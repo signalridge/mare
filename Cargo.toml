@@ -179,7 +179,7 @@ codepage = "0.1"
 windows-sys = "0.61"
 # session metadata index: rebuildable from the session files; bundled SQLite
 # (public domain) so every platform gets the same version and no system library is needed
-rusqlite = { version = "0.42", features = ["bundled", "hooks"] }
+rusqlite = { version = "0.43", features = ["bundled", "hooks"] }
 landlock = "0.4"
 vt100 = "0.18"
 semver = "1.0"
