@@ -89,8 +89,13 @@ impl ProcessBackend for Host {
             let error = leader_err.unwrap();
             return if error.raw_os_error() == Some(libc::ESRCH) { session_result } else { Err(error) };
         }
-        // Also inspect after root exit, while its session members still retain that identity.
-        let session_result = super::session_tree::signal(pid, s);
+        // Non-SIGKILL polite signals: signal every process group in the session once,
+        // never double-signalling the leader's own group `-(pid as i32)` (which under load
+        // can deliver a duplicate SIGINT/SIGTERM after the process handles the first one).
+        // Inspect other session groups first while the leader is still alive (and still
+        // find them if the root already exited), then signal the leader's own group once
+        // directly (also covering `setpgid` fallbacks and unreadable `/proc`).
+        let session_result = super::session_tree::signal_other_groups(pid, s);
         if unsafe { libc::kill(-(pid as i32), s) } == 0 {
             return Ok(());
         }

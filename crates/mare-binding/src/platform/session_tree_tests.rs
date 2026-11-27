@@ -1,6 +1,9 @@
 //! Deterministic `/proc` and kernel answers: no real permissions, no root-dependent chmod.
-use super::{Member, groups_in, tree_alive_in};
-use std::{collections::HashMap, io};
+use super::{Member, groups_in, signal_groups_with, tree_alive_in};
+use std::{
+    collections::{BTreeMap, HashMap},
+    io,
+};
 
 /// A complete record exactly as the kernel writes it (52 fields, trailing newline).
 fn stat(pid: i32, comm: &str, state: &str, pgid: i32, sid: u32) -> Vec<u8> {
@@ -131,4 +134,34 @@ fn the_running_kernels_stat_record_is_accepted_as_complete() {
     let sid = unsafe { libc::getsid(pid) } as u32;
     let pgid = unsafe { libc::getpgid(pid) };
     assert_eq!(super::parse_stat(pid, &real), Some(Member::Ids { sid, pgid }));
+}
+
+#[test]
+fn signal_other_groups_skips_leader_group_so_polite_signals_are_never_duplicated() {
+    let groups = BTreeMap::from([(42, 42), (60, 61), (75, 76)]);
+    let mut signalled_other = Vec::new();
+    signal_groups_with(
+        groups.clone(),
+        Some(42),
+        |_, _| true,
+        |pgid| {
+            signalled_other.push(pgid);
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(signalled_other, vec![60, 75], "leader pgid 42 must be excluded so caller signals it once");
+
+    let mut signalled_all = Vec::new();
+    signal_groups_with(
+        groups,
+        None,
+        |_, _| true,
+        |pgid| {
+            signalled_all.push(pgid);
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(signalled_all, vec![42, 60, 75], "unfiltered SIGKILL path still covers every group");
 }
