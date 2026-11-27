@@ -152,10 +152,16 @@ pub(super) fn inherit_permissions(lua: &Lua, spec: &mut serde_json::Value, inher
             candidates.into_iter().find_map(|name| rank(&name).filter(|r| within(*r, top)).map(|r| (name, r)))
         })
     };
-    let (ceiling, crank) = narrower("permission_ceiling", top)
+    let explicit_ceiling = spec.get("permission_ceiling").is_some_and(|v| !v.is_null());
+    let (mut ceiling, crank) = narrower("permission_ceiling", top)
         .or_else(fallback)
         .ok_or_else(|| rt_err("no permission preset satisfies the inherited ceiling"))?;
-    let permission = narrower("permission", crank).map(|(n, _)| n).unwrap_or_else(|| ceiling.clone());
+    let (permission, prank) = narrower("permission", crank).unwrap_or_else(|| (ceiling.clone(), crank));
+    // An explicit read-only `permission` without a looser explicit `permission_ceiling` establishes
+    // a hard read-only ceiling so the child cannot widen itself back to the parent's preset.
+    if !explicit_ceiling && prank == (1, 1) {
+        ceiling = permission.clone();
+    }
     if !spec.is_object() {
         *spec = serde_json::json!({});
     }
@@ -261,6 +267,7 @@ fn enforce_tool_config_ceilings(
 pub(super) fn merge_child_config(
     lua: &Lua,
     spec: &serde_json::Value,
+    explicit_read_only: bool,
 ) -> mlua::Result<(serde_json::Value, mare_shared::carry::Carried)> {
     let parent_config = lua.globals().get::<Table>("mare").and_then(|m| m.get::<Value>("config")).ok();
     let mut config: serde_json::Value = parent_config
@@ -283,6 +290,9 @@ pub(super) fn merge_child_config(
     }
     if let Some(preset) = spec.get("permission").filter(|v| !v.is_null()) {
         set_plugin_config_leaf(&mut config, PERMISSIONS_PLUGIN, "preset", preset.clone());
+    }
+    if explicit_read_only {
+        set_plugin_config_leaf(&mut config, PERMISSIONS_PLUGIN, "enabled", serde_json::Value::Bool(true));
     }
     let requested_policy = spec
         .get("approval_policy")
@@ -322,23 +332,93 @@ pub(super) fn inherit_approval_gates(lua: &Lua, spec: &mut serde_json::Value) ->
     Ok(())
 }
 
+/// Effective sandbox policy for spawning or resyncing a child: intersects any active frozen tool
+/// context with the parent VM's live policy and inherited ceiling so an in-flight tool call cannot
+/// smuggle a pre-tightening sandbox to a newly created descendant.
+fn effective_parent_policy(lua: &Lua) -> mlua::Result<Option<mare_binding::ossandbox::Policy>> {
+    let active = mare_binding::exec_ctx::active(lua)?.map(|a| a.policy);
+    let live = mare_binding::ossandbox::enforce_ceiling(lua, mare_binding::ossandbox::current(lua));
+    Ok(match (active, live) {
+        (Some(a), Some(b)) => Some(a.intersect(&b)),
+        (a, b) => a.or(b),
+    })
+}
+
+/// Build a hard read-only OS sandbox policy for an explicit read-only child spawned under a wider
+/// parent (e.g. `FULL`), matching the default `permissions` plugin capability acceptance.
+fn explicit_read_only_policy(lua: &Lua, cwd: &std::path::Path) -> mlua::Result<mare_binding::ossandbox::Policy> {
+    let spec = lua.create_table()?;
+    spec.set("level", "read-only")?;
+    spec.set("network", false)?;
+    let mut accept = vec!["fs_protect"];
+    let caps = mare_binding::ossandbox::backend().caps();
+    let no_net = mare_binding::ossandbox::backend() != mare_binding::ossandbox::Backend::None
+        && !caps.contains(&mare_binding::ossandbox::Cap::NetBlock)
+        && !caps.contains(&mare_binding::ossandbox::Cap::NetProxy);
+    if cfg!(windows) && mare_binding::ossandbox::backend() == mare_binding::ossandbox::Backend::WinAcl && no_net {
+        accept.push("network");
+    }
+    spec.set("accept_partial", accept)?;
+    mare_binding::ossandbox::Policy::from_lua(lua, &Value::Table(spec), cwd)?
+        .ok_or_else(|| rt_err("failed to construct read-only sandbox ceiling"))
+}
+
+/// Whether a child spawned with raw caller `spec` inherits the parent's live preset rather than
+/// pinning an explicit permission preset, ceiling, or custom permissions plugin configuration
+/// (such as built-in `explore`/`plan`, `/review`, or caller-supplied `permission = "read-only"`).
+pub(super) fn inherits_parent_preset(spec: &serde_json::Value) -> bool {
+    spec.get("permission").is_none_or(serde_json::Value::is_null)
+        && spec.get("permission_ceiling").is_none_or(serde_json::Value::is_null)
+        && crate::approvals::shared_rule::shares_parent_rules(spec)
+}
+
+/// Snapshot the parent's current live preset and sandbox policy for resynchronizing an existing
+/// unpinned subagent on continuation (`steer`). Captures `child_scope.tighten_seq()` first so any
+/// concurrent tightening after this snapshot rejects a stale widening.
+pub(super) fn parent_permission_sync(
+    lua: &Lua,
+    child_scope: &crate::agent_tree::Scope,
+) -> mlua::Result<crate::agent_registry::PermissionSync> {
+    let expected_tighten_seq = child_scope.tighten_seq();
+    let parent_policy = effective_parent_policy(lua)?;
+    let inherited_preset = match parent_policy.as_ref().map(|p| p.level) {
+        Some(mare_binding::ossandbox::Level::ReadOnly) => "read-only",
+        Some(mare_binding::ossandbox::Level::WorkspaceWrite) => "auto",
+        _ => "full-access",
+    };
+    let mut tmp = serde_json::json!({});
+    inherit_permissions(lua, &mut tmp, inherited_preset)?;
+    let preset = tmp.get("permission").and_then(serde_json::Value::as_str).unwrap_or(inherited_preset).to_owned();
+    Ok(crate::agent_registry::PermissionSync { preset, policy: parent_policy, expected_tighten_seq })
+}
+
 /// Apply sandbox, permission, config, approval-gate, and parameter inheritance onto `spec`.
 pub(super) fn apply_inheritance(
     lua: &Lua,
     spec: &mut serde_json::Value,
+    cwd: &std::path::Path,
 ) -> mlua::Result<(Option<mare_binding::ossandbox::Policy>, serde_json::Value, mare_shared::carry::Carried)> {
-    // the sandbox in force for this call (a tool's narrowed exec context, else this VM's own
-    // policy): the child starts inside it and its ceiling never exceeds it
-    let parent_policy =
-        mare_binding::exec_ctx::active(lua)?.map(|a| a.policy).or_else(|| mare_binding::ossandbox::current(lua));
+    let explicit_read_only = spec.get("permission_ceiling").and_then(serde_json::Value::as_str) == Some("read-only")
+        || (spec.get("permission_ceiling").is_none_or(serde_json::Value::is_null)
+            && spec.get("permission").and_then(serde_json::Value::as_str) == Some("read-only"));
+    // the sandbox in force for this call intersected with the parent VM's live policy/ceiling:
+    // the child starts inside both and its ceiling never exceeds either.
+    let mut parent_policy = effective_parent_policy(lua)?;
     let inherited_preset = match parent_policy.as_ref().map(|p| p.level) {
         Some(mare_binding::ossandbox::Level::ReadOnly) => "read-only",
         Some(mare_binding::ossandbox::Level::WorkspaceWrite) => "auto",
         _ => "full-access",
     };
     inherit_permissions(lua, spec, inherited_preset)?;
+    if explicit_read_only {
+        let ro = explicit_read_only_policy(lua, cwd)?;
+        parent_policy = Some(match parent_policy {
+            Some(existing) => existing.intersect(&ro),
+            None => ro,
+        });
+    }
     inherit_approval_gates(lua, spec)?;
-    let (config, carried) = merge_child_config(lua, spec)?;
+    let (config, carried) = merge_child_config(lua, spec, explicit_read_only)?;
     inherit_params(lua, spec, &config);
     Ok((parent_policy, config, carried))
 }

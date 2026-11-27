@@ -75,9 +75,17 @@ return function(D)
 		P.sandbox_gen = gen
 		D.reset_session_grants()
 		if P.preset ~= "custom" then
-			local next_preset = Pr.effective_preset_for_sandbox(P.preset)
-			if next_preset ~= P.preset then
+			local next_preset, approval_like = Pr.effective_preset_for_sandbox(P.preset)
+			if next_preset ~= P.preset or approval_like ~= P.approval_like then
 				P.preset = next_preset
+				P.approval_like = approval_like
+				emit()
+			end
+		elseif P.approval_like ~= nil then
+			local pol = mare.proc.sandbox.current()
+			if pol and pol.level == "read-only" then
+				P.preset = "read-only"
+				P.approval_like = nil
 				emit()
 			end
 		end
@@ -94,7 +102,9 @@ return function(D)
 		local pol = ev and ev.policy
 		local level = pol and pol.level or "danger-full-access"
 		if P.preset ~= "custom" and LEVEL[P.preset] ~= level then
+			local _, approval_like = Pr.effective_preset_for_sandbox(P.preset)
 			P.preset = "custom"
+			P.approval_like = approval_like
 			emit()
 		end
 	end)

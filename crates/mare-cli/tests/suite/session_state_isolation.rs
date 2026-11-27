@@ -1201,3 +1201,74 @@ async fn set_preset_reconciles_lua_preset_when_host_ceiling_clamps_sandbox() {
     })
     .await;
 }
+
+/// Custom presets whose approval behavior is stricter than `auto` (such as `approval-read`:
+/// sandbox `danger-full-access`, approval `like = "read-only"`) must never be demoted to `auto`
+/// when their sandbox is clamped to `workspace-write`, because doing so would relax workspace
+/// write approvals from `ask` to `allow`.
+#[tokio::test]
+async fn clamping_custom_approval_read_preset_to_workspace_write_preserves_write_approval() {
+    local(async {
+        let env = TestEnv::new().await;
+        let h = env
+            .host()
+            .builtins(&["permissions"])
+            .project_trusted(true)
+            .no_session()
+            .config(json!({
+                "plugins": {
+                    "permissions": {
+                        "enabled": true,
+                        "preset": "approval-read",
+                        "presets": {
+                            "approval-read": { "like": "read-only", "level": "danger-full-access" }
+                        }
+                    }
+                }
+            }))
+            .faux(json!([]))
+            .build_exposed()
+            .await;
+
+        let ws_spec: mlua::Value = h
+            .lua()
+            .load(r#"return { level = "workspace-write", network = true, accept_partial = { "fs_protect" } }"#)
+            .eval()
+            .unwrap();
+        let ws = mare_binding::ossandbox::Policy::from_lua(h.lua(), &ws_spec, &env.cwd).unwrap().unwrap();
+
+        // 1. External tightening while running `approval-read` clamps sandbox to workspace-write.
+        let handle = mare_binding::ossandbox::policy_handle(h.lua()).expect("policy_handle installed");
+        assert!(handle.tighten_ceiling(&ws));
+        let (ext_preset, ext_level, ext_vote): (String, String, String) = eval(
+            &h,
+            r#"
+            local P = C.cordis:get("permissions")
+            local v = P:check({ id = "w1", name = "write", arguments = { path = "out.txt", content = "hi" } }, { side_effect = "write" })
+            return P:preset(), mare.proc.sandbox.current().level, v.decision
+            "#,
+        )
+        .await;
+        assert_eq!(ext_preset, "custom", "must not display AUTO when approval-read is clamped");
+        assert_eq!(ext_level, "workspace-write");
+        assert_eq!(ext_vote, "ask", "clamped approval-read must still ask before workspace writes");
+
+        // 2. Calling P:set("approval-read") under an already-installed workspace-write ceiling
+        // must also keep `custom` and preserve `ask` for workspace writes.
+        let (set_ret, set_preset, set_vote): (String, String, String) = eval(
+            &h,
+            r#"
+            local P = C.cordis:get("permissions")
+            local ret = assert(P:set("approval-read"))
+            local v = P:check({ id = "w2", name = "write", arguments = { path = "out2.txt", content = "hi" } }, { side_effect = "write" })
+            return tostring(ret.preset), P:preset(), v.decision
+            "#,
+        )
+        .await;
+        assert_eq!(set_ret, "custom");
+        assert_eq!(set_preset, "custom");
+        assert_eq!(set_vote, "ask", "P:set(approval-read) under workspace-write ceiling must still ask on write");
+        h.shutdown().await;
+    })
+    .await;
+}

@@ -33,6 +33,7 @@ pub(super) fn bridge_approvals(
     tx: mpsc::UnboundedSender<ChildEvent>,
     origin: serde_json::Value,
     shares_rules: bool,
+    inherits_parent_preset: bool,
 ) -> mlua::Result<()> {
     let lua = host.lua();
     let host_review_required = host
@@ -78,6 +79,7 @@ pub(super) fn bridge_approvals(
                 info,
                 call,
                 shares_rules,
+                inherits_parent_preset,
                 review_required: host_review_required || forwarded_review_required,
                 reply: rtx,
             };

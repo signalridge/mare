@@ -257,6 +257,7 @@ impl Host {
             mut info,
             verdict,
             shares_rules,
+            inherits_parent_preset,
             review_required,
             mut reply,
         } = a;
@@ -302,7 +303,15 @@ impl Host {
         let decision = async {
             if self.service_table(mare_shared::APPROVALS_SERVICE_NAME).is_some() {
                 return self
-                    .review_child_approval(shares_rules, review_required, &call, &info, &verdict, req_opts.as_ref())
+                    .review_child_approval(
+                        shares_rules,
+                        inherits_parent_preset,
+                        review_required,
+                        &call,
+                        &info,
+                        &verdict,
+                        req_opts.as_ref(),
+                    )
                     .await
                     .unwrap_or_else(|e| {
                         (serde_json::json!({"decision":"deny","reason":e.to_string()}), "error", false)
@@ -508,9 +517,11 @@ impl Host {
         let _ = reply.send(child_events::ChildApprovalReply { vote, human_approved });
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn review_child_approval(
         self: &Arc<Self>,
         shares_rules: bool,
+        inherits_parent_preset: bool,
         child_review_required: bool,
         call: &serde_json::Value,
         info: &serde_json::Value,
@@ -574,6 +585,24 @@ impl Host {
                         return mare_shared::lua::json_to_lua(&lua, &vote);
                     }
                 };
+                if !effective_review_required
+                    && c["protected_arguments"] != true
+                    && inherits_parent_preset
+                    && maybe_rule_allow.is_none()
+                {
+                    match shared_rule::resolve_parent_preset(&host, &c, &i).await {
+                        Ok(Some(mut vote)) => {
+                            vote["source"] = "policy".into();
+                            return mare_shared::lua::json_to_lua(&lua, &vote);
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            let mut vote = child_unavailable(&format!("parent permission preset check failed: {e}"));
+                            vote["source"] = "error".into();
+                            return mare_shared::lua::json_to_lua(&lua, &vote);
+                        }
+                    }
+                }
                 let has_host = host.kernel.voter_count("tool/approval-host") > 0;
                 if !has_host
                     && !effective_review_required
@@ -1013,7 +1042,8 @@ mod tests {
                 let info = serde_json::json!({});
                 let verdict = serde_json::json!({"decision":"ask"});
 
-                let (vote, source, _) = host.review_child_approval(false, false, &call, &info, &verdict, None).await.unwrap();
+                let (vote, source, _) =
+                    host.review_child_approval(false, false, false, &call, &info, &verdict, None).await.unwrap();
                 assert_eq!(vote["decision"], "allow", "unexpected vote: {vote}");
                 assert_eq!(source, "reviewer");
 
@@ -1086,7 +1116,7 @@ mod tests {
                 for kind in ["big", "function"] {
                     lua.load(format!("SET_HISTORY('{kind}')")).exec_async().await.unwrap();
                     let error = host
-                        .review_child_approval(false, false, &call, &info, &verdict, None)
+                        .review_child_approval(false, false, false, &call, &info, &verdict, None)
                         .await
                         .unwrap_err()
                         .to_string();
@@ -1165,8 +1195,10 @@ mod tests {
                 };
 
                 for (raw, want) in [("9007199254740993", "integer:9007199254740993"), ("0.1", "float:0.1")] {
-                    let (vote, _, _) =
-                        host.review_child_approval(false, false, &call_with(raw), &info, &verdict, None).await.unwrap();
+                    let (vote, _, _) = host
+                        .review_child_approval(false, false, false, &call_with(raw), &info, &verdict, None)
+                        .await
+                        .unwrap();
                     assert_eq!(vote["decision"], "allow", "{raw}: {vote}");
                     let seen: std::collections::HashMap<String, String> = lua.load("return SEEN").eval().unwrap();
                     assert_eq!(seen["hist_int"], "integer:9007199254740993", "{seen:?}");
@@ -1183,7 +1215,7 @@ mod tests {
 
                 for raw in ["1.00000000000000001", "18446744073709551616"] {
                     let error = host
-                        .review_child_approval(false, false, &call_with(raw), &info, &verdict, None)
+                        .review_child_approval(false, false, false, &call_with(raw), &info, &verdict, None)
                         .await
                         .unwrap_err()
                         .to_string();

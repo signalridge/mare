@@ -26,6 +26,9 @@ struct PolicyNodeState {
     /// Never inherited by future children: newly spawned children snapshot the parent's live
     /// policy via `apply_inheritance` at spawn time.
     pending_tighten: Option<mare_binding::ossandbox::Policy>,
+    /// Monotonic counter bumped whenever an ancestor tightens this node, so a concurrent or
+    /// stale widening resync captured before that tightening is rejected.
+    tighten_seq: u64,
     children: Vec<Weak<PolicyNode>>,
 }
 
@@ -51,6 +54,23 @@ impl PolicyNode {
         st.handle = Some(handle);
     }
 
+    fn tighten_seq(&self) -> u64 {
+        self.state.lock().unwrap().tighten_seq
+    }
+
+    fn resync(&self, parent_policy: Option<&mare_binding::ossandbox::Policy>, expected_tighten_seq: u64) -> bool {
+        let mut st = self.state.lock().unwrap();
+        if st.tighten_seq != expected_tighten_seq {
+            return false;
+        }
+        if let Some(handle) = st.handle.as_ref() {
+            handle.resync_ceiling(parent_policy.cloned());
+        } else {
+            st.pending_tighten = None;
+        }
+        true
+    }
+
     fn tighten_descendants(&self, parent_policy: &mare_binding::ossandbox::Policy) {
         self.tighten_subtree(parent_policy, false);
     }
@@ -59,6 +79,7 @@ impl PolicyNode {
         let live = {
             let mut st = self.state.lock().unwrap();
             if include_self {
+                st.tighten_seq = st.tighten_seq.wrapping_add(1);
                 if let Some(handle) = st.handle.as_ref() {
                     handle.tighten_ceiling(parent_policy);
                 } else {
@@ -191,6 +212,21 @@ impl Scope {
     /// Propagate a tightened parent sandbox policy to all active descendant subagent VMs.
     pub(crate) fn tighten_descendants(&self, parent_policy: &mare_binding::ossandbox::Policy) {
         self.policy.tighten_descendants(parent_policy);
+    }
+
+    /// Sequence number incremented whenever an ancestor tightens this scope.
+    pub(crate) fn tighten_seq(&self) -> u64 {
+        self.policy.tighten_seq()
+    }
+
+    /// Resynchronize this scope's attached sandbox ceiling to `parent_policy` unless an ancestor
+    /// tightened it after `expected_tighten_seq` was captured.
+    pub(crate) fn resync_policy(
+        &self,
+        parent_policy: Option<&mare_binding::ossandbox::Policy>,
+        expected_tighten_seq: u64,
+    ) -> bool {
+        self.policy.resync(parent_policy, expected_tighten_seq)
     }
     pub(crate) fn active_count(&self) -> usize {
         *self.state.lock().unwrap()
@@ -458,5 +494,32 @@ mod tests {
             assert_eq!(gen_after, gen_before, "new child must not receive stale pre-widening tightenings");
             assert!(is_unconfined, "new child under widened full-access parent must remain unconfined");
         }
+    }
+
+    #[test]
+    fn policy_node_resync_policy_widens_on_matching_seq_and_rejects_stale_resync_after_tighten() {
+        let cwd = std::env::temp_dir();
+        let ro = read_only_policy(&cwd);
+        let root = Scope::root(&serde_json::json!({})).unwrap();
+        let session = root.session_scope();
+        let (child, _res) = session.reserve().unwrap();
+
+        let lua = test_lua_with_sandbox(&cwd);
+        mare_binding::ossandbox::set_inherited_ceiling(&lua, Some(ro.clone()));
+        let handle = mare_binding::ossandbox::policy_handle(&lua).unwrap();
+        child.attach_policy(handle);
+
+        // Matching tighten_seq allows widening resync (e.g. parent switched to FULL and steered).
+        let seq_ok = child.tighten_seq();
+        assert!(child.resync_policy(None, seq_ok));
+        let unconfined: bool = lua.load("return mare.proc.sandbox.current() == nil").eval().unwrap();
+        assert!(unconfined, "matching resync must clear inherited ceiling");
+
+        // If parent tightens after a steer captured seq_before, that stale widening must be rejected.
+        let seq_stale = child.tighten_seq();
+        root.tighten_descendants(&ro);
+        assert!(!child.resync_policy(None, seq_stale), "stale resync captured before tighten must be rejected");
+        let level: String = lua.load("return mare.proc.sandbox.current().level").eval().unwrap();
+        assert_eq!(level, "read-only");
     }
 }

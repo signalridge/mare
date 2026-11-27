@@ -129,6 +129,81 @@ pub(crate) async fn resolve_request(host: &Host, shares: bool, call: &J, info: &
     }))
 }
 
+fn has_non_empty_increment(v: &J) -> bool {
+    let Some(inc) = v.get("increment").and_then(J::as_object) else {
+        return false;
+    };
+    inc.get("read").and_then(J::as_array).is_some_and(|a| !a.is_empty())
+        || inc.get("write").and_then(J::as_array).is_some_and(|a| !a.is_empty())
+        || inc.get("network") == Some(&J::Bool(true))
+        || inc.get("network").and_then(J::as_array).is_some_and(|a| !a.is_empty())
+}
+
+/// Parent side: check whether the parent's current live permission preset already allows an
+/// unpinned child's request (without prompting). Dangerous commands, explicit `prompt` rules,
+/// sensitive credential paths, and parent-local session caches/grants still return `Ok(None)` so
+/// they ask normally; `forbidden` rules still return `deny`.
+pub(crate) async fn resolve_parent_preset(host: &Host, call: &J, info: &J) -> Result<Option<J>, String> {
+    validate_access(host, call, info)?;
+    let Some(svc) = permissions_service(&host.kernel) else {
+        return Ok(None);
+    };
+    let lua = host.lua();
+    let check: Function = svc.get("check").map_err(|e| format!("missing check: {e}"))?;
+    let call_lua = json_to_lua_lossless(lua, call).map_err(|e| e.to_string())?;
+    let info_lua = json_to_lua_lossless(lua, info).map_err(|e| e.to_string())?;
+    let v: Value = check.call_async((svc, call_lua, info_lua)).await.map_err(|e| e.to_string())?;
+    if v.is_nil() {
+        return Ok(None);
+    }
+    let v = lua_to_json(lua, v).map_err(|e| e.to_string())?;
+    match v.get("decision").and_then(J::as_str) {
+        Some("deny") => Ok(Some(serde_json::json!({
+            "decision": "deny",
+            "reason": v.get("reason").and_then(J::as_str).unwrap_or("forbidden by parent permission policy"),
+        }))),
+        Some("allow") => {
+            if v.get("own_rule").and_then(J::as_bool) == Some(true)
+                || matches!(v.get("basis").and_then(J::as_str), Some("session approval" | "approved scope"))
+                || has_non_empty_increment(&v)
+            {
+                return Ok(None);
+            }
+            let lift_spec = match v.get("sandbox") {
+                Some(spec) if !spec.is_null() && *spec != J::Bool(false) => spec.clone(),
+                _ => match mare_binding::ossandbox::current(lua) {
+                    None => serde_json::json!("danger-full-access"),
+                    Some(policy) => {
+                        let tbl = policy.to_lua(lua).map_err(|e| e.to_string())?;
+                        lua_to_json(lua, Value::Table(tbl)).map_err(|e| e.to_string())?
+                    }
+                },
+            };
+            let mut out = serde_json::json!({
+                "decision": "allow",
+                "grant": "allow",
+                "reason": "allowed by parent permission preset",
+                "rule_lift": lift_spec,
+            });
+            if call.pointer("/arguments/additional_permissions").is_some() {
+                let scope = call
+                    .pointer("/arguments/scope")
+                    .and_then(J::as_str)
+                    .filter(|s| *s == mare_shared::SESSION_SCOPE || *s == "turn")
+                    .unwrap_or("turn");
+                out["scope"] = scope.into();
+                if scope == mare_shared::SESSION_SCOPE {
+                    out["grant"] = "allow_session".into();
+                }
+            }
+            Ok(Some(out))
+        }
+        Some("ask") | None if v.is_null() => Ok(None),
+        Some("ask") => Ok(None),
+        _ => Err("unexpected parent permission preset verdict".into()),
+    }
+}
+
 /// Child side: lift the inherited ceiling for this one call to the sandbox a parent rule grants
 /// (`spec`: a sandbox spec, `"danger-full-access"` = unconfined; `false` / null = none). Under a
 /// ceiling that restricts reads the call still runs sandboxed with them:
