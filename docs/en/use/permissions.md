@@ -59,7 +59,7 @@ When a tool call needs your decision, mare shows a dialog titled `Allow <tool>?`
 
 `Esc` denies the call and lets the turn continue. For a request for extra sandbox rights the choices are for this turn or for this session. Only one approval is shown at a time.
 
-If the call comes from a sub-agent, the dialog names it.
+If the call comes from a sub-agent, the dialog names it. Sub-agents snapshot the parent's effective preset and sandbox at spawn time: narrowing the parent tightens running sub-agents immediately, while widening the parent to a looser preset (such as `full-access`) applies only to sub-agents started afterward and never auto-widens already-running sub-agents (see [Subagents and side threads](subagents.md#permission-inheritance-and-parent-changes)).
 
 ### Requesting additional permissions
 

@@ -1140,3 +1140,64 @@ async fn external_policy_handle_tightening_syncs_lua_permissions_preset_and_bloc
     })
     .await;
 }
+
+/// If a VM's host-enforced inherited sandbox ceiling is stricter than a preset passed to
+/// `permissions:set` (for example when a parent tightens a child while it is starting up),
+/// `permissions:set` must reconcile `P:preset()` with `mare.proc.sandbox.current()` so
+/// authorization (`vote.lua`) and sandbox enforcement (`exec_ctx` / `request.lua`) stay aligned.
+#[tokio::test]
+async fn set_preset_reconciles_lua_preset_when_host_ceiling_clamps_sandbox() {
+    local(async {
+        let env = TestEnv::new().await;
+        let h = env
+            .host()
+            .builtins(&["permissions"])
+            .project_trusted(true)
+            .no_session()
+            .config(json!({
+                "plugins": {
+                    "permissions": { "enabled": true, "preset": "auto" }
+                }
+            }))
+            .faux(json!([]))
+            .build_exposed()
+            .await;
+
+        let ro = mare_binding::ossandbox::Policy {
+            level: mare_binding::ossandbox::Level::ReadOnly,
+            root: env.cwd.clone(),
+            extra: vec![],
+            root_writable: false,
+            exclude_tmpdir_env_var: false,
+            exclude_slash_tmp: false,
+            writable: vec![],
+            readable: vec![],
+            deny_read: vec![],
+            restrict_read: false,
+            reads_pinned: false,
+            network: mare_binding::ossandbox::Network::Open,
+            profile: None,
+            unix_sockets: vec![],
+            accept_partial: vec![],
+            project_protected: vec![],
+        };
+        mare_binding::ossandbox::set_inherited_ceiling(h.lua(), Some(ro));
+
+        let (returned, live_preset, vote_decision): (String, String, String) = eval(
+            &h,
+            r#"
+            local P = C.cordis:get("permissions")
+            local ret = assert(P:set("full-access"))
+            local v = P:check({ id = "w1", name = "write", arguments = { path = "out.txt", content = "hi" } }, { side_effect = "write" })
+            return type(ret) == "table" and tostring(ret.preset or "") or tostring(ret), P:preset(), v.decision
+            "#,
+        )
+        .await;
+
+        assert_eq!(returned, "read-only");
+        assert_eq!(live_preset, "read-only");
+        assert_eq!(vote_decision, "ask");
+        h.shutdown().await;
+    })
+    .await;
+}

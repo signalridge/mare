@@ -75,6 +75,12 @@ mare.setup {
 
 When a subagent requests an approval that leaves its sandbox, the `agent-approvals` plugin forwards the request to the parent session's UI (`agent/approval-dialog`). A queue line below the input shows pending child approvals in arrival order, and the dialog names the requesting child.
 
+#### Permission inheritance and parent changes
+
+- **Spawn-time snapshot**: a subagent inherits the parent's live effective permission preset, sandbox policy, and approval policy at the moment it starts, and that snapshot becomes its upper bound (`ceiling`). A `general` subagent started after the parent switches to `full-access` (`FULL`) inherits `full-access` with no sandbox ceiling; explicit read-only agents (`explore`, `plan`, `/review`, or `permission = "read-only"`) always narrow to `read-only` regardless of the parent's preset.
+- **Parent narrows while running**: switching the parent to a stricter preset or sandbox policy (or revoking project trust) immediately tightens every running descendant subagent and clears stale grants.
+- **Parent elevates while running**: switching the parent to a wider preset (such as `auto` or `full-access`) does **not** automatically widen subagents that are already running. Already-running subagents keep the ceiling they started with and continue routing out-of-sandbox requests through the parent approval prompt; subagents started *after* the parent switches inherit the wider preset.
+
 ### Inspecting subagents with `/agents`
 
 Run `/agents` (or press `Left` on an empty input) to open the agent list. It shows active subagents, workflow members, background jobs, and (in the Peers tab) other running `mare` sessions on the machine.
