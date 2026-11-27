@@ -666,32 +666,32 @@ pub(crate) struct Listings {
 }
 
 macro_rules! list_all {
-    ($peer:expr, $method:ident, $field:ident) => {{
-        let mut out = Vec::new();
-        let mut cursor: Option<String> = None;
-        let mut pages = 0usize;
-        let mut truncated = false;
-        loop {
-            let r = $peer
-                .$method(Some(PaginatedRequestParams::default().with_cursor(cursor)))
-                .await
-                .map_err(|e| e.to_string())?;
-            out.extend(r.$field);
-            pages += 1;
-            cursor = r.next_cursor;
-            if cursor.is_none() {
-                break;
+    ($peer:expr, $method:ident, $field:ident) => {
+        async {
+            let mut out = Vec::new();
+            let mut cursor: Option<String> = None;
+            let mut pages = 0usize;
+            let mut truncated = false;
+            loop {
+                let r = $peer.$method(Some(PaginatedRequestParams::default().with_cursor(cursor))).await?;
+                out.extend(r.$field);
+                pages += 1;
+                cursor = r.next_cursor;
+                if cursor.is_none() {
+                    break;
+                }
+                if pages >= MAX_PAGES {
+                    truncated = true;
+                    break;
+                }
             }
-            if pages >= MAX_PAGES {
-                truncated = true;
-                break;
-            }
+            Ok::<_, rmcp::ServiceError>((serde_json::to_value(out).unwrap_or_default(), truncated))
         }
-        Ok::<_, String>((serde_json::to_value(out).unwrap_or_default(), truncated))
-    }};
+        .await
+    };
 }
 
-async fn list_tools(peer: &Peer<RoleClient>) -> Result<(serde_json::Value, bool), String> {
+async fn list_tools(peer: &Peer<RoleClient>) -> Result<(serde_json::Value, bool), rmcp::ServiceError> {
     list_all!(peer, list_tools, tools)
 }
 
@@ -700,17 +700,39 @@ pub(super) async fn prefetch(svc: &Service, server: &str) -> Result<Listings, St
     let caps = svc.peer_info().map(|i| serde_json::to_value(&i.capabilities).unwrap_or_default()).unwrap_or_default();
     let has = |k: &str| caps.get(k).is_some_and(|v| !v.is_null());
     let empty = || Ok::<_, String>((serde_json::json!([]), false));
+    // Always request tools/list even when `capabilities.tools` is omitted (matching Codex
+    // `codex-mcp/src/rmcp_client.rs:1374`), falling back to empty only if an unadvertised
+    // server rejects `tools/list` with JSON-RPC `-32601 Method not found` (rmcp 3.12 default).
     let (tools, resources, templates, prompts) = tokio::join!(
         async {
-            if has("tools") || caps.is_null() || caps.as_object().is_some_and(|o| o.is_empty()) {
-                list_tools(&peer).await
+            match list_tools(&peer).await {
+                Ok(v) => Ok(v),
+                Err(rmcp::ServiceError::McpError(ref err))
+                    if !has("tools") && err.code == rmcp::model::ErrorCode::METHOD_NOT_FOUND =>
+                {
+                    mcp_log(server, "info", "tools/list returned method not found; capabilities.tools omitted");
+                    empty()
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        },
+        async {
+            if has("resources") {
+                list_all!(peer, list_resources, resources).map_err(|e| e.to_string())
             } else {
                 empty()
             }
         },
-        async { if has("resources") { list_all!(peer, list_resources, resources) } else { empty() } },
-        async { if has("resources") { list_all!(peer, list_resource_templates, resource_templates) } else { empty() } },
-        async { if has("prompts") { list_all!(peer, list_prompts, prompts) } else { empty() } },
+        async {
+            if has("resources") {
+                list_all!(peer, list_resource_templates, resource_templates).map_err(|e| e.to_string())
+            } else {
+                empty()
+            }
+        },
+        async {
+            if has("prompts") { list_all!(peer, list_prompts, prompts).map_err(|e| e.to_string()) } else { empty() }
+        },
     );
     let (tools, t_trunc) = tools.map_err(|e| format!("tools/list: {e}"))?;
     let mut l = Listings { tools, ..Default::default() };

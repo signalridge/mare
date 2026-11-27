@@ -10,17 +10,20 @@ return function(D, args)
 	local transport_of = D.transport_of
 	local sorted_entries = D.sorted_entries
 	local summary_line = D.summary_line
+	local zero_tools_hint = D.zero_tools_hint
 	local tools_lines = D.tools_lines
 	local tools_text = D.tools_text
 
 	local function details(e)
 		local st = state_of(e)
 		local kind, where = transport_of(e)
+		local count = #(e.tools or {})
+		local hint = zero_tools_hint(e, st)
 		local body = {
 			("state: %s%s"):format(st, e.error and st ~= "connected" and (" — " .. e.error) or ""),
 			("source: %s (%s)"):format(e.source, e.file),
 			("transport: %s %s"):format(kind, where),
-			("tier: %s, %d tools"):format(e.tier, #(e.tools or {})),
+			("tier: %s, %d tools%s"):format(e.tier, count, hint and (" — " .. hint) or ""),
 		}
 		if #(e.missing or {}) > 0 then
 			body[#body + 1] = "missing variables: " .. table.concat(e.missing, ", ")
@@ -57,10 +60,14 @@ return function(D, args)
 		local list = sorted_entries()
 		local items = {}
 		for _, e in ipairs(list) do
+			local st = state_of(e)
 			local kind, where = transport_of(e)
+			local count = #(e.tools or {})
+			local hint = zero_tools_hint(e, st)
 			items[#items + 1] = {
-				label = ("%s  [%s]"):format(e.name, state_of(e)),
-				detail = ("%s · %s %s · %d tools"):format(e.source, kind, where, #(e.tools or {})),
+				label = hint and ("%s  [%s, %d tools]"):format(e.name, st, count) or ("%s  [%s]"):format(e.name, st),
+				detail = hint and ("%s · %s · %s %s"):format(hint, e.source, kind, where)
+					or ("%s · %s %s · %d tools"):format(e.source, kind, where, count),
 			}
 		end
 		local i = mare.ui.select({ title = "MCP servers", items = items, filter = filter or "" })

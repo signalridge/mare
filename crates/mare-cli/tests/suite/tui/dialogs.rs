@@ -724,3 +724,70 @@ async fn disabled_keymap_default_reports_unbound_accept_cancel_and_ctrl_c_still_
     })
     .await
 }
+
+/// Faux TUI screen test: a connected MCP server that exposes 0 tools shows `connected`,
+/// `0 tools`, and a visible hint in `/mcp` (both in the server picker and in the server detail
+/// panel), never silently showing `0 tools` alone.
+#[tokio::test]
+async fn mcp_panel_shows_hint_for_connected_server_with_zero_tools() {
+    local(async {
+        let log_dir = tempfile::tempdir().unwrap();
+        let log = log_dir.path().join("zero.log");
+        let server_cfg = json!({
+            "plugins": {
+                "mcp": {
+                    "servers": {
+                        "empty_srv": {
+                            "command": fake_mcp_bin(),
+                            "args": [
+                                "scripted",
+                                json!({ "log": log, "capabilities": {}, "tools": [] }).to_string()
+                            ],
+                            "tier": "direct"
+                        }
+                    }
+                }
+            }
+        });
+        let mut t = Term::with(json!([]), server_cfg, 120, 30).await;
+        t.until_vt("startup", |t| !t.vt.starting()).await;
+        global(&t.vt.host, "M", t.vt.host.service_table("mcp").unwrap());
+        let deadline = Instant::now() + WAIT;
+        loop {
+            t.step().await;
+            if eval::<bool>(
+                &t.vt.host,
+                r#"local s = M:list_servers().data[1]
+                   return s ~= nil and s.state == "connected""#,
+            )
+            .await
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for empty_srv connected");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        t.submit("/mcp").await;
+        t.until("MCP servers picker", |s| s.contains("MCP servers") && s.contains("empty_srv")).await;
+        let picker_screen = t.screen();
+        assert!(
+            picker_screen.contains("empty_srv")
+                && picker_screen.contains("connected")
+                && picker_screen.contains("0 tools")
+                && picker_screen.contains("no tools exposed"),
+            "expected connected + 0 tools + hint on /mcp picker screen:\n{picker_screen}"
+        );
+
+        t.key(KeyCode::Enter, Modifiers::NONE);
+        t.until("MCP server details", |s| s.contains("MCP empty_srv")).await;
+        let detail_screen = t.screen();
+        assert!(
+            detail_screen.contains("connected")
+                && detail_screen.contains("0 tools")
+                && detail_screen.contains("no tools exposed"),
+            "expected connected + 0 tools + hint on /mcp detail screen:\n{detail_screen}"
+        );
+    })
+    .await
+}

@@ -57,6 +57,16 @@ return function(D)
 		end)
 		return list
 	end
+	local function zero_tools_hint(e, st)
+		if st ~= "connected" or #(e.tools or {}) > 0 then
+			return nil
+		end
+		local caps = type(e.info) == "table" and type(e.info.capabilities) == "table" and e.info.capabilities or nil
+		if caps and caps.tools == nil then
+			return "no tools exposed — server omitted tools capability"
+		end
+		return "no tools exposed — check server config or logs"
+	end
 	local function summary_line(e)
 		local st = state_of(e)
 		local kind, where = transport_of(e)
@@ -64,6 +74,10 @@ return function(D)
 		local extra = e.error and st ~= "connected" and ("  — " .. mare.mcp.redact(tostring(e.error))) or ""
 		if #(e.missing or {}) > 0 then
 			extra = extra .. "  (missing variables: " .. table.concat(e.missing, ", ") .. ")"
+		end
+		local hint = zero_tools_hint(e, st)
+		if hint then
+			extra = extra .. "  (" .. hint .. ")"
 		end
 		return ("%-20s %-15s %-8s %-8s %s  %d tools%s"):format(
 			e.name,
@@ -208,7 +222,8 @@ return function(D)
 			lines[#lines + 1] = "  schema: " .. mare.json.encode(t.inputSchema or { type = "object" })
 		end
 		if #lines == 0 then
-			lines[1] = "(no tools known yet)"
+			local hint = zero_tools_hint(e, state_of(e))
+			lines[1] = hint and ("(connected, 0 tools — " .. hint .. ")") or "(no tools known yet)"
 		end
 		return lines
 	end
@@ -367,6 +382,7 @@ return function(D)
 		state_of = state_of,
 		sorted_entries = sorted_entries,
 		summary_line = summary_line,
+		zero_tools_hint = zero_tools_hint,
 		find = find,
 		actions = actions,
 		tools_lines = tools_lines,
