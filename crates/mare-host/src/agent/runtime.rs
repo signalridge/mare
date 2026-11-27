@@ -68,6 +68,7 @@ pub(super) struct ChildEndMeta {
 pub(super) struct ChildRuntimeArgs {
     pub(super) prompt: String,
     pub(super) cwd: PathBuf,
+    pub(super) trust: super::ChildTrust,
     pub(super) spec: serde_json::Value,
     pub(super) config: serde_json::Value,
     pub(super) history_model: Option<String>,
@@ -238,6 +239,7 @@ fn run_child_thread(mut args: ChildRuntimeArgs) {
         run_child_host(ChildHostArgs {
             prompt: args.prompt,
             cwd: args.cwd,
+            trust: args.trust,
             spec: args.spec,
             config: args.config,
             history_model: args.history_model,
@@ -307,6 +309,7 @@ fn run_child_thread(mut args: ChildRuntimeArgs) {
 struct ChildHostArgs {
     prompt: String,
     cwd: PathBuf,
+    trust: super::ChildTrust,
     spec: serde_json::Value,
     config: serde_json::Value,
     history_model: Option<String>,
@@ -352,6 +355,15 @@ async fn run_child_host(mut args: ChildHostArgs) -> Result<serde_json::Value, su
         child_args.insert("tool_ceiling".into(), tools.clone());
     }
     child_args.insert("no_session".into(), serde_json::Value::Bool(args.transcript.is_none()));
+    if let Some(trust) = args.trust.trust_arg {
+        child_args.insert("trust".into(), serde_json::Value::String(trust));
+    }
+    if let Some(source) = args.trust.trust_source {
+        child_args.insert("trust_source".into(), serde_json::Value::String(source));
+    }
+    if args.trust.approve_mcps {
+        child_args.insert("approve_mcps".into(), serde_json::Value::Bool(true));
+    }
     if let Some(transcript) = &args.transcript {
         child_args
             .insert("recorded_session_path".into(), transcript.borrow().path().to_string_lossy().to_string().into());
@@ -364,7 +376,7 @@ async fn run_child_host(mut args: ChildHostArgs) -> Result<serde_json::Value, su
             mode: mare_shared::ui::Mode::Child,
             config: args.config,
             load_init: false,
-            project_trusted: false,
+            project_trusted: args.trust.project_trusted,
             args: serde_json::Value::Object(child_args),
             no_user_plugins: false,
         },

@@ -266,6 +266,14 @@ fn enforce_tool_config_ceilings(
     }
 }
 
+fn parent_current_model(lua: &Lua) -> Option<String> {
+    let host = lua.app_data_ref::<ParentHost>().and_then(|p| p.0.upgrade())?;
+    let svc = host.service_table(mare_shared::LLM_SERVICE_NAME)?;
+    let current: Function = svc.get("current").ok()?;
+    let model: Table = current.call(svc).ok()?;
+    model.get::<String>("ref").ok().filter(|r| !r.is_empty())
+}
+
 /// Inherit the parent's config, carry param rules, overlay `spec.config`, and apply `model`/`effort`
 /// plus the narrowed child permission preset and approval policy into the child's CLI config layer.
 pub(super) fn merge_child_config(
@@ -286,6 +294,14 @@ pub(super) fn merge_child_config(
         mare_config::merge_json(&mut config, over);
     }
     enforce_tool_config_ceilings(&mut config, parent_enabled, parent_excluded, parent_disabled);
+    let explicit_model = spec
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| spec.get("config").and_then(|c| c.get("model")).and_then(serde_json::Value::as_str))
+        .is_some();
+    if !explicit_model && let Some(current_model) = parent_current_model(lua) {
+        config["model"] = serde_json::Value::String(current_model);
+    }
     for key in ["model", "effort"] {
         if let Some(v) = spec.get(key).and_then(|v| v.as_str()) {
             config[key] = serde_json::Value::String(v.into());

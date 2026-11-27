@@ -80,6 +80,7 @@ fn rules_file(env: &TestEnv) -> Value {
     std::fs::read_to_string(&file).map(|s| serde_json::from_str(&s).unwrap()).unwrap_or(Value::Null)
 }
 
+mod context_inheritance;
 mod contract;
 mod identity;
 mod lifecycle;
