@@ -197,11 +197,14 @@ return function(D)
 			if rule and rule.decision == "prompt" then
 				danger_categories[#danger_categories + 1] = "rules"
 			end
+			local granted = D.request.stores()
+			local danger_sandbox = not E.inc_empty(granted) and E.apply_inc(base_spec(), granted) or nil
 			return {
 				decision = "ask",
 				category = danger_categories[1],
 				categories = #danger_categories > 0 and danger_categories or nil,
 				reason = reason,
+				sandbox = danger_sandbox,
 			}
 		end
 		if structured then
@@ -220,6 +223,10 @@ return function(D)
 			record("auto", d)
 			return { decision = "allow", sandbox = sandbox, basis = basis }
 		end
+		local args_scope, why = args.sandbox_permissions, args.justification
+		local granted = D.request.stores()
+		local base = base_spec()
+		local sandbox = base ~= false and not E.inc_empty(granted) and E.apply_inc(base, granted) or nil
 		-- a forbidden or prompt rule may name what a not-analyzable command runs (`pu\sh`,
 		-- `p{ush,}` are not their argv): it asks in every preset, full-access too, instead of
 		-- running what a rule may forbid (PERM-ESCAPE; rules.lua shell_verdict marks it "prompt").
@@ -230,14 +237,13 @@ return function(D)
 			and not unresolved
 			and not missing_repr
 			and not (rule and rule.decision == "prompt")
+			and (base == false or (args_scope == nil and why == nil))
 		then
-			return auto_allow("full-access")
+			return auto_allow("full-access", sandbox)
 		end
 
 		-- escalation request (sandbox_permissions + justification travel together)
-		local scope, why = args.sandbox_permissions, args.justification
-		local granted = D.request.stores()
-		local sandbox = not E.inc_empty(granted) and E.apply_inc(base_spec(), granted) or nil
+		local scope = args_scope
 		local needs, request = false, nil
 		local reused_scope = nil -- a request fully inside an approved scope (logged below)
 		if scope ~= nil or why ~= nil then
@@ -258,19 +264,28 @@ return function(D)
 			if type(why) ~= "string" or not why:match("%S") then
 				return refuse("sandbox_permissions requires a justification")
 			end
-			local s, err, wider, inc = widen(scope)
+			local s, err, wider, inc = widen(scope, cwd)
 			if s == nil and err then
 				return refuse(err)
 			end
-			sandbox, needs = s, wider
-			if wider and inc then
-				-- inside an already approved scope (this turn / this session): no question;
-				-- otherwise only the part outside it is asked about
-				request = inc_remainder(inc, inc_union(P.approved.session, P.approved.turn))
-				needs = request ~= nil
-				if not needs then
-					reused_scope = scope
+			needs = wider
+			if inc then
+				if wider then
+					-- inside an already approved scope (this turn / this session): no question;
+					-- otherwise only the part outside it is asked about
+					request = inc_remainder(inc, granted)
+					needs = request ~= nil
+					if not needs then
+						reused_scope = scope
+					end
 				end
+				if not E.inc_empty(granted) then
+					sandbox = E.apply_inc(base, inc_union(granted, inc))
+				else
+					sandbox = s
+				end
+			elseif s ~= nil then
+				sandbox = s
 			end
 		end
 
@@ -337,6 +352,18 @@ return function(D)
 			end
 			if scope and scope:match("%.git") then
 				text = text .. " · careful: write access to .git allows changing hooks that run outside the sandbox"
+			elseif request and type(request.write) == "table" then
+				for _, dir in ipairs(request.write) do
+					if not E.is_dot_git_path(dir) and mare.fs.stat(dir .. "/.git") ~= nil then
+						text = text
+							.. " · note: .git inside granted directory stays read-only unless write:<repo>/.git is granted"
+						break
+					end
+				end
+			end
+			if scope and not (request and request.all) then
+				text = text
+					.. " · scope: Allow once = this call only; Allow for this session = reused until session or permissions change"
 			end
 			local amendment
 			if info.unconfined then
@@ -389,8 +416,12 @@ return function(D)
 				info.side_effect == "write" or (rule and rule.decision == "allow" and rule.path_rule and rule.has_write)
 			)
 		then
-			local base = base_spec()
-			sandbox = base and writes_widened(base) or nil
+			sandbox = base
+					and (not E.inc_empty(granted) and E.apply_inc(
+						base,
+						inc_union(granted, { write = { E.workspace_root() } })
+					) or writes_widened(base))
+				or nil
 		end
 
 		if sensitive_reason then
@@ -467,7 +498,7 @@ return function(D)
 			if type(rule.scope) ~= "string" or rule.scope == "" then
 				return false
 			end
-			local s, _, wider, rinc = widen(rule.scope)
+			local s, _, wider, rinc = widen(rule.scope, cwd)
 			if s == nil or not wider or not rinc or not request then
 				return false
 			end
@@ -485,8 +516,10 @@ return function(D)
 			and rule_covers_needs()
 		then
 			if not needs and rule.scope then
-				local s = widen(rule.scope)
-				if s ~= nil then
+				local s, _, _, rinc = widen(rule.scope, cwd)
+				if rinc and not E.inc_empty(granted) then
+					sandbox = E.apply_inc(base, inc_union(granted, rinc))
+				elseif s ~= nil then
 					sandbox = s
 				end
 			end

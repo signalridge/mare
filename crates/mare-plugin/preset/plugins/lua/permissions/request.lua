@@ -34,6 +34,17 @@ return function(D)
 							path = cwd .. "/" .. path
 						end
 						resolved = mare.fs.resolve(path)
+						if kind == "write" then
+							local raw_stat = mare.fs.stat(resolved)
+							if raw_stat and raw_stat.kind ~= "dir" and E.is_dot_git_path(resolved) then
+								local git_inc, git_err = E.resolve_git_pointer_writes(resolved)
+								assert(git_inc, git_err or "write permissions require an existing physical directory")
+								for _, dir in ipairs(git_inc.write or {}) do
+									out[kind][#out[kind] + 1] = dir
+								end
+								goto next_entry
+							end
+						end
 						-- Unlike legacy write:<file>, a structured grant never grows to its parent.
 						resolved = mare.fs.realpath(resolved) or resolved
 						if kind == "read" then
@@ -51,6 +62,7 @@ return function(D)
 						assert(not path:find("[/\\%s]"), "network entries must be host patterns")
 					end
 					out[kind][#out[kind] + 1] = resolved
+					::next_entry::
 				end
 			end
 		end
@@ -154,8 +166,26 @@ return function(D)
 		local reason = missing and ("requests " .. E.inc_text(missing) .. " · because: " .. a.justification)
 			or info.unconfined and "not confined by the local sandbox"
 			or nil
+		if missing and type(missing.write) == "table" then
+			local has_protected_git = false
+			for _, dir in ipairs(missing.write) do
+				if not E.is_dot_git_path(dir) and mare.fs.stat(dir .. "/.git") ~= nil then
+					if not E.write_covered(dir .. "/.git", inc.write) then
+						has_protected_git = true
+						break
+					end
+				end
+			end
+			if has_protected_git then
+				reason = (reason and (reason .. " · ") or "")
+					.. "note: .git inside granted directory stays read-only unless explicitly granted"
+			end
+		end
 		if info.permission_request or a.scope then
-			reason = (reason and (reason .. " · ") or "") .. "maximum grant scope: " .. (a.scope or "turn")
+			local max_scope = a.scope or "turn"
+			local expiry = max_scope == "session" and "expires when this session ends or permissions/sandbox change"
+				or "expires when this turn ends"
+			reason = (reason and (reason .. " · ") or "") .. ("maximum grant scope: %s (%s)"):format(max_scope, expiry)
 		end
 		D.record(missing and "request" or "auto", {
 			tool = call.name,
@@ -257,10 +287,12 @@ return function(D)
 				},
 			},
 			execute = function(_, opts)
+				local scope = opts.permission_scope or "turn"
 				return {
 					content = mare.json.encode({
 						permissions = opts.permissions or {},
-						scope = opts.permission_scope or "turn",
+						scope = scope,
+						expires = scope == "session" and "session_or_policy_change" or "turn_end",
 					}),
 				}
 			end,

@@ -310,6 +310,43 @@ pub(super) fn install(lua: &Lua, ui: &Table, shared: &Arc<UiShared>) -> mlua::Re
                 }
                 let reason_suffix = reason.as_deref().map(|r| format!("  {r}")).unwrap_or_default();
                 let title = format!("{who}Allow {tool}{what}?{reason_suffix}");
+                let sandbox_scope =
+                    arguments.get("sandbox_permissions").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+                let has_grant_scope = scoped || sandbox_scope.is_some();
+                let mut body = Vec::new();
+                if scoped {
+                    let max_scope = arguments.get("scope").and_then(|v| v.as_str()).unwrap_or("turn");
+                    let expiry = if max_scope == "session" {
+                        "up to this session (expires when session ends or permissions/sandbox change)"
+                    } else {
+                        "this turn (expires when this turn ends)"
+                    };
+                    body.push(format!("Grant scope: {expiry}"));
+                    if let Some(add) = arguments.get("additional_permissions").and_then(|v| v.as_object()) {
+                        for key in ["write", "read"] {
+                            if let Some(arr) = add.get(key).and_then(|v| v.as_array())
+                                && !arr.is_empty()
+                            {
+                                let paths: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
+                                if !paths.is_empty() {
+                                    body.push(format!("Requested {key}: {}", paths.join(", ")));
+                                }
+                            }
+                        }
+                        if let Some(net) = add.get("network") {
+                            if net.as_bool() == Some(true) {
+                                body.push("Requested network: open".to_string());
+                            } else if let Some(hosts) = net.as_array() {
+                                let hs: Vec<&str> = hosts.iter().filter_map(|v| v.as_str()).collect();
+                                if !hs.is_empty() {
+                                    body.push(format!("Requested network: {}", hs.join(", ")));
+                                }
+                            }
+                        }
+                    }
+                } else if let Some(sp) = sandbox_scope {
+                    body.push(format!("Grant scope: {sp}"));
+                }
                 let theme = s.theme.read().unwrap().clone();
                 let preview = match t.get::<Value>("preview")? {
                     Value::Nil => None,
@@ -320,10 +357,17 @@ pub(super) fn install(lua: &Lua, ui: &Table, shared: &Arc<UiShared>) -> mlua::Re
                 let mut keys: Vec<(char, String)> = Vec::new();
                 let mut by_key: HashMap<char, String> = HashMap::new();
                 for choice in raw_choices {
-                    let (label, key_char, key_label) = match choice.as_str() {
+                    let (label, detail, key_char, key_label) = match choice.as_str() {
                         "allow" => (
                             if scoped { "Allow requested access for this turn (y)" } else { "Allow once (y)" }
                                 .to_string(),
+                            if scoped {
+                                Some("reused by later commands until this turn ends".to_string())
+                            } else if sandbox_scope.is_some() {
+                                Some("this call only; later commands return to baseline".to_string())
+                            } else {
+                                None
+                            },
                             Some('y'),
                             if scoped { "this turn" } else { "allow once" }.to_string(),
                         ),
@@ -334,20 +378,28 @@ pub(super) fn install(lua: &Lua, ui: &Table, shared: &Arc<UiShared>) -> mlua::Re
                                 "Allow for this session (a)"
                             }
                             .to_string(),
+                            if has_grant_scope {
+                                Some("reused by later commands until session ends or permissions change".to_string())
+                            } else {
+                                None
+                            },
                             Some('a'),
                             "this session".to_string(),
                         ),
                         "allow_amend" => (
                             format!("Allow and remember (A): {}", amendment_desc.as_deref().unwrap_or("this rule")),
+                            None,
                             Some('A'),
                             "remember".to_string(),
                         ),
-                        "deny" => ("Deny, and tell the model why (n)".to_string(), Some('n'), "deny".to_string()),
-                        "abort" => ("Deny and stop this turn (ctrl+c)".to_string(), None, "deny and stop".to_string()),
+                        "deny" => ("Deny, and tell the model why (n)".to_string(), None, Some('n'), "deny".to_string()),
+                        "abort" => {
+                            ("Deny and stop this turn (ctrl+c)".to_string(), None, None, "deny and stop".to_string())
+                        }
                         other => return Err(mlua::Error::runtime(format!("invalid approval choice: {other}"))),
                     };
                     choices.push(choice.clone());
-                    items.push(SelectItem { label, preview: preview.clone(), ..Default::default() });
+                    items.push(SelectItem { label, detail, preview: preview.clone(), ..Default::default() });
                     if let Some(key_char) = key_char {
                         keys.push((key_char, key_label));
                         by_key.insert(key_char, choice);
@@ -375,7 +427,7 @@ pub(super) fn install(lua: &Lua, ui: &Table, shared: &Arc<UiShared>) -> mlua::Re
                     tab: 0,
                     kind: "list".into(),
                     keys,
-                    body: vec![],
+                    body,
                     vim: false,
                     highlight: None,
                     reply: tx,

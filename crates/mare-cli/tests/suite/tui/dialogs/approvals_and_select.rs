@@ -821,3 +821,49 @@ async fn permission_streak_offer_switches_to_wider_preset_when_accepted() {
     })
     .await
 }
+
+#[tokio::test]
+async fn permission_approval_dialog_shows_grant_scope_and_expiry() {
+    local(async {
+        let ext = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+        let ext_git = dunce::canonicalize(ext.path()).unwrap().join(".git");
+        std::fs::create_dir_all(&ext_git).unwrap();
+        let ext_git2 = dunce::canonicalize(ext.path()).unwrap().join("repo2/.git");
+        std::fs::create_dir_all(&ext_git2).unwrap();
+        let script = json!([
+            { "tool_calls": [{ "name": "request_permissions", "arguments": {
+                "additional_permissions": { "write": [ext_git] },
+                "scope": "session",
+                "justification": "fetch external repo"
+            } }] },
+            { "tool_calls": [{ "name": "bash", "arguments": {
+                "command": "true",
+                "sandbox_permissions": format!("write:{}", ext_git2.display()),
+                "justification": "fetch second repo"
+            } }] },
+            { "text": "done" }
+        ]);
+        let cfg = json!({ "plugins": { "permissions": { "enabled": true, "preset": "auto" } } });
+        let mut t = Term::with(script, cfg, 100, 28).await;
+        t.submit("fetch").await;
+        t.until("scoped permission dialog shows scope and expiry", |s| {
+            s.contains("Grant scope:")
+                && s.contains("expires when session ends")
+                && s.contains("Allow requested access for this turn (y)")
+                && s.contains("Allow requested access for this session (a)")
+                && s.contains("Requested write:")
+        })
+        .await;
+        t.key(KeyCode::Char('a'), Modifiers::NONE);
+        t.until("sandbox_permissions dialog shows grant scope and expiry", |s| {
+            s.contains("Grant scope: write:")
+                && s.contains("this call only; later commands return to baseline")
+                && s.contains("Allow once (y)")
+                && s.contains("Allow for this session (a)")
+        })
+        .await;
+        t.key(KeyCode::Char('y'), Modifiers::NONE);
+        t.idle().await;
+    })
+    .await
+}

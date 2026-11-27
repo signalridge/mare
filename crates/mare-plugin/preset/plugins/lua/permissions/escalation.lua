@@ -62,6 +62,30 @@ return function(D)
 		end
 		return out
 	end
+	local function protected_meta_segment(p)
+		if type(p) ~= "string" then
+			return false
+		end
+		local norm = mare.os == "windows" and p:gsub("\\", "/"):lower() or (mare.os == "macos" and p:lower() or p)
+		return norm:match("/%.git$") ~= nil
+			or norm:match("/%.git/") ~= nil
+			or norm:match("/%.mare$") ~= nil
+			or norm:match("/%.mare/") ~= nil
+	end
+	local function write_covered(w, roots)
+		if not protected_meta_segment(w) then
+			return S.within(w, roots or {}, { stable_roots = true })
+		end
+		-- OS sandboxes keep `.git` / `.mare` read-only inside granted ancestor directories;
+		-- only a stored grant that itself sits inside the protected subtree covers `w`.
+		local meta_roots = {}
+		for _, r in ipairs(roots or {}) do
+			if protected_meta_segment(r) then
+				meta_roots[#meta_roots + 1] = r
+			end
+		end
+		return #meta_roots > 0 and S.within(w, meta_roots, { stable_roots = true }) or false
+	end
 	--- the part of `req` not already inside `store` (nil when fully covered)
 	local function inc_remainder(req, store)
 		store = store or {}
@@ -86,7 +110,7 @@ return function(D)
 			end
 		end
 		for _, w in ipairs(req.write or {}) do
-			if not S.within(w, store.write or {}, { stable_roots = true }) then
+			if not write_covered(w, store.write) then
 				table.insert(out.write, w)
 			end
 		end
@@ -268,14 +292,35 @@ return function(D)
 			and no_symlink_dir(dir .. "/refs") ~= nil
 			and valid_git_head(dir)
 	end
+	local function is_dot_git_path(abs)
+		if mare.os == "windows" or mare.os == "macos" then
+			return abs:lower():match(SEP .. "%.git$") ~= nil
+		end
+		return abs:match(SEP .. "%.git$") ~= nil
+	end
+	local function resolve_in_cwd(path, cwd)
+		if cwd and D.lib.is_project_relative(path) then
+			path = cwd .. "/" .. path
+		end
+		return mare.fs.resolve(path)
+	end
 	--- Resolve `.git` pointer file and optional linked-worktree `commondir` strictly without symlinks.
 	local function resolve_git_pointer_writes(abs)
-		local ptr = mare.fs.read(abs, { no_follow = true, max_bytes = 65536 })
+		-- Canonicalize only the containing directory first so worktrees under symlinked
+		-- ancestors (e.g. macOS `/var` -> `/private/var` or symlinked repo roots) work while
+		-- `mare.fs.read(..., { no_follow = true })` still strictly refuses a symlinked `.git`.
+		local parent = abs:match(PARENT) or "."
+		local ok_parent, parent_phys = pcall(mare.fs.realpath, parent)
+		if not ok_parent or type(parent_phys) ~= "string" or parent_phys == "" then
+			return nil, "write scope: invalid .git parent directory"
+		end
+		local abs_phys = parent_phys .. "/.git"
+		local ptr = mare.fs.read(abs_phys, { no_follow = true, max_bytes = 65536 })
 		local gd = ptr and ptr:match("^%s*gitdir:%s*(.-)%s*$")
 		if not gd or gd == "" or gd:find("[%z\r\n]") then
 			return nil, "write scope: invalid .git pointer file"
 		end
-		local gd_cand = join_rel(abs:match(PARENT) or ".", gd)
+		local gd_cand = join_rel(parent_phys, gd)
 		local gd_phys = no_symlink_dir(gd_cand)
 		if not gd_phys then
 			return nil, "write scope: symlinked or invalid .git gitdir target"
@@ -319,7 +364,7 @@ return function(D)
 		if not back_rel or back_rel == "" or back_rel:find("[%z\r\n]") then
 			return nil, "write scope: invalid worktree gitdir backlink"
 		end
-		local ok_abs, abs_rp = pcall(mare.fs.resolve_path, abs)
+		local ok_abs, abs_rp = pcall(mare.fs.resolve_path, abs_phys)
 		local ok_back, back_rp = pcall(mare.fs.resolve_path, join_rel(gd_phys, back_rel))
 		if
 			not ok_abs
@@ -333,7 +378,7 @@ return function(D)
 		return { write = { gd_phys, cd_phys } }
 	end
 	--- `sandbox_permissions` → increment
-	local function scope_inc(scope)
+	local function scope_inc(scope, cwd)
 		if scope == "all" or scope == "danger-full-access" then
 			return { all = true }
 		elseif scope == "network" then
@@ -347,11 +392,11 @@ return function(D)
 		end
 		local path = scope:match("^write:(.+)$")
 		if path then
-			local abs = mare.fs.resolve(path)
+			local abs = resolve_in_cwd(path, cwd)
 			local st = mare.fs.stat(abs)
 			-- a worktree/submodule `.git` is a pointer file: `write:.git` grants the gitdir it
 			-- names (and linked-worktree `commondir` when valid), not the workspace around it
-			if st and st.kind ~= "dir" and abs:match(SEP .. "%.git$") then
+			if st and st.kind ~= "dir" and is_dot_git_path(abs) then
 				return resolve_git_pointer_writes(abs)
 			end
 			-- a file (existing, or one the command is about to create) is checked against its
@@ -366,7 +411,15 @@ return function(D)
 			if not st then
 				return nil, "write scope: neither " .. path .. " nor its parent directory exists"
 			end
-			return { write = { abs } }
+			local ok_rp, phys = pcall(mare.fs.realpath, abs)
+			if not ok_rp or type(phys) ~= "string" or phys == "" then
+				return nil, "write scope: cannot resolve physical directory for " .. path
+			end
+			local phys_st = mare.fs.stat(phys)
+			if not phys_st or phys_st.kind ~= "dir" then
+				return nil, "write scope: " .. path .. " does not resolve to an existing directory"
+			end
+			return { write = { phys } }
 		end
 		return nil,
 			"invalid sandbox_permissions: "
@@ -399,12 +452,12 @@ return function(D)
 	end
 	--- widen the current preset's sandbox by one requested scope.
 	--- -> spec | nil, err ; wider = whether approval is needed ; inc = the increment
-	local function widen(scope)
+	local function widen(scope, cwd)
 		local base = base_spec()
 		if base == false then
 			return nil, nil, false -- already unrestricted: no per-call override
 		end
-		local inc, err = scope_inc(scope)
+		local inc, err = scope_inc(scope, cwd)
 		if not inc then
 			return nil, err
 		end
@@ -423,6 +476,10 @@ return function(D)
 		inc_narrow = inc_narrow,
 		inc_text = inc_text,
 		writes_widened = writes_widened,
+		workspace_root = workspace_root,
+		is_dot_git_path = is_dot_git_path,
+		write_covered = write_covered,
+		resolve_git_pointer_writes = resolve_git_pointer_writes,
 		widen = widen,
 	}
 end
