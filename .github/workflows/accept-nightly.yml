@@ -42,7 +42,7 @@ jobs:
           set -euo pipefail
           git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
       - uses: ./.github/actions/setup-rust
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version-file: .python-version
       - name: Load pinned CI tool versions
@@ -104,7 +104,7 @@ jobs:
         run: brew install lua
       - if: runner.os == 'Windows'
         name: Install lua (Windows)
-        uses: leafo/gh-actions-lua@8aace3457a2fcf3f3c4e9007ecc6b869ff6d74d6 # v11
+        uses: leafo/gh-actions-lua@32909a2dea0a48c433aec79e7fcd31b4cd55800f # v13.1.0
         with:
           luaVersion: ${{ steps.tools.outputs.lua }}
       - name: Install lua-language-server
