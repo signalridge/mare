@@ -89,9 +89,7 @@ REQUIRED_EVENT = "push"
 REQUIRED_BRANCH = "main"
 
 
-def _matches_expected_run(run: dict, expected_commit: str | None) -> bool:
-    if expected_commit is None:
-        return True
+def _matches_expected_run(run: dict, expected_commit: str) -> bool:
     return (
         run.get("event") == REQUIRED_EVENT
         and run.get("headBranch") == REQUIRED_BRANCH
@@ -103,7 +101,7 @@ def check_runs(
     runs: list[dict],
     fetch_jobs,
     *,
-    expected_commit: str | None = None,
+    expected_commit: str,
 ) -> tuple[bool, list[str]]:
     if not runs:
         return False, ["no ci.yml workflow runs found for commit"]
@@ -147,7 +145,7 @@ def wait_for_runs(
     list_runs,
     fetch_jobs,
     *,
-    expected_commit: str | None = None,
+    expected_commit: str,
     wait_minutes: float = 0.0,
     poll_interval: float = 30.0,
     monotonic=time.monotonic,
@@ -218,6 +216,27 @@ def gh_json(args: list[str]) -> object:
 
 
 class ReleaseGateSelfTests(unittest.TestCase):
+    TEST_COMMIT = "a" * 40
+
+    def _run(
+        self,
+        run_id: int,
+        *,
+        status: str = "completed",
+        created_at: str = "2026-11-15T10:00:00Z",
+        commit: str | None = None,
+        event: str = "push",
+        branch: str = "main",
+    ) -> dict:
+        return {
+            "databaseId": run_id,
+            "status": status,
+            "createdAt": created_at,
+            "event": event,
+            "headBranch": branch,
+            "headSha": self.TEST_COMMIT if commit is None else commit,
+        }
+
     def _all_ok_jobs(self) -> list[dict]:
         return [
             {"name": n, "conclusion": "success"}
@@ -225,7 +244,7 @@ class ReleaseGateSelfTests(unittest.TestCase):
         ]
 
     def test_no_runs_fails(self):
-        ok, errs = check_runs([], lambda _id: [])
+        ok, errs = check_runs([], lambda _id: [], expected_commit=self.TEST_COMMIT)
         self.assertFalse(ok)
         self.assertTrue(any("no ci.yml workflow runs" in e for e in errs), errs)
 
@@ -234,8 +253,8 @@ class ReleaseGateSelfTests(unittest.TestCase):
         for job in jobs:
             if job["name"] in ("actionlint", "yamllint", "cargo-deny", "stylua · public-api-lint"):
                 job["conclusion"] = "skipped"
-        runs = [{"databaseId": 101, "status": "completed", "createdAt": "2026-11-15T10:00:00Z"}]
-        ok, msgs = check_runs(runs, lambda _id: jobs)
+        runs = [self._run(101)]
+        ok, msgs = check_runs(runs, lambda _id: jobs, expected_commit=self.TEST_COMMIT)
         self.assertTrue(ok, msgs)
 
         # Docs-only commit where all conditional jobs (including build-linux-tests) were skipped.
@@ -243,7 +262,7 @@ class ReleaseGateSelfTests(unittest.TestCase):
             {"name": n, "conclusion": "success" if n in ALWAYS_REQUIRED_JOBS else "skipped"}
             for n in (*ALWAYS_REQUIRED_JOBS, BUILD_LINUX_JOB, *REQUIRED_JOBS)
         ]
-        ok, msgs = check_runs(runs, lambda _id: docs_only)
+        ok, msgs = check_runs(runs, lambda _id: docs_only, expected_commit=self.TEST_COMMIT)
         self.assertTrue(ok, msgs)
 
     def test_ci_failures_missing_jobs_or_skipped_changes_fail(self):
@@ -276,8 +295,8 @@ class ReleaseGateSelfTests(unittest.TestCase):
         ]
         for label, run_id, jobs, predicate in cases:
             with self.subTest(case=label):
-                runs = [{"databaseId": run_id, "status": "completed", "createdAt": "2026-11-15T10:00:00Z"}]
-                ok, errs = check_runs(runs, lambda _id, j=jobs: j)
+                runs = [self._run(run_id)]
+                ok, errs = check_runs(runs, lambda _id, j=jobs: j, expected_commit=self.TEST_COMMIT)
                 self.assertFalse(ok)
                 self.assertTrue(any(predicate(e) for e in errs), errs)
 
@@ -398,28 +417,20 @@ class ReleaseGateSelfTests(unittest.TestCase):
             self.assertTrue(all(v == "true" for v in disp_out.values()), disp_out)
 
     def test_runtime_gate_requires_push_main_matching_commit(self):
-        commit = "a" * 40
+        commit = self.TEST_COMMIT
         other_sha = "b" * 40
         jobs = self._all_ok_jobs()
         for label, bad_run in (
-            ("pull_request_event", {"databaseId": 301, "status": "completed", "createdAt": "2026-11-27T10:00:00Z", "event": "pull_request", "headBranch": "main", "headSha": commit}),
-            ("non_main_branch", {"databaseId": 302, "status": "completed", "createdAt": "2026-11-27T10:00:00Z", "event": "push", "headBranch": "feat/other", "headSha": commit}),
-            ("wrong_head_sha", {"databaseId": 303, "status": "completed", "createdAt": "2026-11-27T10:00:00Z", "event": "push", "headBranch": "main", "headSha": other_sha}),
+            ("pull_request_event", self._run(301, event="pull_request")),
+            ("non_main_branch", self._run(302, branch="feat/other")),
+            ("wrong_head_sha", self._run(303, commit=other_sha)),
         ):
             with self.subTest(case=label):
                 ok, errs = check_runs([bad_run], lambda _id: jobs, expected_commit=commit)
                 self.assertFalse(ok)
                 self.assertTrue(any("does not match event='push'" in e for e in errs), errs)
 
-        good_run = {
-            "databaseId": 304,
-            "status": "completed",
-            "createdAt": "2026-11-27T10:01:00Z",
-            "event": "push",
-            "headBranch": "main",
-            "headSha": commit,
-        }
-        ok, msgs = check_runs([good_run], lambda _id: jobs, expected_commit=commit)
+        ok, msgs = check_runs([self._run(304)], lambda _id: jobs, expected_commit=commit)
         self.assertTrue(ok, msgs)
 
     def test_required_jobs_includes_workflow_linters(self):
@@ -432,10 +443,11 @@ class ReleaseGateSelfTests(unittest.TestCase):
         def fake_sleep(dt: float) -> None:
             clock[0] += dt
 
-        pending = [{"databaseId": 201, "status": "in_progress", "createdAt": "2026-11-25T10:00:00Z"}]
+        pending = [self._run(201, status="in_progress", created_at="2026-11-25T10:00:00Z")]
         ok, errs = wait_for_runs(
             lambda: pending,
             lambda _id: [],
+            expected_commit=self.TEST_COMMIT,
             wait_minutes=1.0,
             poll_interval=20.0,
             monotonic=lambda: clock[0],
@@ -455,12 +467,13 @@ class ReleaseGateSelfTests(unittest.TestCase):
         def fake_list() -> list[dict]:
             calls[0] += 1
             if calls[0] < 3:
-                return [{"databaseId": 202, "status": "in_progress", "createdAt": "2026-11-25T10:00:00Z"}]
-            return [{"databaseId": 202, "status": "completed", "createdAt": "2026-11-25T10:00:00Z"}]
+                return [self._run(202, status="in_progress", created_at="2026-11-25T10:00:00Z")]
+            return [self._run(202, status="completed", created_at="2026-11-25T10:00:00Z")]
 
         ok, msgs = wait_for_runs(
             fake_list,
             lambda _id: self._all_ok_jobs(),
+            expected_commit=self.TEST_COMMIT,
             wait_minutes=2.0,
             poll_interval=15.0,
             monotonic=lambda: clock[0],
@@ -479,10 +492,11 @@ class ReleaseGateSelfTests(unittest.TestCase):
 
         jobs = self._all_ok_jobs()
         jobs[0]["conclusion"] = "failure"
-        completed = [{"databaseId": 203, "status": "completed", "createdAt": "2026-11-25T10:00:00Z"}]
+        completed = [self._run(203, created_at="2026-11-25T10:00:00Z")]
         ok, errs = wait_for_runs(
             lambda: completed,
             lambda _id: jobs,
+            expected_commit=self.TEST_COMMIT,
             wait_minutes=5.0,
             poll_interval=15.0,
             monotonic=lambda: clock[0],
@@ -503,11 +517,12 @@ class ReleaseGateSelfTests(unittest.TestCase):
             calls[0] += 1
             if calls[0] == 1:
                 return []
-            return [{"databaseId": 204, "status": "completed", "createdAt": "2026-11-25T10:00:00Z"}]
+            return [self._run(204, created_at="2026-11-25T10:00:00Z")]
 
         ok, msgs = wait_for_runs(
             fake_list,
             lambda _id: self._all_ok_jobs(),
+            expected_commit=self.TEST_COMMIT,
             wait_minutes=1.0,
             poll_interval=10.0,
             monotonic=lambda: clock[0],
