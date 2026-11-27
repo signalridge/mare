@@ -166,140 +166,13 @@ fn lock_timeout_error(lock_path: &Path) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::TimedOut, format!("timed out waiting for lock {}", lock_path.display()))
 }
 
-trait LocalWait {
-    fn wait_timeout<'a>(
-        &self,
-        local_lock: &'a std::sync::Mutex<bool>,
-        guard: std::sync::MutexGuard<'a, bool>,
-        dur: Duration,
-    ) -> std::sync::MutexGuard<'a, bool>;
-    fn notify_one(&self);
-}
-
-impl LocalWait for std::sync::Condvar {
-    fn wait_timeout<'a>(
-        &self,
-        _local_lock: &'a std::sync::Mutex<bool>,
-        guard: std::sync::MutexGuard<'a, bool>,
-        dur: Duration,
-    ) -> std::sync::MutexGuard<'a, bool> {
-        Self::wait_timeout(self, guard, dur).unwrap_or_else(|e| e.into_inner()).0
-    }
-
-    fn notify_one(&self) {
-        Self::notify_one(self);
-    }
-}
-
-#[cfg(test)]
-fn acquire_local_lock(
-    local_lock: &std::sync::Mutex<bool>,
-    local_cvar: &std::sync::Condvar,
-    lock_path: &Path,
-    deadline: Instant,
-) -> std::io::Result<()> {
-    acquire_local_lock_inner(
-        local_lock,
-        local_cvar,
-        lock_path,
-        deadline,
-        Instant::now,
-        #[cfg(test)]
-        None,
-        #[cfg(test)]
-        None,
-    )
-}
-
-fn acquire_local_lock_inner<W: LocalWait>(
-    local_lock: &std::sync::Mutex<bool>,
-    local_cvar: &W,
-    lock_path: &Path,
-    deadline: Instant,
-    now: impl Fn() -> Instant,
-    #[cfg(test)] on_wait: Option<&(dyn Fn() + Sync)>,
-    #[cfg(test)] post_wait_now: Option<&(dyn Fn() -> Instant + Sync)>,
-) -> std::io::Result<()> {
-    let mut held = local_lock.lock().unwrap_or_else(|e| e.into_inner());
-    while *held {
-        let Some(remaining) = deadline.checked_duration_since(now()).filter(|d| !d.is_zero()) else {
-            return Err(lock_timeout_error(lock_path));
-        };
-        #[cfg(test)]
-        if let Some(hook) = on_wait {
-            hook();
-        }
-        held = local_cvar.wait_timeout(local_lock, held, remaining);
-    }
-    // Re-check the shared deadline after re-acquiring the mutex: `wait_timeout` may have
-    // timed out right as the holder released `*held = false`.
-    #[cfg(test)]
-    let check_now = post_wait_now.map_or_else(&now, |f| f());
-    #[cfg(not(test))]
-    let check_now = now();
-    if deadline.checked_duration_since(check_now).is_none_or(|d| d.is_zero()) {
-        // We did not take ownership of the free lock and may have consumed the holder's
-        // `notify_one()`; pass the wakeup on so other waiters are not stranded.
-        local_cvar.notify_one();
-        return Err(lock_timeout_error(lock_path));
-    }
-    *held = true;
-    Ok(())
-}
-
-fn locked_with_timeout<T>(p: &Path, timeout: Duration, f: impl FnOnce() -> std::io::Result<T>) -> std::io::Result<T> {
-    static LOCAL: (std::sync::Mutex<bool>, std::sync::Condvar) =
-        (std::sync::Mutex::new(false), std::sync::Condvar::new());
-    locked_with_deadline_inner(
-        p,
-        Instant::now() + timeout,
-        &LOCAL,
-        Instant::now,
-        f,
-        #[cfg(test)]
-        None,
-        #[cfg(test)]
-        None,
-    )
-}
-
-fn locked_with_deadline_inner<T>(
+fn acquire_file_lock(
     p: &Path,
     deadline: Instant,
-    local: &(std::sync::Mutex<bool>, std::sync::Condvar),
     now: impl Fn() -> Instant,
-    f: impl FnOnce() -> std::io::Result<T>,
-    #[cfg(test)] on_local_wait: Option<&(dyn Fn() + Sync)>,
     #[cfg(test)] on_would_block: Option<&(dyn Fn() + Sync)>,
-) -> std::io::Result<T> {
-    struct LocalGuard<'a>(&'a (std::sync::Mutex<bool>, std::sync::Condvar));
-    impl Drop for LocalGuard<'_> {
-        fn drop(&mut self) {
-            let (lock, cvar) = self.0;
-            let mut held = lock.lock().unwrap_or_else(|e| e.into_inner());
-            *held = false;
-            cvar.notify_one();
-        }
-    }
-
+) -> std::io::Result<std::fs::File> {
     let lock_path = p.with_extension("lock");
-
-    // Share one deadline across the in-process mutex/condvar and the cross-process file lock so
-    // multiple concurrent waiters cannot each wait a full `timeout` in series.
-    let (local_lock, local_cvar) = local;
-    acquire_local_lock_inner(
-        local_lock,
-        local_cvar,
-        &lock_path,
-        deadline,
-        &now,
-        #[cfg(test)]
-        on_local_wait,
-        #[cfg(test)]
-        None,
-    )?;
-    let _local = LocalGuard(local);
-
     if let Some(dir) = p.parent().filter(|d| !d.as_os_str().is_empty()) {
         mare_shared::private::create_dir_all(dir)?;
     }
@@ -307,7 +180,7 @@ fn locked_with_deadline_inner<T>(
         mare_shared::private::open(std::fs::OpenOptions::new().create(true).truncate(false).write(true), &lock_path)?;
     loop {
         match lock.try_lock() {
-            Ok(()) => break,
+            Ok(()) => return Ok(lock),
             Err(std::fs::TryLockError::WouldBlock) => {
                 #[cfg(test)]
                 if let Some(hook) = on_would_block {
@@ -321,9 +194,6 @@ fn locked_with_deadline_inner<T>(
             Err(std::fs::TryLockError::Error(e)) => return Err(e),
         }
     }
-    let r = f();
-    let _ = lock.unlock();
-    r
 }
 
 #[derive(Clone, Copy)]
@@ -339,7 +209,6 @@ struct QueuedOp {
     id: u64,
     fp: String,
     kind: OpKind,
-    deadline: Instant,
 }
 
 struct BatchState {
@@ -416,15 +285,36 @@ fn apply_batch_unlocked(p: &Path, batch: &[QueuedOp]) -> std::io::Result<Vec<(u3
 /// `write_atomic` (temp → fsync → rename → dir fsync) so N concurrent callers do not serialize
 /// N×2 fsyncs against one `LOCK_TIMEOUT`.
 fn run_batched_op(p: &Path, fp: &str, kind: OpKind, timeout: Duration) -> OpResult {
+    run_batched_op_inner(
+        p,
+        fp,
+        kind,
+        Instant::now() + timeout,
+        Instant::now,
+        #[cfg(test)]
+        None,
+        #[cfg(test)]
+        None,
+    )
+}
+
+fn run_batched_op_inner(
+    p: &Path,
+    fp: &str,
+    kind: OpKind,
+    deadline: Instant,
+    now: impl Fn() -> Instant,
+    #[cfg(test)] on_wait: Option<&(dyn Fn() + Sync)>,
+    #[cfg(test)] on_would_block: Option<&(dyn Fn() + Sync)>,
+) -> OpResult {
     let batcher = path_batcher(p);
     let lock_path = p.with_extension("lock");
-    let deadline = Instant::now() + timeout;
 
-    let (my_id, batch) = {
+    let my_id = {
         let mut st = batcher.state.lock().unwrap_or_else(|e| e.into_inner());
         let id = st.next_id;
         st.next_id = st.next_id.wrapping_add(1);
-        st.queue.push(QueuedOp { id, fp: fp.to_owned(), kind, deadline });
+        st.queue.push(QueuedOp { id, fp: fp.to_owned(), kind });
         loop {
             if let Some(res) = st.results.remove(&id) {
                 return res;
@@ -433,31 +323,40 @@ fn run_batched_op(p: &Path, fp: &str, kind: OpKind, timeout: Duration) -> OpResu
                 st = batcher.cvar.wait(st).unwrap_or_else(|e| e.into_inner());
                 continue;
             }
-            if !st.leader_running {
-                st.leader_running = true;
-                break (id, std::mem::take(&mut st.queue));
-            }
-            let Some(remaining) = deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()) else {
+            let Some(remaining) = deadline.checked_duration_since(now()).filter(|d| !d.is_zero()) else {
                 st.queue.retain(|q| q.id != id);
                 return Err(lock_timeout_error(&lock_path));
             };
+            if !st.leader_running {
+                st.leader_running = true;
+                break id;
+            }
+            #[cfg(test)]
+            if let Some(hook) = on_wait {
+                hook();
+            }
             st = batcher.cvar.wait_timeout(st, remaining).unwrap_or_else(|e| e.into_inner()).0;
         }
     };
 
     struct LeaderGuard<'a> {
         batcher: &'a PathBatcher,
-        batch: &'a [QueuedOp],
+        my_id: u64,
+        batch: Option<Vec<QueuedOp>>,
         finished: bool,
     }
     impl Drop for LeaderGuard<'_> {
         fn drop(&mut self) {
             if !self.finished {
                 let mut st = self.batcher.state.lock().unwrap_or_else(|e| e.into_inner());
-                for op in self.batch {
-                    st.results
-                        .entry(op.id)
-                        .or_insert_with(|| Err(std::io::Error::other("crash guard leader panicked")));
+                if let Some(batch) = self.batch.take() {
+                    for op in batch {
+                        st.results
+                            .entry(op.id)
+                            .or_insert_with(|| Err(std::io::Error::other("crash guard leader panicked")));
+                    }
+                } else {
+                    st.queue.retain(|q| q.id != self.my_id);
                 }
                 st.leader_running = false;
                 self.batcher.cvar.notify_all();
@@ -465,15 +364,36 @@ fn run_batched_op(p: &Path, fp: &str, kind: OpKind, timeout: Duration) -> OpResu
         }
     }
 
-    let mut guard = LeaderGuard { batcher: &batcher, batch: &batch, finished: false };
-    let batch_deadline = batch.iter().map(|op| op.deadline).min().unwrap_or(deadline);
-    let remaining = batch_deadline.saturating_duration_since(Instant::now());
-    let outcome = if remaining.is_zero() {
-        Err(lock_timeout_error(&lock_path))
-    } else {
-        locked_with_timeout(p, remaining, || apply_batch_unlocked(p, &batch))
+    let mut guard = LeaderGuard { batcher: &batcher, my_id, batch: None, finished: false };
+
+    let lock = match acquire_file_lock(
+        p,
+        deadline,
+        &now,
+        #[cfg(test)]
+        on_would_block,
+    ) {
+        Ok(lock) => lock,
+        Err(err) => {
+            let mut st = batcher.state.lock().unwrap_or_else(|e| e.into_inner());
+            st.queue.retain(|q| q.id != my_id);
+            st.leader_running = false;
+            guard.finished = true;
+            batcher.cvar.notify_all();
+            return Err(err);
+        }
     };
 
+    let batch = {
+        let mut st = batcher.state.lock().unwrap_or_else(|e| e.into_inner());
+        std::mem::take(&mut st.queue)
+    };
+    guard.batch = Some(batch);
+
+    let outcome = apply_batch_unlocked(p, guard.batch.as_deref().unwrap_or(&[]));
+    let _ = lock.unlock();
+
+    let batch = guard.batch.take().unwrap_or_default();
     let mut st = batcher.state.lock().unwrap_or_else(|e| e.into_inner());
     let mut my_result = None;
     match outcome {
@@ -754,7 +674,7 @@ mod tests {
         let lp = p.with_extension("lock");
         let holder = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&lp).unwrap();
         holder.lock().unwrap();
-        let err = locked_with_timeout(&p, Duration::from_millis(50), || Ok(())).unwrap_err();
+        let err = acquire_file_lock(&p, Instant::now() + Duration::from_millis(50), Instant::now, None).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
         holder.unlock().unwrap();
     }
@@ -767,7 +687,6 @@ mod tests {
         let holder = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&lp).unwrap();
         holder.lock().unwrap();
 
-        let local = (std::sync::Mutex::new(false), std::sync::Condvar::new());
         let t0 = Instant::now();
         let deadline = t0 + LOCK_TIMEOUT;
         let expired = std::sync::atomic::AtomicBool::new(false);
@@ -784,32 +703,37 @@ mod tests {
             }
             expired.store(true, std::sync::atomic::Ordering::Release);
         };
-        let on_local_wait = || {
+        let on_wait = || {
             let mut st = phase.0.lock().unwrap_or_else(|e| e.into_inner());
             st.1 += 1;
             phase.1.notify_all();
         };
 
+        let p_ref = p.as_path();
+        let now_ref = &now;
+        let on_wait_ref = &on_wait;
+        let on_would_block_ref = &on_would_block;
         let results: Vec<_> = std::thread::scope(|sc| {
-            let leader = sc.spawn(|| {
-                locked_with_deadline_inner(&p, deadline, &local, now, || Ok(()), None, Some(&on_would_block))
+            let leader = sc.spawn(move || {
+                run_batched_op_inner(p_ref, "fp-0", OpKind::Begin, deadline, now_ref, None, Some(on_would_block_ref))
             });
             let mut st = phase.0.lock().unwrap_or_else(|e| e.into_inner());
             while st.0 == 0 {
                 st = phase.1.wait(st).unwrap_or_else(|e| e.into_inner());
             }
             drop(st);
-            let peers: Vec<_> = (0..3)
-                .map(|_| {
-                    sc.spawn(|| {
-                        locked_with_deadline_inner(
-                            &p,
+            let peers: Vec<_> = (1..=3)
+                .map(|i| {
+                    let fp = format!("fp-{i}");
+                    sc.spawn(move || {
+                        run_batched_op_inner(
+                            p_ref,
+                            &fp,
+                            OpKind::Begin,
                             deadline,
-                            &local,
-                            now,
-                            || Ok(()),
-                            Some(&on_local_wait),
-                            Some(&on_would_block),
+                            now_ref,
+                            Some(on_wait_ref),
+                            Some(on_would_block_ref),
                         )
                     })
                 })
@@ -822,6 +746,70 @@ mod tests {
             assert_eq!(r.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
         }
         assert_eq!(phase.0.lock().unwrap().0, 1, "peers sharing the deadline must time out before polling flock");
+    }
+
+    #[test]
+    fn expired_leader_or_caller_does_not_fail_peer_with_remaining_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("crash-guard.json");
+        let lp = p.with_extension("lock");
+        let holder = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&lp).unwrap();
+        holder.lock().unwrap();
+
+        let t0 = Instant::now();
+        let b_deadline = t0 + Duration::from_secs(1);
+        let c_deadline = t0 + Duration::from_secs(10);
+        let clock_phase = std::sync::atomic::AtomicU8::new(0);
+        let now = || match clock_phase.load(std::sync::atomic::Ordering::Acquire) {
+            0 => t0,
+            _ => t0 + Duration::from_secs(2), // past B's deadline, well within C's deadline
+        };
+        let sync = (std::sync::Mutex::new((0usize, 0usize)), std::sync::Condvar::new());
+        let b_on_would_block = || {
+            let mut st = sync.0.lock().unwrap_or_else(|e| e.into_inner());
+            st.0 += 1;
+            sync.1.notify_all();
+            while st.1 == 0 {
+                st = sync.1.wait(st).unwrap_or_else(|e| e.into_inner());
+            }
+            clock_phase.store(1, std::sync::atomic::Ordering::Release);
+        };
+        let c_on_wait = || {
+            let mut st = sync.0.lock().unwrap_or_else(|e| e.into_inner());
+            st.1 += 1;
+            sync.1.notify_all();
+        };
+
+        let (b_res, c_res) = std::thread::scope(|sc| {
+            let b = sc.spawn(|| {
+                run_batched_op_inner(&p, "fp-b", OpKind::Begin, b_deadline, now, None, Some(&b_on_would_block))
+            });
+            let mut st = sync.0.lock().unwrap_or_else(|e| e.into_inner());
+            while st.0 == 0 {
+                st = sync.1.wait(st).unwrap_or_else(|e| e.into_inner());
+            }
+            drop(st);
+            let c =
+                sc.spawn(|| run_batched_op_inner(&p, "fp-c", OpKind::Begin, c_deadline, now, Some(&c_on_wait), None));
+            let b_res = b.join().unwrap();
+            holder.unlock().unwrap();
+            let c_res = c.join().unwrap();
+            (b_res, c_res)
+        });
+
+        assert_eq!(b_res.unwrap_err().kind(), std::io::ErrorKind::TimedOut, "expired leader B must time out");
+        assert_eq!(c_res.unwrap().0, 0, "follower C with remaining budget must take over and succeed");
+        let st = read_state(&p);
+        assert!(!st.entries.contains_key("fp-b"), "timed-out B must not be persisted");
+        assert!(st.entries.get("fp-c").is_some_and(|e| e.inflight), "C must be durably persisted");
+
+        // An already-expired caller arriving when no leader is running must time out immediately
+        // before electing itself leader, leaving the batcher clean for subsequent callers.
+        let past = t0.checked_sub(Duration::from_secs(1)).unwrap_or(t0);
+        let expired_res = run_batched_op_inner(&p, "fp-expired", OpKind::Begin, past, Instant::now, None, None);
+        assert_eq!(expired_res.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+        assert_eq!(begin(&p, "fp-after").unwrap(), 0);
+        assert!(!read_state(&p).entries.contains_key("fp-expired"));
     }
 
     #[test]
@@ -844,8 +832,8 @@ mod tests {
         let lp = p.with_extension("lock");
         std::fs::write(&p, b"{corrupt-batch").unwrap();
 
-        // Hold the file lock so one leader blocks on flock while the remaining callers accumulate
-        // in the path batch queue, then release to commit the queued operations together.
+        // Hold the file lock so one leader blocks on flock while all 6 callers accumulate in the
+        // path batch queue, then release so the leader takes and commits all 6 in one batch.
         let holder = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&lp).unwrap();
         holder.lock().unwrap();
 
@@ -857,11 +845,11 @@ mod tests {
                     sc.spawn(move || begin_with_report(p, "same-fp").unwrap())
                 })
                 .collect();
-            // Wait until the leader is active and all 5 peers are queued behind it.
+            // Wait until the leader is active and all 6 operations are queued for one batch.
             let wait_deadline = Instant::now() + Duration::from_secs(2);
             loop {
                 let st = batcher.state.lock().unwrap_or_else(|e| e.into_inner());
-                if st.leader_running && st.queue.len() == 5 {
+                if st.leader_running && st.queue.len() == 6 {
                     break;
                 }
                 drop(st);
@@ -920,228 +908,6 @@ mod tests {
         for (path, raw) in &created[2..] {
             assert_eq!(&std::fs::read_to_string(path).unwrap(), raw);
         }
-    }
-
-    #[derive(Default)]
-    struct FakeWaitState {
-        tokens: usize,
-        waiters: usize,
-        done: usize,
-        aborted: bool,
-    }
-
-    struct FakeWait {
-        state: (std::sync::Mutex<FakeWaitState>, std::sync::Condvar),
-    }
-
-    impl FakeWait {
-        fn new() -> Self {
-            Self { state: (std::sync::Mutex::new(FakeWaitState::default()), std::sync::Condvar::new()) }
-        }
-
-        fn wait_until(&self, timeout: Duration, pred: impl Fn(&FakeWaitState) -> bool) -> bool {
-            let (m, cv) = &self.state;
-            let deadline = Instant::now() + timeout;
-            let mut s = m.lock().unwrap_or_else(|e| e.into_inner());
-            while !pred(&s) && !s.aborted {
-                let Some(rem) = deadline.checked_duration_since(Instant::now()) else {
-                    return false;
-                };
-                s = cv.wait_timeout(s, rem).unwrap_or_else(|e| e.into_inner()).0;
-            }
-            pred(&s) && !s.aborted
-        }
-
-        fn mark_done(&self) {
-            let (m, cv) = &self.state;
-            let mut s = m.lock().unwrap_or_else(|e| e.into_inner());
-            s.done += 1;
-            cv.notify_all();
-        }
-
-        fn abort_all(&self) {
-            let (m, cv) = &self.state;
-            let mut s = m.lock().unwrap_or_else(|e| e.into_inner());
-            s.aborted = true;
-            cv.notify_all();
-        }
-    }
-
-    impl LocalWait for FakeWait {
-        fn wait_timeout<'a>(
-            &self,
-            local_lock: &'a std::sync::Mutex<bool>,
-            guard: std::sync::MutexGuard<'a, bool>,
-            _dur: Duration,
-        ) -> std::sync::MutexGuard<'a, bool> {
-            let (m, cv) = &self.state;
-            let mut s = m.lock().unwrap_or_else(|e| e.into_inner());
-            drop(guard);
-            s.waiters += 1;
-            cv.notify_all();
-            while s.tokens == 0 && !s.aborted {
-                s = cv.wait(s).unwrap_or_else(|e| e.into_inner());
-            }
-            if !s.aborted {
-                s.tokens -= 1;
-            }
-            drop(s);
-            local_lock.lock().unwrap_or_else(|e| e.into_inner())
-        }
-
-        fn notify_one(&self) {
-            let (m, cv) = &self.state;
-            let mut s = m.lock().unwrap_or_else(|e| e.into_inner());
-            s.tokens += 1;
-            cv.notify_one();
-        }
-    }
-
-    struct ScopeCleanup<'a> {
-        lock: &'a std::sync::Mutex<bool>,
-        wait: &'a FakeWait,
-        stop: &'a std::sync::atomic::AtomicBool,
-    }
-
-    impl Drop for ScopeCleanup<'_> {
-        fn drop(&mut self) {
-            self.stop.store(true, std::sync::atomic::Ordering::Release);
-            let mut held = self.lock.lock().unwrap_or_else(|e| e.into_inner());
-            *held = false;
-            self.wait.abort_all();
-        }
-    }
-
-    #[test]
-    fn local_lock_rechecks_deadline_after_wait_timeout() {
-        let dir = tempfile::tempdir().unwrap();
-        let lp = dir.path().join("crash-guard.lock");
-        let lock = std::sync::Mutex::new(true);
-        let wait = FakeWait::new();
-        let t0 = Instant::now();
-        let deadline = t0 + Duration::from_secs(5);
-        let expired = std::sync::atomic::AtomicBool::new(false);
-        let stop = std::sync::atomic::AtomicBool::new(false);
-        let now = || if stop.load(std::sync::atomic::Ordering::Acquire) { t0 + Duration::from_secs(10) } else { t0 };
-        let post_wait_now = || {
-            if expired.load(std::sync::atomic::Ordering::Acquire) || stop.load(std::sync::atomic::Ordering::Acquire) {
-                t0 + Duration::from_secs(10)
-            } else {
-                t0
-            }
-        };
-
-        let result = std::thread::scope(|sc| {
-            let _cleanup = ScopeCleanup { lock: &lock, wait: &wait, stop: &stop };
-            let waiter = sc.spawn(|| {
-                let res = acquire_local_lock_inner(&lock, &wait, &lp, deadline, now, None, Some(&post_wait_now));
-                wait.mark_done();
-                res
-            });
-            assert!(wait.wait_until(Duration::from_secs(2), |s| s.waiters == 1), "waiter must reach wait_timeout");
-            let mut held = lock.lock().unwrap();
-            expired.store(true, std::sync::atomic::Ordering::Release);
-            *held = false;
-            wait.notify_one();
-            drop(held);
-            assert!(wait.wait_until(Duration::from_secs(2), |s| s.done == 1), "waiter must finish in bound");
-            waiter.join().unwrap()
-        });
-
-        let err = result.expect_err("waiter whose deadline expired must time out even if held became false");
-        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
-    }
-
-    #[test]
-    fn expired_waiter_passes_wakeup_to_next_waiter() {
-        let dir = tempfile::tempdir().unwrap();
-        let lp = dir.path().join("crash-guard.lock");
-        let lock = std::sync::Mutex::new(true);
-        let wait = FakeWait::new();
-        let t0 = Instant::now();
-        let deadline = t0 + Duration::from_secs(5);
-        let first_consumed = std::sync::atomic::AtomicBool::new(false);
-        let stop = std::sync::atomic::AtomicBool::new(false);
-        let now = || if stop.load(std::sync::atomic::Ordering::Acquire) { t0 + Duration::from_secs(10) } else { t0 };
-        let post_wait_now = || {
-            if !first_consumed.swap(true, std::sync::atomic::Ordering::AcqRel)
-                || stop.load(std::sync::atomic::Ordering::Acquire)
-            {
-                // Whichever waiter consumes the holder's single notify_one() observes an expired
-                // clock and must pass the wakeup on via FakeWait::notify_one().
-                t0 + Duration::from_secs(10)
-            } else {
-                t0
-            }
-        };
-
-        let (r1, r2) = std::thread::scope(|sc| {
-            let _cleanup = ScopeCleanup { lock: &lock, wait: &wait, stop: &stop };
-            let spawn_waiter = || {
-                sc.spawn(|| {
-                    let res = acquire_local_lock_inner(&lock, &wait, &lp, deadline, now, None, Some(&post_wait_now));
-                    wait.mark_done();
-                    res
-                })
-            };
-            let w1 = spawn_waiter();
-            let w2 = spawn_waiter();
-            assert!(
-                wait.wait_until(Duration::from_secs(2), |s| s.waiters == 2),
-                "both waiters must reach wait_timeout"
-            );
-
-            let mut held = lock.lock().unwrap();
-            *held = false;
-            wait.notify_one();
-            drop(held);
-
-            assert!(
-                wait.wait_until(Duration::from_secs(2), |s| s.done == 2),
-                "second waiter must receive the passed-on wakeup within bound"
-            );
-            (w1.join().unwrap(), w2.join().unwrap())
-        });
-
-        let results = [r1, r2];
-        assert_eq!(
-            results.iter().filter(|r| r.as_ref().is_err_and(|e| e.kind() == std::io::ErrorKind::TimedOut)).count(),
-            1,
-            "the waiter that consumed the wakeup expired must time out: {results:?}"
-        );
-        assert_eq!(
-            results.iter().filter(|r| r.is_ok()).count(),
-            1,
-            "the remaining waiter must receive the passed-on wakeup and acquire the lock: {results:?}"
-        );
-    }
-
-    #[test]
-    fn waiter_scope_exits_within_bound_when_signal_never_arrives() {
-        let dir = tempfile::tempdir().unwrap();
-        let lp = dir.path().join("crash-guard.lock");
-        let lock = std::sync::Mutex::new(true);
-        let wait = FakeWait::new();
-        let t0 = Instant::now();
-        let deadline = t0 + Duration::from_secs(5);
-        let stop = std::sync::atomic::AtomicBool::new(false);
-        let now = || if stop.load(std::sync::atomic::Ordering::Acquire) { t0 + Duration::from_secs(10) } else { t0 };
-        let never_signal_hook = || {};
-
-        let start = Instant::now();
-        let timed_out = std::thread::scope(|sc| {
-            let _cleanup = ScopeCleanup { lock: &lock, wait: &wait, stop: &stop };
-            let waiter =
-                sc.spawn(|| acquire_local_lock_inner(&lock, &wait, &lp, deadline, now, Some(&never_signal_hook), None));
-            // Wait for an impossible waiter count so the bounded wait fails, triggering ScopeCleanup.
-            let got = wait.wait_until(Duration::from_millis(20), |s| s.waiters == 99);
-            assert!(!got, "impossible signal count must time out");
-            drop(_cleanup);
-            let res = waiter.join().unwrap();
-            res.is_err()
-        });
-        assert!(timed_out, "aborted waiter must exit cleanly on ScopeCleanup");
-        assert!(start.elapsed() < Duration::from_secs(2), "cleanup must exit within bound");
     }
 
     #[test]
@@ -1238,13 +1004,9 @@ mod tests {
         let qr2: Option<String> = lua.load(r#"return mare.crash.release("lua-fp")"#).eval_async().await.unwrap();
         assert!(qr2.is_some(), "corrupt state on release must return quarantine backup path");
 
-        // Invalid schema under valid version, Condvar expired-deadline wakeup relay, EISDIR begin_async, and all-inflight evict.
+        // Invalid schema under valid version, EISDIR begin_async, and all-inflight evict.
         assert!(parse_state(br#"{"version": 1, "entries": "bad"}"#).is_err());
         let dir = tempfile::tempdir().unwrap();
-        let lp = dir.path().join("crash-guard.lock");
-        let (lock, cvar) = (std::sync::Mutex::new(false), std::sync::Condvar::new());
-        let expired = Instant::now().checked_sub(Duration::from_secs(1)).unwrap_or_else(Instant::now);
-        assert_eq!(acquire_local_lock(&lock, &cvar, &lp, expired).unwrap_err().kind(), std::io::ErrorKind::TimedOut);
         let bad_path = dir.path().join("crash-guard.json");
         std::fs::create_dir_all(bad_path.join("keep")).unwrap();
         assert!(begin_async(crate::blocking::Scope::default(), bad_path, "fp-err".into()).await.is_err());
