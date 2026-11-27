@@ -1163,24 +1163,8 @@ async fn set_preset_reconciles_lua_preset_when_host_ceiling_clamps_sandbox() {
             .build_exposed()
             .await;
 
-        let ro = mare_binding::ossandbox::Policy {
-            level: mare_binding::ossandbox::Level::ReadOnly,
-            root: env.cwd.clone(),
-            extra: vec![],
-            root_writable: false,
-            exclude_tmpdir_env_var: false,
-            exclude_slash_tmp: false,
-            writable: vec![],
-            readable: vec![],
-            deny_read: vec![],
-            restrict_read: false,
-            reads_pinned: false,
-            network: mare_binding::ossandbox::Network::Open,
-            profile: None,
-            unix_sockets: vec![],
-            accept_partial: vec![],
-            project_protected: vec![],
-        };
+        let ro_spec: mlua::Value = h.lua().load(r#"return { level = "read-only", network = true }"#).eval().unwrap();
+        let ro = mare_binding::ossandbox::Policy::from_lua(h.lua(), &ro_spec, &env.cwd).unwrap().unwrap();
         mare_binding::ossandbox::set_inherited_ceiling(h.lua(), Some(ro));
 
         let (returned, live_preset, vote_decision): (String, String, String) = eval(

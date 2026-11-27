@@ -74,18 +74,11 @@ return function(D)
 		end
 		P.sandbox_gen = gen
 		D.reset_session_grants()
-		if P.preset ~= "custom" then
-			local next_preset, approval_like = Pr.effective_preset_for_sandbox(P.preset)
+		if P.preset ~= "custom" or P.approval_like ~= nil then
+			local next_preset, approval_like = Pr.effective_preset_for_sandbox(P.approval_like or P.preset)
 			if next_preset ~= P.preset or approval_like ~= P.approval_like then
 				P.preset = next_preset
 				P.approval_like = approval_like
-				emit()
-			end
-		elseif P.approval_like ~= nil then
-			local pol = mare.proc.sandbox.current()
-			if pol and pol.level == "read-only" then
-				P.preset = "read-only"
-				P.approval_like = nil
 				emit()
 			end
 		end

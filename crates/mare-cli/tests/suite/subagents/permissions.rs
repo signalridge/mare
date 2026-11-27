@@ -814,10 +814,85 @@ async fn explore_and_plan_subagents_run_bash_read_only_and_cannot_write_files() 
     .await
 }
 
+/// Installs a compact child-side probe plugin that reports live permission/sandbox state on
+/// `turn/started` (`probe/state`) and provides `wait_gate` / `report_state` tools for synchronized
+/// parent/child permission tests.
+fn install_perm_probe_plugin(env: &TestEnv, try_widen_on_start: bool) {
+    let plugins = env.config_dir().join("plugins");
+    std::fs::create_dir_all(&plugins).unwrap();
+    let try_widen = if try_widen_on_start { "true" } else { "false" };
+    std::fs::write(
+        plugins.join("child-perm-probe.lua"),
+        format!(
+            r#"
+            return {{
+              name = "child-perm-probe",
+              inject = {{ "bus", "tools", "permissions" }},
+              contracts = {{
+                probe = {{
+                  owner = "child-perm-probe",
+                  events = {{
+                    state = {{
+                      doc = "probe", mode = "emit", expose = "both", delivery = "required",
+                      ignorable = false, data = {{ type = "object", additionalProperties = true }}, example = {{}},
+                    }},
+                  }},
+                }},
+              }},
+              apply = function(ctx)
+                local function snapshot(tag, widen_ok)
+                  local sb = mare.proc.sandbox.current()
+                  return {{
+                    tag = tag,
+                    preset = ctx.permissions:preset(),
+                    ceiling = mare.args and mare.args.permission_ceiling or nil,
+                    sandbox_nil = sb == nil,
+                    sandbox_level = sb and sb.level or nil,
+                    widen_ok = widen_ok,
+                  }}
+                end
+                if mare.mode == "child" then
+                  ctx:on("turn/started", function()
+                    local widen_ok
+                    if {try_widen} then
+                      widen_ok = pcall(ctx.permissions.set, ctx.permissions, "full-access")
+                    end
+                    ctx.bus:emit("probe/state", snapshot("start", widen_ok))
+                  end)
+                end
+                ctx.tools:register("wait_gate", {{
+                  description = "signal readiness and wait on gate file",
+                  side_effect = "read",
+                  parameters = {{ type = "object", properties = {{ gate = {{ type = "string" }} }}, required = {{ "gate" }} }},
+                  execute = function(a)
+                    ctx.bus:emit("probe/state", snapshot("ready"))
+                    for _ = 1, 1000 do
+                      if mare.fs.stat(a.gate) then return {{ content = "released" }} end
+                      mare.task.sleep(5)
+                    end
+                    return {{ content = "timed out", is_error = true }}
+                  end,
+                }})
+                ctx.tools:register("report_state", {{
+                  description = "emit current child preset and sandbox state",
+                  side_effect = "read",
+                  parameters = {{ type = "object", properties = {{}} }},
+                  execute = function()
+                    ctx.bus:emit("probe/state", snapshot("after"))
+                    return {{ content = "reported" }}
+                  end,
+                }})
+              end,
+            }}
+            "#
+        ),
+    )
+    .unwrap();
+}
+
 /// Regression for parent switching to `full-access` (FULL) before spawning a `general` subagent:
-/// stale pre-FULL sandbox policies (from initial `read-only` or `auto` startup) must not leak
-/// through `PolicyNode` into the new child's ceiling. Both direct writes and repeated
-/// `request_permissions` calls within effective permissions must succeed with zero parent prompts.
+/// stale pre-FULL sandbox policies must not leak into the new child's ceiling. Both direct writes
+/// and repeated `request_permissions` calls succeed with zero parent prompts.
 #[tokio::test]
 async fn general_subagent_after_parent_switches_to_full_writes_and_repeats_request_permissions_without_prompt() {
     local(async {
@@ -827,107 +902,15 @@ async fn general_subagent_after_parent_switches_to_full_writes_and_repeats_reque
             std::fs::create_dir_all(&tests_dir).unwrap();
             let outside_base = tempfile::tempdir().unwrap();
             let outside_dir = dunce::canonicalize(outside_base.path()).unwrap();
-
-            let plugins = env.config_dir().join("plugins");
-            std::fs::create_dir_all(&plugins).unwrap();
-            std::fs::write(
-                plugins.join("child-perm-state-probe.lua"),
-                r#"
-                return {
-                  name = "child-perm-state-probe",
-                  inject = { "bus", "permissions" },
-                  contracts = {
-                    probe = {
-                      owner = "child-perm-state-probe",
-                      events = {
-                        ["perm-state"] = {
-                          doc = "probe",
-                          mode = "emit",
-                          expose = "both",
-                          delivery = "required",
-                          ignorable = false,
-                          data = { type = "object", additionalProperties = true },
-                          example = {},
-                        },
-                      },
-                    },
-                  },
-                  apply = function(ctx)
-                    if mare.mode ~= "child" then return end
-                    ctx:on("turn/started", function()
-                      local sb = mare.proc.sandbox.current()
-                      ctx.bus:emit("probe/perm-state", {
-                        preset = ctx.permissions:preset(),
-                        ceiling = mare.args and mare.args.permission_ceiling or nil,
-                        sandbox_nil = sb == nil,
-                        sandbox_level = sb and sb.level or nil,
-                      })
-                    end)
-                  end,
-                }
-                "#,
-            )
-            .unwrap();
+            install_perm_probe_plugin(&env, false);
 
             let script = json!([
-                {
-                    "tool_calls": [
-                        { "name": "write", "arguments": { "path": tests_dir.join("repo-test.txt"), "content": "ok-tests" } }
-                    ]
-                },
-                {
-                    "tool_calls": [
-                        {
-                            "name": "request_permissions",
-                            "arguments": {
-                                "additional_permissions": { "write": [tests_dir] },
-                                "scope": "session",
-                                "justification": "write files in repo tests directory"
-                            }
-                        }
-                    ]
-                },
-                {
-                    "tool_calls": [
-                        {
-                            "name": "request_permissions",
-                            "arguments": {
-                                "additional_permissions": { "write": [tests_dir] },
-                                "scope": "turn",
-                                "justification": "repeat permission request for repo tests directory"
-                            }
-                        }
-                    ]
-                },
-                {
-                    "tool_calls": [
-                        { "name": "write", "arguments": { "path": outside_dir.join("outside.txt"), "content": "ok-outside" } }
-                    ]
-                },
-                {
-                    "tool_calls": [
-                        {
-                            "name": "request_permissions",
-                            "arguments": {
-                                "additional_permissions": { "write": [outside_dir] },
-                                "scope": "session",
-                                "justification": "write outside workspace under full access"
-                            }
-                        }
-                    ]
-                },
-                {
-                    "tool_calls": [
-                        {
-                            "name": "request_permissions",
-                            "arguments": {
-                                "additional_permissions": { "write": [outside_dir] },
-                                "scope": "turn",
-                                "justification": "repeat outside write permission request under full access"
-                            }
-                        }
-                    ]
-                },
+                { "tool_calls": [{ "name": "write", "arguments": { "path": tests_dir.join("repo-test.txt"), "content": "ok-tests" } }] },
+                { "tool_calls": [{ "name": "request_permissions", "arguments": { "additional_permissions": { "write": [tests_dir] }, "scope": "session", "justification": "write repo tests" } }] },
+                { "tool_calls": [{ "name": "request_permissions", "arguments": { "additional_permissions": { "write": [tests_dir] }, "scope": "turn", "justification": "repeat repo tests" } }] },
+                { "tool_calls": [{ "name": "write", "arguments": { "path": outside_dir.join("outside.txt"), "content": "ok-outside" } }] },
+                { "tool_calls": [{ "name": "request_permissions", "arguments": { "additional_permissions": { "write": [outside_dir] }, "scope": "session", "justification": "write outside dir" } }] },
+                { "tool_calls": [{ "name": "request_permissions", "arguments": { "additional_permissions": { "write": [outside_dir] }, "scope": "turn", "justification": "repeat outside dir" } }] },
                 { "text": "all-done" }
             ]);
 
@@ -936,11 +919,7 @@ async fn general_subagent_after_parent_switches_to_full_writes_and_repeats_reque
                 .builtins(SUBAGENT_BUILTINS)
                 .user_plugins()
                 .faux(script)
-                .config(json!({
-                    "plugins": {
-                        "permissions": { "enabled": true, "preset": initial_preset }
-                    }
-                }))
+                .config(json!({ "plugins": { "permissions": { "enabled": true, "preset": initial_preset } } }))
                 .args(json!({ "no_session": true }));
             b.opts.project_trusted = true;
             let h = b.build().await;
@@ -956,20 +935,14 @@ async fn general_subagent_after_parent_switches_to_full_writes_and_repeats_reque
                 end)
                 assert(P:set("full-access"))
                 local svc, raw_start, handle = C.cordis:get("subagent"), mare.subagent.start, nil
-                mare.subagent.start = function(opts)
-                    handle = raw_start(opts)
-                    return handle
-                end
+                mare.subagent.start = function(opts) handle = raw_start(opts); return handle end
                 local info = svc:start({ type = "general", prompt = "write repo tests and outside dir" })
                 mare.subagent.start = raw_start
                 local state
                 while handle do
                     local ev = handle:next_event()
                     if not ev then break end
-                    if ev.name == "probe/perm-state" then
-                        state = ev.payload
-                        break
-                    end
+                    if ev.name == "probe/state" and ev.payload.tag == "start" then state = ev.payload; break end
                 end
                 local done = svc:wait(info.subagent_id, { timeout_ms = 15000 })
                 return asked, mare.json.encode(state or {}), mare.json.encode(done)
@@ -979,30 +952,13 @@ async fn general_subagent_after_parent_switches_to_full_writes_and_repeats_reque
 
             let state: Value = serde_json::from_str(&state_raw).unwrap();
             let done: Value = serde_json::from_str(&done_raw).unwrap();
-            assert_eq!(
-                done["status"], "completed",
-                "initial_preset={initial_preset}: subagent must complete cleanly: {done}"
-            );
-            assert_eq!(
-                asked, 0,
-                "initial_preset={initial_preset}: FULL parent -> general subagent must not prompt parent: state={state} done={done}"
-            );
-            assert_eq!(state["preset"], "full-access", "initial_preset={initial_preset}: {state}");
-            assert_eq!(state["ceiling"], "full-access", "initial_preset={initial_preset}: {state}");
-            assert_eq!(state["sandbox_nil"], true, "initial_preset={initial_preset}: {state}");
-            assert_eq!(
-                std::fs::read_to_string(tests_dir.join("repo-test.txt")).unwrap(),
-                "ok-tests",
-                "initial_preset={initial_preset}: {done}"
-            );
-            assert_eq!(
-                std::fs::read_to_string(outside_dir.join("outside.txt")).unwrap(),
-                "ok-outside",
-                "initial_preset={initial_preset}: {done}"
-            );
-            let msgs = serde_json::to_string(&done["messages"]).unwrap();
-            assert!(!msgs.contains("unexpected parent prompt"), "initial_preset={initial_preset}: {msgs}");
-            assert!(!msgs.contains("sandbox:"), "initial_preset={initial_preset}: {msgs}");
+            assert_eq!(done["status"], "completed", "initial_preset={initial_preset}: {done}");
+            assert_eq!(asked, 0, "initial_preset={initial_preset}: state={state} done={done}");
+            assert_eq!(state["preset"], "full-access", "{state}");
+            assert_eq!(state["ceiling"], "full-access", "{state}");
+            assert_eq!(state["sandbox_nil"], true, "{state}");
+            assert_eq!(std::fs::read_to_string(tests_dir.join("repo-test.txt")).unwrap(), "ok-tests");
+            assert_eq!(std::fs::read_to_string(outside_dir.join("outside.txt")).unwrap(), "ok-outside");
             h.shutdown().await;
         }
     })
@@ -1023,107 +979,13 @@ async fn existing_general_subagent_steered_after_parent_switches_to_full_resyncs
         let outside_dir = dunce::canonicalize(outside_base.path()).unwrap();
         let gate_dir = tempfile::tempdir().unwrap();
         let gate_file = gate_dir.path().join("parent-switched-and-steered");
-
-        let plugins = env.config_dir().join("plugins");
-        std::fs::create_dir_all(&plugins).unwrap();
-        std::fs::write(
-            plugins.join("child-resync-gate.lua"),
-            r#"
-            return {
-              name = "child-resync-gate",
-              inject = { "bus", "tools", "permissions" },
-              contracts = {
-                probe = {
-                  owner = "child-resync-gate",
-                  events = {
-                    ["child-ready"] = {
-                      doc = "probe",
-                      mode = "emit",
-                      expose = "both",
-                      delivery = "required",
-                      ignorable = false,
-                      data = { type = "object", additionalProperties = true },
-                      example = {},
-                    },
-                    ["child-resynced"] = {
-                      doc = "probe",
-                      mode = "emit",
-                      expose = "both",
-                      delivery = "required",
-                      ignorable = false,
-                      data = { type = "object", additionalProperties = true },
-                      example = {},
-                    },
-                  },
-                },
-              },
-              apply = function(ctx)
-                ctx.tools:register("wait_parent_resync", {
-                  description = "signal readiness and wait for parent preset switch and steer",
-                  side_effect = "read",
-                  parameters = {
-                    type = "object",
-                    properties = { gate = { type = "string" } },
-                    required = { "gate" },
-                  },
-                  execute = function(a)
-                    ctx.bus:emit("probe/child-ready", { preset = ctx.permissions:preset() })
-                    for _ = 1, 1000 do
-                      if mare.fs.stat(a.gate) then
-                        return { content = "released" }
-                      end
-                      mare.task.sleep(5)
-                    end
-                    return { content = "timed out waiting for parent", is_error = true }
-                  end,
-                })
-                ctx.tools:register("report_child_perm", {
-                  description = "emit current child preset and sandbox state",
-                  side_effect = "read",
-                  parameters = { type = "object", properties = {} },
-                  execute = function()
-                    local sb = mare.proc.sandbox.current()
-                    ctx.bus:emit("probe/child-resynced", {
-                      preset = ctx.permissions:preset(),
-                      ceiling = mare.args and mare.args.permission_ceiling or nil,
-                      sandbox_nil = sb == nil,
-                    })
-                    return { content = "reported" }
-                  end,
-                })
-              end,
-            }
-            "#,
-        )
-        .unwrap();
+        install_perm_probe_plugin(&env, false);
 
         let child_script = json!([
-            { "tool_calls": [{ "name": "wait_parent_resync", "arguments": { "gate": gate_file } }] },
-            { "tool_calls": [{ "name": "report_child_perm", "arguments": {} }] },
-            {
-                "tool_calls": [
-                    {
-                        "name": "request_permissions",
-                        "arguments": {
-                            "additional_permissions": { "write": [tests_dir] },
-                            "scope": "session",
-                            "justification": "write repo tests after steer resync"
-                        }
-                    }
-                ]
-            },
-            {
-                "tool_calls": [
-                    {
-                        "name": "request_permissions",
-                        "arguments": {
-                            "additional_permissions": { "write": [tests_dir] },
-                            "scope": "turn",
-                            "justification": "repeat permission request after steer resync"
-                        }
-                    }
-                ]
-            },
+            { "tool_calls": [{ "name": "wait_gate", "arguments": { "gate": gate_file } }] },
+            { "tool_calls": [{ "name": "report_state", "arguments": {} }] },
+            { "tool_calls": [{ "name": "request_permissions", "arguments": { "additional_permissions": { "write": [tests_dir] }, "scope": "session", "justification": "write repo tests after steer resync" } }] },
+            { "tool_calls": [{ "name": "request_permissions", "arguments": { "additional_permissions": { "write": [tests_dir] }, "scope": "turn", "justification": "repeat permission request after steer resync" } }] },
             { "tool_calls": [{ "name": "write", "arguments": { "path": tests_dir.join("steered.txt"), "content": "steered-ok" } }] },
             { "tool_calls": [{ "name": "write", "arguments": { "path": outside_dir.join("steered-outside.txt"), "content": "outside-ok" } }] },
             { "text": "steered-done" }
@@ -1134,11 +996,7 @@ async fn existing_general_subagent_steered_after_parent_switches_to_full_resyncs
             .builtins(SUBAGENT_BUILTINS)
             .user_plugins()
             .faux(child_script)
-            .config(json!({
-                "plugins": {
-                    "permissions": { "enabled": true, "preset": "read-only" }
-                }
-            }))
+            .config(json!({ "plugins": { "permissions": { "enabled": true, "preset": "read-only" } } }))
             .args(json!({ "no_session": true }));
         b.opts.project_trusted = true;
         let h = b.build().await;
@@ -1155,10 +1013,7 @@ async fn existing_general_subagent_steered_after_parent_switches_to_full_resyncs
                 return { decision = "deny", reason = "unexpected parent prompt after steer resync" }
             end)
             local svc, raw_start, handle = C.cordis:get("subagent"), mare.subagent.start, nil
-            mare.subagent.start = function(opts)
-                handle = raw_start(opts)
-                return handle
-            end
+            mare.subagent.start = function(opts) handle = raw_start(opts); return handle end
             local running = svc:start({ type = "general", prompt = "start while read-only" })
             mare.subagent.start = raw_start
 
@@ -1166,23 +1021,19 @@ async fn existing_general_subagent_steered_after_parent_switches_to_full_resyncs
             while handle do
                 local ev = handle:next_event()
                 if not ev then break end
-                if ev.name == "probe/child-ready" then
-                    ready_preset = tostring(ev.payload.preset or "")
-                    break
+                if ev.name == "probe/state" and ev.payload.tag == "ready" then
+                    ready_preset = tostring(ev.payload.preset or ""); break
                 end
             end
 
-            -- Parent switches to FULL, then continues the existing subagent via steer.
             assert(P:set("full-access"))
             svc:steer(running.subagent_id, "continue and write the test files")
-            -- Wait deterministically for the child VM to apply the resynced preset before releasing the gate.
             local saw_perm_changed = false
             while handle do
                 local ev = handle:next_event()
                 if not ev then break end
                 if ev.name == "permission/changed" and ev.payload and ev.payload.preset == "full-access" then
-                    saw_perm_changed = true
-                    break
+                    saw_perm_changed = true; break
                 end
             end
             assert(saw_perm_changed, "expected steered child to emit permission/changed=full-access")
@@ -1192,10 +1043,7 @@ async fn existing_general_subagent_steered_after_parent_switches_to_full_resyncs
             while handle do
                 local ev = handle:next_event()
                 if not ev then break end
-                if ev.name == "probe/child-resynced" then
-                    resynced = ev.payload
-                    break
-                end
+                if ev.name == "probe/state" and ev.payload.tag == "after" then resynced = ev.payload; break end
             end
             local done = svc:wait(running.subagent_id, { timeout_ms = 15000 })
             assert(done.status == "completed", mare.json.encode(done))
@@ -1217,10 +1065,10 @@ async fn existing_general_subagent_steered_after_parent_switches_to_full_resyncs
     .await
 }
 
-/// Even without being steered again, an already-running unpinned `general` subagent whose approval
-/// reaches a parent that has since switched to `full-access` (`FULL`) is auto-allowed by the
-/// parent's current preset with zero UI dialogs for sandbox/write/`request_permissions` calls,
-/// while dangerous commands (`rm -f`) still trigger the parent approval dialog.
+/// Without being steered again, an already-running unpinned `general` subagent whose approval
+/// reaches a parent that switched to `FULL` is auto-allowed by the parent's current preset with
+/// zero UI dialogs for workspace writes and `request_permissions`, while dangerous commands
+/// (`rm -f`) still trigger the parent approval dialog.
 #[tokio::test]
 async fn in_flight_general_subagent_approval_auto_allows_under_parent_full_while_dangerous_still_prompts() {
     local(async {
@@ -1233,72 +1081,12 @@ async fn in_flight_general_subagent_approval_auto_allows_under_parent_full_while
         let gate_file = gate_dir.path().join("parent-full-inflight");
         let victim = tests_dir.join("keep-me.txt");
         std::fs::write(&victim, "precious").unwrap();
-
-        let plugins = env.config_dir().join("plugins");
-        std::fs::create_dir_all(&plugins).unwrap();
-        std::fs::write(
-            plugins.join("child-inflight-gate.lua"),
-            r#"
-            return {
-              name = "child-inflight-gate",
-              inject = { "bus", "tools", "permissions" },
-              contracts = {
-                probe = {
-                  owner = "child-inflight-gate",
-                  events = {
-                    ["child-ready"] = {
-                      doc = "probe",
-                      mode = "emit",
-                      expose = "both",
-                      delivery = "required",
-                      ignorable = false,
-                      data = { type = "object", additionalProperties = true },
-                      example = {},
-                    },
-                  },
-                },
-              },
-              apply = function(ctx)
-                ctx.tools:register("wait_parent_full", {
-                  description = "signal readiness and wait for parent preset switch",
-                  side_effect = "read",
-                  parameters = {
-                    type = "object",
-                    properties = { gate = { type = "string" } },
-                    required = { "gate" },
-                  },
-                  execute = function(a)
-                    ctx.bus:emit("probe/child-ready", { preset = ctx.permissions:preset() })
-                    for _ = 1, 1000 do
-                      if mare.fs.stat(a.gate) then
-                        return { content = "released" }
-                      end
-                      mare.task.sleep(5)
-                    end
-                    return { content = "timed out waiting for parent", is_error = true }
-                  end,
-                })
-              end,
-            }
-            "#,
-        )
-        .unwrap();
+        install_perm_probe_plugin(&env, false);
 
         let child_script = json!([
-            { "tool_calls": [{ "name": "wait_parent_full", "arguments": { "gate": gate_file } }] },
+            { "tool_calls": [{ "name": "wait_gate", "arguments": { "gate": gate_file } }] },
             { "tool_calls": [{ "name": "write", "arguments": { "path": tests_dir.join("inflight.txt"), "content": "inflight-ok" } }] },
-            {
-                "tool_calls": [
-                    {
-                        "name": "request_permissions",
-                        "arguments": {
-                            "additional_permissions": { "write": [outside_dir] },
-                            "scope": "session",
-                            "justification": "write outside workspace from in-flight subagent"
-                        }
-                    }
-                ]
-            },
+            { "tool_calls": [{ "name": "request_permissions", "arguments": { "additional_permissions": { "write": [outside_dir] }, "scope": "session", "justification": "write outside workspace from in-flight subagent" } }] },
             { "tool_calls": [{ "name": "write", "arguments": { "path": outside_dir.join("inflight-outside.txt"), "content": "inflight-outside-ok" } }] },
             { "tool_calls": [{ "name": "bash", "arguments": { "command": format!("rm -f {}", victim.display()) } }] },
             { "text": "inflight-done" }
@@ -1309,11 +1097,7 @@ async fn in_flight_general_subagent_approval_auto_allows_under_parent_full_while
             .builtins(SUBAGENT_BUILTINS)
             .user_plugins()
             .faux(child_script)
-            .config(json!({
-                "plugins": {
-                    "permissions": { "enabled": true, "preset": "read-only" }
-                }
-            }))
+            .config(json!({ "plugins": { "permissions": { "enabled": true, "preset": "read-only" } } }))
             .args(json!({ "no_session": true }));
         b.opts.project_trusted = true;
         let h = b.build().await;
@@ -1326,17 +1110,11 @@ async fn in_flight_general_subagent_approval_auto_allows_under_parent_full_while
             r#"
             local dialogs = {}
             mare.ui.connected = function() return true end
-            mare.ui.approve = function(o)
-                dialogs[#dialogs + 1] = tostring(o.wait_title or "")
-                return "deny"
-            end
+            mare.ui.approve = function(o) dialogs[#dialogs + 1] = tostring(o.wait_title or ""); return "deny" end
             mare.ui.input = function() return nil end
 
             local svc, raw_start, handle = C.cordis:get("subagent"), mare.subagent.start, nil
-            mare.subagent.start = function(opts)
-                handle = raw_start(opts)
-                return handle
-            end
+            mare.subagent.start = function(opts) handle = raw_start(opts); return handle end
             local running = svc:start({ type = "general", prompt = "start while read-only" })
             mare.subagent.start = raw_start
 
@@ -1344,16 +1122,13 @@ async fn in_flight_general_subagent_approval_auto_allows_under_parent_full_while
             while handle do
                 local ev = handle:next_event()
                 if not ev then break end
-                if ev.name == "probe/child-ready" then
-                    ready_preset = tostring(ev.payload.preset or "")
-                    break
+                if ev.name == "probe/state" and ev.payload.tag == "ready" then
+                    ready_preset = tostring(ev.payload.preset or ""); break
                 end
             end
 
-            -- Parent switches to FULL without steering the already-running child.
             assert(P:set("full-access"))
             assert(mare.fs.write(GATE_FILE, "go"))
-
             local done = svc:wait(running.subagent_id, { timeout_ms = 15000 })
             assert(done.status == "completed", mare.json.encode(done))
             return mare.json.encode(dialogs), ready_preset
@@ -1363,71 +1138,44 @@ async fn in_flight_general_subagent_approval_auto_allows_under_parent_full_while
 
         let dialogs: Vec<String> = serde_json::from_str(&dialogs_raw).unwrap();
         assert_eq!(ready_preset, "read-only");
-        assert_eq!(
-            std::fs::read_to_string(tests_dir.join("inflight.txt")).unwrap(),
-            "inflight-ok",
-            "in-flight write inside repo must auto-allow under parent FULL: dialogs={dialogs:?}"
-        );
-        assert_eq!(
-            std::fs::read_to_string(outside_dir.join("inflight-outside.txt")).unwrap(),
-            "inflight-outside-ok",
-            "in-flight write outside workspace must auto-allow under parent FULL: dialogs={dialogs:?}"
-        );
-        assert_eq!(
-            dialogs.len(),
-            1,
-            "only the dangerous rm -f command should trigger a parent dialog under FULL: {dialogs:?}"
-        );
-        assert!(dialogs[0].contains("Allow bash?"), "expected dangerous bash dialog, got: {dialogs:?}");
+        assert_eq!(std::fs::read_to_string(tests_dir.join("inflight.txt")).unwrap(), "inflight-ok");
+        assert_eq!(std::fs::read_to_string(outside_dir.join("inflight-outside.txt")).unwrap(), "inflight-outside-ok");
+        assert_eq!(dialogs.len(), 1, "only dangerous rm -f should prompt under FULL: {dialogs:?}");
+        assert!(dialogs[0].contains("Allow bash?"), "expected dangerous bash dialog: {dialogs:?}");
         assert!(victim.exists(), "denied dangerous rm -f must not delete file");
         h.shutdown().await;
     })
     .await
 }
 
-/// Explicit read-only subagents (`explore`, `plan`, or `permission = "read-only"`) stay restricted
-/// even after the parent switches from `auto` to `full-access` (FULL).
+/// Explicit read-only subagents (`permission = "read-only"`, `explore`, `plan`) enforce a hard
+/// read-only ceiling (even if child config tries to disable `permissions` or widen itself, and
+/// even after the parent switches to `FULL` and steers the child).
 #[tokio::test]
 async fn explicit_read_only_subagents_remain_restricted_after_parent_switches_to_full() {
     local(async {
         let env = TestEnv::new().await;
         let tests_dir = env.cwd.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
+        install_perm_probe_plugin(&env, true);
 
-        let ro_general_script = json!([
-            {
-                "tool_calls": [
-                    {
-                        "name": "request_permissions",
-                        "arguments": {
-                            "additional_permissions": { "write": [tests_dir] },
-                            "scope": "session",
-                            "justification": "attempt write under explicit read-only"
-                        }
-                    }
-                ]
-            },
+        let ro_script = json!([
+            { "tool_calls": [{ "name": "request_permissions", "arguments": { "additional_permissions": { "write": [tests_dir] }, "scope": "session", "justification": "attempt write under explicit read-only" } }] },
             { "tool_calls": [{ "name": "write", "arguments": { "path": tests_dir.join("ro-general.txt"), "content": "nope" } }] },
+            { "tool_calls": [{ "name": "bash", "arguments": { "command": format!("printf nope > {}", tests_dir.join("ro-bash.txt").display()) } }] },
             { "text": "ro-done" }
         ]);
         let explore_script = json!([
-            {
-                "tool_calls": [
-                    { "name": "bash", "arguments": { "command": format!("printf nope > {}", tests_dir.join("ro-explore.txt").display()) } }
-                ]
-            },
+            { "tool_calls": [{ "name": "bash", "arguments": { "command": format!("printf nope > {}", tests_dir.join("ro-explore.txt").display()) } }] },
             { "text": "explore-done" }
         ]);
 
         let mut b = env
             .host()
             .builtins(SUBAGENT_BUILTINS)
-            .faux(ro_general_script)
-            .config(json!({
-                "plugins": {
-                    "permissions": { "enabled": true, "preset": "auto" }
-                }
-            }))
+            .user_plugins()
+            .faux(ro_script)
+            .config(json!({ "plugins": { "permissions": { "enabled": true, "preset": "auto" } } }))
             .args(json!({ "no_session": true }));
         b.opts.project_trusted = true;
         let h = b.build().await;
@@ -1435,16 +1183,14 @@ async fn explicit_read_only_subagents_remain_restricted_after_parent_switches_to
         global(&h, "P", h.service_table("permissions").unwrap());
         global(&h, "EXPLORE_SCRIPT", serde_json::to_string(&explore_script).unwrap());
 
-        let (asked, explore_status, plan_status): (usize, String, String) = eval(
+        let (asked, probe_raw, explore_status, plan_status): (usize, String, String, String) = eval(
             &h,
             r#"
             local asked = 0
             local ro
             C.cordis:get("policy"):voter("tool/approval", function()
                 asked = asked + 1
-                if asked == 1 and ro then
-                    ro:steer("keep going under parent full-access")
-                end
+                if asked == 1 and ro then ro:steer("keep going under parent full-access") end
                 return { decision = "deny", reason = "explicit read-only" }
             end)
             assert(P:set("full-access"))
@@ -1452,149 +1198,26 @@ async fn explicit_read_only_subagents_remain_restricted_after_parent_switches_to
                 permission = "read-only",
                 no_session = true,
                 prompt = "try to write under explicit read-only",
-            })
-            ro:wait()
-
-            local svc = C.cordis:get("subagent")
-            local exp = svc:start({
-                type = "explore",
-                prompt = "try to write under explore",
-                config = {
-                    plugins = {
-                        ["provider-faux"] = { script_json = EXPLORE_SCRIPT },
-                    },
-                },
-            })
-            local exp_done = svc:wait(exp.subagent_id, { timeout_ms = 15000 })
-
-            local pln = svc:start({
-                type = "plan",
-                prompt = "try to write under plan",
-                config = {
-                    plugins = {
-                        ["provider-faux"] = { script_json = EXPLORE_SCRIPT },
-                    },
-                },
-            })
-            local pln_done = svc:wait(pln.subagent_id, { timeout_ms = 15000 })
-            return asked, tostring(exp_done.status), tostring(pln_done.status)
-            "#,
-        )
-        .await;
-
-        assert_eq!(explore_status, "completed");
-        assert_eq!(plan_status, "completed");
-        assert!(
-            asked >= 2,
-            "explicit read-only subagent must prompt on both request_permissions and write: asked={asked}"
-        );
-        assert!(!tests_dir.join("ro-general.txt").exists(), "explicit read-only general subagent must not write");
-        assert!(!tests_dir.join("ro-explore.txt").exists(), "explore/plan subagents must not write");
-        h.shutdown().await;
-    })
-    .await
-}
-
-/// Explicit `permission = "read-only"` on a low-level `mare.subagent.start` under a `FULL` parent
-/// must enforce a hard read-only ceiling (both `permission_ceiling = "read-only"` and a Rust
-/// `Level::ReadOnly` inherited sandbox ceiling, plus `permissions` kept enabled) even when the
-/// child config attempts to disable `permissions` or widen itself.
-#[tokio::test]
-async fn explicit_read_only_permission_under_full_parent_enforces_hard_ceiling_even_if_permissions_disabled() {
-    local(async {
-        let env = TestEnv::new().await;
-        let tests_dir = env.cwd.join("tests");
-        std::fs::create_dir_all(&tests_dir).unwrap();
-
-        let plugins = env.config_dir().join("plugins");
-        std::fs::create_dir_all(&plugins).unwrap();
-        std::fs::write(
-            plugins.join("ro-ceiling-probe.lua"),
-            r#"
-            return {
-              name = "ro-ceiling-probe",
-              inject = { "bus", "permissions" },
-              contracts = {
-                probe = {
-                  owner = "ro-ceiling-probe",
-                  events = {
-                    ["ro-ceiling"] = {
-                      doc = "probe",
-                      mode = "emit",
-                      expose = "both",
-                      delivery = "required",
-                      ignorable = false,
-                      data = { type = "object", additionalProperties = true },
-                      example = {},
-                    },
-                  },
-                },
-              },
-              apply = function(ctx)
-                if mare.mode ~= "child" then return end
-                ctx:on("turn/started", function()
-                  local widen_ok = pcall(ctx.permissions.set, ctx.permissions, "full-access")
-                  local sb = mare.proc.sandbox.current()
-                  ctx.bus:emit("probe/ro-ceiling", {
-                    ceiling = mare.args and mare.args.permission_ceiling or nil,
-                    preset = ctx.permissions:preset(),
-                    sandbox_level = sb and sb.level or nil,
-                    widen_ok = widen_ok,
-                  })
-                end)
-              end,
-            }
-            "#,
-        )
-        .unwrap();
-
-        let script = json!([
-            { "tool_calls": [{ "name": "write", "arguments": { "path": tests_dir.join("escape.txt"), "content": "bad" } }] },
-            { "tool_calls": [{ "name": "bash", "arguments": { "command": format!("printf bad > {}", tests_dir.join("escape-sh.txt").display()) } }] },
-            { "text": "done" }
-        ]);
-        let mut b = env
-            .host()
-            .builtins(SUBAGENT_BUILTINS)
-            .user_plugins()
-            .faux(script)
-            .config(json!({
-                "plugins": {
-                    "permissions": { "enabled": true, "preset": "auto" },
-                    "approvals": { "policy": "never" }
-                }
-            }))
-            .args(json!({ "no_session": true }));
-        b.opts.project_trusted = true;
-        let h = b.build().await;
-        expose(&h);
-        global(&h, "P", h.service_table("permissions").unwrap());
-
-        let probe_raw: String = eval(
-            &h,
-            r#"
-            assert(P:set("full-access"))
-            local child = mare.subagent.start({
-                prompt = "try to escape read-only",
-                permission = "read-only",
-                no_session = true,
-                config = {
-                    plugins = {
-                        permissions = { enabled = false, preset = "full-access" },
-                    },
-                },
+                config = { plugins = { permissions = { enabled = false, preset = "full-access" } } },
             })
             local seen = {}
             while true do
-                local ev = child:next_event()
+                local ev = ro:next_event()
                 if not ev then break end
-                if ev.name == "probe/ro-ceiling" then
-                    seen = ev.payload
-                    break
-                end
+                if ev.name == "probe/state" and ev.payload.tag == "start" then seen = ev.payload; break end
             end
-            child:wait()
-            return mare.json.encode(seen)
+            ro:wait()
+
+            local svc = C.cordis:get("subagent")
+            local function run_ro(kind)
+                local c = svc:start({
+                    type = kind,
+                    prompt = "try to write under " .. kind,
+                    config = { plugins = { ["provider-faux"] = { script_json = EXPLORE_SCRIPT } } },
+                })
+                return tostring(svc:wait(c.subagent_id, { timeout_ms = 15000 }).status)
+            end
+            return asked, mare.json.encode(seen), run_ro("explore"), run_ro("plan")
             "#,
         )
         .await;
@@ -1603,9 +1226,13 @@ async fn explicit_read_only_permission_under_full_parent_enforces_hard_ceiling_e
         assert_eq!(seen["ceiling"], "read-only", "{seen}");
         assert_eq!(seen["preset"], "read-only", "{seen}");
         assert_eq!(seen["sandbox_level"], "read-only", "{seen}");
-        assert_eq!(seen["widen_ok"], false, "child with explicit read-only must not widen itself: {seen}");
-        assert!(!tests_dir.join("escape.txt").exists(), "explicit read-only child must not write via write tool");
-        assert!(!tests_dir.join("escape-sh.txt").exists(), "explicit read-only child must not write via bash");
+        assert_eq!(seen["widen_ok"], false, "explicit read-only child must not widen itself: {seen}");
+        assert_eq!(explore_status, "completed");
+        assert_eq!(plan_status, "completed");
+        assert!(asked >= 2, "explicit read-only child must prompt on request_permissions and write: asked={asked}");
+        assert!(!tests_dir.join("ro-general.txt").exists());
+        assert!(!tests_dir.join("ro-bash.txt").exists());
+        assert!(!tests_dir.join("ro-explore.txt").exists());
         h.shutdown().await;
     })
     .await

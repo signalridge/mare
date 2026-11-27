@@ -36,40 +36,14 @@ impl PolicyHandle {
             Some(cur) => Some(new_ceiling.intersect(cur)),
             None => Some(new_ceiling.clone()),
         };
-        let changed = format!("{:?}", g.ceiling) != format!("{:?}", Some(&new_ceiling))
-            || format!("{:?}", g.current) != format!("{:?}", new_current)
-            || !g.lifts.is_empty()
-            || !g.permission_reads.is_empty()
-            || !g.read_receipts.is_empty();
-        if changed {
-            g.ceiling = Some(new_ceiling);
-            g.current = new_current;
-            g.lifts.clear();
-            g.permission_reads.clear();
-            g.read_receipts.clear();
-            g.generation = g.generation.wrapping_add(1);
-        }
-        changed
+        g.replace_policy(Some(new_ceiling), new_current)
     }
 
     /// Replace this VM's inherited ceiling and effective current policy with `parent_policy`
     /// when resynchronizing an unpinned child to its parent's current preset.
     pub fn resync_ceiling(&self, parent_policy: Option<Policy>) -> bool {
         let mut g = self.0.write().unwrap_or_else(|e| e.into_inner());
-        let changed = format!("{:?}", g.ceiling) != format!("{:?}", parent_policy)
-            || format!("{:?}", g.current) != format!("{:?}", parent_policy)
-            || !g.lifts.is_empty()
-            || !g.permission_reads.is_empty()
-            || !g.read_receipts.is_empty();
-        if changed {
-            g.ceiling = parent_policy.clone();
-            g.current = parent_policy;
-            g.lifts.clear();
-            g.permission_reads.clear();
-            g.read_receipts.clear();
-            g.generation = g.generation.wrapping_add(1);
-        }
-        changed
+        g.replace_policy(parent_policy.clone(), parent_policy)
     }
 }
 
@@ -103,6 +77,25 @@ struct PolicySnapshot {
     lifts: Vec<Lift>,
     permission_reads: Vec<PathBuf>,
     read_receipts: Vec<(String, String, Vec<PathBuf>)>,
+}
+
+impl PolicySnapshot {
+    fn replace_policy(&mut self, ceiling: Option<Policy>, current: Option<Policy>) -> bool {
+        let changed = format!("{:?}", self.ceiling) != format!("{:?}", ceiling)
+            || format!("{:?}", self.current) != format!("{:?}", current)
+            || !self.lifts.is_empty()
+            || !self.permission_reads.is_empty()
+            || !self.read_receipts.is_empty();
+        if changed {
+            self.ceiling = ceiling;
+            self.current = current;
+            self.lifts.clear();
+            self.permission_reads.clear();
+            self.read_receipts.clear();
+            self.generation = self.generation.wrapping_add(1);
+        }
+        changed
+    }
 }
 
 /// it was approved under, not clipped to the inherited ceiling — the same escalation the main

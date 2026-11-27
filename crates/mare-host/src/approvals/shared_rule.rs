@@ -90,23 +90,29 @@ pub(crate) fn validate_access_lua(lua: &Lua, call: &J, info: &J) -> Result<(), S
     Ok(())
 }
 
-pub(crate) async fn evaluate(host: &Host, call: &J, info: &J) -> Result<Option<J>, String> {
+async fn call_permissions(host: &Host, method: &str, call: &J, info: &J) -> Result<Option<J>, String> {
     validate_access(host, call, info)?;
     let Some(svc) = permissions_service(&host.kernel) else {
         return Ok(None);
     };
     let lua = host.lua();
-    let f: Function = svc.get("rule_verdict").map_err(|e| format!("missing rule_verdict: {e}"))?;
+    let f: Function = svc.get(method).map_err(|e| format!("missing {method}: {e}"))?;
     let call_lua = json_to_lua_lossless(lua, call).map_err(|e| e.to_string())?;
     let info_lua = json_to_lua_lossless(lua, info).map_err(|e| e.to_string())?;
     let v: Value = f.call_async((svc, call_lua, info_lua)).await.map_err(|e| e.to_string())?;
     if v.is_nil() {
         return Ok(None);
     }
-    let v = lua_to_json(lua, v).map_err(|e| e.to_string())?;
+    Ok(Some(lua_to_json(lua, v).map_err(|e| e.to_string())?))
+}
+
+pub(crate) async fn evaluate(host: &Host, call: &J, info: &J) -> Result<Option<J>, String> {
+    let Some(v) = call_permissions(host, "rule_verdict", call, info).await? else {
+        return Ok(None);
+    };
     match v.get("decision").and_then(|d| d.as_str()) {
         Some("allow" | "deny") => Ok(Some(v)),
-        Some("ask") | None if v.is_null() => Ok(None),
+        Some("ask") => Ok(None),
         _ => Err("unexpected permission rule verdict".into()),
     }
 }
@@ -144,19 +150,10 @@ fn has_non_empty_increment(v: &J) -> bool {
 /// sensitive credential paths, and parent-local session caches/grants still return `Ok(None)` so
 /// they ask normally; `forbidden` rules still return `deny`.
 pub(crate) async fn resolve_parent_preset(host: &Host, call: &J, info: &J) -> Result<Option<J>, String> {
-    validate_access(host, call, info)?;
-    let Some(svc) = permissions_service(&host.kernel) else {
+    let Some(v) = call_permissions(host, "check", call, info).await? else {
         return Ok(None);
     };
     let lua = host.lua();
-    let check: Function = svc.get("check").map_err(|e| format!("missing check: {e}"))?;
-    let call_lua = json_to_lua_lossless(lua, call).map_err(|e| e.to_string())?;
-    let info_lua = json_to_lua_lossless(lua, info).map_err(|e| e.to_string())?;
-    let v: Value = check.call_async((svc, call_lua, info_lua)).await.map_err(|e| e.to_string())?;
-    if v.is_nil() {
-        return Ok(None);
-    }
-    let v = lua_to_json(lua, v).map_err(|e| e.to_string())?;
     match v.get("decision").and_then(J::as_str) {
         Some("deny") => Ok(Some(serde_json::json!({
             "decision": "deny",
@@ -198,7 +195,6 @@ pub(crate) async fn resolve_parent_preset(host: &Host, call: &J, info: &J) -> Re
             }
             Ok(Some(out))
         }
-        Some("ask") | None if v.is_null() => Ok(None),
         Some("ask") => Ok(None),
         _ => Err("unexpected parent permission preset verdict".into()),
     }

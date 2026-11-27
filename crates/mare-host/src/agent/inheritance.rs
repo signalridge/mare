@@ -75,16 +75,20 @@ fn parent_permissions(lua: &Lua) -> Option<ParentPermissions> {
     host_permissions(&host)
 }
 
+fn preset_for_policy(policy: Option<&mare_binding::ossandbox::Policy>) -> &'static str {
+    match policy.map(|p| p.level) {
+        Some(mare_binding::ossandbox::Level::ReadOnly) => "read-only",
+        Some(mare_binding::ossandbox::Level::WorkspaceWrite) => "auto",
+        _ => "full-access",
+    }
+}
+
 /// Compute the active permission preset and sandbox policy ceilings currently enforced on `host`
 /// so a non-admin session load or fork cannot restore a looser preset or sandbox policy.
 pub(crate) fn host_permission_ceiling(host: &crate::Host) -> (Option<String>, Option<serde_json::Value>) {
     let lua = host.lua();
     let cur_policy = mare_binding::ossandbox::enforce_ceiling(lua, mare_binding::ossandbox::current(lua));
-    let inherited = match cur_policy.as_ref().map(|p| p.level) {
-        Some(mare_binding::ossandbox::Level::ReadOnly) => "read-only",
-        Some(mare_binding::ossandbox::Level::WorkspaceWrite) => "auto",
-        _ => "full-access",
-    };
+    let inherited = preset_for_policy(cur_policy.as_ref());
     let svc = host_permissions(host);
     let rank = |name: &str| -> Option<PermissionRank> {
         match &svc {
@@ -381,11 +385,7 @@ pub(super) fn parent_permission_sync(
 ) -> mlua::Result<crate::agent_registry::PermissionSync> {
     let expected_tighten_seq = child_scope.tighten_seq();
     let parent_policy = effective_parent_policy(lua)?;
-    let inherited_preset = match parent_policy.as_ref().map(|p| p.level) {
-        Some(mare_binding::ossandbox::Level::ReadOnly) => "read-only",
-        Some(mare_binding::ossandbox::Level::WorkspaceWrite) => "auto",
-        _ => "full-access",
-    };
+    let inherited_preset = preset_for_policy(parent_policy.as_ref());
     let mut tmp = serde_json::json!({});
     inherit_permissions(lua, &mut tmp, inherited_preset)?;
     let preset = tmp.get("permission").and_then(serde_json::Value::as_str).unwrap_or(inherited_preset).to_owned();
@@ -404,11 +404,7 @@ pub(super) fn apply_inheritance(
     // the sandbox in force for this call intersected with the parent VM's live policy/ceiling:
     // the child starts inside both and its ceiling never exceeds either.
     let mut parent_policy = effective_parent_policy(lua)?;
-    let inherited_preset = match parent_policy.as_ref().map(|p| p.level) {
-        Some(mare_binding::ossandbox::Level::ReadOnly) => "read-only",
-        Some(mare_binding::ossandbox::Level::WorkspaceWrite) => "auto",
-        _ => "full-access",
-    };
+    let inherited_preset = preset_for_policy(parent_policy.as_ref());
     inherit_permissions(lua, spec, inherited_preset)?;
     if explicit_read_only {
         let ro = explicit_read_only_policy(lua, cwd)?;
