@@ -40,21 +40,20 @@ fn decode(bytes: &[u8], charset: &str, final_chunk: bool) -> Result<String, &'st
     Ok(text.strip_prefix('\u{feff}').unwrap_or(&text).to_owned())
 }
 
+// Tags whose subtrees are unconditionally omitted when converting HTML to Markdown.
+const ALWAYS_NON_VISIBLE_TAGS: &[&str] =
+    &["script", "style", "head", "noscript", "template", "iframe", "object", "embed"];
+
 // Elements omitted when converting HTML to Markdown.
-fn non_visible(node: &htmd::Node) -> bool {
-    let markup5ever_rcdom::NodeData::Element { name, attrs, .. } = &node.data else { return false };
-    if matches!(
-        name.local.as_ref(),
-        "script" | "style" | "head" | "noscript" | "template" | "iframe" | "object" | "embed"
-    ) {
+fn non_visible(node: &htmd::node::Node<'_>) -> bool {
+    let Some(tag) = node.tag_name() else { return false };
+    if ALWAYS_NON_VISIBLE_TAGS.contains(&tag) {
         return true;
     }
-    attrs.borrow().iter().any(|attribute| {
-        let key = attribute.name.local.as_ref();
-        let value = attribute.value.as_ref();
+    node.attrs().iter().any(|(key, value)| {
         key == "hidden"
             || (key == "aria-hidden" && value.eq_ignore_ascii_case("true"))
-            || (name.local.as_ref() == "input" && key == "type" && value.eq_ignore_ascii_case("hidden"))
+            || (tag == "input" && key == "type" && value.eq_ignore_ascii_case("hidden"))
             || (key == "style"
                 && value.split(';').any(|declaration| {
                     let Some((property, value)) = declaration.split_once(':') else { return false };
@@ -67,19 +66,15 @@ fn non_visible(node: &htmd::Node) -> bool {
     })
 }
 
-fn table_alignment(cell: &std::rc::Rc<htmd::Node>) -> &'static str {
-    let markup5ever_rcdom::NodeData::Element { attrs, .. } = &cell.data else {
-        return "---";
-    };
+fn table_alignment(cell: &htmd::node::Node<'_>) -> &'static str {
     let mut align = None;
-    for attr in attrs.borrow().iter() {
-        let key = attr.name.local.as_ref();
+    for (key, value) in cell.attrs().iter() {
         if key == "align" {
-            align = Some(attr.value.trim().to_ascii_lowercase());
+            align = Some(value.trim().to_ascii_lowercase());
             break;
         }
         if key == "style" {
-            for decl in attr.value.split(';') {
+            for decl in value.split(';') {
                 if let Some((prop, val)) = decl.split_once(':')
                     && prop.trim().eq_ignore_ascii_case("text-align")
                 {
@@ -156,24 +151,27 @@ fn append_bounded_row<'a>(
 
 fn extract_tr_cells(
     handlers: &dyn htmd::element_handler::Handlers,
-    tr: &std::rc::Rc<htmd::Node>,
+    tr: &htmd::node::Node<'_>,
 ) -> (Vec<String>, Vec<&'static str>, bool) {
     let mut cells = Vec::new();
     let mut aligns = Vec::new();
     let mut all_th = true;
-    for child in tr.children.borrow().iter() {
-        let markup5ever_rcdom::NodeData::Element { name, .. } = &child.data else {
+    for child in tr.children().iter() {
+        if non_visible(&child) {
+            continue;
+        }
+        let Some(tag) = child.tag_name() else {
             continue;
         };
-        let tag = name.local.as_ref();
         if tag != "th" && tag != "td" {
             continue;
         }
         if tag != "th" {
             all_th = false;
         }
-        aligns.push(table_alignment(child));
-        let rendered = handlers.handle(child).map(|r| r.content).unwrap_or_default();
+        aligns.push(table_alignment(&child));
+        let rendered =
+            handlers.handle(&child, htmd::element_handler::Context::BLOCK).map(|r| r.content).unwrap_or_default();
         cells.push(format_table_cell(&rendered));
     }
     let header_only = all_th && !cells.is_empty();
@@ -182,9 +180,12 @@ fn extract_tr_cells(
 
 fn render_gfm_table(
     handlers: &dyn htmd::element_handler::Handlers,
-    element: htmd::Element,
+    element: &htmd::Element<'_>,
     budget: &TableBudget,
 ) -> Option<htmd::element_handler::HandlerResult> {
+    if non_visible(element.node) {
+        return None;
+    }
     let limit = budget.remaining.load(std::sync::atomic::Ordering::Relaxed);
     if limit == 0 {
         budget.truncated.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -192,13 +193,16 @@ fn render_gfm_table(
     }
     let mut captions = Vec::new();
     let mut rows: Vec<(Vec<String>, Vec<&'static str>, bool)> = Vec::new();
-    for child in element.node.children.borrow().iter() {
-        let markup5ever_rcdom::NodeData::Element { name, .. } = &child.data else {
+    for child in element.node.children().iter() {
+        if non_visible(&child) {
+            continue;
+        }
+        let Some(tag) = child.tag_name() else {
             continue;
         };
-        match name.local.as_ref() {
+        match tag {
             "caption" => {
-                if let Some(res) = handlers.handle(child) {
+                if let Some(res) = handlers.handle(&child, htmd::element_handler::Context::BLOCK) {
                     let cap = res.content.trim().to_owned();
                     if !cap.is_empty() {
                         captions.push(cap);
@@ -206,12 +210,10 @@ fn render_gfm_table(
                 }
             }
             "thead" | "tbody" | "tfoot" => {
-                let in_thead = name.local.as_ref() == "thead";
-                for row_node in child.children.borrow().iter() {
-                    if let markup5ever_rcdom::NodeData::Element { name, .. } = &row_node.data
-                        && name.local.as_ref() == "tr"
-                    {
-                        let (cells, aligns, all_th) = extract_tr_cells(handlers, row_node);
+                let in_thead = tag == "thead";
+                for row_node in child.children().iter() {
+                    if !non_visible(&row_node) && row_node.tag_name() == Some("tr") {
+                        let (cells, aligns, all_th) = extract_tr_cells(handlers, &row_node);
                         if !cells.is_empty() {
                             rows.push((cells, aligns, in_thead || all_th));
                         }
@@ -219,7 +221,7 @@ fn render_gfm_table(
                 }
             }
             "tr" => {
-                let (cells, aligns, all_th) = extract_tr_cells(handlers, child);
+                let (cells, aligns, all_th) = extract_tr_cells(handlers, &child);
                 if !cells.is_empty() {
                     rows.push((cells, aligns, all_th));
                 }
@@ -295,6 +297,75 @@ fn html(
     Ok((md, truncated))
 }
 
+fn check_dom_budget(
+    root: &htmd::node::Node<'_>,
+    max_nodes: usize,
+    max_depth: usize,
+) -> Result<(bool, std::collections::BTreeSet<String>), String> {
+    let mut pending = vec![(root.clone(), 0usize)];
+    let mut count = 0usize;
+    let mut has_template = false;
+    let mut hidden_tags = std::collections::BTreeSet::new();
+    while let Some((node, depth)) = pending.pop() {
+        count += 1;
+        if count > max_nodes {
+            return Err("HTML exceeds max_nodes complexity budget".into());
+        }
+        if depth > max_depth {
+            return Err("HTML exceeds max_depth complexity budget".into());
+        }
+        if let Some(tag) = node.tag_name() {
+            if tag == "template" {
+                has_template = true;
+            }
+            if !ALWAYS_NON_VISIBLE_TAGS.contains(&tag) && tag != "table" && non_visible(&node) {
+                hidden_tags.insert(tag.to_owned());
+            }
+        }
+        let mut child = node.first_child();
+        while let Some(c) = child {
+            child = c.next_sibling();
+            pending.push((c, depth + 1));
+        }
+    }
+    Ok((has_template, hidden_tags))
+}
+
+// htmd 0.6's ego-tree backend stores `<template>` contents in a private DocumentFragment
+// unreachable through `Node::children()`. Rewrite `<template...>` / `</template...>` tags
+// solely for a budget-counting parse so template subtrees still count against `max_nodes`
+// and `max_depth`; Markdown conversion always runs on the original unmodified tree.
+fn expose_templates(input: &str) -> String {
+    const TAG: &[u8] = b"template";
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len() + 16);
+    let mut i = 0;
+    let mut last = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'<' {
+            let mut j = i + 1;
+            if bytes.get(j) == Some(&b'/') {
+                j += 1;
+            }
+            if bytes.get(j..j + TAG.len()).is_some_and(|s| s.eq_ignore_ascii_case(TAG))
+                && matches!(
+                    bytes.get(j + TAG.len()).copied(),
+                    None | Some(b'>' | b'/' | b' ' | b'\t' | b'\n' | b'\r' | b'\x0c')
+                )
+            {
+                out.push_str(&input[last..j]);
+                out.push_str("x-");
+                last = j;
+                i = j + TAG.len();
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out.push_str(&input[last..]);
+    out
+}
+
 fn html_with_stats(
     input: &str,
     max_input: usize,
@@ -311,53 +382,47 @@ fn html_with_stats(
     if input.bytes().filter(|b| *b == b'<').take(max_tags + 1).count() > max_tags {
         return Err("HTML exceeds max_tags complexity budget".into());
     }
+    let parser = htmd::HtmlToMarkdown::new();
+    let tree = parser.html_to_tree(input).map_err(|e| e.to_string())?;
+    // Count the entire parsed tree first: hidden subtrees do not evade resource
+    // ceilings. Collect tag names that actually carry non-visible attributes so the
+    // immutable ego-tree walk can skip those subtrees without regex over HTML.
+    let (has_template, hidden_tags) = check_dom_budget(&tree.root(), max_nodes, max_depth)?;
+    if has_template {
+        let exposed = expose_templates(input);
+        let exposed_tree = parser.html_to_tree(&exposed).map_err(|e| e.to_string())?;
+        check_dom_budget(&exposed_tree.root(), max_nodes, max_depth)?;
+    }
     let budget = std::sync::Arc::new(TableBudget {
         remaining: std::sync::atomic::AtomicUsize::new(max_output.saturating_add(1)),
         truncated: std::sync::atomic::AtomicBool::new(false),
         cells_written: std::sync::atomic::AtomicUsize::new(0),
     });
     let budget_handler = budget.clone();
-    let converter = htmd::HtmlToMarkdown::builder()
+    let mut builder = htmd::HtmlToMarkdown::builder()
         .options(htmd::options::Options {
             bullet_list_marker: htmd::options::BulletListMarker::Dash,
             ul_bullet_spacing: 1,
             ..Default::default()
         })
-        .skip_tags(vec!["script", "style", "head", "template", "noscript"])
+        .skip_tags(ALWAYS_NON_VISIBLE_TAGS.to_vec())
         .add_handler(
             vec!["table"],
-            move |handlers: &dyn htmd::element_handler::Handlers, element: htmd::Element<'_>| {
+            move |handlers: &dyn htmd::element_handler::Handlers, element: &htmd::Element<'_>| {
                 render_gfm_table(handlers, element, &budget_handler)
             },
-        )
-        .build();
-    let tree = converter.html_to_tree(input).map_err(|e| e.to_string())?;
-    let mut pending = vec![(tree.clone(), 0usize)];
-    let mut count = 0usize;
-    while let Some((node, depth)) = pending.pop() {
-        count += 1;
-        if count > max_nodes {
-            return Err("HTML exceeds max_nodes complexity budget".into());
-        }
-        if depth > max_depth {
-            return Err("HTML exceeds max_depth complexity budget".into());
-        }
-        pending.extend(node.children.borrow().iter().map(|child| (child.clone(), depth + 1)));
-        if let markup5ever_rcdom::NodeData::Element { template_contents, .. } = &node.data
-            && let Some(contents) = template_contents.borrow().as_ref()
-        {
-            pending.push((contents.clone(), depth + 1));
-        }
+        );
+    if !hidden_tags.is_empty() {
+        let tag_refs: Vec<&str> = hidden_tags.iter().map(String::as_str).collect();
+        builder = builder.add_handler(
+            tag_refs,
+            |handlers: &dyn htmd::element_handler::Handlers, element: &htmd::Element<'_>| {
+                if non_visible(element.node) { None } else { handlers.fallback(element) }
+            },
+        );
     }
-    // Count the entire parsed tree first: hidden subtrees do not evade resource
-    // ceilings. Then prune using the parser's attributes, never regex over HTML.
-    let mut visible = vec![tree.clone()];
-    while let Some(node) = visible.pop() {
-        let mut children = node.children.borrow_mut();
-        children.retain(|child| !non_visible(child));
-        visible.extend(children.iter().cloned());
-    }
-    let output = converter.tree_to_markdown(&tree);
+    let converter = builder.build();
+    let output = converter.convert(&tree).map_err(|e| e.to_string())?;
     let pre_cut_len = output.len();
     let table_cells_written = budget.cells_written.load(std::sync::atomic::Ordering::Relaxed);
     let truncated = pre_cut_len > max_output || budget.truncated.load(std::sync::atomic::Ordering::Relaxed);
@@ -571,5 +636,92 @@ mod decoding_prefixes {
         let (md, truncated) = html(&decoded, MAX_HTML_INPUT, MAX_OUTPUT, MAX_TAGS, MAX_NODES, MAX_DEPTH).unwrap();
         assert!(truncated);
         assert!(md.starts_with("é"));
+    }
+
+    #[test]
+    fn web_html_filters_non_visible_elements_inside_tables_and_custom_tags() {
+        let input = r#"
+        <table hidden><tr><th>HiddenTable</th></tr><tr><td>SecretTableCell</td></tr></table>
+        <table>
+            <caption hidden>Secret Caption</caption>
+            <caption>Sales <span style="display:none">secret-cap</span> Summary</caption>
+            <thead style="display:none"><tr><th>BadHead</th></tr></thead>
+            <thead>
+                <tr>
+                    <th align="left">Item</th>
+                    <th hidden>HiddenCol</th>
+                    <th style="text-align: right !important">Qty</th>
+                    <th style="text-align: center">Note</th>
+                </tr>
+            </thead>
+            <tbody aria-hidden="true"><tr><td>HiddenTbody</td></tr></tbody>
+            <tbody>
+                <tr>
+                    <td>A|B</td>
+                    <td style="visibility:hidden">drop-cell</td>
+                    <td>10</td>
+                    <td>ok <em hidden>secret-inline</em><em>shown</em></td>
+                </tr>
+                <tr style="display:none"><td>HiddenRow</td><td>99</td><td>x</td></tr>
+            </tbody>
+            <tfoot>
+                <tr>
+                    <td>Total</td>
+                    <td>10</td>
+                    <td><span style="visibility:collapse">secret-foot</span>done</td>
+                </tr>
+            </tfoot>
+        </table>
+        <custom-banner hidden>secret-custom</custom-banner>
+        <custom-banner>visible-custom</custom-banner>
+        <p><em hidden>secret-em</em><em>kept-em</em> <span style="display:none">secret-span</span><span>kept-span</span></p>
+        "#;
+        let (md, truncated) = html(input, MAX_INPUT, MAX_OUTPUT, MAX_TAGS, MAX_NODES, MAX_DEPTH).unwrap();
+        assert!(!truncated);
+        for visible in [
+            "Sales",
+            "Summary",
+            "| Item | Qty | Note |",
+            "| :--- | ---: | :---: |",
+            "| A\\|B | 10 | ok *shown* |",
+            "| Total | 10 | done |",
+            "visible-custom",
+            "*kept-em*",
+            "kept-span",
+        ] {
+            assert!(md.contains(visible), "missing {visible} in:\n{md}");
+        }
+        for hidden in [
+            "HiddenTable",
+            "SecretTableCell",
+            "Secret Caption",
+            "secret-cap",
+            "BadHead",
+            "HiddenCol",
+            "HiddenTbody",
+            "drop-cell",
+            "secret-inline",
+            "HiddenRow",
+            "secret-foot",
+            "secret-custom",
+            "secret-em",
+            "secret-span",
+        ] {
+            assert!(!md.contains(hidden), "leaked {hidden} in:\n{md}");
+        }
+    }
+
+    #[test]
+    fn web_html_template_depth_and_utf8_boundaries_are_enforced() {
+        let utf8_with_template = "<p>日本語</p><template><template><p>秘密</p></template></template><p>表示</p>";
+        let (md, truncated) = html(utf8_with_template, MAX_INPUT, MAX_OUTPUT, MAX_TAGS, MAX_NODES, MAX_DEPTH).unwrap();
+        assert!(!truncated);
+        assert!(md.contains("日本語") && md.contains("表示"), "{md}");
+        assert!(!md.contains("秘密"), "{md}");
+
+        let deep_template = format!("<template>{}leaf{}</template>", "<div>".repeat(40), "</div>".repeat(40));
+        assert!(
+            html(&deep_template, MAX_INPUT, MAX_OUTPUT, MAX_TAGS, MAX_NODES, 20).unwrap_err().contains("max_depth")
+        );
     }
 }
