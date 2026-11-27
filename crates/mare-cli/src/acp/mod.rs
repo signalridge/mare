@@ -47,8 +47,8 @@ use helpers::{
 };
 use mare_shared::wire_projection::WireProjector;
 use turns::{
-    AcpSessionAliases, PROMPT_DRAIN_TIMEOUT, SessionForwarders, TurnCancels, map_turn_result, wait_for_queued_input,
-    wait_for_started_turn,
+    AcpSessionAliases, ConfigSync, ForwarderTarget, PROMPT_DRAIN_TIMEOUT, SessionForwarders, TurnCancels,
+    map_turn_result, wait_for_queued_input, wait_for_started_turn,
 };
 use wire::{send_reply, send_update};
 
@@ -655,6 +655,33 @@ async fn apply_additional_directories(host: &Host, dirs: &[PathBuf]) -> Result<(
     Ok(())
 }
 
+async fn open_session_forwarder(
+    host: &Arc<Host>,
+    session_id: &str,
+    conn: &ConnectionTo<Client>,
+    cancel: &CancellationToken,
+    forwarders: &SessionForwarders,
+    start_after: Option<oneshot::Receiver<()>>,
+) -> Vec<SessionConfigOption> {
+    let cfg_opts = config_options(host).await;
+    let cfg_json = serde_json::to_value(&cfg_opts).unwrap_or(J::Null);
+    let cursor = host.kernel.open_cursor(std::sync::Arc::new(|name| helpers::handles_event(name).then_some(true)));
+    let projector = mare_shared::wire_projection::hook(host.lua());
+    let config_sync = ConfigSync::install(host, cfg_json);
+    forwarders.open(
+        session_id,
+        ForwarderTarget {
+            cursor,
+            conn: conn.clone(),
+            projector,
+            stop: cancel.child_token(),
+            start_after,
+            config: config_sync,
+        },
+    );
+    cfg_opts
+}
+
 async fn finish_acp_session(
     manager: &std::rc::Rc<HostManager>,
     rt: &mare_host::SessionRuntime,
@@ -668,10 +695,7 @@ async fn finish_acp_session(
         let _ = manager.close_session(&rt.session_id).await;
         return Err(err);
     }
-    let cfg_opts = config_options(&rt.host).await;
-    let cursor = rt.host.kernel.open_cursor(std::sync::Arc::new(|name| helpers::handles_event(name).then_some(true)));
-    let projector = mare_shared::wire_projection::hook(rt.host.lua());
-    forwarders.open(&rt.session_id, cursor, conn.clone(), projector, rt.cancel.child_token(), start_after);
+    let cfg_opts = open_session_forwarder(&rt.host, &rt.session_id, conn, &rt.cancel, forwarders, start_after).await;
     cancels.open(&rt.session_id);
     Ok(cfg_opts)
 }
@@ -745,18 +769,18 @@ impl OrchestratorExt for AcpSessionExt {
         let sid = rt.session_id.clone();
         let already_open = self.cancels.current(&sid).is_some();
         if !already_open {
-            if let Some(conn) = self.conn.borrow().as_ref() {
-                if let Err(e) = approvals::install(&rt.host, &sid, conn, rt.cancel.clone()) {
+            self.cancels.open(&sid);
+            if let Some(conn) = self.conn.borrow().clone() {
+                if let Err(e) = approvals::install(&rt.host, &sid, &conn, rt.cancel.clone()) {
                     tracing::warn!(session_id = %sid, "installing ACP approvals on Lua-opened session failed: {e}");
                 }
-                let cursor = rt
-                    .host
-                    .kernel
-                    .open_cursor(std::sync::Arc::new(|name| helpers::handles_event(name).then_some(true)));
-                let projector = mare_shared::wire_projection::hook(rt.host.lua());
-                self.forwarders.open(&sid, cursor, conn.clone(), projector, rt.cancel.child_token(), None);
+                let host = Arc::clone(&rt.host);
+                let cancel = rt.cancel.clone();
+                let forwarders = self.forwarders.clone();
+                return Box::pin(async move {
+                    let _ = open_session_forwarder(&host, &sid, &conn, &cancel, &forwarders, None).await;
+                });
             }
-            self.cancels.open(&sid);
         }
         Box::pin(async {})
     }

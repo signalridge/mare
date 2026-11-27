@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use crate::rpc::call_service;
 
 use super::AcpErr;
-use super::helpers::to_update;
+use super::helpers::{config_options, has_truncated_image, hydrate_tool_result_update, to_update};
 
 /// How long a finished turn may take to hand its queued updates to the client.
 pub(super) const PROMPT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -36,9 +36,120 @@ pub(super) enum SinkOutcome {
     Disconnected,
 }
 
-fn translate_record(rec: mare_kernel::CursorRecord) -> Result<Option<J>, String> {
+enum RecordStep {
+    Continue,
+    #[cfg(test)]
+    Disconnected,
+}
+
+trait ConfigWatcher {
+    fn is_active(&self) -> bool;
+    async fn changed(&mut self) -> bool;
+    async fn flush(&mut self, force: bool) -> Option<J>;
+    async fn translate_event(&mut self, name: &str, payload: &J) -> Option<J>;
+}
+
+#[cfg(test)]
+struct NoConfigWatcher;
+
+#[cfg(test)]
+impl ConfigWatcher for NoConfigWatcher {
+    fn is_active(&self) -> bool {
+        false
+    }
+
+    async fn changed(&mut self) -> bool {
+        std::future::pending().await
+    }
+
+    async fn flush(&mut self, _force: bool) -> Option<J> {
+        None
+    }
+
+    async fn translate_event(&mut self, name: &str, payload: &J) -> Option<J> {
+        to_update(name, payload)
+    }
+}
+
+/// Host-backed watcher for live session `configOptions` updates (`llm/model-changed`) and
+/// hydration of wire-truncated tool-result image payloads (`agent.messages`).
+pub(super) struct ConfigSync {
+    host: std::sync::Weak<Host>,
+    rx: Option<tokio::sync::watch::Receiver<u64>>,
+    last: J,
+}
+
+impl ConfigSync {
+    pub(super) fn install(host: &Arc<Host>, initial: J) -> Self {
+        let rx = (|| -> mlua::Result<tokio::sync::watch::Receiver<u64>> {
+            let ctx = host.kernel.host_ctx()?;
+            let owner = host.kernel.host_owner()?;
+            let (tx, rx) = tokio::sync::watch::channel(0u64);
+            let cb = host.lua().create_function(move |_, _: mlua::MultiValue| {
+                tx.send_modify(|n| *n = n.wrapping_add(1));
+                Ok(())
+            })?;
+            let _ = host.kernel.host_on(&ctx, owner, "llm/model-changed", cb, mare_kernel::HostOn::default())?;
+            Ok(rx)
+        })()
+        .map_err(|e| tracing::warn!("installing ACP llm/model-changed watcher failed: {e}"))
+        .ok();
+        Self { host: Arc::downgrade(host), rx, last: initial }
+    }
+}
+
+impl ConfigWatcher for ConfigSync {
+    fn is_active(&self) -> bool {
+        self.rx.is_some()
+    }
+
+    async fn changed(&mut self) -> bool {
+        match self.rx.as_mut() {
+            Some(rx) => rx.changed().await.is_ok(),
+            None => std::future::pending().await,
+        }
+    }
+
+    async fn flush(&mut self, force: bool) -> Option<J> {
+        let rx_changed = self.rx.as_ref().and_then(|rx| rx.has_changed().ok()).unwrap_or(false);
+        if rx_changed && let Some(rx) = self.rx.as_mut() {
+            rx.mark_unchanged();
+        }
+        if !force && !rx_changed {
+            return None;
+        }
+        let host = self.host.upgrade()?;
+        let opts = config_options(&host).await;
+        let opts_json = serde_json::to_value(&opts).ok()?;
+        if opts_json == self.last {
+            return None;
+        }
+        self.last = opts_json;
+        Some(json!({
+            "sessionUpdate": "config_option_update",
+            "configOptions": opts,
+        }))
+    }
+
+    async fn translate_event(&mut self, name: &str, payload: &J) -> Option<J> {
+        if name == "item/completed"
+            && payload.pointer("/item/message/content").is_some_and(has_truncated_image)
+            && let Some(host) = self.host.upgrade()
+        {
+            return hydrate_tool_result_update(&host, payload).await;
+        }
+        to_update(name, payload)
+    }
+}
+
+async fn translate_record_with<W: ConfigWatcher>(
+    rec: mare_kernel::CursorRecord,
+    watch: &mut W,
+) -> Result<Option<J>, String> {
     match rec {
-        mare_kernel::CursorRecord::Event { event, selected } if selected => Ok(to_update(&event.name, &event.payload)),
+        mare_kernel::CursorRecord::Event { event, selected } if selected => {
+            Ok(watch.translate_event(&event.name, &event.payload).await)
+        }
         mare_kernel::CursorRecord::Event { .. } => Ok(None),
         mare_kernel::CursorRecord::Lagged { from_seq, to_seq } => {
             tracing::warn!(from_seq, to_seq, "acp cursor lagged behind event log");
@@ -47,6 +158,190 @@ fn translate_record(rec: mare_kernel::CursorRecord) -> Result<Option<J>, String>
         mare_kernel::CursorRecord::Dropped { count, .. } => {
             tracing::warn!(count, "acp cursor dropped events under backpressure");
             Err(format!("event stream dropped {count} events under backpressure; turn output is incomplete"))
+        }
+    }
+}
+
+async fn send_update<F, Fut>(
+    session_id: &str,
+    update: J,
+    send: &mut F,
+    stream_err: &mut Option<String>,
+    record_err: bool,
+) -> RecordStep
+where
+    F: FnMut(String, J) -> Fut,
+    Fut: Future<Output = SinkOutcome>,
+{
+    match send(session_id.to_string(), update).await {
+        SinkOutcome::Sent => RecordStep::Continue,
+        SinkOutcome::Failed(e) => {
+            if record_err {
+                stream_err.get_or_insert(e);
+            }
+            RecordStep::Continue
+        }
+        #[cfg(test)]
+        SinkOutcome::Disconnected => RecordStep::Disconnected,
+    }
+}
+
+async fn flush_config<F, Fut, W: ConfigWatcher>(
+    watch: &mut W,
+    session_id: &str,
+    send: &mut F,
+    stream_err: &mut Option<String>,
+    record_err: bool,
+    force: bool,
+) -> RecordStep
+where
+    F: FnMut(String, J) -> Fut,
+    Fut: Future<Output = SinkOutcome>,
+{
+    let Some(update) = watch.flush(force).await else {
+        return RecordStep::Continue;
+    };
+    send_update(session_id, update, send, stream_err, record_err).await
+}
+
+async fn forward_record<F, Fut, W: ConfigWatcher>(
+    rec: mare_kernel::CursorRecord,
+    watch: &mut W,
+    session_id: &str,
+    send: &mut F,
+    stream_err: &mut Option<String>,
+    record_err: bool,
+) -> RecordStep
+where
+    F: FnMut(String, J) -> Fut,
+    Fut: Future<Output = SinkOutcome>,
+{
+    match translate_record_with(rec, watch).await {
+        Ok(Some(u)) => send_update(session_id, u, send, stream_err, record_err).await,
+        Ok(None) => RecordStep::Continue,
+        Err(e) => {
+            if record_err {
+                stream_err.get_or_insert(e);
+            }
+            RecordStep::Continue
+        }
+    }
+}
+
+async fn drain_cursor<F, Fut, W: ConfigWatcher>(
+    cursor: &mut mare_kernel::EventCursor,
+    watch: &mut W,
+    session_id: &str,
+    send: &mut F,
+    stream_err: &mut Option<String>,
+    record_err: bool,
+) -> RecordStep
+where
+    F: FnMut(String, J) -> Fut,
+    Fut: Future<Output = SinkOutcome>,
+{
+    while let Ok(Some(rec)) = cursor.try_recv() {
+        match forward_record(rec, watch, session_id, send, stream_err, record_err).await {
+            RecordStep::Continue => {}
+            #[cfg(test)]
+            RecordStep::Disconnected => return RecordStep::Disconnected,
+        }
+    }
+    flush_config(watch, session_id, send, stream_err, record_err, false).await
+}
+
+fn ack_pending_cmds(cmd_rx: &mut mpsc::Receiver<ForwarderCmd>, stream_err: &mut Option<String>) {
+    while let Ok(cmd) = cmd_rx.try_recv() {
+        match cmd {
+            ForwarderCmd::BeginTurn(ack) => {
+                let _ = ack.send(());
+            }
+            ForwarderCmd::Flush(ack) => {
+                let _ = ack.send(stream_err.take().map_or(Ok(()), Err));
+            }
+        }
+    }
+}
+
+async fn forward_session_loop<F, Fut, W: ConfigWatcher>(
+    session_id: String,
+    mut cursor: mare_kernel::EventCursor,
+    mut cmd_rx: mpsc::Receiver<ForwarderCmd>,
+    stop_task: CancellationToken,
+    start_after: Option<oneshot::Receiver<()>>,
+    mut watch: W,
+    mut send: F,
+) where
+    F: FnMut(String, J) -> Fut,
+    Fut: Future<Output = SinkOutcome>,
+{
+    if let Some(rx) = start_after {
+        tokio::select! {
+            biased;
+            _ = stop_task.cancelled() => return,
+            _ = rx => {}
+        }
+    }
+    let mut stream_err: Option<String> = None;
+    let mut config_rx_open = watch.is_active();
+    loop {
+        tokio::select! {
+            biased;
+            _ = stop_task.cancelled() => {
+                let _ = drain_cursor(&mut cursor, &mut watch, &session_id, &mut send, &mut stream_err, true).await;
+                ack_pending_cmds(&mut cmd_rx, &mut stream_err);
+                return;
+            }
+            changed = watch.changed(), if config_rx_open => {
+                if !changed {
+                    config_rx_open = false;
+                } else {
+                    match flush_config(&mut watch, &session_id, &mut send, &mut stream_err, true, true).await {
+                        RecordStep::Continue => {}
+                        #[cfg(test)]
+                        RecordStep::Disconnected => return,
+                    }
+                }
+            }
+            rec = cursor.recv() => {
+                let Some(rec) = rec else {
+                    ack_pending_cmds(&mut cmd_rx, &mut stream_err);
+                    return;
+                };
+                match forward_record(rec, &mut watch, &session_id, &mut send, &mut stream_err, true).await {
+                    RecordStep::Continue => {}
+                    #[cfg(test)]
+                    RecordStep::Disconnected => return,
+                }
+            }
+            Some(cmd) = cmd_rx.recv() => {
+                match cmd {
+                    ForwarderCmd::BeginTurn(ack) => {
+                        // Drain pre-turn buffered updates and clear any stale lag/drop
+                        // error from an earlier idle/background window so it cannot
+                        // poison an unrelated subsequent `session/prompt`.
+                        let step = drain_cursor(&mut cursor, &mut watch, &session_id, &mut send, &mut stream_err, false).await;
+                        stream_err = None;
+                        let _ = ack.send(());
+                        #[cfg(test)]
+                        if matches!(step, RecordStep::Disconnected) {
+                            return;
+                        }
+                        #[cfg(not(test))]
+                        let _ = step;
+                    }
+                    ForwarderCmd::Flush(ack) => {
+                        let step = drain_cursor(&mut cursor, &mut watch, &session_id, &mut send, &mut stream_err, true).await;
+                        let _ = ack.send(stream_err.take().map_or(Ok(()), Err));
+                        #[cfg(test)]
+                        if matches!(step, RecordStep::Disconnected) {
+                            return;
+                        }
+                        #[cfg(not(test))]
+                        let _ = step;
+                    }
+                }
+            }
         }
     }
 }
@@ -111,170 +406,66 @@ impl AcpSessionAliases {
 #[derive(Clone, Default)]
 pub(super) struct SessionForwarders(Arc<Mutex<HashMap<String, SessionForwarder>>>);
 
+pub(super) struct ForwarderTarget {
+    pub(super) cursor: mare_kernel::EventCursor,
+    pub(super) conn: ConnectionTo<Client>,
+    pub(super) projector: Option<WireProjector>,
+    pub(super) stop: CancellationToken,
+    pub(super) start_after: Option<oneshot::Receiver<()>>,
+    pub(super) config: ConfigSync,
+}
+
 impl SessionForwarders {
     fn map(&self) -> std::sync::MutexGuard<'_, HashMap<String, SessionForwarder>> {
         self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    pub(super) fn open(
-        &self,
-        session: &str,
-        cursor: mare_kernel::EventCursor,
-        conn: ConnectionTo<Client>,
-        projector: Option<WireProjector>,
-        stop: CancellationToken,
-        start_after: Option<oneshot::Receiver<()>>,
-    ) {
-        self.open_with_sink(session, cursor, stop, start_after, move |sid, u| {
-            let res = super::wire::send_update(&conn, &sid, u, projector.as_slice());
-            async move {
-                match res {
-                    Ok(()) => SinkOutcome::Sent,
-                    Err(e) => SinkOutcome::Failed(e),
+    pub(super) fn open(&self, session: &str, target: ForwarderTarget) {
+        let ForwarderTarget { cursor, conn, projector, stop, start_after, config } = target;
+        let session_id = session.to_string();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<ForwarderCmd>(FORWARDER_CMD_CAPACITY);
+        let stop_task = stop.clone();
+
+        tokio::task::spawn_local(forward_session_loop(
+            session_id,
+            cursor,
+            cmd_rx,
+            stop_task,
+            start_after,
+            config,
+            move |sid, u| {
+                let res = super::wire::send_update(&conn, &sid, u, projector.as_slice());
+                async move {
+                    match res {
+                        Ok(()) => SinkOutcome::Sent,
+                        Err(e) => SinkOutcome::Failed(e),
+                    }
                 }
-            }
-        });
+            },
+        ));
+
+        if let Some(prev) = self.map().insert(session.to_string(), SessionForwarder { cmd_tx, stop }) {
+            prev.stop.cancel();
+        }
     }
 
+    #[cfg(test)]
     pub(super) fn open_with_sink<F, Fut>(
         &self,
         session: &str,
-        mut cursor: mare_kernel::EventCursor,
+        cursor: mare_kernel::EventCursor,
         stop: CancellationToken,
         start_after: Option<oneshot::Receiver<()>>,
-        mut send: F,
+        send: F,
     ) where
         F: FnMut(String, J) -> Fut + Send + 'static,
         Fut: Future<Output = SinkOutcome> + Send + 'static,
     {
         let session_id = session.to_string();
-        let (cmd_tx, mut cmd_rx) = mpsc::channel::<ForwarderCmd>(FORWARDER_CMD_CAPACITY);
+        let (cmd_tx, cmd_rx) = mpsc::channel::<ForwarderCmd>(FORWARDER_CMD_CAPACITY);
         let stop_task = stop.clone();
 
-        tokio::spawn(async move {
-            if let Some(rx) = start_after {
-                tokio::select! {
-                    biased;
-                    _ = stop_task.cancelled() => return,
-                    _ = rx => {}
-                }
-            }
-            let mut stream_err: Option<String> = None;
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = stop_task.cancelled() => {
-                        while let Ok(Some(rec)) = cursor.try_recv() {
-                            match translate_record(rec) {
-                                Ok(Some(u)) => match send(session_id.clone(), u).await {
-                                    SinkOutcome::Sent => {}
-                                    SinkOutcome::Failed(e) => {
-                                        stream_err.get_or_insert(e);
-                                    }
-                                    #[cfg(test)]
-                                    SinkOutcome::Disconnected => break,
-                                },
-                                Ok(None) => {}
-                                Err(e) => {
-                                    stream_err.get_or_insert(e);
-                                }
-                            }
-                        }
-                        while let Ok(cmd) = cmd_rx.try_recv() {
-                            match cmd {
-                                ForwarderCmd::BeginTurn(ack) => {
-                                    let _ = ack.send(());
-                                }
-                                ForwarderCmd::Flush(ack) => {
-                                    let _ = ack.send(stream_err.take().map_or(Ok(()), Err));
-                                }
-                            }
-                        }
-                        return;
-                    }
-                    rec = cursor.recv() => {
-                        let Some(rec) = rec else {
-                            while let Ok(cmd) = cmd_rx.try_recv() {
-                                match cmd {
-                                    ForwarderCmd::BeginTurn(ack) => {
-                                        let _ = ack.send(());
-                                    }
-                                    ForwarderCmd::Flush(ack) => {
-                                        let _ = ack.send(stream_err.take().map_or(Ok(()), Err));
-                                    }
-                                }
-                            }
-                            return;
-                        };
-                        match translate_record(rec) {
-                            Ok(Some(u)) => match send(session_id.clone(), u).await {
-                                SinkOutcome::Sent => {}
-                                SinkOutcome::Failed(e) => {
-                                    stream_err.get_or_insert(e);
-                                }
-                                #[cfg(test)]
-                                SinkOutcome::Disconnected => return,
-                            },
-                            Ok(None) => {}
-                            Err(e) => {
-                                stream_err.get_or_insert(e);
-                            }
-                        }
-                    }
-                    Some(cmd) = cmd_rx.recv() => {
-                        match cmd {
-                            ForwarderCmd::BeginTurn(ack) => {
-                                // Drain pre-turn buffered updates and clear any stale lag/drop
-                                // error from an earlier idle/background window so it cannot
-                                // poison an unrelated subsequent `session/prompt`.
-                                while let Ok(Some(rec)) = cursor.try_recv() {
-                                    if let Ok(Some(u)) = translate_record(rec) {
-                                        match send(session_id.clone(), u).await {
-                                            SinkOutcome::Sent | SinkOutcome::Failed(_) => {}
-                                            #[cfg(test)]
-                                            SinkOutcome::Disconnected => {
-                                                let _ = ack.send(());
-                                                return;
-                                            }
-                                        }
-                                    }
-                                }
-                                stream_err = None;
-                                let _ = ack.send(());
-                            }
-                            ForwarderCmd::Flush(ack) => {
-                                #[cfg(test)]
-                                let mut disconnected = false;
-                                while let Ok(Some(rec)) = cursor.try_recv() {
-                                    match translate_record(rec) {
-                                        Ok(Some(u)) => match send(session_id.clone(), u).await {
-                                            SinkOutcome::Sent => {}
-                                            SinkOutcome::Failed(e) => {
-                                                stream_err.get_or_insert(e);
-                                            }
-                                            #[cfg(test)]
-                                            SinkOutcome::Disconnected => {
-                                                disconnected = true;
-                                                break;
-                                            }
-                                        },
-                                        Ok(None) => {}
-                                        Err(e) => {
-                                            stream_err.get_or_insert(e);
-                                        }
-                                    }
-                                }
-                                let _ = ack.send(stream_err.take().map_or(Ok(()), Err));
-                                #[cfg(test)]
-                                if disconnected {
-                                    return;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        });
+        tokio::spawn(forward_session_loop(session_id, cursor, cmd_rx, stop_task, start_after, NoConfigWatcher, send));
 
         if let Some(prev) = self.map().insert(session.to_string(), SessionForwarder { cmd_tx, stop }) {
             prev.stop.cancel();

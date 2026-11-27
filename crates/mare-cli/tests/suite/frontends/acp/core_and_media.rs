@@ -1,5 +1,12 @@
 use super::*;
 
+const PNG_1X1: [u8; 67] = [
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0a, 0x49,
+    0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00,
+    0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+];
+
 #[test]
 fn acp_prompt_ends_turn_cancel_cancels_and_unknown_session_errors() {
     let (mut rpc, home) = acp(json!([
@@ -508,4 +515,324 @@ fn acp_initialize_clamps_protocol_version_and_rejects_overlapping_prompts() {
     let first_res = rpc.wait_raw(id1, |_| json!(null));
     assert_eq!(first_res["result"]["stopReason"], "end_turn", "{first_res}");
     rpc.kill_and_wait();
+}
+
+#[test]
+fn acp_text_resources_preserve_uri_and_image_blobs_match_top_level_images() {
+    use base64::Engine as _;
+
+    let png_b64 = base64::engine::general_purpose::STANDARD.encode(PNG_1X1);
+
+    let home = tempfile::tempdir().unwrap();
+    let reqs_dir = home.path().join("reqs");
+    std::fs::create_dir_all(&reqs_dir).unwrap();
+    let plugins_dir = home.path().join("config/plugins");
+    std::fs::create_dir_all(&plugins_dir).unwrap();
+    std::fs::write(
+        plugins_dir.join("record-media.lua"),
+        format!(
+            r#"local n = 0
+return {{
+    name = "record-media",
+    inject = {{ "llm" }},
+    apply = function(ctx)
+        ctx.llm:register_provider({{
+            provider = "rec",
+            no_key = true,
+            models = {{
+                {{ model_id = "img", name = "Rec Img", images = true }},
+                {{ model_id = "plain", name = "Rec Plain", images = false }},
+            }},
+            stream = function(req)
+                n = n + 1
+                local path = {:?} .. "/req-" .. tostring(n) .. ".json"
+                mare.fs.write(path, mare.json.encode({{ model = req.model and req.model.ref, messages = req.messages }}))
+                return {{ role = "assistant", content = {{ {{ type = "text", text = "ok" }} }}, stop_reason = "stop" }}
+            end,
+        }})
+    end,
+}}"#,
+            reqs_dir.to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    let mut cmd = mare_cmd();
+    cmd.args(["--model", "rec/img", "acp"]).env("MARE_HOME", home.path()).stderr(Stdio::piped());
+    let mut rpc = RpcClient::spawn_cmd(&mut cmd);
+    let _ = rpc.call_raw("initialize", json!({ "protocolVersion": 1, "clientCapabilities": {} }), |_| json!(null));
+    let cwd = dunce::canonicalize(home.path()).unwrap();
+    let s = rpc.call_raw("session/new", json!({ "cwd": cwd, "mcpServers": [] }), |_| json!(null));
+    let sid = s["result"]["sessionId"].as_str().unwrap().to_string();
+
+    // 1. Two embedded text resources with the same basename keep distinct URIs + texts.
+    let r1 = rpc.call_raw(
+        "session/prompt",
+        json!({
+            "sessionId": sid,
+            "prompt": [
+                { "type": "resource", "resource": { "uri": "file:///dir-a/notes.txt", "text": "alpha-body" } },
+                { "type": "resource", "resource": { "uri": "file:///dir-b/notes.txt", "text": "beta-body" } }
+            ]
+        }),
+        |_| json!(null),
+    );
+    assert_eq!(r1["result"]["stopReason"], "end_turn", "{r1}");
+
+    let req1: Value = serde_json::from_str(&std::fs::read_to_string(reqs_dir.join("req-1.json")).unwrap()).unwrap();
+    let msg1_str = req1["messages"].to_string();
+    assert!(msg1_str.contains("file:///dir-a/notes.txt") && msg1_str.contains("alpha-body"), "{req1}");
+    assert!(msg1_str.contains("file:///dir-b/notes.txt") && msg1_str.contains("beta-body"), "{req1}");
+
+    // 2. Top-level image vs embedded PNG blob resource produce equivalent image blocks.
+    let r2 = rpc.call_raw(
+        "session/prompt",
+        json!({
+            "sessionId": sid,
+            "prompt": [
+                { "type": "text", "text": "top" },
+                { "type": "image", "data": png_b64, "mimeType": "image/png" }
+            ]
+        }),
+        |_| json!(null),
+    );
+    assert_eq!(r2["result"]["stopReason"], "end_turn", "{r2}");
+
+    let r3 = rpc.call_raw(
+        "session/prompt",
+        json!({
+            "sessionId": sid,
+            "prompt": [
+                { "type": "text", "text": "blob" },
+                { "type": "resource", "resource": { "uri": "file:///img/pic.png", "mimeType": "image/png", "blob": png_b64 } }
+            ]
+        }),
+        |_| json!(null),
+    );
+    assert_eq!(r3["result"]["stopReason"], "end_turn", "{r3}");
+
+    let req2: Value = serde_json::from_str(&std::fs::read_to_string(reqs_dir.join("req-2.json")).unwrap()).unwrap();
+    let req3: Value = serde_json::from_str(&std::fs::read_to_string(reqs_dir.join("req-3.json")).unwrap()).unwrap();
+    let img_block = |req: &Value| -> Value {
+        req["messages"].as_array().unwrap().last().unwrap()["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["type"] == "image")
+            .cloned()
+            .unwrap_or_else(|| panic!("missing image block in {req}"))
+    };
+    let b2 = img_block(&req2);
+    let b3 = img_block(&req3);
+    assert_eq!(b2["type"], b3["type"]);
+    assert_eq!(b2["mime"], b3["mime"]);
+    assert_eq!(b2["data"], b3["data"]);
+    assert_eq!(b3["data"], png_b64);
+
+    // 3. Unsupported binary blob still fails; embedded PNG blob goes through image_refusal when model has images=false.
+    let bad_bin = rpc.call_raw(
+        "session/prompt",
+        json!({
+            "sessionId": sid,
+            "prompt": [{ "type": "resource", "resource": { "uri": "file:///a.bin", "mimeType": "application/octet-stream", "blob": "AQID" } }]
+        }),
+        |_| json!(null),
+    );
+    assert_eq!(bad_bin["error"]["code"], -32602, "{bad_bin}");
+
+    let switched = rpc.call_raw(
+        "session/set_config_option",
+        json!({ "sessionId": sid, "configId": "model", "value": "rec/plain" }),
+        |_| json!(null),
+    );
+    assert!(switched.get("error").is_none(), "{switched}");
+    let refused_blob = rpc.call_raw(
+        "session/prompt",
+        json!({
+            "sessionId": sid,
+            "prompt": [{ "type": "resource", "resource": { "uri": "file:///img/pic.png", "mimeType": "image/png", "blob": png_b64 } }]
+        }),
+        |_| json!(null),
+    );
+    assert_eq!(refused_blob["error"]["code"], -32602, "{refused_blob}");
+    assert!(refused_blob["error"]["data"].as_str().unwrap_or("").contains("does not accept images"), "{refused_blob}");
+
+    rpc.kill_and_wait();
+}
+
+#[test]
+fn acp_tool_results_forward_images_live_and_on_replay() {
+    use base64::Engine as _;
+
+    let png_b64 = base64::engine::general_purpose::STANDARD.encode(PNG_1X1);
+
+    let home = tempfile::tempdir().unwrap();
+    let ws = tempfile::tempdir().unwrap();
+    let pic_path = ws.path().join("pic.png");
+    std::fs::write(&pic_path, PNG_1X1).unwrap();
+
+    let plugins_dir = home.path().join("config/plugins");
+    std::fs::create_dir_all(&plugins_dir).unwrap();
+    std::fs::write(
+        plugins_dir.join("img-only-tool.lua"),
+        format!(
+            r#"return {{
+    name = "img-only-tool",
+    inject = {{ "tools" }},
+    apply = function(ctx)
+        ctx.tools:register("img_only", {{
+            description = "returns image only",
+            side_effect = "read",
+            parameters = {{ type = "object", additionalProperties = false }},
+            execute = function()
+                return {{ content = {{ {{ type = "image", mime = "image/png", data = "{png_b64}" }} }} }}
+            end,
+        }})
+    end,
+}}"#
+        ),
+    )
+    .unwrap();
+
+    let script = json!([
+        { "tool_calls": [{ "name": "read", "arguments": { "path": "pic.png" } }] },
+        { "tool_calls": [{ "name": "img_only", "arguments": {} }] },
+        { "text": "done" }
+    ]);
+    let mut rpc = acp_in_home(home.path(), script, &["--permission", "auto", "--approval-policy", "never"], &[]);
+    let _ = rpc.call_raw("initialize", json!({ "protocolVersion": 1, "clientCapabilities": {} }), |_| json!(null));
+    let cwd = dunce::canonicalize(ws.path()).unwrap();
+    let s = rpc.call_raw("session/new", json!({ "cwd": cwd, "mcpServers": [] }), |_| json!(null));
+    let sid = s["result"]["sessionId"].as_str().unwrap().to_string();
+
+    let p_id =
+        rpc.request("session/prompt", json!({ "sessionId": sid, "prompt": [{ "type": "text", "text": "read pic" }] }));
+    let (p_resp, live_updates) = read_until(&mut rpc, p_id, Some(&sid));
+    assert_eq!(p_resp["result"]["stopReason"], "end_turn", "{p_resp}");
+
+    let assert_has_tool_images = |updates: &[Value], phase: &str| {
+        let tool_updates: Vec<&Value> = updates.iter().filter(|u| u["sessionUpdate"] == "tool_call_update").collect();
+        assert_eq!(tool_updates.len(), 2, "{phase}: expected 2 tool_call_update items: {updates:?}");
+
+        // First tool (read): text + image content block with valid PNG bytes.
+        let read_content =
+            tool_updates[0]["content"].as_array().unwrap_or_else(|| panic!("{phase}: {:?}", tool_updates[0]));
+        assert!(
+            read_content.iter().any(|c| c["content"]["type"] == "text"
+                && c["content"]["text"].as_str().is_some_and(|t| t.contains("Image pic.png"))),
+            "{phase}: missing read text block: {read_content:?}"
+        );
+        let read_img = read_content
+            .iter()
+            .find(|c| c["content"]["type"] == "image")
+            .unwrap_or_else(|| panic!("{phase}: missing read image block: {read_content:?}"));
+        assert_eq!(read_img["content"]["mimeType"], "image/png");
+        let read_bytes =
+            base64::engine::general_purpose::STANDARD.decode(read_img["content"]["data"].as_str().unwrap()).unwrap();
+        let decoded = image::load_from_memory(&read_bytes).expect("decoded read PNG must be valid");
+        assert_eq!((decoded.width(), decoded.height()), (1, 1), "{phase}: unexpected image dims");
+
+        // Second tool (img_only): image only, no empty text block.
+        let only_content =
+            tool_updates[1]["content"].as_array().unwrap_or_else(|| panic!("{phase}: {:?}", tool_updates[1]));
+        assert_eq!(only_content.len(), 1, "{phase}: image-only tool must not emit empty text: {only_content:?}");
+        assert_eq!(only_content[0]["content"]["type"], "image");
+        assert_eq!(only_content[0]["content"]["mimeType"], "image/png");
+        let only_bytes = base64::engine::general_purpose::STANDARD
+            .decode(only_content[0]["content"]["data"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(only_bytes, PNG_1X1, "{phase}: image-only bytes mismatch");
+    };
+
+    assert_has_tool_images(&live_updates, "live");
+
+    let closed = rpc.call_raw("session/close", json!({ "sessionId": sid }), |_| json!(null));
+    assert!(closed.get("result").is_some(), "{closed}");
+    rpc.kill_and_wait();
+
+    // Restart ACP process and replay via session/load.
+    let mut rpc2 = acp_in_home(home.path(), json!([]), &["--permission", "auto", "--approval-policy", "never"], &[]);
+    let _ = rpc2.call_raw("initialize", json!({ "protocolVersion": 1, "clientCapabilities": {} }), |_| json!(null));
+    let load_id = rpc2.request("session/load", json!({ "sessionId": sid, "cwd": cwd, "mcpServers": [] }));
+    let (load_resp, replay_updates) = read_until(&mut rpc2, load_id, Some(&sid));
+    assert!(load_resp.get("error").is_none(), "{load_resp}");
+    assert_has_tool_images(&replay_updates, "replay");
+    rpc2.kill_and_wait();
+}
+
+#[test]
+fn acp_tool_results_forward_large_truncated_images_live_and_on_replay() {
+    use base64::Engine as _;
+    use std::io::Cursor;
+
+    // Build an incompressible >800 KiB PNG (<= 1.5 MiB so `read` preserves PNG, > 1 MiB once
+    // base64-encoded so the kernel wire tap truncates inline `data` on `item/completed`).
+    let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+    let img = image::RgbImage::from_fn(620, 620, |_, _| {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let r = (state >> 16) as u8;
+        let g = (state >> 24) as u8;
+        let b = (state >> 32) as u8;
+        image::Rgb([r, g, b])
+    });
+    let mut large_png = Vec::new();
+    img.write_to(&mut Cursor::new(&mut large_png), image::ImageFormat::Png).unwrap();
+    assert!(
+        large_png.len() > 850_000 && large_png.len() <= 1_500_000,
+        "expected PNG between 850 KiB and 1.5 MiB, got {} bytes",
+        large_png.len()
+    );
+
+    let home = tempfile::tempdir().unwrap();
+    let ws = tempfile::tempdir().unwrap();
+    let pic_path = ws.path().join("large.png");
+    std::fs::write(&pic_path, &large_png).unwrap();
+
+    let script = json!([
+        { "tool_calls": [{ "name": "read", "arguments": { "path": pic_path.to_string_lossy() } }] },
+        { "text": "large-done" }
+    ]);
+    let mut rpc = acp_in_home(home.path(), script, &["--permission", "auto", "--approval-policy", "never"], &[]);
+    let _ = rpc.call_raw("initialize", json!({ "protocolVersion": 1, "clientCapabilities": {} }), |_| json!(null));
+    let cwd = dunce::canonicalize(ws.path()).unwrap();
+    let s = rpc.call_raw("session/new", json!({ "cwd": cwd, "mcpServers": [] }), |_| json!(null));
+    let sid = s["result"]["sessionId"].as_str().unwrap().to_string();
+
+    let p_id = rpc
+        .request("session/prompt", json!({ "sessionId": sid, "prompt": [{ "type": "text", "text": "read large" }] }));
+    let (p_resp, live_updates) = read_until(&mut rpc, p_id, Some(&sid));
+    assert_eq!(p_resp["result"]["stopReason"], "end_turn", "{p_resp}");
+
+    let extract_large_img = |updates: &[Value], phase: &str| -> Vec<u8> {
+        let tu = updates
+            .iter()
+            .find(|u| u["sessionUpdate"] == "tool_call_update")
+            .unwrap_or_else(|| panic!("{phase}: missing tool_call_update: {updates:?}"));
+        let content = tu["content"].as_array().unwrap_or_else(|| panic!("{phase}: {tu}"));
+        let img_block = content
+            .iter()
+            .find(|c| c["content"]["type"] == "image")
+            .unwrap_or_else(|| panic!("{phase}: missing large image block: {content:?}"));
+        assert_eq!(img_block["content"]["mimeType"], "image/png");
+        let bytes =
+            base64::engine::general_purpose::STANDARD.decode(img_block["content"]["data"].as_str().unwrap()).unwrap();
+        let decoded = image::load_from_memory(&bytes).expect("decoded large PNG must be valid");
+        assert_eq!((decoded.width(), decoded.height()), (620, 620), "{phase}: unexpected dims");
+        bytes
+    };
+
+    let live_bytes = extract_large_img(&live_updates, "live");
+
+    let closed = rpc.call_raw("session/close", json!({ "sessionId": sid }), |_| json!(null));
+    assert!(closed.get("result").is_some(), "{closed}");
+    rpc.kill_and_wait();
+
+    let mut rpc2 = acp_in_home(home.path(), json!([]), &["--permission", "auto", "--approval-policy", "never"], &[]);
+    let _ = rpc2.call_raw("initialize", json!({ "protocolVersion": 1, "clientCapabilities": {} }), |_| json!(null));
+    let load_id = rpc2.request("session/load", json!({ "sessionId": sid, "cwd": cwd, "mcpServers": [] }));
+    let (load_resp, replay_updates) = read_until(&mut rpc2, load_id, Some(&sid));
+    assert!(load_resp.get("error").is_none(), "{load_resp}");
+    let replay_bytes = extract_large_img(&replay_updates, "replay");
+    assert_eq!(live_bytes, replay_bytes, "live and replayed >1 MiB PNG bytes must match");
+    rpc2.kill_and_wait();
 }

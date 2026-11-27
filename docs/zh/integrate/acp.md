@@ -70,7 +70,7 @@ ACP 客户端把智能体作为子进程启动，并通过它的标准输入和�
 
 ### 提示词
 
-提示词按原有顺序接受文本块、嵌入的文本资源、资源链接和图片。资源链接以文本表示，相邻文本用空行连接。音频和嵌入的二进制资源会被拒绝。
+提示词按原有顺序接受文本块、嵌入的文本资源（保留非空 URI）、资源链接和图片。MIME 类型为 `image/png`、`image/jpeg`、`image/gif` 或 `image/webp` 的嵌入二进制 blob 会作为图片处理；音频和其他嵌入二进制资源会被拒绝。资源链接以文本表示，相邻文本用空行连接。
 
 如果会话当前模型未声明支持图片输入，包含图片块的提示词会以参数无效错误被拒绝。模型按会话选择且可以更改，且 mare 在初始化时尚无会话宿主，无法按单个模型决定该标志，因此 `initialize` 为连接声明图片支持，并在每次包含图片的提示中检查当前模型。
 
@@ -95,8 +95,9 @@ provider 错误和持久化失败会作为 JSON-RPC 内部错误返回，绝不�
 | `agent_message_chunk` | 助手文本的增量。 |
 | `agent_thought_chunk` | 推理的增量。 |
 | `tool_call` | 工具调用开始。`status` 为 `in_progress`，`title` 是工具名称加上它的 `path` 或 `command` 参数，`rawInput` 是参数。 |
-| `tool_call_update` | 工具调用结束。`status` 为 `completed` 或 `failed`，内容是工具的文本输出。 |
+| `tool_call_update` | 工具调用结束。`status` 为 `completed` 或 `failed`，内容包含工具的文本和图片输出。 |
 | `usage_update` | 收到含 `last_context` 和正 `context_window` 的 `usage/changed` 时发送，包含 `used` 和 `size`。 |
+| `config_option_update` | 会话内模型或推理强度发生变化时发送，携带最新的 `configOptions`。 |
 
 工具调用的 `kind` 由内核工具元数据推导（声明 `command_tool` 时为 `execute`，按 `side_effect` 映射为 `read` / `edit`，其余情况及历史回放缺少元数据时为 `other`）。
 
@@ -104,7 +105,7 @@ provider 错误和持久化失败会作为 JSON-RPC 内部错误返回，绝不�
 
 - **没有会话模式。** 服务器不声明 ACP 会话模式，也不实现 `session/set_mode`。
 - **额外目录校验。** `session/new` 支持 `additionalDirectories`（`cwd` 之外实际存在的物理目录，在恢复会话时重新校验）；`session/load` 和 `session/resume` 接受已记录且通过重新校验的 `additionalDirectories`，对未记录或失效的目录返回 `Invalid params`。
-- **没有音频提示词。** 音频块和嵌入的二进制资源会被拒绝。
+- **不支持音频和任意二进制提示词。** 音频块与非图片类嵌入二进制资源会被拒绝（`image/png`、`image/jpeg`、`image/gif`、`image/webp` 的 blob 会作为图片接受）。
 - **没有客户端的文件或终端方法。** mare 自己读写文件并运行命令。它不会调用编辑器的 `fs/*` 或 `terminal/*` 方法。
 - **不要求认证。** `initialize` 不返回认证方式，收到 `authenticate` 时返回空成功响应。
 

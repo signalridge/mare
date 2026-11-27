@@ -146,6 +146,18 @@ fn push_text_block(texts: &mut Vec<String>, content: &mut Vec<J>, text: String) 
     texts.push(text);
 }
 
+fn push_image_block(images: &mut Vec<J>, content: &mut Vec<J>, data: String, mime: String) {
+    let image = json!({ "type": "image", "data": data, "mime": mime });
+    images.push(image.clone());
+    content.push(image);
+}
+
+fn supported_blob_image_mime(mime_type: Option<&str>) -> Option<String> {
+    let raw = mime_type?.trim();
+    let media_type = raw.split(';').next()?.trim().to_ascii_lowercase();
+    matches!(media_type.as_str(), "image/png" | "image/jpeg" | "image/gif" | "image/webp").then_some(media_type)
+}
+
 /// Extract ordered text and image blocks from an ACP `session/prompt` request.
 pub(super) fn extract_prompt(blocks: &[ContentBlock]) -> Result<ExtractedPrompt, String> {
     let mut texts = Vec::new();
@@ -156,10 +168,16 @@ pub(super) fn extract_prompt(blocks: &[ContentBlock]) -> Result<ExtractedPrompt,
             ContentBlock::Text(t) => push_text_block(&mut texts, &mut content, t.text.clone()),
             ContentBlock::Resource(r) => match &r.resource {
                 EmbeddedResourceResource::TextResourceContents(tr) => {
-                    push_text_block(&mut texts, &mut content, tr.text.clone());
+                    let text =
+                        if tr.uri.trim().is_empty() { tr.text.clone() } else { format!("[{}]\n{}", tr.uri, tr.text) };
+                    push_text_block(&mut texts, &mut content, text);
                 }
-                EmbeddedResourceResource::BlobResourceContents(_) => {
-                    return Err("binary embedded resource prompt content is not supported".into());
+                EmbeddedResourceResource::BlobResourceContents(blob) => {
+                    if let Some(mime) = supported_blob_image_mime(blob.mime_type.as_deref()) {
+                        push_image_block(&mut images, &mut content, blob.blob.clone(), mime);
+                    } else {
+                        return Err("binary embedded resource prompt content is not supported".into());
+                    }
                 }
                 _ => return Err("unsupported embedded resource prompt content".into()),
             },
@@ -169,9 +187,7 @@ pub(super) fn extract_prompt(blocks: &[ContentBlock]) -> Result<ExtractedPrompt,
                 push_text_block(&mut texts, &mut content, format!("[resource_link name={name} uri={uri}]"));
             }
             ContentBlock::Image(img) => {
-                let image = json!({ "type": "image", "data": img.data, "mime": img.mime_type });
-                images.push(image.clone());
-                content.push(image);
+                push_image_block(&mut images, &mut content, img.data.clone(), img.mime_type.clone());
             }
             ContentBlock::Audio(_) => return Err("audio prompt content is not supported".into()),
             _ => return Err("unsupported ACP prompt content".into()),
@@ -209,11 +225,29 @@ fn tool_call_update_start(id: &J, name: &str, arguments: &J, info: Option<&J>) -
     })
 }
 
-fn tool_result_text(content: &J) -> String {
+fn block_image_to_acp(block: &J) -> Option<J> {
+    if block.get("type").and_then(J::as_str) != Some("image") {
+        return None;
+    }
+    let data = block.get("data").and_then(J::as_str).unwrap_or("");
+    let mime = block.get("mime").or_else(|| block.get("mimeType")).and_then(J::as_str).unwrap_or("");
+    (!data.is_empty() && !mime.is_empty()).then(|| json!({ "type": "image", "data": data, "mimeType": mime }))
+}
+
+fn tool_result_content(content: &J) -> Vec<J> {
     match content {
-        J::String(s) => s.clone(),
-        J::Array(a) => a.iter().filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("\n"),
-        _ => String::new(),
+        J::String(s) => vec![json!({ "type": "content", "content": { "type": "text", "text": s } })],
+        J::Array(blocks) => blocks
+            .iter()
+            .filter_map(|block| {
+                if let Some(text) = block.get("text").and_then(J::as_str) {
+                    Some(json!({ "type": "content", "content": { "type": "text", "text": text } }))
+                } else {
+                    block_image_to_acp(block).map(|img| json!({ "type": "content", "content": img }))
+                }
+            })
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -222,13 +256,63 @@ fn tool_call_update_end(id: &J, failed: bool, content: &J) -> J {
         "sessionUpdate": "tool_call_update",
         "toolCallId": id,
         "status": if failed { "failed" } else { "completed" },
-        "content": [{ "type": "content", "content": { "type": "text", "text": tool_result_text(content) } }],
+        "content": tool_result_content(content),
     })
 }
 
 /// Events translated into ACP `SessionUpdate` notifications by [`to_update`].
 pub(super) fn handles_event(name: &str) -> bool {
     matches!(name, "item/delta" | "item/started" | "item/completed" | "usage/changed")
+}
+
+pub(super) fn has_truncated_image(content: &J) -> bool {
+    content.as_array().is_some_and(|blocks| {
+        blocks.iter().any(|block| {
+            block.get("type").and_then(J::as_str) == Some("image")
+                && block.get("truncated").and_then(J::as_bool) == Some(true)
+                && block.get("data").and_then(J::as_str).is_none_or(str::is_empty)
+        })
+    })
+}
+
+fn parse_completed_tool_call(p: &J) -> Option<(&J, bool, &J)> {
+    let item = p.get("item")?;
+    if item.get("type").and_then(J::as_str) != Some("tool_call") {
+        return None;
+    }
+    let call_id = item.get("tool_call_id").or_else(|| p.get("item_id"))?;
+    let is_error = item
+        .pointer("/message/is_error")
+        .and_then(J::as_bool)
+        .or_else(|| item.pointer("/result/is_error").and_then(J::as_bool))
+        .unwrap_or(false);
+    let status_failed = item["status"].as_str().is_some_and(|s| s != "completed");
+    let failed = is_error || status_failed;
+    let content = item.pointer("/message/content").unwrap_or(&J::Null);
+    Some((call_id, failed, content))
+}
+
+async fn fetch_full_tool_result_content(host: &Host, call_id: &str) -> Option<J> {
+    let msgs = call_service(host, "agent", "messages", vec![]).await.ok()?;
+    msgs.as_array()?.iter().rev().find_map(|msg| {
+        (msg.get("role").and_then(J::as_str) == Some("tool_result")
+            && msg.get("tool_call_id").and_then(J::as_str) == Some(call_id))
+        .then(|| msg.get("content").cloned())
+        .flatten()
+    })
+}
+
+/// Resolve an `item/completed` event into an ACP `tool_call_update`, reading the full tool result
+/// from `agent.messages` when inline image blocks were truncated by the kernel wire bound.
+pub(super) async fn hydrate_tool_result_update(host: &Host, p: &J) -> Option<J> {
+    let (call_id, failed, content) = parse_completed_tool_call(p)?;
+    if has_truncated_image(content)
+        && let Some(id_str) = call_id.as_str()
+        && let Some(full) = fetch_full_tool_result_content(host, id_str).await
+    {
+        return Some(tool_call_update_end(call_id, failed, &full));
+    }
+    Some(tool_call_update_end(call_id, failed, content))
 }
 
 /// Map a mare kernel event to an ACP `SessionUpdate` (as JSON).
@@ -254,19 +338,7 @@ pub(super) fn to_update(name: &str, p: &J) -> Option<J> {
             Some(tool_call_update_start(call_id, tool_name, &item["arguments"], info))
         }
         "item/completed" => {
-            let item = p.get("item")?;
-            if item.get("type").and_then(J::as_str) != Some("tool_call") {
-                return None;
-            }
-            let call_id = item.get("tool_call_id").or_else(|| p.get("item_id"))?;
-            let is_error = item
-                .pointer("/message/is_error")
-                .and_then(J::as_bool)
-                .or_else(|| item.pointer("/result/is_error").and_then(J::as_bool))
-                .unwrap_or(false);
-            let status_failed = item["status"].as_str().is_some_and(|s| s != "completed");
-            let failed = is_error || status_failed;
-            let content = item.pointer("/message/content").unwrap_or(&J::Null);
+            let (call_id, failed, content) = parse_completed_tool_call(p)?;
             Some(tool_call_update_end(call_id, failed, content))
         }
         "usage/changed" => {
@@ -336,16 +408,10 @@ pub(super) fn messages_to_updates_with_info(
                                     }
                                 }
                                 Some("image") => {
-                                    let data = block.get("data").and_then(J::as_str).unwrap_or("");
-                                    let mime = block
-                                        .get("mime")
-                                        .or_else(|| block.get("mimeType"))
-                                        .and_then(J::as_str)
-                                        .unwrap_or("");
-                                    if !data.is_empty() && !mime.is_empty() {
+                                    if let Some(img) = block_image_to_acp(block) {
                                         out.push(json!({
                                             "sessionUpdate": "user_message_chunk",
-                                            "content": { "type": "image", "data": data, "mimeType": mime },
+                                            "content": img,
                                         }));
                                     }
                                 }
@@ -878,5 +944,80 @@ mod tests {
         assert!(parse_list_cursor(Some("100")).is_err());
         assert!(parse_list_cursor(Some("100:")).is_err());
         assert!(parse_list_cursor(Some("abc:id")).is_err());
+    }
+
+    #[test]
+    fn extract_prompt_preserves_text_resource_uri_and_accepts_image_blobs() {
+        use agent_client_protocol::v1::schema::{
+            BlobResourceContents, EmbeddedResource, EmbeddedResourceResource, ResourceLink, TextResourceContents,
+        };
+        let blocks = vec![
+            ContentBlock::Resource(EmbeddedResource::new(EmbeddedResourceResource::TextResourceContents(
+                TextResourceContents::new("body", "file:///notes/a.md"),
+            ))),
+            ContentBlock::Resource(EmbeddedResource::new(EmbeddedResourceResource::BlobResourceContents(
+                BlobResourceContents::new("AQID", "file:///pic.png").mime_type("image/png; charset=binary"),
+            ))),
+            ContentBlock::ResourceLink(ResourceLink::new("ref", "file:///b.md")),
+        ];
+        let parsed = extract_prompt(&blocks).expect("prompt");
+        assert_eq!(parsed.images.len(), 1);
+        assert_eq!(parsed.images[0], json!({ "type": "image", "data": "AQID", "mime": "image/png" }));
+        assert!(parsed.text.contains("[file:///notes/a.md]\nbody"), "{}", parsed.text);
+        assert_eq!(parsed.content.len(), 3);
+
+        let bad_blob =
+            vec![ContentBlock::Resource(EmbeddedResource::new(EmbeddedResourceResource::BlobResourceContents(
+                BlobResourceContents::new("AQID", "file:///doc.pdf").mime_type("application/pdf"),
+            )))];
+        assert!(extract_prompt(&bad_blob).is_err());
+    }
+
+    #[test]
+    fn tool_result_images_forward_live_and_on_replay_without_empty_text() {
+        let img_only = vec![json!({ "type": "image", "data": "AQID", "mime": "image/png" })];
+        let live = to_update(
+            "item/completed",
+            &json!({
+                "turn_id": "t1",
+                "item_id": "c1",
+                "status": "completed",
+                "item": {
+                    "type": "tool_call",
+                    "tool_call_id": "c1",
+                    "name": "img_only",
+                    "status": "completed",
+                    "message": { "role": "tool_result", "tool_call_id": "c1", "content": img_only, "is_error": false }
+                }
+            }),
+        )
+        .expect("live tool_call_update");
+        assert_eq!(
+            live["content"],
+            json!([{ "type": "content", "content": { "type": "image", "data": "AQID", "mimeType": "image/png" } }])
+        );
+        assert!(
+            serde_json::from_value::<SessionNotification>(json!({ "sessionId": "s1", "update": live })).is_ok(),
+            "live image tool result must parse as SessionNotification"
+        );
+
+        let replay = messages_to_updates(&[
+            json!({ "role": "assistant", "content": [{ "type": "tool_call", "id": "c1", "name": "img_only", "arguments": {} }] }),
+            json!({ "role": "tool_result", "tool_call_id": "c1", "content": [
+                { "type": "image", "data": "AQID", "mime": "image/png" }
+            ], "is_error": false }),
+        ]);
+        assert_eq!(replay.len(), 2);
+        assert_eq!(
+            replay[1]["content"],
+            json!([{ "type": "content", "content": { "type": "image", "data": "AQID", "mimeType": "image/png" } }])
+        );
+        assert!(
+            serde_json::from_value::<SessionNotification>(json!({ "sessionId": "s1", "update": replay[1] })).is_ok(),
+            "replayed image tool result must parse as SessionNotification"
+        );
+
+        assert!(has_truncated_image(&json!([{ "type": "image", "mime": "image/png", "truncated": true }])));
+        assert!(!has_truncated_image(&json!([{ "type": "image", "data": "AQID", "mime": "image/png" }])));
     }
 }
