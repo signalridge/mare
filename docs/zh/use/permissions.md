@@ -24,9 +24,9 @@ mare --yolo                          # same as --permission full-access
 mare.plugin("permissions", { preset = "auto" })
 ```
 
-在会话内，`/permission` 打开选择器，`/permission read-only`（或 `auto`、`full-access`）直接切换。`/yolo` 切换到 `full-access`；mare 会请你确认。`/permission log` 显示做出了什么决定及原因，`/permission caps` 显示本机沙箱后端能强制执行什么。会话会记录它的预设，所以恢复会话时会还原。
+在会话内，`/permission` 打开选择器，`/permission read-only`（或 `auto`、`full-access`）直接切换，`Shift+Tab` 按 `read-only` → `auto` → `full-access` → `read-only` 顺序循环。`/yolo` 切换到 `full-access`；mare 会请你确认。`/permission log` 显示做出了什么决定及原因，`/permission caps` 显示本机沙箱后端能强制执行什么。会话会记录它的预设，所以恢复会话时会还原。
 
-在不受信任的项目中（见下文），显式传入的命令行标志预设（`--permission` 或 `--yolo`）仍优先；未通过这两个标志指定时，mare 会使用可配置的 `untrusted_preset`（默认为 `read-only`），而不使用常规 `preset`（包括 `--set plugins.permissions.preset=...`），撤销项目信任后也会按该上限降级。
+在不受信任的项目中（见下文），显式传入的命令行标志预设（`--permission` 或 `--yolo`）仍优先；未通过这两个标志指定时，mare 会使用可配置的 `untrusted_preset`（默认为 `read-only`），而不使用常规 `preset`（包括 `--set plugins.permissions.preset=...`），撤销项目信任后也会按该上限降级。在未受信任目录中，按 `Shift+Tab` 仍可直接降级到 `read-only`（例如从 `full-access` 切回 `read-only`）；若下一档为 `auto` 或 `full-access`，则会打开与 `/permission` 相同的选择器并默认选中当前档，而不会单次按键直接提权。按 `Esc` 保持当前预设不变，显式选择 `auto` 立即生效，选择 `full-access` 仍需确认；切换预设不会改变目录的信任状态。
 
 在 `auto` 和 `read-only` 下，shell 命令在沙箱内运行而无需询问。如果命令因为沙箱拒绝了某些操作而失败，模型可以重试，并请求拒绝信息中指出的最小额外权限：网络访问（对某个主机）、对某个路径的写权限，或全部权限。这次重试会询问你。审批只适用于那一次调用，绝不会自动重试。
 

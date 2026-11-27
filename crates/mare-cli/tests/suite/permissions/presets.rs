@@ -132,6 +132,21 @@ async fn first_switch_to_full_access_is_confirmed_once() {
         )
         .await;
         assert_eq!(asked, 1);
+        // Even after confirming once in a trusted folder, switching into full-access
+        // in an untrusted folder still requires confirmation.
+        let untrusted_asked: i64 = eval(
+            &h,
+            r#"
+            local n = 0
+            mare.trusted = false
+            P:set("read-only")
+            mare.ui.confirm = function() n = n + 1 return true end
+            assert(P:set("full-access", { confirm = true }))
+            return n
+            "#,
+        )
+        .await;
+        assert_eq!(untrusted_asked, 1);
         h.shutdown().await;
     })
     .await

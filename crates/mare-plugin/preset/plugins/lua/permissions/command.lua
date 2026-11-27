@@ -11,6 +11,35 @@ return function(D)
 	local function vote(...)
 		return D.vote.vote(...)
 	end
+	local function pick_preset()
+		local items, sel = {}, 1
+		for i, name in ipairs(PRESETS) do
+			if name == P.preset then
+				sel = i
+			end
+			items[i] = {
+				label = ("%s  %s"):format(LABEL[name], name),
+				detail = DESC[name] .. (name == P.preset and "  (current)" or ""),
+			}
+		end
+		local title = P.preset == "custom" and "Permissions — current: custom (not a preset)" or "Permissions"
+		if not mare.trusted then
+			title = title .. " (untrusted folder)"
+		end
+		-- what this host's sandbox can actually enforce
+		local caps = mare.proc.sandbox.capabilities()
+		title = title .. "  ·  sandbox " .. tostring(caps.summary or caps.mechanism)
+		if is_partial() then
+			title = title .. "  ·  PARTIAL (some sandbox controls unavailable)"
+		end
+		local i = mare.ui.select({ title = title, items = items, selected = sel })
+		if i then
+			local ok, err = set_preset(PRESETS[i], { source = "user", confirm = true })
+			if not ok and err ~= "cancelled" then
+				mare.ui.notify("permission: " .. tostring(err), "warning")
+			end
+		end
+	end
 	local cycle = { "read-only", "auto", "full-access" }
 	local action = mare.keymap.action("permissions.cycle", function()
 		ctx:spawn(function()
@@ -22,8 +51,7 @@ return function(D)
 				end
 			end
 			if not mare.trusted and next_preset ~= "read-only" then
-				mare.ui.notify("Permission mode cannot be raised while this folder is untrusted.", "warning")
-				return
+				return pick_preset()
 			end
 			local ok, err = set_preset(next_preset, { source = "user", confirm = true })
 			if not ok and err ~= "cancelled" then
@@ -130,30 +158,7 @@ return function(D)
 					end
 					return
 				end
-				local items, sel = {}, 1
-				for i, name in ipairs(PRESETS) do
-					if name == P.preset then
-						sel = i
-					end
-					items[i] = {
-						label = ("%s  %s"):format(LABEL[name], name),
-						detail = DESC[name] .. (name == P.preset and "  (current)" or ""),
-					}
-				end
-				local title = P.preset == "custom" and "Permissions — current: custom (not a preset)" or "Permissions"
-				-- what this host's sandbox can actually enforce
-				local caps = mare.proc.sandbox.capabilities()
-				title = title .. "  ·  sandbox " .. tostring(caps.summary or caps.mechanism)
-				if is_partial() then
-					title = title .. "  ·  PARTIAL (some sandbox controls unavailable)"
-				end
-				local i = mare.ui.select({ title = title, items = items, selected = sel })
-				if i then
-					local ok, err = set_preset(PRESETS[i], { source = "user", confirm = true })
-					if not ok and err ~= "cancelled" then
-						mare.ui.notify("permission: " .. tostring(err), "warning")
-					end
-				end
+				return pick_preset()
 			end,
 		})
 		ctx.commands:register("yolo", {

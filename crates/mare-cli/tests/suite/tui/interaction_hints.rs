@@ -436,10 +436,109 @@ async fn shift_tab_cycles_permissions_but_respects_untrusted_folder() {
         t.key(KeyCode::Escape, Modifiers::NONE);
         t.ctrl('c');
         t.step().await;
-        exec(&t.vt.host, "mare.trusted = false; P:set('read-only')").await;
+        exec(&t.vt.host, "mare.trusted = false; P:set('full-access')").await;
+        // Untrusted directory: stepping down from FULL to READ still cycles directly.
         t.key(KeyCode::BackTab, Modifiers::SHIFT);
-        tokio::time::timeout(Duration::from_secs(5), t.until("untrusted explanation", |s| s.to_lowercase().contains("untrusted"))).await.expect("untrusted explanation did not appear");
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            t.until("untrusted downgrade to read-only", |s| s.lines().last().is_some_and(|bar| bar.contains(read_badge))),
+        )
+        .await
+        .expect("untrusted Shift+Tab from full-access must step down to read-only");
         assert_eq!(eval::<String>(&t.vt.host, "return P:preset()").await, "read-only");
+        assert!(!eval::<bool>(&t.vt.host, "return mare.trusted").await, "trust state must stay false");
+
+        // Next Shift+Tab from READ would raise to AUTO: opens the /permission picker with READ selected.
+        t.key(KeyCode::BackTab, Modifiers::SHIFT);
+        let opened = tokio::time::timeout(
+            Duration::from_secs(5),
+            t.until("untrusted permission picker", |s| {
+                s.contains("Permissions (untrusted folder)") && s.contains("READ  read-only")
+            }),
+        )
+        .await;
+        assert!(opened.is_ok(), "untrusted Shift+Tab did not open permission picker; screen:\n{}", t.screen());
+        // Pressing Enter immediately keeps the default-selected current mode (READ).
+        t.key(KeyCode::Enter, Modifiers::NONE);
+        t.step().await;
+        assert_eq!(eval::<String>(&t.vt.host, "return P:preset()").await, "read-only");
+        assert!(!eval::<bool>(&t.vt.host, "return mare.trusted").await);
+
+        // Opening again and pressing Esc leaves READ unchanged.
+        t.key(KeyCode::BackTab, Modifiers::SHIFT);
+        let reopened = tokio::time::timeout(
+            Duration::from_secs(5),
+            t.until("untrusted picker before esc", |s| s.contains("Permissions (untrusted folder)")),
+        )
+        .await;
+        assert!(reopened.is_ok(), "picker did not reopen; screen:\n{}", t.screen());
+        t.key(KeyCode::Escape, Modifiers::NONE);
+        t.step().await;
+        assert_eq!(eval::<String>(&t.vt.host, "return P:preset()").await, "read-only");
+        assert!(!eval::<bool>(&t.vt.host, "return mare.trusted").await);
+
+        // Explicitly selecting AUTO in the picker switches to AUTO without changing trust.
+        t.key(KeyCode::BackTab, Modifiers::SHIFT);
+        let for_auto = tokio::time::timeout(
+            Duration::from_secs(5),
+            t.until("untrusted picker for auto", |s| s.contains("Permissions (untrusted folder)")),
+        )
+        .await;
+        assert!(for_auto.is_ok(), "picker did not open for auto; screen:\n{}", t.screen());
+        t.key(KeyCode::Down, Modifiers::NONE);
+        t.key(KeyCode::Enter, Modifiers::NONE);
+        let auto_ok = tokio::time::timeout(Duration::from_secs(5), t.until("auto preset from picker", |s| s.contains(auto_badge))).await;
+        assert!(auto_ok.is_ok(), "explicit AUTO selection in untrusted picker did not activate; screen:\n{}", t.screen());
+        assert_eq!(eval::<String>(&t.vt.host, "return P:preset()").await, "auto");
+        assert!(!eval::<bool>(&t.vt.host, "return mare.trusted").await, "explicit AUTO must not trust folder");
+
+        // Next Shift+Tab from AUTO would raise to FULL: opens picker with AUTO selected; picking FULL still asks for confirmation.
+        t.key(KeyCode::BackTab, Modifiers::SHIFT);
+        let from_auto = tokio::time::timeout(
+            Duration::from_secs(5),
+            t.until("untrusted picker from auto", |s| s.contains("Permissions (untrusted folder)")),
+        )
+        .await;
+        assert!(from_auto.is_ok(), "picker did not open from auto; screen:\n{}", t.screen());
+        t.key(KeyCode::Down, Modifiers::NONE);
+        t.key(KeyCode::Enter, Modifiers::NONE);
+        let confirm_full = tokio::time::timeout(
+            Duration::from_secs(5),
+            t.until("untrusted full access confirmation", |s| s.contains("Full access")),
+        )
+        .await;
+        assert!(confirm_full.is_ok(), "selecting FULL in untrusted folder must still ask for confirmation; screen:\n{}", t.screen());
+        // Cancel first -> stays AUTO.
+        t.key(KeyCode::Char('n'), Modifiers::NONE);
+        t.step().await;
+        assert_eq!(eval::<String>(&t.vt.host, "return P:preset()").await, "auto");
+        assert!(!eval::<bool>(&t.vt.host, "return mare.trusted").await);
+
+        // Confirm FULL -> switches to FULL, trust still false.
+        t.key(KeyCode::BackTab, Modifiers::SHIFT);
+        let for_full = tokio::time::timeout(
+            Duration::from_secs(5),
+            t.until("untrusted picker for full confirm", |s| s.contains("Permissions (untrusted folder)")),
+        )
+        .await;
+        assert!(for_full.is_ok(), "picker did not reopen for full; screen:\n{}", t.screen());
+        t.key(KeyCode::Down, Modifiers::NONE);
+        t.key(KeyCode::Enter, Modifiers::NONE);
+        let confirm_yes = tokio::time::timeout(
+            Duration::from_secs(5),
+            t.until("untrusted full confirm yes", |s| s.contains("Full access")),
+        )
+        .await;
+        assert!(confirm_yes.is_ok(), "full confirmation did not reappear; screen:\n{}", t.screen());
+        t.key(KeyCode::Char('y'), Modifiers::NONE);
+        let full_ok = tokio::time::timeout(
+            Duration::from_secs(5),
+            t.until("full preset from untrusted picker", |s| s.lines().last().is_some_and(|bar| bar.contains("FULL"))),
+        )
+        .await;
+        assert!(full_ok.is_ok(), "confirmed FULL did not activate; screen:\n{}", t.screen());
+        assert_eq!(eval::<String>(&t.vt.host, "return P:preset()").await, "full-access");
+        assert!(!eval::<bool>(&t.vt.host, "return mare.trusted").await, "confirmed FULL must not trust folder");
     })
     .await
 }
