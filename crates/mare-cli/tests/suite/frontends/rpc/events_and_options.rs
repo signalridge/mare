@@ -138,13 +138,21 @@ fn rpc_invalid_builtin_event_fails_the_stream() {
     let init = c.call_raw("initialize", json!({"protocol_version": "3.0"}), |_| json!(null));
     let sid = init["result"]["session"]["session_id"].as_str().expect("session_id").to_string();
     c.call_raw("events.subscribe", json!({"scope":"all","include":["turn/started"]}), |_| json!(null));
-    let started = c.call_raw("agent.prompt", json!({"session_id": sid, "input":"go"}), |_| json!(null));
-    let wait_req = c.request("agent.wait", json!({"session_id": sid, "turn_id": started["result"]["turn_id"]}));
+    let prompt_req = c.request("agent.prompt", json!({"session_id": sid, "input": "go"}));
+    let mut wait_req = None;
     loop {
         let line = c.read();
-        assert_ne!(line.get("id").and_then(Value::as_u64), Some(wait_req), "invalid event did not fail: {line}");
         if line["method"] == "stream.failed" {
             break;
+        }
+        if line.get("method").is_none() && line.get("id").and_then(Value::as_u64) == Some(prompt_req) {
+            assert!(line["error"].is_null(), "agent.prompt failed: {line}");
+            let turn_id = line["result"]["turn_id"].as_str().expect("turn_id");
+            wait_req = Some(c.request("agent.wait", json!({"session_id": sid, "turn_id": turn_id})));
+            continue;
+        }
+        if let Some(wid) = wait_req {
+            assert_ne!(line.get("id").and_then(Value::as_u64), Some(wid), "invalid event did not fail: {line}");
         }
     }
     c.kill_and_wait();

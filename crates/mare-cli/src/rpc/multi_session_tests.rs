@@ -31,7 +31,7 @@ impl Drop for EnvGuard {
 async fn read_reply(cr: &mut (impl AsyncBufReadExt + Unpin), id: i64) -> J {
     loop {
         let msg = rpc_read(cr).await;
-        if msg["id"] == id {
+        if msg.get("method").is_none() && msg["id"] == id {
             return msg;
         }
     }
@@ -1538,16 +1538,19 @@ async fn abort_on_other_session_does_not_cancel_in_flight_approval_request() {
                 json!({"jsonrpc":"2.0","id":10,"method":"agent.prompt","params":{"session_id":s1,"input":"go"}}),
             )
             .await;
-            let p10_start = read_reply(&mut cr, 10).await;
-            assert!(p10_start.get("error").is_none(), "{p10_start}");
-            let turn_id = p10_start["result"]["turn_id"].as_str().unwrap().to_string();
-            let approval_req = loop {
+            let mut p10_start = None;
+            let mut approval_req = None;
+            while p10_start.is_none() || approval_req.is_none() {
                 let msg = rpc_read(&mut cr).await;
-                if msg["method"] == "approval.request" {
-                    break msg;
+                if msg.get("method").is_none() && msg["id"] == 10 {
+                    assert!(msg.get("error").is_none(), "{msg}");
+                    p10_start = Some(msg);
+                } else if msg["method"] == "approval.request" {
+                    approval_req = Some(msg);
                 }
-            };
-            let approval_id = approval_req["id"].clone();
+            }
+            let turn_id = p10_start.unwrap()["result"]["turn_id"].as_str().unwrap().to_string();
+            let approval_id = approval_req.unwrap()["id"].clone();
 
             // Cancel s2 while s1's approval.request is still unanswered.
             rpc_send(&mut cw, json!({"jsonrpc":"2.0","id":11,"method":"agent.cancel","params":{"session_id":s2}})).await;
@@ -6195,19 +6198,22 @@ async fn agent_cancel_sends_cancel_request_for_pending_approval() {
                 json!({"jsonrpc":"2.0","id":2,"method":"agent.prompt","params":{"session_id":sid,"input":"go"}}),
             )
             .await;
-            let p2 = read_reply(&mut cr, 2).await;
-            assert!(p2["error"].is_null(), "{p2}");
-            let approval_req = tokio::time::timeout(Duration::from_secs(5), async {
-                loop {
+            let mut p2 = None;
+            let mut approval_req = None;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while p2.is_none() || approval_req.is_none() {
                     let msg = rpc_read(&mut cr).await;
-                    if msg.get("method").and_then(J::as_str) == Some(methods::APPROVAL_REQUEST) {
-                        return msg;
+                    if msg.get("method").is_none() && msg["id"] == 2 {
+                        assert!(msg["error"].is_null(), "{msg}");
+                        p2 = Some(msg);
+                    } else if msg.get("method").and_then(J::as_str) == Some(methods::APPROVAL_REQUEST) {
+                        approval_req = Some(msg);
                     }
                 }
             })
             .await
-            .expect("expected approval.request");
-            let approval_id = approval_req["id"].clone();
+            .expect("expected agent.prompt reply and approval.request");
+            let approval_id = approval_req.unwrap()["id"].clone();
 
             // Calling agent.cancel on the session MUST cancel the pending approval.request via $/cancel_request.
             rpc_send(&mut cw, json!({"jsonrpc":"2.0","id":3,"method":"agent.cancel","params":{"session_id":sid}})).await;
