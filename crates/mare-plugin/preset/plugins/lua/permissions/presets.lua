@@ -336,21 +336,25 @@ return function(D)
 				("a sub-agent can't widen permissions beyond %s"):format(ceiling),
 				"permissions.ceiling_exceeded"
 		end
-		-- first switch to full access: confirm once (interactive switches only)
+		-- first switch to full access (and any interactive switch in an untrusted folder): confirm
 		if LIKE[name] == "full-access" and opts.confirm and LIKE[P.preset] ~= "full-access" then
 			local st = mare.state.read() or {}
-			if not st.full_access_confirmed then
+			if not st.full_access_confirmed or not mare.trusted then
 				if not mare.ui.connected() then
-					return nil, "full access needs a confirmation the first time", "permissions.needs_ui"
+					local why = mare.trusted and "full access needs a confirmation the first time"
+						or "full access needs a confirmation in an untrusted folder"
+					return nil, why, "permissions.needs_ui"
 				end
-				local ok = mare.ui.confirm(
-					"Full access: commands run without a sandbox and nothing asks for approval. Continue?",
-					false
-				)
+				local prompt = mare.trusted
+						and "Full access: commands run without a sandbox and nothing asks for approval. Continue?"
+					or "Full access (untrusted folder): commands run without a sandbox and nothing asks for approval. Continue?"
+				local ok = mare.ui.confirm(prompt, false)
 				if not ok then
 					return nil, "cancelled", "cancelled"
 				end
-				lib.save_state(ctx, "full_access_confirmed", true)
+				if mare.trusted and not st.full_access_confirmed then
+					lib.save_state(ctx, "full_access_confirmed", true)
+				end
 			end
 		end
 		local ok, err = apply_sandbox(spec_for(name))

@@ -24,9 +24,9 @@ mare --yolo                          # same as --permission full-access
 mare.plugin("permissions", { preset = "auto" })
 ```
 
-セッション内では、`/permission` でピッカーが開き、`/permission read-only` (または `auto`、`full-access`) で直接切り替えられます。`/yolo` は `full-access` に切り替えます。mare は確認を求めます。`/permission log` は何がどう決定されたかとその理由を表示し、`/permission caps` はこのマシンのサンドボックスバックエンドが強制できることを表示します。セッションはプリセットを記録するため、再開すると復元されます。
+セッション内では、`/permission` でピッカーが開き、`/permission read-only` (または `auto`、`full-access`) で直接切り替えられます。`Shift+Tab` は `read-only` → `auto` → `full-access` → `read-only` の順に循環します。`/yolo` は `full-access` に切り替えます。mare は確認を求めます。`/permission log` は何がどう決定されたかとその理由を表示し、`/permission caps` はこのマシンのサンドボックスバックエンドが強制できることを表示します。セッションはプリセットを記録するため、再開すると復元されます。
 
-信頼されていないプロジェクト (後述) では、明示的な CLI フラグプリセット (`--permission` または `--yolo`) が最優先されます。これらが指定されていない場合、通常の `preset` (`--set plugins.permissions.preset=...` による指定を含む) ではなく設定可能な `untrusted_preset` (既定は `read-only`) で起動し、プロジェクトの信頼が取り消された場合もその上限までダウングレードされます。
+信頼されていないプロジェクト (後述) では、明示的な CLI フラグプリセット (`--permission` または `--yolo`) が最優先されます。これらが指定されていない場合、通常の `preset` (`--set plugins.permissions.preset=...` による指定を含む) ではなく設定可能な `untrusted_preset` (既定は `read-only`) で起動し、プロジェクトの信頼が取り消された場合もその上限までダウングレードされます。未信頼ディレクトリでは、`Shift+Tab` で `read-only` へ下げる操作 (`full-access` からなど) はそのまま直接切り替わりますが、次の候補が `auto` または `full-access` になる場合は 1 回のキー押下で昇格させず、現在のプリセットを選択した状態で `/permission` と同じピッカーを開きます。`Esc` を押すと現在のプリセットのまま変わりません。明示的に `auto` を選ぶとそのセッションに適用され、`full-access` を選ぶと引き続き確認が求められます。いずれの切り替えもプロジェクトの信頼状態は変更しません。
 
 `auto` と `read-only` では、シェルコマンドは確認なしでサンドボックス内で実行されます。サンドボックスが何かを拒否したためにコマンドが失敗した場合、モデルは、その拒否が示す最小限の追加権限を求めて再試行できます。追加権限は、ネットワークアクセス (特定のホストへの)、パスへの書き込みアクセス、またはすべてです。この再試行ではあなたに確認します。承認はその 1 回の呼び出しにだけ適用され、自動的に再試行されることはありません。
 
