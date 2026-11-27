@@ -8,10 +8,10 @@
 
 | プラットフォーム | ターゲット | 配布形式 |
 | --- | --- | --- |
-| macOS、Apple シリコン | `aarch64-apple-darwin` | `.tar.gz`、Homebrew cask、Nix |
-| macOS、Intel | `x86_64-apple-darwin` | `.tar.gz`、Homebrew cask、Nix |
-| Linux、x86-64 (静的 musl) | `x86_64-unknown-linux-musl` | `.tar.gz`、`.deb`、`.rpm`、Homebrew cask、AUR、Nix、GHCR コンテナ |
-| Linux、ARM64 (静的 musl) | `aarch64-unknown-linux-musl` | `.tar.gz`、`.deb`、`.rpm`、Homebrew cask、AUR、Nix、GHCR コンテナ |
+| macOS、Apple シリコン | `aarch64-apple-darwin` | `.tar.gz`、Homebrew formula、Nix |
+| macOS、Intel | `x86_64-apple-darwin` | `.tar.gz`、Homebrew formula、Nix |
+| Linux、x86-64 (静的 musl) | `x86_64-unknown-linux-musl` | `.tar.gz`、`.deb`、`.rpm`、Homebrew formula、AUR、Nix、GHCR コンテナ |
+| Linux、ARM64 (静的 musl) | `aarch64-unknown-linux-musl` | `.tar.gz`、`.deb`、`.rpm`、Homebrew formula、AUR、Nix、GHCR コンテナ |
 | Windows、x86-64 | `x86_64-pc-windows-msvc` | `.zip`、Scoop マニフェスト |
 | Windows、ARM64 | `aarch64-pc-windows-msvc` | `.zip`、Scoop マニフェスト |
 
@@ -29,12 +29,12 @@ curl -fsSL https://signalridge.github.io/mare/install.sh | sh
 
 既定では `~/.local/bin` にインストールされます。配置先は `MARE_INSTALL_DIR`、バージョン固定は `MARE_VERSION=vX.Y.Z` で指定できます。
 
-### Homebrew cask
+### Homebrew
 
 ```sh
 brew tap signalridge/tap
 brew trust signalridge/tap
-brew install --cask mare
+brew install signalridge/tap/mare
 ```
 
 ### Nix (Flake と NUR)
@@ -68,6 +68,8 @@ else
   false
 fi
 ```
+
+ブラウザーからアーカイブをダウンロードした場合は、実行前に macOS の隔離属性を解除してください: `xattr -d com.apple.quarantine ./mare`。
 
 ## Linux
 
@@ -111,7 +113,7 @@ yay -S mare-bin
 ```sh
 brew tap signalridge/tap
 brew trust signalridge/tap
-brew install --cask mare
+brew install signalridge/tap/mare
 ```
 
 ### Nix (Flake と NUR)
@@ -279,7 +281,7 @@ mare completion fish > ~/.config/fish/completions/mare.fish
 
 mare は自分自身のバイナリを置き換えません。アップデート方法:
 
-- パッケージマネージャーから導入した場合は、それぞれの更新コマンド (`brew upgrade --cask mare`、`scoop update mare`、`yay -Syu mare-bin`、`nix profile upgrade mare` など) を使います。
+- パッケージマネージャーから導入した場合は、それぞれの更新コマンド (`brew upgrade mare`、`scoop update mare`、`yay -Syu mare-bin`、`nix profile upgrade mare` など) を使います。
 - それ以外の場合は、ワンラインインストーラー (`install.sh` / `install.ps1`) を再実行するか、新しいアーカイブをダウンロード・検証して上記のとおり古い `mare` を上書きしてください。
 
 リリースビルドの TUI は、既定で 24 時間ごとに GitHub のリリースを確認し (`update-check.interval_hours` で間隔を変更可能、デバッグビルドは自動確認をスキップ)、新しいバージョンがあれば 1 行表示します。リクエストには `mare/<version>` 以外の識別情報は含まれません。確認を止めるには `init.lua` に次を書きます。
@@ -306,7 +308,7 @@ mare.setup { update_check = false }
 ## アンインストール
 
 1. 任意: `mare logout` で保存済みの認証情報を削除します。プロバイダーが対応していればトークンも失効させます。プロバイダー名を省略した場合、ログイン中のプロバイダーがちょうど 1 つのときだけ動作します。それ以外は `mare logout openai` のように名前を指定してください。
-2. パッケージマネージャーから導入した場合はアンインストールコマンド (`brew uninstall --cask mare` や `scoop uninstall mare` など) を実行し、手動導入の場合は `mare` バイナリを削除します。
+2. パッケージマネージャーから導入した場合はアンインストールコマンド (`brew uninstall mare` や `scoop uninstall mare` など) を実行し、手動導入の場合は `mare` バイナリを削除します。
 3. 痕跡を残したくなければ、上記のディレクトリを削除します。状態ディレクトリを削除すると、保存済みのセッションはすべて消えます。
 
 ```sh

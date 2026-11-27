@@ -160,6 +160,12 @@ def check_release_workflow(root: pathlib.Path) -> list[str]:
         errors.append("release.yaml build job must disable aws-lc jitter entropy on musl")
     if "readelf -l" not in build_block or "INTERP" not in build_block:
         errors.append("release.yaml build job must verify Linux musl binaries have no PT_INTERP")
+    if "codesign -v --strict" not in build_block:
+        errors.append("release.yaml build job must verify macOS binary signature with codesign -v --strict")
+    elif build_block.find("codesign -v --strict") < build_block.find("Package archive (Unix)"):
+        errors.append("release.yaml build job must run codesign -v --strict after packaging")
+    if "CARGO_TARGET_X86_64_APPLE_DARWIN_RUSTFLAGS" not in build_block or "-Wl,-adhoc_codesign" not in build_block:
+        errors.append("release.yaml build job must enable -Wl,-adhoc_codesign for x86_64-apple-darwin")
 
     release_block = extract_job_block(text, "release")
     if not release_block:
@@ -171,7 +177,7 @@ def check_release_workflow(root: pathlib.Path) -> list[str]:
             errors.append("release.yaml must not curl nfpm directly without ./.github/actions/setup-nfpm")
         if "scripts/release_manifests.py" not in release_block:
             errors.append("release.yaml release job must use scripts/release_manifests.py")
-        if 'cask "mare" do' in release_block or "pkgbase = mare-bin" in release_block:
+        if 'cask "mare" do' in release_block or "class Mare < Formula" in release_block or "pkgbase = mare-bin" in release_block:
             errors.append("release.yaml must not inline manifest templates; keep them in scripts/release_manifests.py")
         if "include-hidden-files: true" not in release_block:
             errors.append("release.yaml package-manifests upload must set include-hidden-files: true")
@@ -193,6 +199,29 @@ def check_release_workflow(root: pathlib.Path) -> list[str]:
         for image in ("ubuntu:20.04", "debian:11", "registry.access.redhat.com/ubi8/ubi"):
             if image not in verify_binary:
                 errors.append(f"release.yaml verify-binary must verify Linux binary inside {image}")
+
+    publish_hb = extract_job_block(text, "publish-homebrew")
+    if not publish_hb:
+        errors.append("release.yaml missing publish-homebrew job")
+    else:
+        if "manifests/Formula/mare.rb" not in publish_hb or "tap/mare.rb" not in publish_hb or "git -C tap add mare.rb" not in publish_hb:
+            errors.append("release.yaml publish-homebrew must publish manifests/Formula/mare.rb to tap/mare.rb")
+        if "tap/Formula" in publish_hb:
+            errors.append("release.yaml publish-homebrew must publish to tap root so root clinvk.rb stays active")
+        if "Casks/mare.rb" not in publish_hb or "git -C tap rm" not in publish_hb:
+            errors.append("release.yaml publish-homebrew must remove Casks/mare.rb from the tap")
+
+    verify_hb = extract_job_block(text, "verify-homebrew")
+    if not verify_hb:
+        errors.append("release.yaml missing verify-homebrew job")
+    else:
+        if "--cask" in verify_hb:
+            errors.append("release.yaml verify-homebrew must install the formula, not --cask")
+        if "brew test mare" not in verify_hb:
+            errors.append("release.yaml verify-homebrew must run brew test mare")
+        for os_name in ("macos-latest", "ubuntu-24.04"):
+            if os_name not in verify_hb:
+                errors.append(f"release.yaml verify-homebrew must cover {os_name}")
 
     verify_aur = extract_job_block(text, "verify-aur")
     if not verify_aur:
@@ -857,6 +886,33 @@ class ReleasePolicySelfTests(unittest.TestCase):
             )
             errs = check_release_workflow(root)
             self.assertTrue(any("ubi8" in e for e in errs), errs)
+
+    def test_release_workflow_catches_missing_codesign_and_cask_regressions(self):
+        rel_text = (self._repo_root() / ".github" / "workflows" / "release.yaml").read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            wf_dir = root / ".github" / "workflows"
+            wf_dir.mkdir(parents=True)
+
+            (wf_dir / "release.yaml").write_text(rel_text.replace("codesign -v --strict", "true"), encoding="utf-8")
+            errs = check_release_workflow(root)
+            self.assertTrue(any("codesign -v --strict" in e for e in errs), errs)
+
+            (wf_dir / "release.yaml").write_text(rel_text.replace("brew test mare", "brew --version"), encoding="utf-8")
+            errs = check_release_workflow(root)
+            self.assertTrue(any("brew test mare" in e for e in errs), errs)
+
+            (wf_dir / "release.yaml").write_text(rel_text.replace("Formula/mare.rb", "Casks/mare.rb"), encoding="utf-8")
+            errs = check_release_workflow(root)
+            self.assertTrue(any("tap/mare.rb" in e for e in errs), errs)
+
+            (wf_dir / "release.yaml").write_text(rel_text.replace("tap/mare.rb", "tap/Formula/mare.rb"), encoding="utf-8")
+            errs = check_release_workflow(root)
+            self.assertTrue(any("tap root" in e for e in errs), errs)
+
+            (wf_dir / "release.yaml").write_text(rel_text.replace("-Wl,-adhoc_codesign", ""), encoding="utf-8")
+            errs = check_release_workflow(root)
+            self.assertTrue(any("-Wl,-adhoc_codesign" in e for e in errs), errs)
 
 
 def main() -> int:

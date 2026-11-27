@@ -8,10 +8,10 @@ Release artifacts are built for six targets (`.github/workflows/release.yaml`):
 
 | Platform | Target | Artifacts |
 | --- | --- | --- |
-| macOS, Apple silicon | `aarch64-apple-darwin` | `.tar.gz`, Homebrew cask, Nix |
-| macOS, Intel | `x86_64-apple-darwin` | `.tar.gz`, Homebrew cask, Nix |
-| Linux, x86-64 (static musl) | `x86_64-unknown-linux-musl` | `.tar.gz`, `.deb`, `.rpm`, Homebrew cask, AUR, Nix, GHCR container |
-| Linux, ARM64 (static musl) | `aarch64-unknown-linux-musl` | `.tar.gz`, `.deb`, `.rpm`, Homebrew cask, AUR, Nix, GHCR container |
+| macOS, Apple silicon | `aarch64-apple-darwin` | `.tar.gz`, Homebrew formula, Nix |
+| macOS, Intel | `x86_64-apple-darwin` | `.tar.gz`, Homebrew formula, Nix |
+| Linux, x86-64 (static musl) | `x86_64-unknown-linux-musl` | `.tar.gz`, `.deb`, `.rpm`, Homebrew formula, AUR, Nix, GHCR container |
+| Linux, ARM64 (static musl) | `aarch64-unknown-linux-musl` | `.tar.gz`, `.deb`, `.rpm`, Homebrew formula, AUR, Nix, GHCR container |
 | Windows, x86-64 | `x86_64-pc-windows-msvc` | `.zip`, Scoop manifest |
 | Windows, ARM64 | `aarch64-pc-windows-msvc` | `.zip`, Scoop manifest |
 
@@ -29,12 +29,12 @@ curl -fsSL https://signalridge.github.io/mare/install.sh | sh
 
 By default, the script installs `mare` into `~/.local/bin`. Override `MARE_INSTALL_DIR` to change the target directory, or set `MARE_VERSION=vX.Y.Z` to install a specific release.
 
-### Homebrew cask
+### Homebrew
 
 ```sh
 brew tap signalridge/tap
 brew trust signalridge/tap
-brew install --cask mare
+brew install signalridge/tap/mare
 ```
 
 ### Nix (Flake and NUR)
@@ -68,6 +68,8 @@ else
   false
 fi
 ```
+
+If you downloaded the archive with a browser, clear the macOS quarantine attribute before running it: `xattr -d com.apple.quarantine ./mare`.
 
 ## Linux
 
@@ -111,7 +113,7 @@ yay -S mare-bin
 ```sh
 brew tap signalridge/tap
 brew trust signalridge/tap
-brew install --cask mare
+brew install signalridge/tap/mare
 ```
 
 ### Nix (Flake and NUR)
@@ -279,7 +281,7 @@ Restart the shell, or reload its completion system, to pick it up.
 
 mare does not replace its own binary. To update:
 
-- If you installed via a package manager (`brew upgrade --cask mare`, `scoop update mare`, `yay -Syu mare-bin`, `nix profile upgrade mare`), use that package manager.
+- If you installed via a package manager (`brew upgrade mare`, `scoop update mare`, `yay -Syu mare-bin`, `nix profile upgrade mare`), use that package manager.
 - Otherwise, re-run the quick install script (`install.sh` / `install.ps1`) or download the newer archive, verify it, and overwrite the old `mare` binary.
 
 Release builds of the TUI check GitHub releases for a newer version every 24 hours by default (`update-check.interval_hours` adjusts the interval; debug builds skip automatic checks) and print one line if there is one. The request carries no identifier beyond `mare/<version>`. Turn the check off in `init.lua`:
@@ -306,7 +308,7 @@ A project can also have a `.mare/` directory with its own `init.lua`, plugins, s
 ## Uninstall
 
 1. Optional: remove stored credentials with `mare logout`, which revokes tokens where the provider supports it. Without a provider name it works when exactly one provider is logged in; otherwise name one, as in `mare logout openai`.
-2. Uninstall via your package manager (for example `brew uninstall --cask mare` or `scoop uninstall mare`), or delete the `mare` binary directly.
+2. Uninstall via your package manager (for example `brew uninstall mare` or `scoop uninstall mare`), or delete the `mare` binary directly.
 3. Delete the directories above if you want no trace left. Deleting the state directory removes all saved sessions.
 
 ```sh
