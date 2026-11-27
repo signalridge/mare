@@ -1,0 +1,25 @@
+schema_version = "1.4"
+artifacts = []
+
+[metadata]
+description = "add coupon support (with tests) to a small shopping-cart package; hidden tests plus the original suite"
+
+[verifier]
+timeout_sec = 300.0
+environment_mode = "shared"
+collect = []
+
+[verifier.env]
+
+[agent]
+timeout_sec = 1200.0
+
+[environment]
+network_mode = "public"
+build_timeout_sec = 600.0
+os = "linux"
+mcp_servers = []
+
+[environment.env]
+
+[solution.env]

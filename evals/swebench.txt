@@ -1,0 +1,15 @@
+# SWE-bench Verified subset for `just eval swebench`. Harbor dataset
+# `swe-bench/swe-bench-verified`, pinned to revision 2 (registry version 2.0.0, 500 tasks,
+# content sha256:b934b0cc3dc800fe945eaf9f1623329db97ee3133c706d20644524c7759fb341).
+#
+# Selection: all five carry the official difficulty label "<15 min fix" (194 of the 500 do), each
+# from a different repository. Within a repository, the pick has a small one-file gold patch, a
+# self-contained issue text (reproduction or exact expected behavior in the instruction, no
+# external links needed) and comes from a repo with a light test suite. Images are prebuilt
+# swebench/sweb.eval.x86_64.* (amd64 only, ~1 GB compressed each; on Apple silicon they run
+# under emulation).
+swe-bench/django__django-11179   # django: delete() on a model without dependencies must clear the PK; one-line fix in db/models/deletion.py; ORM area, the most common repo in Verified (92 of the "<15 min" tasks)
+swe-bench/sympy__sympy-13480     # sympy: coth(log(tan(x))).subs(x, 2) raises NameError (typo cotm/cothm); traceback in the issue points at the line, tests the "read the traceback, find the bug" loop
+swe-bench/psf__requests-1921     # requests: a session header set to None must be dropped, not sent as "None"; small library, behavior fully specified in the issue
+swe-bench/pytest-dev__pytest-7432  # pytest: --runxfail breaks skip location reporting; control flow in a hook (elif -> if), issue names the file and hook
+swe-bench/pallets__flask-5014    # flask: Blueprint with an empty name must raise ValueError; the only flask task in Verified, a small feature-style fix (add validation)

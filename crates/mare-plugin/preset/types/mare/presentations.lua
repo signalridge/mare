@@ -1,0 +1,43 @@
+---@meta _
+--- Generic Markdown presentations. Source is authoritative; all render callbacks run in
+--- caller-owned async tasks outside the draw path, and every absent/failed result keeps code.
+---@class mare.MarkdownViewport
+---@field width? integer 1..10000; defaults to the connected frontend width
+---@field height? integer 1..10000
+---@field supports_images? boolean This consumer can display binary image descriptors
+---@field supports_artifact_images? boolean RPC consumer can read output resource locators on its original connection
+---@class mare.MarkdownRequest
+---@field document_id string Scoped to the caller that owns the document
+---@field block_id string Occurrence identity; equal sources in two positions remain distinct
+---@field start integer Zero-based UTF-8 source byte position
+---@field source string Parser-normalized code
+---@field language string ASCII lowercase
+---@field info string Full fenced-code information string
+---@field phase "open"|"closed"
+---@field revision integer Revision at admission; a later unchanged block can reuse this work
+---@field render_seq integer Presentation render sequence (changes on session replacement)
+---@field request_id integer Unique presenter task request identifier
+---@field session_id? string Owning session identity captured with the source
+---@field session_epoch? string Owning session epoch; facts, not execution authority
+---@field width integer
+---@field height integer
+---@field layout_revision integer Opaque effective native styling/layout revision
+---@field capabilities table Native frontend capabilities, never overwritten for remote clients
+---@field supports_images boolean Capability of this document's actual consumer
+---@field supports_artifact_images boolean Native consumer or explicitly negotiated resource-aware RPC frontend
+---@field theme {active?:string,appearance?:"dark"|"light",revision?:integer,code_background?:string}
+---@field replay boolean
+---@field cancel mare.Token Supersede/dispose/cancel requests cancellation and rejects late results
+---@class mare.MarkdownSnapshot
+---@field document_id string
+---@field source string Complete original Markdown
+---@field revision integer
+---@field render_seq integer
+---@field session_id? string
+---@field session_epoch? string
+---@field pending integer In-flight occurrence requests
+---@field enhanced boolean At least one cached presentation is available
+---@field supports_artifact_images boolean Consumer accepts artifact image descriptors
+---@field diagnostic? string Consumer compatibility diagnostic, if any
+---@field node mare.Node Existing node description; RPC converts inline image bytes to canonical base64
+---@field expanded_node mare.Node Same Markdown with each enhanced fence followed by its complete source

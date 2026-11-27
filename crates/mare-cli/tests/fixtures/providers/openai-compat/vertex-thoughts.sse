@@ -1,0 +1,10 @@
+data: {"choices":[{"delta":{"content":"**Acknowledging Greeting**\n\nRecognizing a friendly greeting and replying politely.\n\n","extra_content":{"google":{"thought":true}},"role":"assistant"},"index":0}],"created":1700000000,"id":"chatcmpl-syn-vtx","model":"google/gemini-3.8-flash","object":"chat.completion.chunk"}
+
+data: {"choices":[{"delta":{"content":"\u4f60\u597d\uff01\u5f88\u9ad8","role":"assistant"},"index":0}],"created":1700000000,"id":"chatcmpl-syn-vtx","model":"google/gemini-3.8-flash","object":"chat.completion.chunk"}
+
+data: {"choices":[{"delta":{"content":"\u5174\u4e0e\u4f60\u4ea4\u6d41\u3002\u8bf7\u95ee\u6709\u4ec0\u4e48\u6211\u53ef\u4ee5\u5e2e\u4f60\u7684\u5417\uff1f","role":"assistant"},"index":0}],"created":1700000000,"id":"chatcmpl-syn-vtx","model":"google/gemini-3.8-flash","object":"chat.completion.chunk"}
+
+data: {"choices":[{"delta":{"content":"","extra_content":{"google":{"thought_signature":"c2lnLXZlcnRleC10aG91Z2h0"}},"role":"assistant"},"finish_reason":"stop","index":0}],"created":1700000000,"id":"chatcmpl-syn-vtx","model":"google/gemini-3.8-flash","object":"chat.completion.chunk","usage":{"completion_tokens":16,"completion_tokens_details":{"reasoning_tokens":219},"prompt_tokens":1,"total_tokens":236}}
+
+data: [DONE]
+

@@ -1,0 +1,196 @@
+name: Release Dry Run
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/ci-tools.json"
+      - ".github/actions/**"
+      - "about.toml"
+      - "deny.toml"
+      - "scripts/check_notices.py"
+      - "rust-toolchain.toml"
+      - ".python-version"
+      - ".github/workflows/release.yaml"
+      - ".github/workflows/release-dry-run.yaml"
+      - ".github/workflows/release-please.yaml"
+      - "release-please-config.json"
+      - ".release-please-manifest.json"
+      - "Dockerfile.release"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/release_manifests.py"
+      - "scripts/check_release_gate.py"
+      - "scripts/check_release_policy.py"
+      - "scripts/verify_release_archive.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-dry-run-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  dry-run:
+    name: Release Packaging Dry Run
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: release-dry-run
+      - name: Run release script self-tests and policy checks
+        run: |
+          python3 scripts/release_manifests.py --self-test
+          python3 scripts/check_release_policy.py --self-test
+          python3 scripts/check_release_policy.py
+          python3 scripts/verify_release_archive.py --self-test
+      - name: Build locked release binary and verify seams
+        run: |
+          cargo build --release --locked -p mare-cli --bin mare
+          target/release/mare --version
+          python3 scripts/check_seams.py \
+            --verify-release target/release/mare \
+            --verify-faux-absent target/release/mare
+      - uses: ./.github/actions/setup-cargo-about
+      - name: Generate and verify Rust dependency notices
+        run: |
+          cargo fetch --locked
+          python3 scripts/check_notices.py --self-test
+          python3 scripts/check_notices.py --generate-rust-notices licenses/RUST-THIRD-PARTY-NOTICES.txt
+          python3 scripts/check_notices.py --rust-notices licenses/RUST-THIRD-PARTY-NOTICES.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: dry-run-rust-notices
+          path: licenses/RUST-THIRD-PARTY-NOTICES.txt
+          retention-days: 1
+      - name: Dry-run Unix archive packaging and verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import json; print(json.load(open(".release-please-manifest.json"))["."])')"
+          stage="${RUNNER_TEMP}/unix-archive-dry-run"
+          rm -rf "$stage"
+          dir="${stage}/mare-v${version}-x86_64-unknown-linux-gnu"
+          mkdir -p "$dir/licenses"
+          cp target/release/mare "$dir/"
+          cp -r crates/mare-plugin/preset/types "$dir/"
+          cp LICENSE THIRD_PARTY_NOTICES.md README.md "$dir/"
+          cp crates/mare-kernel/lua/cordis/LICENSE "$dir/licenses/cordis-LICENSE"
+          cp licenses/RUST-THIRD-PARTY-NOTICES.txt "$dir/licenses/"
+          tar czf "${dir}.tar.gz" -C "$stage" "mare-v${version}-x86_64-unknown-linux-gnu"
+          python3 scripts/verify_release_archive.py "${dir}.tar.gz" "mare-v${version}-x86_64-unknown-linux-gnu"
+      - uses: ./.github/actions/setup-nfpm
+      - name: Dry-run .deb and .rpm packaging via nfpm
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import json; print(json.load(open(".release-please-manifest.json"))["."])')"
+          stage="${RUNNER_TEMP}/nfpm-dry-run"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          cat > "$stage/nfpm.yaml" <<YAML
+          name: mare
+          arch: amd64
+          platform: linux
+          version: ${version}
+          section: utils
+          priority: optional
+          maintainer: Signalridge <support@signalridge.com>
+          vendor: Signalridge
+          homepage: https://github.com/signalridge/mare
+          license: Apache-2.0
+          description: A hyperextensible agent harness (Rust core, Lua plugins).
+          contents:
+            - src: target/release/mare
+              dst: /usr/bin/mare
+              file_info:
+                mode: 0755
+            - src: LICENSE
+              dst: /usr/share/licenses/mare/LICENSE
+              file_info:
+                mode: 0644
+            - src: THIRD_PARTY_NOTICES.md
+              dst: /usr/share/licenses/mare/THIRD_PARTY_NOTICES.md
+              file_info:
+                mode: 0644
+            - src: crates/mare-kernel/lua/cordis/LICENSE
+              dst: /usr/share/licenses/mare/cordis-LICENSE
+              file_info:
+                mode: 0644
+            - src: licenses/RUST-THIRD-PARTY-NOTICES.txt
+              dst: /usr/share/licenses/mare/RUST-THIRD-PARTY-NOTICES.txt
+              file_info:
+                mode: 0644
+            - src: README.md
+              dst: /usr/share/doc/mare/README.md
+              file_info:
+                mode: 0644
+          YAML
+          nfpm package --config "$stage/nfpm.yaml" --packager deb --target "$stage/mare_${version}_linux_amd64.deb"
+          nfpm package --config "$stage/nfpm.yaml" --packager rpm --target "$stage/mare_${version}_linux_amd64.rpm"
+          ls -lh "$stage/mare_${version}_linux_amd64.deb" "$stage/mare_${version}_linux_amd64.rpm"
+          dpkg-deb -c "$stage/mare_${version}_linux_amd64.deb" > "$stage/deb-contents.txt"
+          for f in LICENSE THIRD_PARTY_NOTICES.md cordis-LICENSE RUST-THIRD-PARTY-NOTICES.txt; do
+            if ! grep -q "/usr/share/licenses/mare/${f}\$" "$stage/deb-contents.txt"; then
+              echo "::error::.deb is missing ${f}"
+              exit 1
+            fi
+          done
+
+  dry-run-windows:
+    name: Release Packaging Dry Run (Windows)
+    needs: [dry-run]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: dry-run-rust-notices
+          path: licenses
+      - name: Verify Rust dependency notices match this checkout
+        shell: pwsh
+        run: python scripts/check_notices.py --rust-notices licenses/RUST-THIRD-PARTY-NOTICES.txt
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: release-dry-run-windows
+      - name: Build locked release binary and verify seams (Windows)
+        shell: pwsh
+        run: |
+          cargo build --release --locked -p mare-cli --bin mare
+          & "target/release/mare.exe" --version
+          python scripts/check_seams.py `
+            --verify-release "target/release/mare.exe" `
+            --verify-faux-absent "target/release/mare.exe"
+      - name: Dry-run Windows archive packaging and verification
+        shell: pwsh
+        run: |
+          $version = (Get-Content .release-please-manifest.json -Raw | ConvertFrom-Json).'.'
+          $dir = "mare-v$version-x86_64-pc-windows-msvc"
+          if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
+          if (Test-Path "$dir.zip") { Remove-Item -Force "$dir.zip" }
+          New-Item -ItemType Directory -Force "$dir/licenses" | Out-Null
+          Copy-Item "target/release/mare.exe" "$dir/"
+          Copy-Item -Recurse crates/mare-plugin/preset/types "$dir/"
+          Copy-Item LICENSE, THIRD_PARTY_NOTICES.md, README.md "$dir/"
+          Copy-Item crates/mare-kernel/lua/cordis/LICENSE "$dir/licenses/cordis-LICENSE"
+          Copy-Item licenses/RUST-THIRD-PARTY-NOTICES.txt "$dir/licenses/"
+          Compress-Archive -Path "$dir" -DestinationPath "$dir.zip"
+          python scripts/verify_release_archive.py "$dir.zip" "$dir"
+          $hash = (Get-FileHash "$dir.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $dir.zip" | Out-File -Encoding ascii "$dir.zip.sha256"

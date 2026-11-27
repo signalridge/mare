@@ -1,0 +1,43 @@
+[package]
+name         = "mare-tui"
+description  = "Main-screen TUI renderer: diff rendering, markdown, highlighting, editor, keys"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+publish                = false
+
+[lints]
+workspace = true
+
+[dependencies]
+lru.workspace = true
+rustc-hash.workspace = true
+serde_json.workspace = true
+nucleo-matcher.workspace = true
+mare-shared.workspace = true
+termina.workspace = true
+pulldown-cmark.workspace = true
+syntect = { workspace = true, features = ["plist-load"] }
+unicode-segmentation.workspace = true
+similar.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+quantette.workspace = true
+image = { workspace = true, default-features = false, features = ["png"] }
+base64.workspace = true
+mare-edit.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_Threading"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+insta.workspace = true
+syntect = { workspace = true, features = ["default-syntaxes", "default-themes", "dump-create", "yaml-load"] }
+

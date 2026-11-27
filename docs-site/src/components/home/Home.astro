@@ -1,0 +1,2268 @@
+---
+// Standalone product home page, one per locale (src/pages/[lang]/index.astro).
+// Shares Mare's Lunar Dusk palette, Space Grotesk / Inter / JetBrains Mono
+// typography, and Starlight's `starlight-theme` storage key with the docs.
+import fs from 'node:fs';
+import { COPY, HTML_LANG, LANGS, LANG_LABEL, type Lang } from './copy';
+import { ARCHITECTURE_POSTER_URL, ARCHITECTURE_VIDEO_URL } from './media';
+
+const ARCH_DIAGRAM_SVG = fs.readFileSync(
+	new URL('../../../../docs/assets/diagrams/architecture.svg', import.meta.url),
+	'utf8',
+);
+
+interface Props {
+	lang: Lang;
+}
+
+const { lang } = Astro.props;
+const t = COPY[lang];
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+const site = Astro.site ? new URL(`${base}/${lang}/`, Astro.site).href : undefined;
+const docs = (path: string) => `${base}/${path}`;
+const REPO = 'https://github.com/signalridge/mare';
+const RELEASES = `${REPO}/releases/latest`;
+const hasArchVideo = ARCHITECTURE_VIDEO_URL.trim().length > 0;
+
+const fontCss = [
+	`@font-face{font-family:'Inter Variable';font-style:normal;font-weight:100 900;font-display:swap;src:url('${base}/fonts/inter-latin-wght-normal.woff2') format('woff2');unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}`,
+	`@font-face{font-family:'Inter Variable';font-style:normal;font-weight:100 900;font-display:swap;src:url('${base}/fonts/inter-latin-ext-wght-normal.woff2') format('woff2');unicode-range:U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+1E00-1E9F,U+2C60-2C7F,U+A720-A7FF}`,
+	`@font-face{font-family:'Space Grotesk';font-style:normal;font-weight:600;font-display:swap;src:url('${base}/fonts/space-grotesk-600-latin.woff2') format('woff2');unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}`,
+	`@font-face{font-family:'Space Grotesk';font-style:normal;font-weight:600;font-display:swap;src:url('${base}/fonts/space-grotesk-600-latin-ext.woff2') format('woff2');unicode-range:U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+1E00-1E9F,U+2C60-2C7F,U+A720-A7FF}`,
+	`@font-face{font-family:'JetBrains Mono Variable';font-style:normal;font-weight:100 800;font-display:swap;src:url('${base}/fonts/jetbrains-mono-latin-wght-normal.woff2') format('woff2')}`,
+].join('');
+
+const PLUGIN_RAW = `-- ~/.config/mare/plugins/show-model.lua
+return {
+  name = "show-model",
+  inject = { "llm", "commands" },
+  apply = function(ctx)
+    ctx.commands:register("which-model", {
+      description = "Show the current model",
+      run = function()
+        local m = ctx.llm:current()
+        ui.notify(m and m.ref or "no model")
+      end,
+    })
+  end,
+}`;
+
+const PLUGIN_SAMPLE = `<span class="c">-- ~/.config/mare/plugins/show-model.lua</span>
+<span class="k">return</span> {
+  name = <span class="s">"show-model"</span>,
+  inject = { <span class="s">"llm"</span>, <span class="s">"commands"</span> },
+  apply = <span class="k">function</span>(ctx)
+    ctx.commands:<span class="f">register</span>(<span class="s">"which-model"</span>, {
+      description = <span class="s">"Show the current model"</span>,
+      run = <span class="k">function</span>()
+        <span class="k">local</span> m = ctx.llm:<span class="f">current</span>()
+        ui.<span class="f">notify</span>(m <span class="k">and</span> m.ref <span class="k">or</span> <span class="s">"no model"</span>)
+      <span class="k">end</span>,
+    })
+  <span class="k">end</span>,
+}`;
+
+const AGENT_SAMPLE = `<span class="c">---</span>
+<span class="f">name</span>: security-auditor
+<span class="f">description</span>: Audits changes for secret leaks.
+<span class="f">tools</span>: [read, ls]
+<span class="f">effort</span>: high
+<span class="c">---</span>
+You are a read-only security reviewer.`;
+
+const SESSION_COMMANDS = ['/fork', '/tree', '/rewind', 'mare -c'];
+const PROVIDERS = ['openai', 'anthropic', 'google', 'opencode-go', 'deepseek', 'kimi', 'kimi-code', 'openrouter', 'ollama', 'lmstudio'];
+const EFFORT = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+
+const INTEGRATE_RAW = `mare -p "summarize the open TODOs in @src"
+mare --json "fix the failing test" | jq -c .
+mare acp
+mare --rpc
+mare --web`;
+
+const INTEGRATE_SAMPLE = `<span class="c"># one-shot, for scripts</span>
+<span class="p">$</span> mare -p <span class="s">"summarize the open TODOs in @src"</span>
+<span class="c"># JSON event stream for CI</span>
+<span class="p">$</span> mare --json <span class="s">"fix the failing test"</span> | jq -c .
+<span class="c"># editors (Agent Client Protocol)</span>
+<span class="p">$</span> mare acp
+<span class="c"># mare RPC 3.0 (JSON-RPC 2.0) on stdio, or HTTP + WebSocket</span>
+<span class="p">$</span> mare --rpc
+<span class="p">$</span> mare --web`;
+
+const STARTUP_COMMANDS = ['mare --profile-startup', 'mare --startuptime startup.log', 'mare --clean'];
+
+const INSTALL_SH = 'curl -fsSL https://signalridge.github.io/mare/install.sh | sh';
+const BREW = ['brew tap signalridge/tap', 'brew trust signalridge/tap', 'brew install --cask mare'];
+const NUR = ['nix profile install github:signalridge/nur-packages#mare'];
+
+const OSES = [
+	{
+		id: 'macos',
+		label: 'macOS',
+		methods: [
+			{ name: t.install.script, lines: [INSTALL_SH] },
+			{ name: 'Homebrew', lines: BREW },
+			{ name: 'Nix (NUR)', lines: NUR },
+		],
+	},
+	{
+		id: 'linux',
+		label: 'Linux',
+		methods: [
+			{ name: t.install.script, lines: [INSTALL_SH] },
+			{ name: 'Homebrew', lines: BREW },
+			{ name: 'Arch Linux (AUR)', lines: ['yay -S mare-bin'] },
+			{ name: 'Nix (NUR)', lines: NUR },
+		],
+	},
+	{
+		id: 'windows',
+		label: 'Windows',
+		methods: [
+			{ name: t.install.script, lines: ['irm https://signalridge.github.io/mare/install.ps1 | iex'] },
+			{
+				name: 'Scoop',
+				lines: [
+					'scoop bucket add signalridge https://github.com/signalridge/scoop-bucket',
+					'scoop install signalridge/mare',
+				],
+			},
+		],
+	},
+	{
+		id: 'container',
+		label: t.install.container,
+		methods: [
+			{
+				name: 'GHCR',
+				lines: ['docker run --rm -it -v "$PWD:/workspace" -w /workspace ghcr.io/signalridge/mare:latest'],
+			},
+		],
+	},
+];
+
+const TARGETS = [
+	{ os: 'macos', arch: 'arm', name: 'macOS', detail: t.install.apple, target: 'aarch64-apple-darwin', ext: 'tar.gz' },
+	{ os: 'macos', arch: 'x86', name: 'macOS', detail: t.install.intel, target: 'x86_64-apple-darwin', ext: 'tar.gz' },
+	{ os: 'linux', arch: 'x86', name: 'Linux', detail: 'x86-64', target: 'x86_64-unknown-linux-gnu', ext: 'tar.gz' },
+	{ os: 'linux', arch: 'arm', name: 'Linux', detail: 'ARM64', target: 'aarch64-unknown-linux-gnu', ext: 'tar.gz' },
+	{ os: 'windows', arch: 'x86', name: 'Windows', detail: 'x64', target: 'x86_64-pc-windows-msvc', ext: 'zip' },
+	{ os: 'windows', arch: 'arm', name: 'Windows', detail: 'ARM64', target: 'aarch64-pc-windows-msvc', ext: 'zip' },
+];
+
+const ICONS: Record<string, string> = {
+	macos: '<path d="M16.4 12.6c0-2.3 1.9-3.4 2-3.5-1.1-1.6-2.8-1.8-3.4-1.8-1.4-.1-2.8.9-3.5.9-.7 0-1.9-.8-3.1-.8-1.6 0-3 .9-3.8 2.3-1.6 2.8-.4 7 1.2 9.3.8 1.1 1.7 2.4 2.9 2.3 1.2 0 1.6-.7 3-.7s1.8.7 3.1.7c1.3 0 2.1-1.1 2.8-2.3.9-1.3 1.3-2.6 1.3-2.6s-2.5-1-2.5-3.8zM14.1 5.8c.6-.8 1.1-1.9 1-3-.9 0-2.1.6-2.7 1.4-.6.7-1.1 1.8-1 2.9 1 .1 2.1-.5 2.7-1.3z"/>',
+	linux: '<path d="M12 2.2c-2.2 0-3.6 1.9-3.6 4.6 0 1.4.4 2.4-.4 3.7-1 1.6-2.7 3.4-2.7 6 0 .7.1 1.3.4 1.8-.8.3-1.7.7-1.7 1.4 0 1 1.8 1 3.1 1.6 1 .5 1.8 1 2.7.6.5-.2.8-.6 1-1h2.4c.2.4.5.8 1 1 .9.4 1.7-.1 2.7-.6 1.3-.6 3.1-.6 3.1-1.6 0-.7-.9-1.1-1.7-1.4.3-.5.4-1.1.4-1.8 0-2.6-1.7-4.4-2.7-6-.8-1.3-.4-2.3-.4-3.7 0-2.7-1.4-4.6-3.6-4.6zm-1.5 3.7c.4 0 .7.5.7 1.1s-.3 1.1-.7 1.1-.7-.5-.7-1.1.3-1.1.7-1.1zm3 0c.4 0 .7.5.7 1.1s-.3 1.1-.7 1.1-.7-.5-.7-1.1.3-1.1.7-1.1zM12 8.6c.9 0 2 .5 2 .9s-1.1 1.1-2 1.1-2-.7-2-1.1.9-.9 2-.9z"/>',
+	windows: '<path d="M3 5.5 10.4 4.5v7.1H3zM11.3 4.4 21 3v8.6h-9.7zM3 12.4h7.4v7.1L3 18.5zm8.3 0H21V21l-9.7-1.4z"/>',
+	container: '<path d="M4 10h2.5v2.4H4zm3 0h2.5v2.4H7zm3 0h2.5v2.4H10zm3 0h2.5v2.4H13zM7 7.2h2.5v2.4H7zm3 0h2.5v2.4H10zm3 0h2.5v2.4H13zm0-2.8h2.5v2.4H13zM21.6 11c-.5-.4-1.6-.5-2.5-.3-.1-.9-.6-1.6-1.4-2.2l-.3-.2-.2.3c-.4.6-.5 1.6-.4 2.3.1.3.2.7.4 1-.4.2-1 .4-1.9.4H2.2l-.1.4c-.1 1.6.2 3.5 1.2 4.8.9 1.2 2.4 1.9 4.5 1.9 4.4 0 7.7-2 9.2-6.3.6 0 1.9 0 2.6-1.3l.2-.4z"/>',
+};
+---
+
+<!doctype html>
+<html lang={HTML_LANG[lang]} data-theme="dark">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>{t.title}</title>
+		<meta name="description" content={t.description} />
+		{site && <link rel="canonical" href={site} />}
+		{LANGS.map((l) => <link rel="alternate" hreflang={HTML_LANG[l]} href={`${Astro.site?.origin ?? ''}${base}/${l}/`} />)}
+		<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+		<meta name="theme-color" content="#0e0f17" media="(prefers-color-scheme: dark)" />
+		<meta property="og:title" content={t.title} />
+		<meta property="og:description" content={t.description} />
+		<meta property="og:type" content="website" />
+		{site && <meta property="og:url" content={site} />}
+		<link rel="icon" href={`${base}/mark.svg`} type="image/svg+xml" />
+		<link rel="preload" href={`${base}/fonts/inter-latin-wght-normal.woff2`} as="font" type="font/woff2" crossorigin="anonymous" />
+		<link rel="preload" href={`${base}/fonts/space-grotesk-600-latin.woff2`} as="font" type="font/woff2" crossorigin="anonymous" />
+		<link rel="preload" href={`${base}/fonts/jetbrains-mono-latin-wght-normal.woff2`} as="font" type="font/woff2" crossorigin="anonymous" />
+		<style is:inline set:html={fontCss} />
+		<style is:inline>
+			html{background:#0e0f17;color:#f3f4fb}
+			html[data-theme='light']{background:#ffffff;color:#141624}
+			svg{max-width:100%;height:auto}
+			.icon-btn svg,.menu summary svg{width:18px;height:18px}
+			.play svg,.tabs svg{width:16px;height:16px}
+			.targets svg{width:22px;height:22px}
+			#theme svg,.play .i-pause{display:none}
+			.brand img{display:block;height:22px;width:auto}
+			.brand .wordmark-light{display:none}
+			html[data-theme='light'] .brand .wordmark-dark{display:none}
+			html[data-theme='light'] .brand .wordmark-light{display:block}
+		</style>
+		<script is:inline>
+			(function () {
+				var root = document.documentElement;
+				root.classList.add('js');
+				var saved = null;
+				try {
+					saved = localStorage.getItem('starlight-theme');
+				} catch (e) {}
+				var choice = saved === 'light' || saved === 'dark' ? saved : 'auto';
+				var system = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+				root.dataset.themeChoice = choice;
+				root.dataset.theme = choice === 'auto' ? system : choice;
+			})();
+		</script>
+	</head>
+	<body>
+		<a class="skip" href="#main">{t.nav.skip}</a>
+
+		<header class="nav" id="site-nav">
+			<div class="wide nav-row">
+				<a class="brand" href={`${base}/${lang}/`} aria-label="mare">
+					<img class="wordmark-dark" src={`${base}/assets/brand/mare-wordmark-nav-dark.svg`} alt="mare" width="101" height="22" decoding="sync" />
+					<img class="wordmark-light" src={`${base}/assets/brand/mare-wordmark-nav-light.svg`} alt="mare" width="101" height="22" decoding="sync" />
+				</a>
+				<nav aria-label={t.nav.aria}>
+					<ul>
+						<li class="wide-only"><a href="#architecture">{t.nav.architecture}</a></li>
+						<li class="wide-only"><a href="#features">{t.nav.features}</a></li>
+						<li class="wide-only"><a href="#install">{t.nav.install}</a></li>
+						<li><a class="nav-docs" href={docs(`${lang}/get-started/overview/`)}>{t.nav.docs}</a></li>
+						<li>
+							<details class="menu">
+								<summary aria-label={t.nav.language}>
+									<svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm6.9 6h-3a15.7 15.7 0 0 0-1.3-3.9A8 8 0 0 1 18.9 8zM12 4c.8 1.2 1.5 2.5 1.9 4h-3.8c.4-1.5 1.1-2.8 1.9-4zM4.3 14a8 8 0 0 1 0-4h3.4a16.5 16.5 0 0 0 0 4zm.8 2h3a15.7 15.7 0 0 0 1.3 3.9A8 8 0 0 1 5.1 16zm3-8h-3a8 8 0 0 1 4.3-3.9C8.8 5.3 8.4 6.6 8.1 8zM12 20c-.8-1.2-1.5-2.5-1.9-4h3.8c-.4 1.5-1.1 2.8-1.9 4zm2.3-6H9.7a14.7 14.7 0 0 1 0-4h4.6a14.7 14.7 0 0 1 0 4zm.3 5.9c.6-1.2 1-2.5 1.3-3.9h3a8 8 0 0 1-4.3 3.9zm1.7-5.9a16.5 16.5 0 0 0 0-4h3.4a8 8 0 0 1 0 4z" /></svg>
+								</summary>
+								<ul>
+									{
+										LANGS.map((l) => (
+											<li>
+												<a href={`${base}/${l}/`} hreflang={HTML_LANG[l]} lang={HTML_LANG[l]} aria-current={l === lang ? 'page' : undefined}>
+													{LANG_LABEL[l]}
+												</a>
+											</li>
+										))
+									}
+								</ul>
+							</details>
+						</li>
+						<li>
+							<button type="button" class="icon-btn" id="theme" data-labels={JSON.stringify(t.nav.themes)} aria-label={t.nav.themes[0]}>
+								<svg class="i-auto" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zm0 2v14a7 7 0 0 1 0-14z" /></svg>
+								<svg class="i-light" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 7a5 5 0 1 0 0 10 5 5 0 0 0 0-10zM11 1h2v3h-2zm0 19h2v3h-2zM1 11h3v2H1zm19 0h3v2h-3zM4.2 2.8l2.1 2.1-1.4 1.4-2.1-2.1zm14.9 14.9 2.1 2.1-1.4 1.4-2.1-2.1zM2.8 19.8l2.1-2.1 1.4 1.4-2.1 2.1zM17.7 4.9l2.1-2.1 1.4 1.4-2.1 2.1z" /></svg>
+								<svg class="i-dark" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.7 14.3A8.5 8.5 0 0 1 9.7 3.3a9 9 0 1 0 11 11z" /></svg>
+							</button>
+						</li>
+						<li>
+							<a class="icon-btn" href={REPO} aria-label="GitHub">
+								<svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 0 0-3.2 19.5c.5.1.7-.2.7-.5v-1.7c-2.8.6-3.4-1.3-3.4-1.3-.5-1.2-1.1-1.5-1.1-1.5-.9-.6.1-.6.1-.6 1 .1 1.5 1 1.5 1 .9 1.5 2.4 1.1 2.9.8.1-.6.4-1.1.6-1.3-2.2-.3-4.6-1.1-4.6-5 0-1.1.4-2 1-2.7-.1-.3-.4-1.3.1-2.7 0 0 .8-.3 2.8 1a9.6 9.6 0 0 1 5 0c1.9-1.3 2.8-1 2.8-1 .5 1.4.2 2.4.1 2.7.6.7 1 1.6 1 2.7 0 3.9-2.3 4.7-4.6 5 .4.3.7.9.7 1.9V21c0 .3.2.6.7.5A10 10 0 0 0 12 2z" /></svg>
+							</a>
+						</li>
+					</ul>
+				</nav>
+			</div>
+		</header>
+
+		<main id="main">
+			<section class="hero">
+				<div class="wrap hero-inner">
+					<h1>
+						<span>{t.hero.title[0]}</span>{' '}
+						<span class="accent-word">{t.hero.title[1]}</span>
+					</h1>
+					<p class="hero-lede">{t.hero.lede}</p>
+					<div class="hero-actions">
+						<a class="btn-primary" href={docs(`${lang}/get-started/quickstart/`)}>{t.hero.start}</a>
+						<div class="hero-install">
+							<code><span class="p">$</span> {INSTALL_SH}</code>
+							<button type="button" class="inline-copy" data-copy={INSTALL_SH} data-copied={t.hero.copied} aria-label={t.hero.copyCmd}>
+								<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+									<rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+									<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+								</svg>
+								<span>{t.install.copy}</span>
+							</button>
+						</div>
+					</div>
+				</div>
+
+				<div class="wide shot" id="shot">
+					<figure class="shot-frame">
+						<div class="window-bar" aria-hidden="true">
+							<i></i><i></i><i></i>
+							<span>mare ~/median</span>
+						</div>
+						<div class="screen">
+							<div
+								id="demo-player"
+								class="demo-player"
+								data-cast={`${base}/home/session.cast`}
+								data-cast-mobile={`${base}/home/session-mobile.cast`}
+								role="region"
+								aria-label={t.hero.video}
+							>
+								<img
+									class="demo-poster"
+									src={`${base}/home/poster.webp`}
+									alt={t.hero.video}
+									width="1084"
+									height="612"
+								/>
+							</div>
+						</div>
+					</figure>
+					<p class="caption">{t.hero.caption}</p>
+				</div>
+			</section>
+
+			<section id="architecture" class="band band-alt">
+				<div class="wide">
+					<div class="section-head reveal">
+						<h2>{t.architecture.title}</h2>
+						<p>{t.architecture.lede}</p>
+					</div>
+
+					<figure class="arch-stage reveal" data-arch-slot="video-or-diagram">
+						{
+							hasArchVideo ? (
+								<div class="arch-media">
+									<video
+										id="arch-video"
+										muted
+										loop
+										playsinline
+										preload="metadata"
+										poster={ARCHITECTURE_POSTER_URL || undefined}
+										aria-label={t.architecture.videoLabel}
+										width="1280"
+										height="720"
+									>
+										<source src={ARCHITECTURE_VIDEO_URL} />
+									</video>
+									<button type="button" class="play" id="arch-play" data-pause={t.hero.pause} data-play={t.hero.play} aria-label={t.hero.play}>
+										<svg class="i-play" width="16" height="16" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z" /></svg>
+										<svg class="i-pause" width="16" height="16" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h4v14H7zm6 0h4v14h-4z" /></svg>
+									</button>
+								</div>
+							) : (
+								<div class="arch-diagram">
+									<div class="arch-diagram-scroll" set:html={ARCH_DIAGRAM_SVG} />
+								</div>
+							)
+						}
+						<figcaption class="caption">
+							{hasArchVideo ? t.architecture.videoCaption : t.architecture.diagramCaption}
+						</figcaption>
+					</figure>
+
+					<div class="layers-grid reveal">
+						{
+							t.architecture.layers.map((layer) => (
+								<div class="layer-col">
+									<div class="layer-head">
+										<h3>{layer.name}</h3>
+										<span class="layer-lang">{layer.lang}</span>
+									</div>
+									<p>{layer.desc}</p>
+								</div>
+							))
+						}
+					</div>
+					<p class="section-foot-link reveal">
+						<a class="more" href={docs(`${lang}/get-started/overview/`)}>{t.architecture.more}</a>
+					</p>
+				</div>
+			</section>
+
+			<section id="features" class="band">
+				<div class="wide">
+					<div class="section-head reveal">
+						<h2>{t.features.title}</h2>
+						<p>{t.features.lede}</p>
+					</div>
+
+					{/* Editorial Row 1: Lua Plugins */}
+					<div class="split-row reveal">
+						<div class="split-copy">
+							<h3>{t.features.plugins.title}</h3>
+							<p>{t.features.plugins.body}</p>
+							<a class="more" href={docs(t.features.plugins.link)}>{t.features.plugins.more}</a>
+						</div>
+						<div class="code-panel">
+							<div class="code-bar">
+								<span>show-model.lua</span>
+								<button type="button" class="copy-sm" data-copy={PLUGIN_RAW} data-copied={t.copiedCode}>{t.copyCode}</button>
+							</div>
+							<pre class="code" tabindex="0"><code set:html={PLUGIN_SAMPLE} /></pre>
+						</div>
+					</div>
+
+					{/* Editorial Row 2: 3-column architectural hairline strip */}
+					<div class="three-col reveal">
+						<div class="col-item">
+							<h3>{t.features.subagents.title}</h3>
+							<p>{t.features.subagents.body}</p>
+							<a class="more" href={docs(t.features.subagents.link)}>{t.features.subagents.more}</a>
+							<pre class="code compact" tabindex="0"><code set:html={AGENT_SAMPLE} /></pre>
+						</div>
+
+						<div class="col-item">
+							<h3>{t.features.sessions.title}</h3>
+							<p>{t.features.sessions.body}</p>
+							<a class="more" href={docs(t.features.sessions.link)}>{t.features.sessions.more}</a>
+							<dl class="cmds">
+								{
+									SESSION_COMMANDS.map((cmd, i) => (
+										<div>
+											<dt><code>{cmd}</code></dt>
+											<dd>{t.sessionRows[i]}</dd>
+										</div>
+									))
+								}
+							</dl>
+						</div>
+
+						<div class="col-item">
+							<h3>{t.features.sandbox.title}</h3>
+							<p>{t.features.sandbox.body}</p>
+							<a class="more" href={docs(t.features.sandbox.link)}>{t.features.sandbox.more}</a>
+							<div class="interactive-box">
+								<div class="segmented" role="radiogroup" aria-label={t.features.sandbox.title} data-preset-group>
+									{
+										t.sandboxPresets.map((preset) => (
+											<button
+												type="button"
+												role="radio"
+												aria-checked={preset.id === 'auto' ? 'true' : 'false'}
+												data-flag={preset.flag}
+												data-summary={preset.summary}
+											>
+												{preset.id}
+											</button>
+										))
+									}
+								</div>
+								<div class="interactive-readout">
+									<code data-preset-flag>{t.sandboxPresets[1].flag}</code>
+									<p data-preset-summary>{t.sandboxPresets[1].summary}</p>
+								</div>
+							</div>
+						</div>
+					</div>
+
+					{/* Editorial Row 3: Models & Effort + Every Front End */}
+					<div class="split-row split-row-top reveal">
+						<div class="split-copy">
+							<h3>{t.features.providers.title}</h3>
+							<p>{t.features.providers.body}</p>
+							<a class="more" href={docs(t.features.providers.link)}>{t.features.providers.more}</a>
+							<p class="provider-list" aria-label="Providers">
+								{PROVIDERS.join(' · ')}
+							</p>
+							<div class="interactive-box">
+								<p class="effort-note">{t.effortNote}</p>
+								<div class="segmented effort-seg" role="radiogroup" aria-label="/effort" data-effort-group>
+									{
+										EFFORT.map((level) => (
+											<button
+												type="button"
+												role="radio"
+												aria-checked={level === 'high' ? 'true' : 'false'}
+												data-level={level}
+											>
+												{level}
+											</button>
+										))
+									}
+								</div>
+								<div class="interactive-readout">
+									<code data-effort-cmd>/effort high  ·  mare --effort high</code>
+								</div>
+							</div>
+						</div>
+
+						<div class="split-copy">
+							<h3>{t.features.integrate.title}</h3>
+							<p>{t.features.integrate.body}</p>
+							<a class="more" href={docs(t.features.integrate.link)}>{t.features.integrate.more}</a>
+							<div class="code-panel">
+								<div class="code-bar">
+									<span>cli · acp · rpc · web</span>
+									<button type="button" class="copy-sm" data-copy={INTEGRATE_RAW} data-copied={t.copiedCode}>{t.copyCode}</button>
+								</div>
+								<pre class="code" tabindex="0"><code set:html={INTEGRATE_SAMPLE} /></pre>
+							</div>
+						</div>
+					</div>
+
+					{/* Editorial Row 4: Startup & Native Binary */}
+					<div class="startup-row reveal">
+						<div class="startup-copy">
+							<h3>{t.features.startup.title}</h3>
+							<p>{t.features.startup.body}</p>
+							<a class="more" href={docs(t.features.startup.link)}>{t.features.startup.more}</a>
+						</div>
+						<ul class="cmd-list">
+							{
+								STARTUP_COMMANDS.map((cmd) => (
+									<li>
+										<code><span class="p">$</span> {cmd}</code>
+									</li>
+								))
+							}
+						</ul>
+					</div>
+				</div>
+			</section>
+
+			<section id="install" class="band band-alt">
+				<div class="wide">
+					<div class="section-head reveal">
+						<h2>{t.install.title}</h2>
+						<p>
+							{t.install.lede}
+							<span class="release" hidden>
+								{' '}
+								<a href={RELEASES}>{t.install.latest}: <span data-release-tag></span></a>
+							</span>
+						</p>
+					</div>
+
+					<div class="install-grid reveal">
+						<div class="install-box">
+							<div class="tabs" role="tablist" aria-label={t.install.tabsAria}>
+								{
+									OSES.map((os, i) => (
+										<button
+											type="button"
+											role="tab"
+											id={`tab-${os.id}`}
+											aria-controls={`panel-${os.id}`}
+											aria-selected={i === 0 ? 'true' : 'false'}
+											tabindex={i === 0 ? 0 : -1}
+											data-os={os.id}
+										>
+											<svg width="17" height="17" viewBox="0 0 24 24" aria-hidden="true" set:html={ICONS[os.id]} />
+											<span>{os.label}</span>
+											<em class="detected" hidden>{t.install.detected}</em>
+										</button>
+									))
+								}
+							</div>
+							{
+								OSES.map((os, i) => (
+									<div class="panel" role="tabpanel" id={`panel-${os.id}`} aria-labelledby={`tab-${os.id}`} hidden={i !== 0}>
+										{os.methods.map((m) => (
+											<div class="method">
+												<h3>{m.name}</h3>
+												<div class="cmd">
+													<pre tabindex="0"><code>{m.lines.join('\n')}</code></pre>
+													<button type="button" class="copy" data-copy={m.lines.join('\n')} data-copied={t.install.copied}>
+														{t.install.copy}
+													</button>
+												</div>
+											</div>
+										))}
+									</div>
+								))
+							}
+						</div>
+
+						<div class="first-run">
+							<h3>{t.install.firstRunTitle}</h3>
+							<p>{t.install.firstRunBody}</p>
+							<div class="terminal" role="img" aria-label={`${INSTALL_SH}; cd ~/src/my-project; mare`}>
+								<div class="window-bar" aria-hidden="true"><i></i><i></i><i></i><span>shell</span></div>
+								<pre aria-hidden="true"><span class="p">$</span> {INSTALL_SH}
+<span class="p">$</span> cd ~/src/my-project
+<span class="p">$</span> mare
+<span class="c"># {t.install.firstRunComment}</span></pre>
+							</div>
+							<a class="more" href={docs(`${lang}/get-started/quickstart/`)}>{t.install.firstRunMore}</a>
+						</div>
+					</div>
+
+					<div class="downloads reveal">
+						<div class="downloads-head">
+							<h3>{t.install.downloads}</h3>
+							<p>{t.install.downloadsLede}</p>
+						</div>
+						<ul class="targets">
+							{
+								TARGETS.map((d) => (
+									<li data-os={d.os} data-arch={d.arch}>
+										<a href={RELEASES} data-target={d.target} data-ext={d.ext}>
+											<svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true" set:html={ICONS[d.os]} />
+											<div>
+												<strong>{d.name} · {d.detail}</strong>
+												<code>.{d.ext} {t.install.archive}</code>
+											</div>
+										</a>
+									</li>
+								))
+							}
+						</ul>
+						<p class="note">
+							{t.install.note} <a href={docs(`${lang}/get-started/installation/`)}>{t.install.guide}</a>
+						</p>
+					</div>
+				</div>
+			</section>
+
+			<section id="ecosystem" class="band">
+				<div class="wide">
+					<div class="section-head reveal">
+						<h2>{t.ecosystem.title}</h2>
+					</div>
+					<ul class="eco reveal">
+						<li>
+							<a href="https://github.com/signalridge/mare-plugins">
+								<strong>mare-plugins</strong>
+								<span>{t.ecosystem.plugins}</span>
+							</a>
+						</li>
+						<li>
+							<a href="https://github.com/signalridge/cordis-lua">
+								<strong>cordis-lua</strong>
+								<span>{t.ecosystem.cordis}</span>
+							</a>
+						</li>
+						<li>
+							<a href={`${base}/llms-full.txt`}>
+								<strong>llms-full.txt</strong>
+								<span>{t.ecosystem.llms}</span>
+							</a>
+						</li>
+					</ul>
+				</div>
+			</section>
+		</main>
+
+		<footer>
+			<div class="wide foot">
+				<div class="foot-meta">
+					<p class="foot-brand">mare</p>
+					<p>{t.footer.tagline}</p>
+					<p class="name-note">{t.footer.name}</p>
+				</div>
+				<ul>
+					<li><a href={REPO}>GitHub</a></li>
+					<li><a href={RELEASES}>{t.footer.releases}</a></li>
+					<li><a href={`${REPO}/blob/main/CHANGELOG.md`}>{t.footer.changelog}</a></li>
+					<li><a href={docs(`${lang}/get-started/overview/`)}>{t.footer.docs}</a></li>
+					<li><a href={`${REPO}/blob/main/LICENSE`}>{t.footer.license}</a></li>
+				</ul>
+			</div>
+		</footer>
+
+		<script is:inline>
+			(function () {
+				var root = document.documentElement;
+				var reduce = matchMedia('(prefers-reduced-motion: reduce)');
+
+				// Borderless header at y = 0; clean separation once scrolled.
+				var nav = document.getElementById('site-nav');
+				var syncNav = function () {
+					nav.classList.toggle('scrolled', window.scrollY > 4);
+				};
+				syncNav();
+				addEventListener('scroll', syncNav, { passive: true });
+
+				// Theme toggle synced with Starlight's storage key.
+				var themeBtn = document.getElementById('theme');
+				var labels = JSON.parse(themeBtn.dataset.labels);
+				var order = ['auto', 'light', 'dark'];
+				var light = matchMedia('(prefers-color-scheme: light)');
+				function applyTheme(choice) {
+					root.dataset.themeChoice = choice;
+					root.dataset.theme = choice === 'auto' ? (light.matches ? 'light' : 'dark') : choice;
+					themeBtn.setAttribute('aria-label', labels[order.indexOf(choice)]);
+					themeBtn.title = labels[order.indexOf(choice)];
+				}
+				applyTheme(root.dataset.themeChoice || 'auto');
+				themeBtn.addEventListener('click', function () {
+					var next = order[(order.indexOf(root.dataset.themeChoice) + 1) % order.length];
+					try {
+						localStorage.setItem('starlight-theme', next === 'auto' ? '' : next);
+					} catch (e) {}
+					applyTheme(next);
+				});
+				light.addEventListener('change', function () {
+					if (root.dataset.themeChoice === 'auto') applyTheme('auto');
+				});
+
+				// Close the language menu on Escape or outside click.
+				var menu = document.querySelector('details.menu');
+				document.addEventListener('click', function (e) {
+					if (menu.open && !menu.contains(e.target)) menu.open = false;
+				});
+				menu.addEventListener('keydown', function (e) {
+					if (e.key === 'Escape') {
+						menu.open = false;
+						menu.querySelector('summary').focus();
+					}
+				});
+
+				// Scroll reveals (elements start visible if JS disabled or reduced motion).
+				var revealed = document.querySelectorAll('.reveal');
+				if (reduce.matches || !('IntersectionObserver' in window)) {
+					revealed.forEach(function (el) {
+						el.classList.add('in');
+					});
+				} else {
+					var io = new IntersectionObserver(
+						function (entries) {
+							entries.forEach(function (e) {
+								if (e.isIntersecting) {
+									e.target.classList.add('in');
+									io.unobserve(e.target);
+								}
+							});
+						},
+						{ rootMargin: '0px 0px -6% 0px' },
+					);
+					revealed.forEach(function (el) {
+						io.observe(el);
+					});
+				}
+
+				// Video helper for both hero recording and optional architecture video.
+				function wireVideo(videoId, playId) {
+					var video = document.getElementById(videoId);
+					var play = document.getElementById(playId);
+					if (!video || !play) return;
+					var userPaused = reduce.matches;
+					function syncButton() {
+						var playing = !video.paused;
+						play.classList.toggle('playing', playing);
+						play.setAttribute('aria-label', playing ? play.dataset.pause : play.dataset.play);
+					}
+					video.addEventListener('play', syncButton);
+					video.addEventListener('pause', syncButton);
+					play.addEventListener('click', function () {
+						if (video.paused) {
+							userPaused = false;
+							video.play().catch(function () {});
+						} else {
+							userPaused = true;
+							video.pause();
+						}
+					});
+					if ('IntersectionObserver' in window) {
+						new IntersectionObserver(
+							function (entries) {
+								entries.forEach(function (e) {
+									if (e.isIntersecting && !userPaused) video.play().catch(function () {});
+									else if (!e.isIntersecting) video.pause();
+								});
+							},
+							{ threshold: 0.25 },
+						).observe(video);
+					}
+					syncButton();
+				}
+				wireVideo('arch-video', 'arch-play');
+
+				// Interactive permission preset switcher.
+				var presetGroup = document.querySelector('[data-preset-group]');
+				if (presetGroup) {
+					var presetFlag = document.querySelector('[data-preset-flag]');
+					var presetSummary = document.querySelector('[data-preset-summary]');
+					var presetBtns = Array.prototype.slice.call(presetGroup.querySelectorAll('[role="radio"]'));
+					presetBtns.forEach(function (btn) {
+						btn.addEventListener('click', function () {
+							presetBtns.forEach(function (b) {
+								b.setAttribute('aria-checked', b === btn ? 'true' : 'false');
+							});
+							if (presetFlag) presetFlag.textContent = btn.dataset.flag;
+							if (presetSummary) presetSummary.textContent = btn.dataset.summary;
+						});
+					});
+				}
+
+				// Interactive reasoning effort selector.
+				var effortGroup = document.querySelector('[data-effort-group]');
+				if (effortGroup) {
+					var effortCmd = document.querySelector('[data-effort-cmd]');
+					var effortBtns = Array.prototype.slice.call(effortGroup.querySelectorAll('[role="radio"]'));
+					effortBtns.forEach(function (btn) {
+						btn.addEventListener('click', function () {
+							effortBtns.forEach(function (b) {
+								b.setAttribute('aria-checked', b === btn ? 'true' : 'false');
+							});
+							var lvl = btn.dataset.level;
+							if (effortCmd) effortCmd.textContent = '/effort ' + lvl + '  ·  mare --effort ' + lvl;
+						});
+					});
+				}
+
+				// Install tabs (WAI-ARIA tabs pattern) with OS detection.
+				var tabs = Array.prototype.slice.call(document.querySelectorAll('[role="tab"]'));
+				function select(tab, focus) {
+					tabs.forEach(function (t) {
+						var on = t === tab;
+						t.setAttribute('aria-selected', on ? 'true' : 'false');
+						t.tabIndex = on ? 0 : -1;
+						document.getElementById(t.getAttribute('aria-controls')).hidden = !on;
+					});
+					if (focus) tab.focus();
+				}
+				tabs.forEach(function (tab, i) {
+					tab.addEventListener('click', function () {
+						select(tab, false);
+					});
+					tab.addEventListener('keydown', function (e) {
+						var n = null;
+						if (e.key === 'ArrowRight') n = (i + 1) % tabs.length;
+						else if (e.key === 'ArrowLeft') n = (i - 1 + tabs.length) % tabs.length;
+						else if (e.key === 'Home') n = 0;
+						else if (e.key === 'End') n = tabs.length - 1;
+						if (n !== null) {
+							e.preventDefault();
+							select(tabs[n], true);
+						}
+					});
+				});
+				var uaPlatform = ((navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '') + ' ' + navigator.userAgent;
+				var os = /win/i.test(uaPlatform)
+					? 'windows'
+					: /iphone|ipad|android/i.test(uaPlatform)
+						? null
+						: /mac/i.test(uaPlatform)
+							? 'macos'
+							: /linux|x11|bsd/i.test(uaPlatform)
+								? 'linux'
+								: null;
+				function markTargets(arch) {
+					document.querySelectorAll('.targets li').forEach(function (li) {
+						var hit = li.dataset.os === os && (!arch || li.dataset.arch === arch);
+						li.classList.toggle('mine', hit);
+					});
+				}
+				if (os) {
+					var mine = document.getElementById('tab-' + os);
+					if (mine) {
+						mine.querySelector('.detected').hidden = false;
+						select(mine, false);
+						markTargets(null);
+					}
+					if (navigator.userAgentData && navigator.userAgentData.getHighEntropyValues) {
+						navigator.userAgentData
+							.getHighEntropyValues(['architecture'])
+							.then(function (v) {
+								if (v.architecture === 'arm' || v.architecture === 'x86') markTargets(v.architecture);
+							})
+							.catch(function () {});
+					}
+				}
+
+				// Copy buttons.
+				document.querySelectorAll('button[data-copy]').forEach(function (btn) {
+					var target = btn.querySelector('span') || btn;
+					var label = target.textContent;
+					btn.addEventListener('click', function () {
+						if (!navigator.clipboard) return;
+						navigator.clipboard.writeText(btn.dataset.copy).then(function () {
+							target.textContent = btn.dataset.copied;
+							btn.classList.add('done');
+							setTimeout(function () {
+								target.textContent = label;
+								btn.classList.remove('done');
+							}, 1600);
+						});
+					});
+				});
+
+				// Fetch latest release tag and direct asset links.
+				fetch('https://api.github.com/repos/signalridge/mare/releases/latest', { headers: { Accept: 'application/vnd.github+json' } })
+					.then(function (r) {
+						return r.ok ? r.json() : null;
+					})
+					.then(function (rel) {
+						if (!rel || !/^v\d+\.\d+\.\d+/.test(rel.tag_name || '')) return;
+						var tag = rel.tag_name;
+						document.querySelectorAll('[data-release-tag]').forEach(function (el) {
+							el.textContent = tag;
+						});
+						document.querySelectorAll('.release').forEach(function (el) {
+							el.hidden = false;
+						});
+						var names = (rel.assets || []).map(function (a) {
+							return a.name;
+						});
+						document.querySelectorAll('[data-target]').forEach(function (a) {
+							var file = 'mare-' + tag + '-' + a.dataset.target + '.' + a.dataset.ext;
+							if (names.indexOf(file) !== -1) a.href = 'https://github.com/signalridge/mare/releases/download/' + tag + '/' + file;
+						});
+					})
+					.catch(function () {});
+			})();
+		</script>
+
+		<script>
+			import { create } from 'asciinema-player';
+			import 'asciinema-player/dist/bundle/asciinema-player.css';
+
+			const mount = document.getElementById('demo-player');
+			const castUrl = mount?.dataset.cast;
+			if (mount && castUrl) {
+				const reduce = matchMedia('(prefers-reduced-motion: reduce)');
+				const narrow = matchMedia('(max-width: 640px)').matches;
+				const src = narrow && mount.dataset.castMobile ? mount.dataset.castMobile : castUrl;
+				const poster = mount.querySelector('.demo-poster');
+				if (poster) poster.remove();
+
+				const player = create(src, mount, {
+					cols: narrow ? 72 : 116,
+					rows: 26,
+					fit: 'width',
+					theme: 'catppuccin-mocha',
+					terminalFontFamily: "'JetBrains Mono Variable', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+					terminalLineHeight: 1.33333333,
+					autoPlay: !reduce.matches,
+					loop: true,
+					preload: true,
+					controls: 'auto',
+					idleTimeLimit: 2.0,
+					poster: 'npt:0.35',
+				});
+
+				let userPaused = reduce.matches;
+				let autoPausing = false;
+				player.addEventListener('pause', () => {
+					if (!autoPausing) userPaused = true;
+				});
+				player.addEventListener('play', () => {
+					userPaused = false;
+				});
+
+				if ('IntersectionObserver' in window) {
+					new IntersectionObserver(
+						(entries) => {
+							for (const e of entries) {
+								if (e.isIntersecting) {
+									if (!userPaused) {
+										player.play().catch(() => {});
+									}
+								} else {
+									autoPausing = true;
+									Promise.resolve(player.pause())
+										.catch(() => {})
+										.finally(() => {
+											autoPausing = false;
+										});
+								}
+							}
+						},
+						{ threshold: 0.25 },
+					).observe(mount);
+				}
+			}
+		</script>
+	</body>
+</html>
+
+<style is:global>
+	/* Unified Lunar Dusk (薄暮) tokens shared with Starlight documentation pages.
+	   Strict 3-size body scale below hero: --text-heading (1.5rem), --text-body (1rem), --text-sm (0.875rem). */
+	:root {
+		--bg: #ffffff;
+		--bg-alt: #f6f7fb;
+		--surface: #ffffff;
+		--code-bg: #f3f5fa;
+		--term-bg: #141622;
+		--text: #141624;
+		--text-2: #42465e;
+		--muted: #5b607a;
+		--line: #e1e4ee;
+		--accent: #4c50d4;
+		--accent-hover: #3d40be;
+		--accent-soft: #ebecfc;
+		--link: #4043be;
+		--coral: #c24f3b;
+		--nav-scrolled: #ffffff;
+		--shadow: 0 24px 64px -24px rgba(20, 22, 36, 0.16), 0 4px 16px -6px rgba(20, 22, 36, 0.08);
+		--k: #b4380b;
+		--s: #15744a;
+		--f: #5b38c6;
+		--c: #636780;
+		--ease: cubic-bezier(0.22, 1, 0.36, 1);
+
+		--font-display: 'Space Grotesk', 'Inter Variable', 'PingFang SC', 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Noto Sans CJK SC', 'Yu Gothic UI', sans-serif;
+		--font-body: 'Inter Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Noto Sans CJK SC', 'Microsoft YaHei', 'Yu Gothic UI', sans-serif;
+		--mono: 'JetBrains Mono Variable', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+		--text-heading: 1.5rem;
+		--text-body: 1rem;
+		--text-sm: 0.875rem;
+
+		color-scheme: light;
+	}
+	:root[data-theme='dark'] {
+		--bg: #0e0f17;
+		--bg-alt: #131521;
+		--surface: #171927;
+		--code-bg: #131520;
+		--term-bg: #11131e;
+		--text: #f3f4fb;
+		--text-2: #b2b7d1;
+		--muted: #8d92b0;
+		--line: #25273a;
+		--accent: #7f83f5;
+		--accent-hover: #6e72ee;
+		--accent-soft: #222447;
+		--link: #a5a9ff;
+		--coral: #f59d88;
+		--nav-scrolled: #0e0f17;
+		--shadow: 0 32px 84px -24px rgba(0, 0, 0, 0.78), 0 0 0 1px rgba(255, 255, 255, 0.06);
+		--k: #ff9e7a;
+		--s: #8fe0a8;
+		--f: #b8beff;
+		--c: #8c91ae;
+		color-scheme: dark;
+	}
+
+	*,
+	*::before,
+	*::after {
+		box-sizing: border-box;
+	}
+	* {
+		margin: 0;
+		padding: 0;
+	}
+	html {
+		scroll-behavior: smooth;
+		-webkit-text-size-adjust: 100%;
+	}
+	body {
+		background: var(--bg);
+		color: var(--text);
+		font-family: var(--font-body);
+		font-size: var(--text-body);
+		line-height: 1.65;
+		font-variant-numeric: tabular-nums;
+		-webkit-font-smoothing: antialiased;
+		-moz-osx-font-smoothing: grayscale;
+		overflow-x: clip;
+	}
+	a {
+		color: var(--link);
+		text-decoration: none;
+		transition: color 160ms var(--ease);
+	}
+	a:hover {
+		text-decoration: underline;
+		text-underline-offset: 0.2em;
+	}
+	img,
+	video,
+	svg {
+		display: block;
+		max-width: 100%;
+	}
+	code,
+	pre {
+		font-family: var(--mono);
+	}
+	:focus-visible {
+		outline: 2px solid var(--accent);
+		outline-offset: 3px;
+		border-radius: 6px;
+	}
+	.skip {
+		position: absolute;
+		left: 16px;
+		top: -48px;
+		z-index: 30;
+		background: var(--accent);
+		color: #fff;
+		padding: 8px 14px;
+		border-radius: 8px;
+		font-size: var(--text-sm);
+	}
+	.skip:focus {
+		top: 12px;
+	}
+	.wrap {
+		width: min(880px, 100% - 32px);
+		margin-inline: auto;
+	}
+	.wide {
+		width: min(1160px, 100% - 32px);
+		margin-inline: auto;
+	}
+
+	/* Navigation: borderless at y = 0, crisp separation when scrolled. */
+	.nav {
+		position: fixed;
+		top: 0;
+		left: 0;
+		right: 0;
+		z-index: 20;
+		background: transparent;
+		border-bottom: 1px solid transparent;
+		transition:
+			background-color 120ms var(--ease),
+			border-color 120ms var(--ease);
+	}
+	.nav.scrolled,
+	html:not(.js) .nav {
+		background: var(--nav-scrolled);
+		border-bottom-color: var(--line);
+	}
+	.nav-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		height: 60px;
+		gap: 16px;
+	}
+	.brand {
+		display: inline-flex;
+		align-items: center;
+		gap: 10px;
+		color: var(--text);
+		font-family: var(--font-display);
+		font-weight: 600;
+		font-size: 1.3125rem;
+		letter-spacing: -0.03em;
+	}
+	.brand:hover {
+		text-decoration: none;
+	}
+	.nav ul {
+		display: flex;
+		align-items: center;
+		gap: 18px;
+		list-style: none;
+		font-size: var(--text-sm);
+	}
+	.nav ul a {
+		color: var(--text-2);
+		font-weight: 500;
+		white-space: nowrap;
+	}
+	.nav ul a:hover {
+		color: var(--text);
+		text-decoration: none;
+	}
+	.nav ul .nav-docs {
+		color: var(--text);
+		font-weight: 600;
+	}
+	.icon-btn,
+	.menu summary {
+		display: grid;
+		place-items: center;
+		width: 34px;
+		height: 34px;
+		border-radius: 8px;
+		border: 0;
+		background: transparent;
+		color: var(--text-2);
+		cursor: pointer;
+		transition:
+			background-color 160ms var(--ease),
+			color 160ms var(--ease);
+	}
+	.icon-btn:hover,
+	.menu summary:hover {
+		color: var(--text);
+		background: color-mix(in srgb, var(--line) 55%, transparent);
+	}
+	.icon-btn svg,
+	.menu summary svg {
+		width: 18px;
+		height: 18px;
+		fill: currentColor;
+	}
+	#theme svg {
+		display: none;
+	}
+	[data-theme-choice='auto'] #theme .i-auto,
+	[data-theme-choice='light'] #theme .i-light,
+	[data-theme-choice='dark'] #theme .i-dark {
+		display: block;
+	}
+	html:not(.js) #theme {
+		display: none;
+	}
+	.menu {
+		position: relative;
+	}
+	.menu summary {
+		list-style: none;
+	}
+	.menu summary::-webkit-details-marker {
+		display: none;
+	}
+	.menu ul {
+		position: absolute;
+		right: 0;
+		top: 42px;
+		display: grid;
+		gap: 2px;
+		min-width: 148px;
+		padding: 6px;
+		background: var(--surface);
+		border: 1px solid var(--line);
+		border-radius: 12px;
+		box-shadow: var(--shadow);
+	}
+	.menu ul a {
+		display: block;
+		padding: 7px 11px;
+		border-radius: 8px;
+		font-size: var(--text-sm);
+		color: var(--text-2);
+	}
+	.menu ul a:hover,
+	.menu ul a[aria-current] {
+		background: var(--bg-alt);
+		color: var(--text);
+	}
+	.menu ul a[aria-current] {
+		font-weight: 600;
+	}
+
+	/* Hero: full-bleed Lunar Dusk horizon behind borderless header. */
+	.hero {
+		position: relative;
+		text-align: center;
+		padding: 112px 0 64px;
+		background:
+			radial-gradient(62rem 30rem at 50% -8rem, color-mix(in srgb, var(--accent) 20%, transparent), transparent 68%),
+			radial-gradient(38rem 18rem at 76% 4%, color-mix(in srgb, var(--coral) 11%, transparent), transparent 72%),
+			var(--bg);
+	}
+	.hero-inner {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+	}
+	.hero h1 {
+		font-family: var(--font-display);
+		font-size: clamp(2.625rem, 6.2vw, 4.75rem);
+		line-height: 1.03;
+		font-weight: 600;
+		letter-spacing: -0.04em;
+		max-width: 16ch;
+	}
+	:lang(zh) .hero h1,
+	:lang(ja) .hero h1 {
+		letter-spacing: -0.015em;
+		font-size: clamp(1.65rem, 6vw, 4rem);
+		max-width: 18ch;
+		overflow-wrap: break-word;
+		word-break: auto-phrase;
+	}
+	.accent-word {
+		color: var(--link);
+	}
+	.hero-lede {
+		margin-top: 20px;
+		max-width: 56ch;
+		font-size: var(--text-body);
+		line-height: 1.65;
+		color: var(--text-2);
+	}
+	.hero-actions {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		flex-wrap: wrap;
+		gap: 12px;
+		margin-top: 28px;
+		max-width: 100%;
+	}
+	.btn-primary {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		height: 44px;
+		padding: 0 22px;
+		border-radius: 10px;
+		background: var(--accent);
+		color: #ffffff;
+		font-size: var(--text-body);
+		font-weight: 600;
+		transition:
+			background-color 180ms var(--ease),
+			transform 160ms var(--ease);
+	}
+	.btn-primary:hover {
+		background: var(--accent-hover);
+		text-decoration: none;
+	}
+	.btn-primary:active {
+		transform: scale(0.98);
+	}
+	.hero-install {
+		display: inline-flex;
+		align-items: center;
+		gap: 10px;
+		height: 44px;
+		max-width: 100%;
+		padding: 0 8px 0 14px;
+		border-radius: 10px;
+		border: 1px solid var(--line);
+		background: var(--surface);
+		font-size: var(--text-sm);
+	}
+	.hero-install code {
+		color: var(--text);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		max-width: min(68vw, 560px);
+	}
+	.inline-copy {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		height: 30px;
+		padding: 0 10px;
+		border: 1px solid var(--line);
+		border-radius: 7px;
+		background: var(--bg-alt);
+		color: var(--text-2);
+		font-family: var(--font-body);
+		font-size: var(--text-sm);
+		font-weight: 500;
+		cursor: pointer;
+		flex: none;
+		transition:
+			border-color 160ms var(--ease),
+			color 160ms var(--ease),
+			background-color 160ms var(--ease);
+	}
+	.inline-copy:hover {
+		border-color: var(--accent);
+		color: var(--text);
+	}
+	.inline-copy.done {
+		color: var(--s);
+		border-color: color-mix(in srgb, var(--s) 55%, transparent);
+	}
+	html:not(.js) .inline-copy,
+	html:not(.js) .copy,
+	html:not(.js) .copy-sm {
+		display: none;
+	}
+
+	/* Hero TUI Recording Stage */
+	.shot {
+		margin-top: 44px;
+	}
+	.shot-frame {
+		border-radius: 14px;
+		overflow: hidden;
+		background: #1e1e2e;
+		border: 1px solid var(--line);
+		box-shadow: var(--shadow);
+		max-width: 1040px;
+		margin-inline: auto;
+	}
+	.window-bar {
+		display: flex;
+		align-items: center;
+		gap: 7px;
+		padding: 11px 16px;
+		background: #181825;
+		border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+	}
+	.window-bar i {
+		width: 10px;
+		height: 10px;
+		border-radius: 50%;
+		background: rgba(255, 255, 255, 0.22);
+	}
+	.window-bar span {
+		flex: 1;
+		text-align: center;
+		margin-right: 44px;
+		font-size: var(--text-sm);
+		color: #a6adc8;
+		font-family: var(--mono);
+	}
+	.screen {
+		position: relative;
+		background: #1e1e2e;
+		padding: 22px;
+	}
+	.demo-player {
+		width: 100%;
+		max-width: 100%;
+		background: #1e1e2e;
+	}
+	.demo-poster {
+		width: 100%;
+		height: auto;
+		aspect-ratio: 1084 / 612;
+	}
+	.demo-player div.ap-wrapper {
+		width: 100%;
+		max-width: 100%;
+	}
+	.demo-player div.ap-wrapper div.ap-player {
+		width: 100%;
+		max-width: 100%;
+		border-radius: 0;
+		background-color: #1e1e2e;
+		overflow: hidden;
+	}
+	.demo-player .ap-overlay-start {
+		display: none !important;
+	}
+	.demo-player div.ap-player div.ap-control-bar {
+		height: 28px;
+		background: rgba(24, 24, 37, 0.88);
+		backdrop-filter: blur(6px);
+	}
+	.demo-player div.ap-control-bar button.ap-playback-button,
+	.demo-player div.ap-control-bar button.ap-fullscreen-button {
+		padding: 8px;
+	}
+	.demo-player div.ap-control-bar span.ap-timer {
+		font-size: 12px;
+	}
+	.demo-player div.ap-control-bar .ap-progressbar .ap-bar .ap-gutter {
+		top: 12.5px;
+	}
+	/* Catppuccin Mocha terminal palette (matches scripts/screenshots.py) */
+	.asciinema-player-theme-catppuccin-mocha {
+		--term-color-foreground: #cdd6f4;
+		--term-color-background: #1e1e2e;
+		--term-color-0: #45475a;
+		--term-color-1: #f38ba8;
+		--term-color-2: #a6e3a1;
+		--term-color-3: #f9e2af;
+		--term-color-4: #89b4fa;
+		--term-color-5: #cba6f7;
+		--term-color-6: #94e2d5;
+		--term-color-7: #bac2de;
+		--term-color-8: #585b70;
+		--term-color-9: #f38ba8;
+		--term-color-10: #a6e3a1;
+		--term-color-11: #f9e2af;
+		--term-color-12: #89b4fa;
+		--term-color-13: #cba6f7;
+		--term-color-14: #94e2d5;
+		--term-color-15: #a6adc8;
+	}
+	.play {
+		position: absolute;
+		right: 14px;
+		bottom: 14px;
+		width: 38px;
+		height: 38px;
+		border-radius: 10px;
+		border: 1px solid rgba(255, 255, 255, 0.18);
+		background: rgba(14, 15, 23, 0.78);
+		backdrop-filter: blur(8px);
+		color: #f3f4fb;
+		display: grid;
+		place-items: center;
+		cursor: pointer;
+		transition:
+			background-color 160ms var(--ease),
+			border-color 160ms var(--ease);
+	}
+	.play:hover {
+		border-color: rgba(255, 255, 255, 0.42);
+	}
+	.play svg {
+		width: 16px;
+		height: 16px;
+		fill: currentColor;
+	}
+	.play .i-pause,
+	.play.playing .i-play {
+		display: none;
+	}
+	.play.playing .i-pause {
+		display: block;
+	}
+	.caption {
+		margin-top: 14px;
+		text-align: center;
+		font-size: var(--text-sm);
+		color: var(--muted);
+	}
+
+	/* Sections */
+	.band {
+		padding: 88px 0;
+		border-top: 1px solid var(--line);
+	}
+	.band-alt {
+		background: var(--bg-alt);
+	}
+	.section-head {
+		max-width: 660px;
+		margin-bottom: 44px;
+	}
+	.section-head h2 {
+		font-family: var(--font-display);
+		font-size: clamp(1.75rem, 3.4vw, 2.5rem);
+		line-height: 1.12;
+		font-weight: 600;
+		letter-spacing: -0.03em;
+	}
+	:lang(zh) .section-head h2,
+	:lang(ja) .section-head h2 {
+		letter-spacing: -0.01em;
+		word-break: auto-phrase;
+	}
+	.section-head p {
+		margin-top: 12px;
+		color: var(--text-2);
+		font-size: var(--text-body);
+		max-width: 62ch;
+	}
+	.more {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		font-size: var(--text-sm);
+		font-weight: 600;
+	}
+	.more::after {
+		content: '→';
+		transition: transform 160ms var(--ease);
+	}
+	.more:hover::after {
+		transform: translateX(3px);
+	}
+
+	/* Architecture showcase stage */
+	.arch-stage {
+		margin: 0;
+	}
+	.arch-media,
+	.arch-diagram {
+		position: relative;
+		border-radius: 14px;
+		overflow: hidden;
+		border: 1px solid var(--line);
+		background: var(--code-bg);
+		box-shadow: var(--shadow);
+	}
+	.arch-media video {
+		width: 100%;
+		height: auto;
+		aspect-ratio: 16 / 9;
+	}
+	.arch-diagram-scroll {
+		overflow-x: auto;
+		-webkit-overflow-scrolling: touch;
+	}
+	.arch-diagram-scroll svg {
+		display: block;
+		width: 100%;
+		height: auto;
+		user-select: text;
+	}
+	@media (max-width: 44rem) {
+		.arch-diagram-scroll svg {
+			min-width: 42rem;
+		}
+	}
+	.layers-grid {
+		display: grid;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+		margin-top: 36px;
+		border-top: 1px solid var(--line);
+	}
+	.layer-col {
+		padding: 24px 24px 0 0;
+	}
+	.layer-col + .layer-col {
+		padding-left: 24px;
+		border-left: 1px solid var(--line);
+	}
+	.layer-head {
+		display: flex;
+		align-items: baseline;
+		justify-content: space-between;
+		gap: 12px;
+		margin-bottom: 8px;
+	}
+	.layer-col h3 {
+		font-family: var(--font-display);
+		font-size: var(--text-heading);
+		font-weight: 600;
+		line-height: 1.25;
+		letter-spacing: -0.02em;
+	}
+	.layer-lang {
+		font-family: var(--mono);
+		font-size: var(--text-sm);
+		color: var(--muted);
+		white-space: nowrap;
+	}
+	.layer-col p {
+		font-size: var(--text-body);
+		color: var(--text-2);
+	}
+	.section-foot-link {
+		margin-top: 28px;
+	}
+
+	/* Editorial capabilities layout (no card cages) */
+	.split-row {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+		gap: 48px;
+		align-items: center;
+		padding-bottom: 56px;
+		border-bottom: 1px solid var(--line);
+	}
+	.split-row-top {
+		padding-top: 56px;
+		align-items: start;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+	.split-copy {
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+		min-width: 0;
+	}
+	.split-copy h3,
+	.col-item h3,
+	.startup-copy h3,
+	.first-run h3,
+	.downloads-head h3 {
+		font-family: var(--font-display);
+		font-size: var(--text-heading);
+		line-height: 1.22;
+		font-weight: 600;
+		letter-spacing: -0.02em;
+	}
+	:lang(zh) :is(.split-copy h3, .col-item h3, .startup-copy h3, .first-run h3, .downloads-head h3, .layer-col h3),
+	:lang(ja) :is(.split-copy h3, .col-item h3, .startup-copy h3, .first-run h3, .downloads-head h3, .layer-col h3) {
+		letter-spacing: 0;
+	}
+	.split-copy p,
+	.col-item p,
+	.startup-copy p,
+	.first-run p,
+	.downloads-head p {
+		color: var(--text-2);
+		font-size: var(--text-body);
+		max-width: 58ch;
+	}
+
+	.code-panel {
+		border-radius: 12px;
+		border: 1px solid var(--line);
+		background: var(--code-bg);
+		overflow: hidden;
+		min-width: 0;
+	}
+	.code-bar {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 12px;
+		padding: 9px 14px;
+		border-bottom: 1px solid var(--line);
+		background: var(--surface);
+		font-family: var(--mono);
+		font-size: var(--text-sm);
+		color: var(--muted);
+	}
+	.copy-sm {
+		border: 1px solid var(--line);
+		border-radius: 6px;
+		padding: 3px 10px;
+		background: var(--bg);
+		color: var(--text-2);
+		font-family: var(--font-body);
+		font-size: var(--text-sm);
+		font-weight: 500;
+		cursor: pointer;
+		transition:
+			border-color 160ms var(--ease),
+			color 160ms var(--ease);
+	}
+	.copy-sm:hover {
+		border-color: var(--accent);
+		color: var(--text);
+	}
+	.copy-sm.done {
+		color: var(--s);
+	}
+	.code {
+		padding: 16px 18px;
+		font-size: var(--text-sm);
+		line-height: 1.7;
+		overflow-x: auto;
+		color: var(--text);
+	}
+	.code.compact {
+		margin-top: auto;
+		border: 1px solid var(--line);
+		border-radius: 10px;
+		background: var(--code-bg);
+		padding: 14px 16px;
+	}
+	.k { color: var(--k); }
+	.s { color: var(--s); }
+	.f { color: var(--f); }
+	.c { color: var(--c); }
+	.p { color: var(--s); user-select: none; }
+
+	.three-col {
+		display: grid;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+		border-bottom: 1px solid var(--line);
+	}
+	.col-item {
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+		padding: 48px 28px 48px 0;
+		min-width: 0;
+	}
+	.col-item + .col-item {
+		padding-left: 28px;
+		border-left: 1px solid var(--line);
+	}
+	.col-item:last-child {
+		padding-right: 0;
+	}
+	.cmds {
+		margin-top: auto;
+		border-top: 1px solid var(--line);
+	}
+	.cmds div {
+		display: grid;
+		grid-template-columns: 6.5em minmax(0, 1fr);
+		gap: 10px;
+		padding: 10px 0;
+		border-bottom: 1px solid var(--line);
+		font-size: var(--text-sm);
+	}
+	.cmds dt code {
+		color: var(--link);
+	}
+	.cmds dd {
+		color: var(--text-2);
+	}
+
+	/* Interactive segmented controls (permissions + /effort) */
+	.interactive-box {
+		margin-top: auto;
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+		padding-top: 8px;
+	}
+	.segmented {
+		display: inline-grid;
+		grid-auto-flow: column;
+		grid-auto-columns: minmax(0, 1fr);
+		padding: 3px;
+		border-radius: 10px;
+		border: 1px solid var(--line);
+		background: var(--bg-alt);
+		gap: 2px;
+	}
+	.effort-seg {
+		display: flex;
+		flex-wrap: wrap;
+		width: fit-content;
+		max-width: 100%;
+	}
+	.segmented button {
+		border: 0;
+		border-radius: 7px;
+		padding: 7px 10px;
+		background: transparent;
+		color: var(--text-2);
+		font-family: var(--mono);
+		font-size: var(--text-sm);
+		font-weight: 500;
+		cursor: pointer;
+		white-space: nowrap;
+		transition:
+			background-color 160ms var(--ease),
+			color 160ms var(--ease);
+	}
+	.segmented button:hover {
+		color: var(--text);
+	}
+	.segmented button[aria-checked='true'] {
+		background: var(--accent);
+		color: #ffffff;
+		font-weight: 600;
+	}
+	.interactive-readout {
+		padding: 12px 14px;
+		border-radius: 10px;
+		border: 1px solid var(--line);
+		background: var(--code-bg);
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+	}
+	.interactive-readout code {
+		font-size: var(--text-sm);
+		color: var(--text);
+		overflow-wrap: anywhere;
+	}
+	.interactive-readout p {
+		font-size: var(--text-sm);
+		color: var(--text-2);
+	}
+	.provider-list {
+		font-family: var(--mono);
+		font-size: var(--text-sm) !important;
+		color: var(--muted) !important;
+		line-height: 1.8;
+		padding: 12px 0;
+		border-top: 1px solid var(--line);
+		border-bottom: 1px solid var(--line);
+	}
+	.effort-note {
+		font-size: var(--text-sm) !important;
+		color: var(--muted) !important;
+	}
+
+	/* Startup row */
+	.startup-row {
+		display: grid;
+		grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+		gap: 48px;
+		align-items: center;
+		padding-top: 56px;
+	}
+	.startup-copy {
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+	}
+	.cmd-list {
+		list-style: none;
+		border-top: 1px solid var(--line);
+	}
+	.cmd-list li {
+		padding: 13px 4px;
+		border-bottom: 1px solid var(--line);
+		font-size: var(--text-sm);
+		overflow-x: auto;
+		white-space: nowrap;
+	}
+
+	/* Install workbench */
+	.install-grid {
+		display: grid;
+		grid-template-columns: minmax(0, 1.25fr) minmax(0, 0.9fr);
+		gap: 44px;
+		align-items: start;
+	}
+	.install-box {
+		border: 1px solid var(--line);
+		border-radius: 14px;
+		background: var(--surface);
+		overflow: hidden;
+		min-width: 0;
+	}
+	.tabs {
+		display: grid;
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+		border-bottom: 1px solid var(--line);
+		background: var(--code-bg);
+	}
+	.tabs button {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 7px;
+		padding: 13px 10px;
+		border: 0;
+		border-bottom: 2px solid transparent;
+		background: transparent;
+		color: var(--text-2);
+		font-family: var(--font-body);
+		font-size: var(--text-sm);
+		font-weight: 600;
+		cursor: pointer;
+		transition:
+			color 160ms var(--ease),
+			background-color 160ms var(--ease),
+			border-color 160ms var(--ease);
+	}
+	.tabs button:hover {
+		color: var(--text);
+	}
+	.tabs button svg {
+		width: 17px;
+		height: 17px;
+		fill: currentColor;
+		flex: none;
+	}
+	.tabs button[aria-selected='true'] {
+		background: var(--surface);
+		color: var(--text);
+		border-bottom-color: var(--accent);
+	}
+	.tabs .detected {
+		font-style: normal;
+		font-size: var(--text-sm);
+		font-weight: 500;
+		color: var(--link);
+	}
+	.panel {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr);
+		gap: 18px;
+		padding: 22px;
+		min-width: 0;
+	}
+	.panel[hidden] {
+		display: none;
+	}
+	.method {
+		min-width: 0;
+	}
+	.method h3 {
+		font-size: var(--text-sm);
+		font-weight: 600;
+		color: var(--text-2);
+		margin-bottom: 8px;
+	}
+	.cmd {
+		display: flex;
+		align-items: stretch;
+		max-width: 100%;
+		min-width: 0;
+		border: 1px solid var(--line);
+		border-radius: 10px;
+		background: var(--term-bg);
+		overflow: hidden;
+	}
+	.cmd pre {
+		flex: 1;
+		min-width: 0;
+		padding: 13px 16px;
+		color: #d8ddf4;
+		font-size: var(--text-sm);
+		line-height: 1.65;
+		overflow-x: auto;
+	}
+	.copy {
+		flex: none;
+		border: 0;
+		border-left: 1px solid rgba(255, 255, 255, 0.1);
+		background: rgba(255, 255, 255, 0.04);
+		color: #d8ddf4;
+		font-family: var(--font-body);
+		font-size: var(--text-sm);
+		font-weight: 500;
+		padding: 0 16px;
+		cursor: pointer;
+		min-width: 74px;
+		transition: background-color 160ms var(--ease);
+	}
+	.copy:hover {
+		background: rgba(255, 255, 255, 0.11);
+	}
+	.copy.done {
+		color: #8fe0a8;
+	}
+
+	.first-run {
+		display: flex;
+		flex-direction: column;
+		gap: 14px;
+		min-width: 0;
+	}
+	.terminal {
+		background: var(--term-bg);
+		border-radius: 12px;
+		border: 1px solid var(--line);
+		overflow: hidden;
+		color: #d8ddf4;
+	}
+	.terminal pre {
+		padding: 18px 20px;
+		font-size: var(--text-sm);
+		line-height: 1.8;
+		white-space: pre-wrap;
+		overflow-wrap: anywhere;
+	}
+
+	/* Direct downloads hairline table-grid */
+	.downloads {
+		margin-top: 56px;
+		padding-top: 44px;
+		border-top: 1px solid var(--line);
+	}
+	.downloads-head {
+		display: flex;
+		align-items: baseline;
+		justify-content: space-between;
+		flex-wrap: wrap;
+		gap: 8px 24px;
+	}
+	.targets {
+		list-style: none;
+		display: grid;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+		gap: 12px;
+		margin-top: 22px;
+	}
+	.targets a {
+		display: flex;
+		align-items: center;
+		gap: 14px;
+		padding: 15px 16px;
+		border-radius: 10px;
+		border: 1px solid var(--line);
+		background: var(--surface);
+		color: var(--text);
+		transition:
+			border-color 160ms var(--ease),
+			transform 160ms var(--ease);
+	}
+	.targets a:hover {
+		text-decoration: none;
+		border-color: var(--accent);
+		transform: translateY(-1px);
+	}
+	.targets svg {
+		width: 22px;
+		height: 22px;
+		fill: var(--text-2);
+		flex: none;
+	}
+	.targets div {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		min-width: 0;
+	}
+	.targets strong {
+		font-size: var(--text-body);
+		font-weight: 600;
+	}
+	.targets code {
+		font-size: var(--text-sm);
+		color: var(--link);
+	}
+	.targets li.mine a {
+		border-color: var(--accent);
+		background: var(--accent-soft);
+	}
+	.note {
+		margin-top: 20px;
+		font-size: var(--text-sm);
+		color: var(--muted);
+	}
+
+	/* Ecosystem */
+	.eco {
+		list-style: none;
+		display: grid;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+		border-top: 1px solid var(--line);
+	}
+	.eco li + li {
+		border-left: 1px solid var(--line);
+	}
+	.eco a {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		height: 100%;
+		padding: 24px 24px 12px 0;
+		color: var(--text);
+	}
+	.eco li + li a {
+		padding-left: 24px;
+	}
+	.eco a:hover {
+		text-decoration: none;
+	}
+	.eco a:hover strong {
+		color: var(--link);
+	}
+	.eco strong {
+		font-family: var(--mono);
+		font-size: var(--text-body);
+		font-weight: 600;
+		transition: color 160ms var(--ease);
+	}
+	.eco strong::after {
+		content: ' ↗';
+		color: var(--muted);
+	}
+	.eco span {
+		color: var(--text-2);
+		font-size: var(--text-body);
+	}
+
+	/* Footer */
+	footer {
+		border-top: 1px solid var(--line);
+		padding: 40px 0 56px;
+		font-size: var(--text-sm);
+		color: var(--muted);
+	}
+	.foot {
+		display: flex;
+		justify-content: space-between;
+		gap: 28px;
+		flex-wrap: wrap;
+	}
+	.foot-meta {
+		display: grid;
+		gap: 6px;
+		max-width: 480px;
+	}
+	.foot-brand {
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
+		font-family: var(--font-display);
+		font-weight: 600;
+		font-size: var(--text-body);
+		color: var(--text);
+	}
+	.foot ul {
+		list-style: none;
+		display: flex;
+		flex-wrap: wrap;
+		gap: 10px 22px;
+		align-content: start;
+	}
+	.foot a {
+		color: var(--text-2);
+	}
+	.foot a:hover {
+		color: var(--text);
+	}
+
+	/* Scroll reveal */
+	.js .reveal {
+		opacity: 0;
+		transform: translateY(18px);
+		transition:
+			opacity 520ms var(--ease),
+			transform 520ms var(--ease);
+	}
+	.js .reveal.in {
+		opacity: 1;
+		transform: none;
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		html {
+			scroll-behavior: auto;
+		}
+		.js .reveal {
+			opacity: 1;
+			transform: none;
+			transition: none;
+		}
+		.btn-primary,
+		.targets a,
+		.more::after {
+			transition: none;
+		}
+	}
+
+	@media (max-width: 960px) {
+		.layers-grid,
+		.three-col,
+		.split-row,
+		.split-row-top,
+		.startup-row,
+		.install-grid,
+		.eco {
+			grid-template-columns: minmax(0, 1fr);
+		}
+		.layer-col,
+		.layer-col + .layer-col {
+			padding: 20px 0;
+			border-left: 0;
+			border-top: 1px solid var(--line);
+		}
+		.layer-col:first-child {
+			border-top: 0;
+		}
+		.col-item,
+		.col-item + .col-item {
+			padding: 32px 0;
+			border-left: 0;
+			border-top: 1px solid var(--line);
+		}
+		.col-item:first-child {
+			border-top: 0;
+		}
+		.eco li + li {
+			border-left: 0;
+			border-top: 1px solid var(--line);
+		}
+		.eco a,
+		.eco li + li a {
+			padding: 20px 0;
+		}
+		.targets {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+		}
+	}
+
+	@media (max-width: 640px) {
+		.hero {
+			padding: 88px 0 48px;
+		}
+		.band {
+			padding: 64px 0;
+		}
+		.nav ul {
+			gap: 10px;
+		}
+		.nav .wide-only {
+			display: none;
+		}
+		.hero-actions {
+			flex-direction: column;
+			width: 100%;
+		}
+		.btn-primary,
+		.hero-install {
+			width: 100%;
+			justify-content: center;
+		}
+		.hero-install {
+			justify-content: space-between;
+		}
+		.hero-install code {
+			max-width: none;
+		}
+		.tabs {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+		}
+		.tabs .detected {
+			display: none;
+		}
+		.panel {
+			padding: 16px;
+		}
+		.targets {
+			grid-template-columns: minmax(0, 1fr);
+		}
+		.cmds div {
+			grid-template-columns: minmax(0, 1fr);
+			gap: 2px;
+		}
+		.window-bar span {
+			display: none;
+		}
+		.shot-frame {
+			border-radius: 12px;
+		}
+		.screen {
+			padding: 12px;
+		}
+	}
+</style>

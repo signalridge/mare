@@ -1,0 +1,7 @@
+# The one place the Rust version is pinned: local builds (rustup), CI and release
+# (.github/actions/setup-rust), the Nix flake and the source Dockerfile all read it.
+# .github/workflows/ci-deps-update.yaml opens a PR when a new stable release ships.
+[toolchain]
+channel = "1.100.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

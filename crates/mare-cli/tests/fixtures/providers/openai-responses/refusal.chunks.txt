@@ -1,0 +1,10 @@
+{"type":"response.created","response":{"id":"resp_syn_refusal","object":"response","created_at":1700000000,"status":"in_progress","model":"gpt-4o","output":[]},"sequence_number":0}
+{"type":"response.in_progress","response":{"id":"resp_syn_refusal","object":"response","created_at":1700000000,"status":"in_progress","model":"gpt-4o","output":[]},"sequence_number":1}
+{"type":"response.output_item.added","item":{"id":"msg_syn_refusal","type":"message","status":"in_progress","content":[],"role":"assistant"},"output_index":0,"sequence_number":2}
+{"type":"response.content_part.added","content_index":0,"item_id":"msg_syn_refusal","output_index":0,"part":{"type":"refusal","refusal":""},"sequence_number":3}
+{"type":"response.refusal.delta","content_index":0,"delta":"I cannot ","item_id":"msg_syn_refusal","output_index":0,"sequence_number":4}
+{"type":"response.refusal.delta","content_index":0,"delta":"assist with that.","item_id":"msg_syn_refusal","output_index":0,"sequence_number":5}
+{"type":"response.refusal.done","content_index":0,"item_id":"msg_syn_refusal","output_index":0,"refusal":"I cannot assist with that.","sequence_number":6}
+{"type":"response.content_part.done","content_index":0,"item_id":"msg_syn_refusal","output_index":0,"part":{"type":"refusal","refusal":"I cannot assist with that."},"sequence_number":7}
+{"type":"response.output_item.done","item":{"id":"msg_syn_refusal","type":"message","status":"completed","content":[{"type":"refusal","refusal":"I cannot assist with that."}],"role":"assistant"},"output_index":0,"sequence_number":8}
+{"type":"response.completed","response":{"id":"resp_syn_refusal","object":"response","created_at":1700000000,"status":"completed","output":[{"id":"msg_syn_refusal","type":"message","status":"completed","content":[{"type":"refusal","refusal":"I cannot assist with that."}],"role":"assistant"}],"usage":{"input_tokens":55,"input_tokens_details":{"cached_tokens":0},"output_tokens":13,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":68}},"sequence_number":9}

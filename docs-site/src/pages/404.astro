@@ -1,0 +1,218 @@
+---
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+const fontCss = [
+	`@font-face{font-family:'Inter Variable';font-style:normal;font-weight:100 900;font-display:swap;src:url('${base}/fonts/inter-latin-wght-normal.woff2') format('woff2')}`,
+	`@font-face{font-family:'Space Grotesk';font-style:normal;font-weight:600;font-display:swap;src:url('${base}/fonts/space-grotesk-600-latin.woff2') format('woff2')}`,
+	`@font-face{font-family:'JetBrains Mono Variable';font-style:normal;font-weight:100 800;font-display:swap;src:url('${base}/fonts/jetbrains-mono-latin-wght-normal.woff2') format('woff2')}`,
+].join('');
+---
+
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<meta name="robots" content="noindex" />
+		<title>Page not found | mare</title>
+		<link rel="icon" href={`${base}/mark.svg`} />
+		<link rel="preload" href={`${base}/fonts/inter-latin-wght-normal.woff2`} as="font" type="font/woff2" crossorigin="anonymous" />
+		<link rel="preload" href={`${base}/fonts/space-grotesk-600-latin.woff2`} as="font" type="font/woff2" crossorigin="anonymous" />
+		<style is:inline set:html={fontCss} />
+		<script is:inline>
+			(function () {
+				try {
+					var saved = localStorage.getItem('starlight-theme');
+					var theme = saved === 'light' || saved === 'dark'
+						? saved
+						: (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+					document.documentElement.dataset.theme = theme;
+				} catch (e) {
+					document.documentElement.dataset.theme = 'dark';
+				}
+			})();
+		</script>
+		<style>
+			:root {
+				color-scheme: dark;
+				--bg: #0e0f17;
+				--surface: #151722;
+				--hairline: #25273a;
+				--text: #f3f4fb;
+				--muted: #8d92b0;
+				--body: #b2b7d1;
+				--violet: #a5a9ff;
+				--violet-deep: #7f83f5;
+				--coral: #f59d88;
+			}
+			:root[data-theme='light'] {
+				color-scheme: light;
+				--bg: #ffffff;
+				--surface: #f6f7fb;
+				--hairline: #e1e4ee;
+				--text: #141624;
+				--muted: #5b607a;
+				--body: #42465e;
+				--violet: #4c50d4;
+				--violet-deep: #3d40be;
+				--coral: #bd4b37;
+			}
+			* {
+				box-sizing: border-box;
+			}
+			body {
+				margin: 0;
+				min-height: 100vh;
+				display: grid;
+				place-items: center;
+				padding: 2rem 1.25rem;
+				font-family: 'Inter Variable', 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans CJK SC', 'Hiragino Kaku Gothic ProN', 'Yu Gothic UI', system-ui, sans-serif;
+				background:
+					radial-gradient(38rem 22rem at 50% 0%, color-mix(in srgb, var(--violet-deep) 20%, transparent), transparent 72%),
+					radial-gradient(28rem 16rem at 80% 10%, color-mix(in srgb, var(--coral) 10%, transparent), transparent 72%),
+					var(--bg);
+				color: var(--body);
+				-webkit-font-smoothing: antialiased;
+			}
+			main {
+				width: 100%;
+				max-width: 42rem;
+				border: 1px solid var(--hairline);
+				border-radius: 1rem;
+				background: color-mix(in srgb, var(--surface) 88%, transparent);
+				padding: clamp(2rem, 5vw, 3.25rem);
+				text-align: center;
+				backdrop-filter: blur(12px);
+			}
+			.wordmark {
+				display: block;
+				height: 2rem;
+				width: auto;
+				margin: 0 auto 1.4rem;
+			}
+			.wordmark-light {
+				display: none;
+			}
+			:root[data-theme='light'] .wordmark-dark {
+				display: none;
+			}
+			:root[data-theme='light'] .wordmark-light {
+				display: block;
+			}
+			.code {
+				margin: 0.75rem 0 0;
+				font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+				font-size: 0.875rem;
+				font-weight: 500;
+				color: var(--muted);
+			}
+			h1 {
+				margin: 0;
+				font-family: 'Space Grotesk', system-ui, sans-serif;
+				font-size: clamp(1.75rem, 4vw, 2.5rem);
+				font-weight: 600;
+				line-height: 1.15;
+				letter-spacing: -0.025em;
+				color: var(--text);
+			}
+			.lead {
+				margin: 0.9rem auto 0;
+				max-width: 32rem;
+				line-height: 1.65;
+				font-size: 1rem;
+			}
+			.locales {
+				display: grid;
+				grid-template-columns: repeat(3, minmax(0, 1fr));
+				gap: 0.75rem;
+				margin-top: 2rem;
+				text-align: left;
+			}
+			.locale-card {
+				border: 1px solid var(--hairline);
+				border-radius: 0.75rem;
+				padding: 0.9rem 1rem;
+				background: color-mix(in srgb, var(--bg) 65%, transparent);
+			}
+			.locale-card strong {
+				display: block;
+				font-family: 'Space Grotesk', system-ui, sans-serif;
+				font-size: 0.9375rem;
+				color: var(--text);
+				margin-bottom: 0.45rem;
+			}
+			.locale-card a {
+				display: block;
+				font-size: 0.875rem;
+				line-height: 1.6;
+				color: var(--violet);
+				text-decoration: none;
+			}
+			.locale-card a:hover {
+				text-decoration: underline;
+			}
+			@media (max-width: 38rem) {
+				.locales {
+					grid-template-columns: 1fr;
+				}
+			}
+		</style>
+	</head>
+	<body>
+		<main>
+			<img class="wordmark wordmark-dark" src={`${base}/assets/brand/mare-wordmark-dark.svg`} alt="mare" width="128" height="32" decoding="sync" />
+			<img class="wordmark wordmark-light" src={`${base}/assets/brand/mare-wordmark-light.svg`} alt="mare" width="128" height="32" decoding="sync" />
+			<h1 id="err-title">Page not found</h1>
+			<p class="code" id="err-code">HTTP 404</p>
+			<p class="lead" id="err-lead">The requested mare documentation route does not exist or moved. Choose a language below to return to the docs.</p>
+			<div class="locales">
+				<div class="locale-card" lang="en">
+					<strong>English</strong>
+					<a href={`${base}/en/`}>Home</a>
+					<a href={`${base}/en/get-started/quickstart/`}>Quickstart</a>
+				</div>
+				<div class="locale-card" lang="zh-CN">
+					<strong>简体中文</strong>
+					<a href={`${base}/zh/`}>首页</a>
+					<a href={`${base}/zh/get-started/quickstart/`}>快速上手</a>
+				</div>
+				<div class="locale-card" lang="ja">
+					<strong>日本語</strong>
+					<a href={`${base}/ja/`}>ホーム</a>
+					<a href={`${base}/ja/get-started/quickstart/`}>クイックスタート</a>
+				</div>
+			</div>
+		</main>
+		<script is:inline>
+			(function () {
+				var m = window.location.pathname.match(/(?:^|\/)(zh|ja)(?:\/|$)/);
+				var loc = m ? m[1] : null;
+				if (!loc) return;
+				var copy = {
+					zh: {
+						lang: 'zh-CN',
+						docTitle: '页面未找到 | mare',
+						code: '404 · 未找到页面',
+						title: '页面未找到',
+						lead: '请求的 mare 文档路径不存在或已移动。请选择下面的语言返回文档。',
+					},
+					ja: {
+						lang: 'ja',
+						docTitle: 'ページが見つかりません | mare',
+						code: '404 · ページが見つかりません',
+						title: 'ページが見つかりません',
+						lead: '指定された mare ドキュメントのページは存在しないか移動しました。下の言語からドキュメントに戻ってください。',
+					},
+				}[loc];
+				if (!copy) return;
+				document.documentElement.lang = copy.lang;
+				document.title = copy.docTitle;
+				var codeEl = document.getElementById('err-code');
+				var titleEl = document.getElementById('err-title');
+				var leadEl = document.getElementById('err-lead');
+				if (codeEl) codeEl.textContent = copy.code;
+				if (titleEl) titleEl.textContent = copy.title;
+				if (leadEl) leadEl.textContent = copy.lead;
+			})();
+		</script>
+	</body>
+</html>

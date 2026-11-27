@@ -1,0 +1,12 @@
+---
+source: crates/mare-cli/tests/suite/tui/components.rs
+expression: t.snap().await
+---
+  ╭─ Fallback Select ──────────────────────────────────────────────╮
+  │ alpha                                                          │
+  │ beta                                                           │
+  ╰─────────────────────────────────────────────────────── 1 of 2 ─╯
+╭────────────────────────────────────────────────────────────────────╮
+│ ❯ Ask mare anything… (@ files, / commands, ? keys)                 │
+╰────────────────────────────────────────────────────────────────────╯
+ Enter select │ ↑↓ move │ / search │ Esc cancel │ ? all keys

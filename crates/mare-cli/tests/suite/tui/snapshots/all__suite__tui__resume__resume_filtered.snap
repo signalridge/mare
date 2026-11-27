@@ -1,0 +1,14 @@
+---
+source: crates/mare-cli/tests/suite/tui/resume.rs
+assertion_line: 115
+expression: t.snap().await
+---
+  ╭─ Resume session  This project │ All ─── [updated] created · [all] named ─╮
+  │ / flaky▏                                                                 │
+  │   fix the flaky test                                                     │
+  │   just now · sb                                                          │
+  ╰───────────────────────────────────────────────────────────────── 1 of 1 ─╯
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ ❯ Ask mare anything… (@ files, / commands, ? keys)                           │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ Enter select │ ↑↓ move │ Esc clear search │ Tab switch tab │ ? all keys

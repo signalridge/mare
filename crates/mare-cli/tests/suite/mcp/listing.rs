@@ -1,0 +1,353 @@
+//! Tool listing: pagination, names, status, the CLI list and direct tools.
+
+use super::*;
+
+/// tools/list is bounded: an endless cursor stops after 16 pages, and a list that never
+/// answers fails within the startup timeout instead of hanging.
+#[tokio::test]
+async fn mcp_tools_list_is_capped_at_16_pages_and_bounded_by_the_startup_timeout() {
+    local(async {
+        let env = TestEnv::new().await;
+        let fake = Fake::new(&env, "pages");
+        let h = env.host().builtins(&["mcp"]).no_session().build().await;
+        global(
+            &h,
+            "SPEC",
+            mare_shared::lua::json_to_lua(h.lua(), &with(fake.entry(json!({ "pages": true })), json!({ "name": "p" })))
+                .unwrap(),
+        );
+        let n: i64 = eval(&h, "local c = mare.mcp.connect(SPEC); local n = #c:tools(); c:close(); return n").await;
+        assert_eq!(n, 16, "one tool per page, 16 pages");
+        assert_eq!(fake.count("tools/list"), 16);
+
+        let slow = Fake::new(&env, "slow");
+        let spec = with(slow.entry(json!({ "list_delay": 30 })), json!({ "name": "s", "timeout_ms": 400 }));
+        global(&h, "SPEC", mare_shared::lua::json_to_lua(h.lua(), &spec).unwrap());
+        let t0 = std::time::Instant::now();
+        let err: String =
+            eval(&h, "local ok, e = pcall(mare.mcp.connect, SPEC); assert(not ok); return tostring(e)").await;
+        assert!(err.contains("did not initialize within 400ms"), "{err}");
+        assert!(t0.elapsed() < std::time::Duration::from_secs(5), "bounded by the timeout");
+        h.shutdown().await;
+    })
+    .await
+}
+
+/// Tool names: too long or colliding names get a short hash suffix; two servers whose names
+/// sanitize alike are an error — the second never shadows the first.
+#[tokio::test]
+async fn mcp_tool_names_are_hashed_and_colliding_servers_rejected() {
+    local(async {
+        let env = TestEnv::new().await;
+        let fake = Fake::new(&env, "names");
+        let long = "x".repeat(80);
+        let entry = fake.entry(json!({ "tools": ["echo", "a.b", "a_b", long] }));
+        let cfg = servers(json!({
+            "a-b": with(entry.clone(), json!({ "tier": "direct" })),
+            "a_b": with(entry, json!({ "tier": "direct" })),
+        }));
+        let h = env.host().builtins(&["mcp"]).config(cfg).no_session().build().await;
+        expose(&h);
+        wait_until(15, "the a-b tools", || {
+            let h = h.clone();
+            async move { eval::<bool>(&h, "return T:get('mcp__a-b__echo') ~= nil").await }
+        })
+        .await;
+        let names: Vec<String> = eval(
+            &h,
+            r#"local out = {}
+               for _, d in ipairs(T:list()) do if d.name:match("^mcp__") then out[#out + 1] = d.name end end
+               table.sort(out) return out"#,
+        )
+        .await;
+        assert_eq!(names.len(), 4, "{names:?}");
+        assert!(names.iter().all(|n| n.len() <= 64 && n.starts_with("mcp__a-b__")), "{names:?}");
+        let hashed: Vec<&String> = names.iter().filter(|n| n.as_str() != "mcp__a-b__echo").collect();
+        assert!(hashed.iter().all(|n| n.rsplit('_').next().unwrap().len() == 8), "hash suffixes: {hashed:?}");
+        let out: String = eval(
+            &h,
+            r#"local req = { action = "list", lines = {}, code = 0 }
+               C.cordis:get("bus"):emit("mcp/cli", req) return table.concat(req.lines, "\n")"#,
+        )
+        .await;
+        assert!(out.contains("a_b") && out.contains("collides with a-b"), "{out}");
+        assert_eq!(fake.count("start"), 1, "the rejected server never starts");
+        h.shutdown().await;
+    })
+    .await
+}
+
+/// The `mcp` service's status(): one row per server with state, tier, transport, tool count
+/// and the last error, without connecting anything itself (deferred servers stay idle).
+#[tokio::test]
+async fn mcp_service_status_reports_state_tools_and_last_error() {
+    local(async {
+        let env = TestEnv::new().await;
+        let fake = Fake::new(&env, "status");
+        let cfg = servers(json!({
+            "ok": with(fake.entry(json!({ "tools": ["echo", "crash"] })), json!({ "tier": "direct" })),
+            "broken": { "command": "/nonexistent/mare-mcp-server", "tier": "direct" },
+            "lazy": fake.entry(json!({})),
+        }));
+        let h = env.host().builtins(&["mcp"]).config(cfg).no_session().build().await;
+        global(&h, "M", h.service_table("mcp").unwrap());
+        wait_until(15, "both direct servers settle", || {
+            let h = h.clone();
+            async move {
+                eval::<bool>(
+                    &h,
+                    r#"local by = {}
+                       for _, s in ipairs(M:list_servers().data) do by[s.name] = s end
+                       return by.ok.state == "connected" and by.broken.state == "error""#,
+                )
+                .await
+            }
+        })
+        .await;
+        let (rows, ok, broken, lazy): (String, String, String, String) = eval(
+            &h,
+            r#"local st = M:list_servers()
+               local by, names = {}, {}
+               for _, s in ipairs(st.data) do by[s.name] = s names[#names + 1] = s.name end
+               local function row(s)
+                 return table.concat({ s.state, s.tier, s.transport, tostring(s.tools), tostring(s.error ~= nil) }, " ")
+               end
+               return table.concat(names, ","), row(by.ok), row(by.broken), row(by.lazy)"#,
+        )
+        .await;
+        assert_eq!(rows, "broken,lazy,ok", "sorted like /mcp");
+        assert_eq!(ok, "connected direct stdio 2 false");
+        assert_eq!(broken, "error direct stdio 0 true");
+        assert_eq!(lazy, "idle deferred stdio 0 false");
+        assert_eq!(fake.count("start"), 1, "status() never connected the deferred server");
+        h.shutdown().await;
+    })
+    .await
+}
+
+/// `mare mcp list` (the binary): connects to the user's servers and prints their state.
+#[test]
+fn mcp_cli_list_prints_servers() {
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let log = home.path().join("srv.log");
+    std::fs::create_dir_all(home.path().join("config")).unwrap();
+    let entry = json!({ "command": fake_mcp_bin(), "args": ["scripted", json!({ "log": log }).to_string()] });
+    std::fs::write(home.path().join("config/mcp.json"), json!({ "mcpServers": { "cli": entry } }).to_string()).unwrap();
+    let out = mare_cmd().args(["mcp", "list"]).current_dir(work.path()).env("MARE_HOME", home.path()).run_output();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{text}\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(text.contains("cli") && text.contains("connected") && text.contains("1 tools"), "{text}");
+}
+
+/// A deferred server's tools overridden to `direct` are declared once the background connect
+/// finishes, the rest stay deferred.
+#[tokio::test]
+async fn mcp_direct_tools_of_a_deferred_server_are_declared_at_startup() {
+    local(async {
+        let env = TestEnv::new().await;
+        let fake = Fake::new(&env, "mixed");
+        let entry = with(fake.entry(json!({ "tools": ["echo", "other"] })), json!({ "tools": { "echo": "direct" } }));
+        let h = env.host().builtins(&["mcp"]).config(servers(json!({ "fake": entry }))).no_session().build().await;
+        expose(&h);
+        let (echo, other_declared, other_exposure): (bool, bool, String) = eval(
+            &h,
+            r#"C.cordis:get("bus"):emit("request/prepare", {})
+               local deadline = mare.task.clock() + 10000
+               while not T:get('mcp__fake__echo') and mare.task.clock() < deadline do mare.task.sleep(25) end
+               local declared = {}
+               for _, d in ipairs(T:definitions({})) do declared[d.name] = true end
+               local other_def = T:get('mcp__fake__other')
+               return declared['mcp__fake__echo'] == true, declared['mcp__fake__other'] == true,
+                 tostring(other_def and other_def.exposure or "")"#,
+        )
+        .await;
+        assert!(echo && !other_declared && other_exposure == "deferred", "echo declared, other deferred");
+        h.shutdown().await;
+    })
+    .await
+}
+
+/// `/mcp` and `mcp:list_servers()` order servers by source: project, user, env (then config).
+#[tokio::test]
+async fn mcp_servers_are_ordered_project_then_user_then_env() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let fake = Fake::new(&env, "order");
+        let entry = || fake.entry(json!({}));
+
+        std::fs::create_dir_all(env.config_dir()).unwrap();
+        std::fs::write(env.config_dir().join("mcp.json"), json!({ "mcpServers": { "m_user": entry() } }).to_string())
+            .unwrap();
+
+        let env_cfg = env.home.path().join("env-mcp.json");
+        std::fs::write(&env_cfg, json!({ "mcpServers": { "a_env": entry() } }).to_string()).unwrap();
+        env.set_var("MARE_MCP_CONFIG", env_cfg.to_string_lossy().as_ref());
+
+        std::fs::write(env.cwd.join(".mcp.json"), json!({ "mcpServers": { "z_proj": entry() } }).to_string()).unwrap();
+
+        let mut hb = env.host().builtins(&["mcp"]).config(servers(json!({ "b_cfg": entry() }))).no_session();
+        hb.opts.project_trusted = true;
+        let h = hb.build().await;
+        global(&h, "M", h.service_table("mcp").unwrap());
+        let names: Vec<String> = eval(
+            &h,
+            r#"local out = {}
+               for _, s in ipairs(M:list_servers().data) do out[#out + 1] = s.name end
+               return out"#,
+        )
+        .await;
+        assert_eq!(
+            names,
+            vec!["z_proj", "m_user", "a_env", "b_cfg"],
+            "MCP server listing must sort project -> user -> env -> config: {names:?}"
+        );
+        h.shutdown().await;
+    })
+    .await
+}
+
+/// Wildcard `*` in `enabled_tools` filters registered tools, and the `/mcp` interactive
+/// panel displays statuses, passes filter arguments, offers status-dependent actions, and shows
+/// per-tool schemas in an overlay.
+#[tokio::test]
+async fn mcp_enabled_tools_wildcard_and_panel_states_actions_and_schemas() {
+    local(async {
+        let env = TestEnv::new().await;
+        let fake = Fake::new(&env, "panel");
+        let entry = with(
+            fake.entry(json!({ "tools": ["echo", "echo_two", "other"] })),
+            json!({ "tier": "direct", "enabled_tools": ["echo*"] }),
+        );
+        let cfg = servers(json!({
+            "live": entry,
+            "off": with(fake.entry(json!({ "tools": ["echo"] })), json!({ "enabled": false })),
+            "oauth_srv": { "url": "http://127.0.0.1:1/mcp", "oauth": true, "tier": "direct" },
+        }));
+        let h = env.host().builtins(&["mcp"]).config(cfg).no_session().build().await;
+        expose(&h);
+        global(&h, "M", h.service_table("mcp").unwrap());
+        wait_until(15, "live tools and oauth needs_login settle", || {
+            let h = h.clone();
+            async move {
+                eval::<bool>(
+                    &h,
+                    r#"local ok_live, ok_oauth = false, false
+                       for _, s in ipairs(M:list_servers().data) do
+                         if s.name == "live" and s.state == "connected" then ok_live = true end
+                         if s.name == "oauth_srv" and s.state == "needs_login" then ok_oauth = true end
+                       end
+                       return ok_live and ok_oauth and T:get("mcp__live__echo") ~= nil and T:get("mcp__live__echo_two") ~= nil"#,
+                )
+                .await
+            }
+        })
+        .await;
+
+        // 1. Wildcard `enabled_tools: ["echo*"]` registered echo & echo_two, excluded other.
+        let has_other: bool = eval(&h, r#"return T:get("mcp__live__other") ~= nil"#).await;
+        assert!(!has_other, "tool not matching enabled_tools wildcard must be excluded");
+
+        // 2. `/mcp <filter>` passes filter, shows status labels, status-dependent actions, and tool schema overlay.
+        let (seen_filter, live_actions, off_actions, oauth_actions, overlay_title, overlay_body): (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+        ) = eval(
+            &h,
+            r#"local CM = C.cordis:get("commands")
+               mare.ui.connected = function() return true end
+               local got_filter, ov_title, ov_body = "", "", ""
+               mare.ui.overlay = function(title, node)
+                 ov_title = tostring(title)
+                 ov_body = mare.json.encode(node)
+               end
+               local function probe_panel(target, arg, pick_tools)
+                 local step, actions = 0, {}
+                 mare.ui.select = function(opts)
+                   step = step + 1
+                   if step == 1 then
+                     if arg then got_filter = tostring(opts.filter or "") end
+                     for i, it in ipairs(opts.items or {}) do
+                       if it.label:find("^" .. target .. "%s+%[") then return i end
+                     end
+                     return nil
+                   else
+                     for i, it in ipairs(opts.items or {}) do
+                       actions[#actions + 1] = type(it) == "table" and it.label or tostring(it)
+                     end
+                     if pick_tools then
+                       for i, lbl in ipairs(actions) do
+                         if lbl == "Show tools and schemas" then return i end
+                       end
+                     end
+                     return nil
+                   end
+                 end
+                 CM:run(arg and ("/mcp " .. arg) or "/mcp")
+                 return table.concat(actions, ",")
+               end
+               local a_live = probe_panel("live", "li", true)
+               local a_off = probe_panel("off", nil, false)
+               local a_oauth = probe_panel("oauth_srv", nil, false)
+               return got_filter, a_live, a_off, a_oauth, ov_title, ov_body"#,
+        )
+        .await;
+        assert_eq!(seen_filter, "li", "/mcp filter argument must populate picker filter");
+        assert_eq!(live_actions, "Show tools and schemas,Reconnect,Disable");
+        assert_eq!(off_actions, "Enable");
+        assert_eq!(oauth_actions, "Login,Disable");
+        assert_eq!(overlay_title, "MCP live tools");
+        assert!(
+            overlay_body.contains("mcp__live__echo") && overlay_body.contains("properties"),
+            "tool schema overlay must show tool name and JSON schema: {overlay_body}"
+        );
+        h.shutdown().await;
+    })
+    .await
+}
+
+/// CLI subcommands `mare mcp list-tools`, `mare mcp disable`, and `mare mcp login` (error
+/// on non-oauth server) work end-to-end through the real `mare` binary.
+#[test]
+fn mcp_cli_list_tools_disable_and_login_rejection() {
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let log = home.path().join("cli-sub.log");
+    std::fs::create_dir_all(home.path().join("config")).unwrap();
+    let entry = json!({
+        "command": fake_mcp_bin(),
+        "args": ["scripted", json!({ "log": log, "tools": ["echo", "other"] }).to_string()]
+    });
+    std::fs::write(home.path().join("config/mcp.json"), json!({ "mcpServers": { "cli": entry } }).to_string()).unwrap();
+
+    // 1. `mare mcp list-tools cli` prints the server's tools and schema.
+    let list_tools = mare_cmd()
+        .args(["mcp", "list-tools", "cli"])
+        .current_dir(work.path())
+        .env("MARE_HOME", home.path())
+        .run_output();
+    let lt_out = String::from_utf8_lossy(&list_tools.stdout);
+    assert!(list_tools.status.success(), "{lt_out}\n{}", String::from_utf8_lossy(&list_tools.stderr));
+    assert!(lt_out.contains("echo") && lt_out.contains("other"), "{lt_out}");
+
+    // 2. `mare mcp login cli` rejects a non-oauth server with a non-zero exit code.
+    let login_bad =
+        mare_cmd().args(["mcp", "login", "cli"]).current_dir(work.path()).env("MARE_HOME", home.path()).run_output();
+    assert!(!login_bad.status.success(), "login on non-oauth server must fail");
+    let login_txt =
+        format!("{}{}", String::from_utf8_lossy(&login_bad.stdout), String::from_utf8_lossy(&login_bad.stderr));
+    assert!(login_txt.contains("oauth"), "{login_txt}");
+
+    // 3. `mare mcp disable cli` persists disabled state, reflected in subsequent `mare mcp list`.
+    let disable =
+        mare_cmd().args(["mcp", "disable", "cli"]).current_dir(work.path()).env("MARE_HOME", home.path()).run_output();
+    assert!(disable.status.success(), "{}", String::from_utf8_lossy(&disable.stderr));
+    let listed = mare_cmd().args(["mcp", "list"]).current_dir(work.path()).env("MARE_HOME", home.path()).run_output();
+    let listed_out = String::from_utf8_lossy(&listed.stdout);
+    assert!(listed.status.success(), "{listed_out}");
+    assert!(listed_out.contains("cli") && listed_out.contains("disabled"), "{listed_out}");
+}

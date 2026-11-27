@@ -1,0 +1,1 @@
+Use the bash tool twice. First call: `mkdir -p sub && cd sub && echo one > a.txt`. Second, separate call, with no cd and no path: `echo two > b.txt`. Then tell me which directory each file ended up in.

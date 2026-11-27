@@ -1,0 +1,25 @@
+name: Set up pinned cargo-about
+description: Install the cargo-about release pinned in .github/ci-tools.json (Linux runners).
+
+runs:
+  using: composite
+  steps:
+    - name: Install cargo-about
+      shell: bash
+      run: |
+        set -euo pipefail
+        ver="$(jq -er '.cargo_about | strings' .github/ci-tools.json)"
+        case "$(uname -m)" in
+          x86_64) arch=x86_64 ;;
+          aarch64 | arm64) arch=aarch64 ;;
+          *) printf '::error::unsupported runner architecture %s\n' "$(uname -m)"; exit 1 ;;
+        esac
+        name="cargo-about-${ver}-${arch}-unknown-linux-musl"
+        url="https://github.com/EmbarkStudios/cargo-about/releases/download/${ver}/${name}.tar.gz"
+        dir="${RUNNER_TEMP}/cargo-about"
+        mkdir -p "$dir"
+        curl -fsSL "$url" -o "$dir/${name}.tar.gz"
+        expected="$(curl -fsSL "${url}.sha256" | awk '{print $1}')"
+        printf '%s  %s\n' "$expected" "$dir/${name}.tar.gz" | sha256sum -c -
+        tar -xzf "$dir/${name}.tar.gz" -C "$dir" "${name}/cargo-about"
+        echo "$dir/${name}" >> "$GITHUB_PATH"

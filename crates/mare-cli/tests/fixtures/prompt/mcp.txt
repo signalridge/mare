@@ -1,0 +1,12 @@
+@@ after: <tools>
++- tool_search: Discover and load deferred tools before calling them
++- call_tool: Invoke a deferred tool by name and arguments
+@@ after: 
+-Additional tools may be available.
++Deferred tools (call tool_search with keywords or select:<name1,name2> for schemas, then invoke via call_tool): list_mcp_resource_templates, list_mcp_resources, read_mcp_resource
+@@ after: 
++<mcp>
++MCP servers:
++- docs: Docs {{x}} server (find its tools with tool_search)
++</mcp>
++

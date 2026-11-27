@@ -1,0 +1,9 @@
+data: {"id":"chatcmpl-kimi-1","choices":[{"index":0,"delta":{"role":"assistant","content":"Inspecting Cargo.toml.<|tool_calls_"}}]}
+
+data: {"id":"chatcmpl-kimi-1","choices":[{"index":0,"delta":{"content":"section_begin|><|tool_call_begin|>functions.read:0<|tool_call_argu"}}]}
+
+data: {"id":"chatcmpl-kimi-1","choices":[{"index":0,"delta":{"content":"ment_begin|>{\"path\":\"Cargo.toml\"}<|tool_call_end|><|tool_calls_section_end|>"}}]}
+
+data: {"id":"chatcmpl-kimi-1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":15}}
+
+data: [DONE]

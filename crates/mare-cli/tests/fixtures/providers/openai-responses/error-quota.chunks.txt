@@ -1,0 +1,4 @@
+{"type":"response.created","sequence_number":0,"response":{"id":"resp_syn_err_quota","object":"response","created_at":1700000000,"status":"in_progress","model":"gpt-5-nano","output":[]}}
+{"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_syn_err_quota","object":"response","created_at":1700000000,"status":"in_progress","model":"gpt-5-nano","output":[]}}
+{"type":"error","sequence_number":2,"error":{"type":"insufficient_quota","code":"insufficient_quota","message":"You exceeded your current quota, please check your plan and billing details.","param":null}}
+{"type":"response.failed","sequence_number":3,"response":{"id":"resp_syn_err_quota","object":"response","created_at":1700000000,"status":"failed","error":{"code":"insufficient_quota","message":"You exceeded your current quota, please check your plan and billing details."},"output":[]}}

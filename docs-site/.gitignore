@@ -1,0 +1,12 @@
+dist/
+.astro/
+node_modules/
+# synced docs content (generated from ../docs and src/landing/ by scripts/sync-docs.mjs)
+src/content/docs/
+# copied / generated from ../docs
+public/assets/
+public/raw/
+public/llms*.txt
+npm-debug.log*
+.env
+.DS_Store

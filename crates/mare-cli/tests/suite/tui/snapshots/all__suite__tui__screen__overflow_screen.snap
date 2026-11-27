@@ -1,0 +1,10 @@
+---
+source: crates/mare-cli/tests/suite/tui/screen.rs
+expression: t.snap().await
+---
+worked Ns · 90 tokens · HH:MM
+
+╭────────────────────────────────────────────────╮
+│ ❯ Ask mare anything… (@ files, / commands, ? … │
+╰────────────────────────────────────────────────╯
+   READ    Faux Echo thinking: medium · ▱▱▱▱▱▱ 0%

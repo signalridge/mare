@@ -1,0 +1,186 @@
+---
+import DefaultFooter from '@astrojs/starlight/components/Footer.astro';
+
+const { locale } = Astro.locals.starlightRoute;
+const lang = locale === 'zh' || locale === 'ja' ? locale : 'en';
+const CLOSE_LABEL = { en: 'Close preview', zh: '关闭预览', ja: 'プレビューを閉じる' }[lang];
+---
+
+<DefaultFooter />
+
+<dialog id="mare-lightbox" class="mare-lightbox" aria-modal="true" aria-labelledby="mare-lightbox-caption">
+	<div class="mare-lightbox-bar">
+		<span id="mare-lightbox-caption" class="mare-lightbox-caption"></span>
+		<button type="button" id="mare-lightbox-close" class="mare-lightbox-close" aria-label={CLOSE_LABEL}>
+			<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+				<path d="M18 6 6 18" /><path d="m6 6 12 12" />
+			</svg>
+			<span>Esc</span>
+		</button>
+	</div>
+	<div class="mare-lightbox-stage" tabindex="0">
+		<img id="mare-lightbox-img" src="" alt="" />
+		<div id="mare-lightbox-svg" class="mare-lightbox-svg" hidden></div>
+	</div>
+</dialog>
+
+<script>
+	function enhanceTables() {
+		const lang = (document.documentElement.lang || 'en').slice(0, 2);
+		const copy =
+			lang === 'zh'
+				? { placeholder: '过滤选项、命令或类型…', clear: '清除' }
+				: lang === 'ja'
+					? { placeholder: 'オプション・コマンド・型を絞り込み…', clear: 'クリア' }
+					: { placeholder: 'Filter options, commands, or types…', clear: 'Clear' };
+
+		for (const table of document.querySelectorAll<HTMLTableElement>('.sl-markdown-content table')) {
+			if (table.closest('.not-content') || table.dataset.mareEnhanced === '1') continue;
+			table.dataset.mareEnhanced = '1';
+
+			const wrap = document.createElement('div');
+			wrap.className = 'mare-table-wrap';
+			table.parentNode?.insertBefore(wrap, table);
+			wrap.appendChild(table);
+
+			const updateOverflow = () => {
+				const overflows = table.scrollWidth > wrap.clientWidth + 2;
+				wrap.dataset.overflows = overflows ? 'true' : 'false';
+				if (overflows) {
+					const atStart = wrap.scrollLeft <= 2;
+					const atEnd = wrap.scrollLeft + wrap.clientWidth >= table.scrollWidth - 2;
+					wrap.dataset.scrollLeft = atStart ? '0' : '1';
+					wrap.dataset.scrollRight = atEnd ? '0' : '1';
+				} else {
+					wrap.dataset.scrollLeft = '0';
+					wrap.dataset.scrollRight = '0';
+				}
+			};
+			wrap.addEventListener('scroll', updateOverflow, { passive: true });
+			window.addEventListener('resize', updateOverflow, { passive: true });
+			requestAnimationFrame(updateOverflow);
+
+			const tbody = table.tBodies[0];
+			if (!tbody || tbody.rows.length < 8) continue;
+
+			const rows = Array.from(tbody.rows);
+			const total = rows.length;
+			const bar = document.createElement('div');
+			bar.className = 'mare-table-filter';
+
+			const input = document.createElement('input');
+			input.type = 'search';
+			input.className = 'mare-table-filter-input';
+			input.placeholder = copy.placeholder;
+			input.setAttribute('aria-label', copy.placeholder);
+
+			const meta = document.createElement('div');
+			meta.className = 'mare-table-filter-meta';
+
+			const count = document.createElement('span');
+			count.className = 'mare-table-filter-count';
+			count.textContent = `${total} / ${total}`;
+
+			const clearBtn = document.createElement('button');
+			clearBtn.type = 'button';
+			clearBtn.className = 'mare-table-filter-clear';
+			clearBtn.textContent = copy.clear;
+			clearBtn.hidden = true;
+
+			meta.append(count, clearBtn);
+			bar.append(input, meta);
+			wrap.parentNode?.insertBefore(bar, wrap);
+
+			const applyFilter = () => {
+				const q = input.value.trim().toLowerCase();
+				let visible = 0;
+				for (const row of rows) {
+					const match = !q || (row.textContent || '').toLowerCase().includes(q);
+					row.hidden = !match;
+					if (match) visible++;
+				}
+				count.textContent = `${visible} / ${total}`;
+				clearBtn.hidden = q.length === 0;
+				updateOverflow();
+			};
+
+			input.addEventListener('input', applyFilter);
+			input.addEventListener('keydown', (e) => {
+				if (e.key === 'Escape' && input.value) {
+					e.stopPropagation();
+					input.value = '';
+					applyFilter();
+				}
+			});
+			clearBtn.addEventListener('click', () => {
+				input.value = '';
+				applyFilter();
+				input.focus();
+			});
+		}
+	}
+
+	function setupLightbox() {
+		const dialog = document.getElementById('mare-lightbox') as HTMLDialogElement | null;
+		const imgEl = document.getElementById('mare-lightbox-img') as HTMLImageElement | null;
+		const svgHost = document.getElementById('mare-lightbox-svg') as HTMLDivElement | null;
+		const captionEl = document.getElementById('mare-lightbox-caption');
+		const closeBtn = document.getElementById('mare-lightbox-close');
+		if (!dialog || !imgEl || !svgHost || !captionEl || !closeBtn) return;
+
+		if (dialog.dataset.bound !== '1') {
+			dialog.dataset.bound = '1';
+			const close = () => dialog.close();
+			closeBtn.addEventListener('click', close);
+			dialog.addEventListener('click', (e) => {
+				if (e.target === dialog) close();
+			});
+		}
+
+		const openLightboxImg = (src: string, alt: string) => {
+			svgHost.hidden = true;
+			svgHost.replaceChildren();
+			imgEl.hidden = false;
+			imgEl.src = src;
+			imgEl.alt = alt;
+			captionEl.textContent = alt || src.split('/').pop() || 'Preview';
+			dialog.showModal();
+		};
+
+		const openLightboxSvg = (svgEl: SVGSVGElement, alt: string) => {
+			imgEl.hidden = true;
+			imgEl.removeAttribute('src');
+			svgHost.hidden = false;
+			svgHost.replaceChildren(svgEl.cloneNode(true));
+			captionEl.textContent = alt || 'Diagram';
+			dialog.showModal();
+		};
+
+		for (const anchor of document.querySelectorAll<HTMLAnchorElement>(
+			'.sl-markdown-content a[href*="/assets/diagrams/"], .sl-markdown-content a[href*="/assets/screenshots/"], a[data-lightbox-link]',
+		)) {
+			if (anchor.dataset.lightboxBound === '1') continue;
+			const childImg = anchor.querySelector('img');
+			const diagramSvg = anchor.closest('.mare-diagram')?.querySelector<SVGSVGElement>('svg');
+			if (!childImg && !diagramSvg) continue;
+			anchor.dataset.lightboxBound = '1';
+			anchor.addEventListener('click', (e) => {
+				if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+				e.preventDefault();
+				if (diagramSvg) {
+					openLightboxSvg(diagramSvg, anchor.dataset.diagramAlt || '');
+				} else if (childImg) {
+					openLightboxImg(anchor.href, childImg.alt || '');
+				}
+			});
+		}
+	}
+
+	function initEnhancers() {
+		enhanceTables();
+		setupLightbox();
+	}
+
+	initEnhancers();
+	document.addEventListener('astro:page-load', initEnhancers);
+</script>

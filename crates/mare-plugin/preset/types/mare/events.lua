@@ -1,0 +1,227 @@
+-- ui/caps-changed(caps): effective native frontend capabilities have been applied. This is
+-- an observation event; unlike ui/caps it cannot override the capability table.
+-- ui/presenter-changed {language,registration,action="registered"|"removed"}: scoped language
+-- presenter lifecycle; no callback or binary bytes enter the event payload.
+-- ui/presentation-render-completed {document_id,block_id,revision,render_seq,request_id,accepted}: emitted after an
+-- async markdown presenter task settles (accepted or discarded).
+-- ui/presentation-invalidate {}: request owned document recomputation after a display change.
+---@meta _
+-- LuaLS definitions: kernel events and the unified status (entry: types/mare.lua)
+
+-- theme/changed(snapshot: mare.ThemeSnapshot): selection, preview, registry or override changed.
+-- ui/background {dark: boolean, r?: integer, g?: integer, b?: integer}: terminal background observation.
+-- Event category is declared by the producer: ctx:policy always dispatches policy votes,
+-- including custom names. RPC listeners receive policy mode regardless of subscription mode;
+-- missing capability, timeout, disconnect or malformed answer denies. Ordinary observers
+-- retain their emit/bail/waterfall behavior.
+-- Process-only events (`expose = "process"`: provider raw wire hooks,
+-- jobs/internal-changed, llm/model-changing, llm/model-changed, compact/idle {} — compaction
+-- released its admission on any path — and pipeline/*) are ordinary events that never reach a
+-- frontend stream; there is no separate local channel.
+-- Events (ctx:on): app/ready, app/shutdown (every clean exit: /quit, Ctrl+D, double Ctrl+C,
+--   headless end, SIGTERM/SIGHUP — listeners are awaited), session/started {session_id, path, resumed},
+-- session/new {session_id, path}, session/loaded, session/changed {session_id, path?, reason =
+--   "resume"|"new"|"fork"} (path = the session JSONL file, fixed before its first write),
+-- session/closed {session_id, cwd, path?, reason} (once per retired root session after flush/close),
+-- turn/started {turn_id, trigger, input_item_ids?, text?, source?},
+-- step/started {turn_id, step_id, turn, model?, attempt?} (before context/transform and request/build),
+-- agent/input-ready (policy {input_id, attempt_id, revision, turn_id, cancel, session: {session_id, session_epoch}, content, input_context?, source?, delivery}: a deny stops admission without mutating history or queue; abort = true halts the run),
+-- agent/step-ready (policy {id, step, cancel, turn_id}: a deny stops the run before the request),
+-- agent/step-committed {step_id, step, turn_id} (after a step's participant state was committed),
+-- step/completed {turn_id, step_id, status, stop_reason?, usage?, error?, kind?, will_retry?, attempt?, delay_ms?, reset?},
+-- item/started {turn_id?, item_id, step_id?, item},
+-- item/delta {turn_id, item_id, kind, delta, offset, tool_call_id?, partial?, event?},
+-- item/completed {turn_id?, item_id, status, item?, item_omitted?},
+-- queue/changed {items, action?},
+-- turn/completed {turn_id, status = "completed"|"cancelled"|"failed", termination_reason?, cancellation_cause?, text?, structured?, usage?, error?, error_kind?, not_sent?},
+-- agent/settled {turn_id, busy} (after every turn/completed listener of that run returned; busy = another
+--   run or an outer turn/completed dispatch is still in progress),
+-- host/notice {level, text, message?},
+-- agent/request-resumed {request_id, attempt, clean?}, repeat-guard/reminder {tool, count},
+-- agent/turn-stopping (bail {message, turn, turn_id, cancel}: return a string or {message, source?}
+--   to keep the loop going — when `source` is set, the continuation carries `source` and `notification = true`;
+--   `cancel` is the run's token, `turn_id` the run's id as in step/started),
+-- tool/before (policy: (call, {side_effect, idempotent, unconfined, permission_request, command_tool, command?}) — vote deny/ask/allow;
+--   an allow/ask vote may carry `sandbox` = the per-call policy), tool/approval (policy, same
+---   args + verdict: tri-state allow / deny / ask (abstain); all policy constraints survive review.
+---   tool/approval-host is the separate human RPC answerer. Protected arguments require a
+---   human answer from the host or TUI. Automatic policy votes cannot satisfy that boundary.
+--- approval/requested {approval_id, category, tool_call_id?, snapshot?, child_approval_id?}:
+--   public lifecycle start for an approval request (pairs with `approval/resolved` via `approval_id`).
+--- approval/resolved {approval_id, category, tool_call_id?, result: mare.ApprovalAudit}:
+--   public lifecycle completion for an approval request (what was decided — the permissions
+--   plugin caches allow_session / persists amendments on `pipeline/approval-decided`),
+-- permission/changed {preset?, label?, partial?},
+-- tool/authorized {call, permissions?, scope?}: internal observation after durable execution admission;
+--   grants are committed from a private receipt, never by this event.
+-- agent/approval-dialog (bail {call, info, verdict, rule?}: a sub-agent's approval request for the
+--   user, one at a time, only with a UI and no tool/approval listener; call.origin names the
+--   sub-agent; `rule` is a copy of the rule "remember" stores (the child's description removed).
+--   Return {choice = "allow"|"allow_session"|"allow_amend"|"deny"|"abort", reason?} — no choice =
+--   dismissed (a declined request); nil = pass. Nobody answering, an error or any other answer is
+--   `unavailable` (denied). The agent-approvals plugin draws it; a higher priority replaces it),
+-- subagent/started / subagent/completed {subagent_id, agent_id, name?, label?, status?, run_id?,
+--   seq?, task?, parent_session_id?, parent_session_epoch?, text?, error?, usage?}:
+--   the host-generated child session identity and terminal outcome, where recorded;
+-- subagent/progress {subagent_id, parent_session_id?, parent_session_epoch?, progress}:
+--   the latest coalesced status snapshot for that child;
+-- agent/child-approval {origin, request_id, ...}, approval/requested|resolved {approval_id, ..., result: {child_approval_id, ...}}:
+--   request_id pairs the open child approval with its completion independently of model call ids;
+-- agent/approval-queue {pending = [origin, …]} (sub-agent approval requests waiting behind the
+--   one being answered, oldest first; agent-approvals shows them under the editor),
+-- net/approval (policy {host, port}: a sandboxed command wants a host outside the network
+--   allow list; a vote, re-run as a veto even when a cached grant exists), net/approval-host
+--   (policy {host, port, approval_binding?}: the human/RPC answerer; without one, an `allow`
+--   vote answers; nobody answering = refused; allow_session / allow_amend are cached per
+--   session and host:port in core), approval/requested & approval/resolved (category = "network"),
+-- request/prepare {model, cancel} (before the first request of each prompt: refresh what it needs),
+-- request/ready {model} (policy: a deny/error/timeout prevents the built-in agent from sending;
+--   replacement agents must call and honor it to provide the same readiness contract). Both run
+--   in a fixed order: the host's vote (priority math.maxinteger: config error,
+--   packages, blocking plugin failures, reloads), then llm (300: model, provider, credentials,
+--   token refresh), mcp (200: required servers), context (100: the system prompt), then listeners
+--   without a priority (0) — the first deny is the reason shown as "not sent: <reason>",
+-- tool/result (waterfall: result, frozen_call, {max_bytes, max_lines, session_id?, route?}); runs
+--   after execution settles, before default truncation, also for direct tools:execute callers.
+--   Refused/unstarted calls skip it. Budgets include the current model's smaller byte budget.
+--   output_notice is reserved by later built-in truncation; keep it concise and within budget.
+-- tool/after (waterfall; result.sandbox_denials = refusals recorded by the core policy layer),
+-- workspace/changed, editor/changed {text, cursor, selection?, revision}, input/submit, input/follow-up,
+-- input/transform / context/transform / request/build / context/system (waterfall),
+-- llm/model-changed {model, effort?, global_effort?, scope?, scoped_only?, params_only?} (process-local;
+--   params_only: the same model with a changed effort — recorded for resume, not a model switch),
+-- model/changed {ref, provider_id, model_id}, llm/retry {attempt, delay_ms, error, kind?, reset},
+-- usage/changed {input, output, cache_read, cache_write, cache_write_1h?, cost, cost_unknown?, requests, subscription_requests,
+--   side_requests, last_context, last_cache_read, rate_limits?},
+-- llm/usage {usage = {input, output, cache_read, cache_write, cache_write_1h?, reasoning?, cost?, cost_unknown?}, model_ref, provider_id,
+--   subscription?, purpose, request_id?, session_id?, leaf_entry_id?} (after every provider request that reported usage, each
+--   fallback attempt on its own; purpose "agent" = the conversation's requests, which also arrive
+--   on their assistant message — usage plugins count the others from here),
+-- tool/rewrite (strict chain, before voting: return new arguments or nil; see Ctx:rewrite),
+-- tool/snapshot-void {call, reason} (an approval was voided: the call changed before it ran),
+-- permission/parse (tighten only: listeners get a copy of the built-in shell_parse result and
+--   may set analyzable = false (+ reason), segments[i].unanalyzable / .note, deny_reasons = {...},
+--   notes = {...}; any other change, or a different parse, is ignored; extra {command, tool, shell}),
+-- permission/verdict (policy vote, {call, info, preset, verdict}: participants can only tighten
+--   the permissions plugin's verdict — deny, or ask instead of allow; allow votes change nothing;
+--   errors, timeouts and invalid results count as deny),
+-- provider/request (waterfall {provider, method?, url, headers, body, model}: the wire request
+--   before it is sent), provider/transport (bail {provider, transport, request, cancel, fresh?,
+--   session_id?, credential_id?, proxy?} -> a response with `:next_event()` and `:close()` to take
+--   over the transport, e.g. WebSocket), provider/event (waterfall: each raw stream event;
+--   dispatched only while someone listens),
+-- theme/palette (waterfall: the palette of a flavor after blending, before styles are built;
+--   extra {flavor, background}),
+-- compact/before (bail {reason, tokens, threshold}: false cancels, any other value = handled
+--   by the plugin), compact/stage {stage, phase = "before"|"after", changed, reason, tokens_before,
+--   tokens_after},
+--   compact/summary-error (waterfall {error, kind, messages} → return {summary = "..."} to
+--   substitute), compact/approaching {tokens, threshold}, compact/started {reason, messages?},
+--   compact/completed {reason, changed, stalled?, pruned_count?, offloaded_count?, summary?, tokens_before, tokens_after, error?, split?, mid_turn?, cancelled?}, ui/resize,
+-- trust/resolve (waterfall {cwd, resources = {category = count}, saved = true|false|nil,
+--   default = "ask"|"trust"|"distrust"} → set `decision = true|false` and return the table to
+--   decide this folder's project trust for the session; the first listener that decides owns it
+--   (after --trust/--no-trust, before saved decisions and `trust_default`; nothing is
+--   saved). Runs once user-level plugins have started; project plugins can't take part),
+-- trust/changed {trusted, saved, source? = "plugin"|"default"} (the trust overlay was answered,
+--   or a trust/resolve plugin / the configured default decided),
+-- ui/caps (waterfall: the capability table → return a modified table to add or override
+--   capabilities; `sync`, `scroll_region` and `truecolor` are applied by the renderer),
+-- ui/commit-before (waterfall {lines = {"plain text", ...}} → return {lines = {...}} to rewrite or
+--   append lines before they go into scrollback; unchanged entries keep their styles, new text may
+--   carry SGR colors; held at most 2s), ui/commit-after {lines} (what went into scrollback),
+--   ui/external-output {lines} (captured external process output lines),
+-- fs/observed {path, observation} (read-before-edit records), fs/edit-intent / fs/write-intent
+--   {path, tool, exists, observation} (policy events before edit tools write),
+-- fs/changes-inexact {tool, paths} (an edit's effect is uncertain — a write errored and the file
+--   changed: drop or recompute change summaries / diffs derived from these files),
+-- changes/rewound {turn, restored, conflicts, missing, refused, failed} (/rewind restored files)
+-- plugins/completed {action, name?, status}; plugins/plugin {name, enabled} (the /plugins panel)
+-- agent:abort_turn {turn_id} (atomically cancel only the currently active turn whose
+--   ID matches; a replacement agent must implement this alongside abort and expose
+--   the active turn_id in state() to support disconnect cancellation),
+-- ui/wait-started / ui/wait-completed {kind = "select"|"input"|"confirm"|"approval"|"sudo"|..., title, wait_id?} (callers pass `wait_kind` to name it) (waiting for
+--   the user; emitted around mare.ui.select/input/confirm whoever implements them — other waits
+--   such as approvals or sudo prompts emit them with their own kind),
+-- interaction/requested {interaction_id, kind = "select"|"input"|"confirm"|"questions"|"editor", title?, session_id?}
+-- interaction/resolved {interaction_id, kind, outcome = "answered"|"cancelled"|"unavailable", title?, session_id?}
+--   (1:1 observation events paired around interactive UI waits; read-only, observers cannot reply),
+-- ui/print {text, lines?} (lossy, ignorable ephemeral print output; not persisted to session log),
+-- ui/card {card_id?, block_id?, title, markdown, kind, persistent, after_entry_id?, meta?}
+--   (emitted for both persistent and temporary ui.card calls; persistent = true also writes session custom record "ui/card"),
+-- jobs/changed {job = {job_id, kind, label, description, status = "running"|"completed"|"failed"|
+--   "killed"|"interrupted", background}},
+-- tools/loaded {tools} (deferred tools loaded by tool_search),
+-- mcp/ready {server, tools}, mcp/error {server, error}, mcp/exit {server},
+--   mcp/changed {server}, mcp/codemode {server, tools},
+--   mcp/cli {action, server?, args?}, mcp/elicit (bail {server, id, params} -> {action = "accept"|"decline"|"cancel", content?})
+--   (builtin `mcp` plugin: stdio & HTTP MCP servers from `mare.plugin("mcp", { servers = ... })`;
+--   their tools are registered as unconfined `mcp__<server>__<tool>`),
+-- peer/inbound {message_id, from = {name, pid, cwd?, session_id?}, text, policy?, policy_verified = false} (bail: a message from another session via the peer socket; `from` and
+--   `policy` are self-reported — display only (the socket admits only the same OS user). Return a
+--   value to take it over; otherwise core holds it for the user), peer/held, peer/released,
+--   peer/rejected, peer/message (same
+--   payload; peer/message = handed to the agent inside a <peer-message> data boundary),
+-- status/changed / status/session / status/exit {mare.Status} (the unified state),
+-- kernel/reloaded,
+-- kernel/error {message, plugin, event, what, error} (a plugin's listener, task, timer or dispose
+--   hook failed, every time: `what` is "hook `<event>`" for a listener, else "task", "timer", …;
+--   `error` is the first line without the traceback.
+--   The ui plugin shows it under the turn's prompt during a turn, as a notice outside one).
+-- kernel/stalled {summary, plugin, state, ms, effects, missing} (a plugin has been LOADING,
+--   UNLOADING or PENDING for `stall_ms`: announced once each time it gets stuck in a state, with
+--   the labels of the effects it holds and the services it waits for; nothing is aborted. The ui
+--   plugin shows it as a notice; /plugins tree and `mare plugin tree --json` list it too).
+
+--- The unified agent state (status builtin).
+---@class mare.Status
+---@field state "idle"|"working"|"blocked"
+---@field message string what it is doing ("bash: cargo test") or waiting for ("waiting: …")
+---@field session {path?:string,resume?:string[],session_id?:string} resume = {"mare", "-r", id}
+---@field cwd string
+---@field model? string
+---@field pid integer
+---@field seq integer strictly increasing
+
+---@class mare.status
+mare.status = {}
+--- Run a command when the unified state changes ("status"), on session start/resume/fork/switch
+--- ("session") and on exit ("exit", awaited with a timeout). The state goes to stdin as JSON and
+--- into MARE_STATE, MARE_MESSAGE, MARE_SESSION_ID, MARE_SESSION_PATH, MARE_CWD, MARE_SESSION_MODEL.
+--- "status" runs are coalesced (at most one per throttle_ms, latest state wins) and skipped when
+--- state and message are unchanged; a run is killed after timeout_ms; failures are only logged.
+---@param def {on?: ("status"|"session"|"exit")[], cmd: string[]|(fun(s: mare.Status): string[]), throttle_ms?: integer, timeout_ms?: integer}
+function mare.status.hook(def) end
+
+-- approval/changed {policy,revision}: independent policy state invalidates frozen grants/prompts.
+-- approval/review-result {category,snapshot?,result}: automatic reviewer outcome (no raw history).
+-- approval/policy, approval/requested and approval/resolved are durable custom session records.
+-- web/providers-changed { kind = "search"|"fetch" }: web search/fetch backend registration changed.
+-- session/before-switch (policy {reason:"new"|"resume", target_path?:string}): cancelable pre-switch hook.
+-- session/before-fork (policy {before_id?:string, keep_all?:boolean, id?:string, name?:string}): cancelable pre-fork hook.
+-- session/before-tree (policy {target_id?:string, current_leaf?:string}): cancelable pre-tree-navigation hook.
+-- session/mutation-ready (policy {transition_id,kind,source,cancel}): may only tighten transition readiness.
+-- session/transition-committed {status:"committed",transition_id,mode,source,target,has_initial}: target committed.
+-- session/transition-completed {status:"applied",transition_id,mode,source,target,initial_status?,turn_id?,recovered?}.
+-- session/transition-failed {status:"rejected"|"stale",transition_id,mode,source,target?,error?,recovered?}.
+-- tools/executors-changed {executor_id:string,kind:"registered"|"removed",api_version:1}
+-- tool/program-result (waterfall canonical ToolResult envelope, frozen_call): authoritative post-execute value/error policy before canonical output schema validation.
+-- tool/result (waterfall model_result, frozen_call, {audience:"model"|"program", max_bytes, max_lines}): shared retention stage after canonical settlement.
+-- projection/changed {revision: integer}: coalesced value-registry changes. The default tools
+-- service forwards the public mare.projection subscription; no names, values or references.
+-- Custom hosts/replacement services can subscribe directly. Always compare revision at use;
+-- notification delivery is not an execution authorization or a persistence barrier.
+
+-- approval/requested public: {approval_id, category, tool_call_id?, snapshot?, child_approval_id?}.
+-- approval/resolved public: {approval_id, category, tool_call_id?, result: mare.ApprovalAudit} (closed
+-- call{id,name}, decision/source, outcome?, scope?, child_approval_id?). Never carries execution
+-- arguments or free-form text.
+-- The full in-process bookkeeping result (permissions, amendments, child origin, rule_token) is the
+-- separate `pipeline/approval-decided`, not a public event: frontend taps and RPC hooks never get it.
+-- item/started tool_call uses the original model call; its full rewritten started call is local.
+-- Policy dispatch taps carry only {dispatch="policy"}; authorized policy hooks retain full inputs.
+-- conversation/opened {id, session_id, model}: independent ephemeral side conversation created.
+-- conversation/changed {id, session_id, selected, parent_status}: selection or parent state changed.
+-- conversation/stream {id, session_id, turn_id, event}: side text/tool output; never item/delta.
+-- conversation/settled {id, session_id, turn_id, prompt?, text?, message?, error?}: a side turn finished.
+-- conversation/closed {id, session_id}: cancellation requested and ephemeral history discarded.

@@ -1,0 +1,192 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="568" viewBox="0 0 960 568" class="mare-svg mare-svg-arch" role="img" aria-labelledby="arch-title arch-desc">
+  <title id="arch-title">mare layered architecture</title>
+  <desc id="arch-desc">Four-layer architecture of mare: Front ends (TUI via mare-cli and mare-tui, Headless, mare RPC 3.0 over JSON-RPC 2.0, HTTP/WS listener, ACP) over Plugins (Built-in Lua 5.5, User and project config, Packages), Public Lua API (Cordis services, Event and policy bus, UI components), and the Rust core kernel (OS sandbox, Durable JSONL appends, File snapshots, Lua watchdog, Runtime and TUI).</desc>
+  <defs>
+    <style>
+      .mare-svg-arch {
+        --bg: #0e0f17;
+        --panel: #151724;
+        --card: #1c1f30;
+        --line: #2a2f46;
+        --ink: #f3f4fb;
+        --ink2: #b4b9d4;
+        --ink3: #8c92b0;
+        --violet: #a0a4ff;
+        --violet-bg: rgba(160, 164, 255, 0.10);
+        --violet-line: rgba(160, 164, 255, 0.46);
+        --coral: #ffa38f;
+        --coral-bg: rgba(255, 163, 143, 0.10);
+        --coral-line: rgba(255, 163, 143, 0.46);
+        font-family: 'Inter Variable', 'Inter', system-ui, -apple-system, sans-serif;
+      }
+      @media (prefers-color-scheme: light) {
+        :root:not([data-theme='dark']) .mare-svg-arch,
+        svg.mare-svg-arch:root {
+          --bg: #fbfbfd;
+          --panel: #f3f4fa;
+          --card: #ffffff;
+          --line: #d8dceb;
+          --ink: #141624;
+          --ink2: #484e6e;
+          --ink3: #646b8c;
+          --violet: #5256d4;
+          --violet-bg: rgba(82, 86, 212, 0.08);
+          --violet-line: rgba(82, 86, 212, 0.42);
+          --coral: #c44f35;
+          --coral-bg: rgba(255, 163, 143, 0.16);
+          --coral-line: rgba(196, 79, 53, 0.42);
+        }
+      }
+      :root[data-theme='light'] .mare-svg-arch {
+        --bg: #fbfbfd;
+        --panel: #f3f4fa;
+        --card: #ffffff;
+        --line: #d8dceb;
+        --ink: #141624;
+        --ink2: #484e6e;
+        --ink3: #646b8c;
+        --violet: #5256d4;
+        --violet-bg: rgba(82, 86, 212, 0.08);
+        --violet-line: rgba(82, 86, 212, 0.42);
+        --coral: #c44f35;
+        --coral-bg: rgba(255, 163, 143, 0.16);
+        --coral-line: rgba(196, 79, 53, 0.42);
+      }
+      .mare-svg-arch text { user-select: text; }
+      .arch-hd { font-family: 'Space Grotesk', 'Inter Variable', system-ui, sans-serif; font-size: 14.5px; font-weight: 600; fill: var(--ink); }
+      .arch-tag { font-family: 'JetBrains Mono Variable', ui-monospace, SFMono-Regular, monospace; font-size: 10.8px; font-weight: 500; fill: var(--ink3); }
+      .arch-card-t { font-size: 12.6px; font-weight: 600; fill: var(--ink); }
+      .arch-card-s { font-family: 'JetBrains Mono Variable', ui-monospace, SFMono-Regular, monospace; font-size: 10.2px; fill: var(--ink2); }
+      .arch-flow { font-family: 'JetBrains Mono Variable', ui-monospace, SFMono-Regular, monospace; font-size: 10.5px; fill: var(--ink3); }
+    </style>
+    <marker id="arch-arr-v" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M1 1.5 L8.5 5 L1 8.5" fill="none" stroke="var(--violet)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="arch-arr-c" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M1 1.5 L8.5 5 L1 8.5" fill="none" stroke="var(--coral)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="960" height="568" rx="14" fill="var(--bg)"/>
+
+  <!-- Layer 4: Front ends -->
+  <g>
+    <rect x="24" y="20" width="912" height="106" rx="12" fill="var(--panel)" stroke="var(--line)" stroke-width="1.2"/>
+    <text x="42" y="45" class="arch-hd">Front ends</text>
+    <text x="876" y="45" text-anchor="end" class="arch-tag">five ways into the same session</text>
+
+    <rect x="42" y="58" width="166" height="54" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="54" y="79" class="arch-card-t">Terminal UI</text>
+    <text x="54" y="98" class="arch-card-s">mare (mare-cli/tui)</text>
+
+    <rect x="219" y="58" width="166" height="54" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="231" y="79" class="arch-card-t">Headless</text>
+    <text x="231" y="98" class="arch-card-s">-p · --json</text>
+
+    <rect x="396" y="58" width="168" height="54" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="408" y="79" class="arch-card-t">mare RPC 3.0</text>
+    <text x="408" y="98" class="arch-card-s">--rpc (JSON-RPC 2.0)</text>
+
+    <rect x="575" y="58" width="166" height="54" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="587" y="79" class="arch-card-t">HTTP / WS listener</text>
+    <text x="587" y="98" class="arch-card-s">--web (plugin UI/RPC)</text>
+
+    <rect x="752" y="58" width="166" height="54" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="764" y="79" class="arch-card-t">Editor ACP</text>
+    <text x="764" y="98" class="arch-card-s">mare acp</text>
+  </g>
+
+  <!-- Connector 4 <-> 3 -->
+  <g stroke="var(--violet)" stroke-width="1.4" opacity="0.85">
+    <line x1="210" y1="126" x2="210" y2="152" marker-end="url(#arch-arr-v)" marker-start="url(#arch-arr-v)"/>
+    <line x1="750" y1="126" x2="750" y2="152" marker-end="url(#arch-arr-v)" marker-start="url(#arch-arr-v)"/>
+  </g>
+  <text x="480" y="143" text-anchor="middle" class="arch-flow">commands · prompts · event streams</text>
+
+  <!-- Layer 3: Plugins -->
+  <g>
+    <rect x="24" y="156" width="912" height="114" rx="12" fill="var(--panel)" stroke="var(--line)" stroke-width="1.2"/>
+    <text x="42" y="181" class="arch-hd">Plugins</text>
+    <text x="918" y="181" text-anchor="end" class="arch-tag">Lua 5.5 · readable, replaceable (override = true)</text>
+
+    <rect x="42" y="194" width="330" height="62" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="56" y="216" class="arch-card-t">Built-in plugins</text>
+    <text x="56" y="234" class="arch-card-s">agent · tools · providers · compact · session</text>
+    <text x="56" y="249" class="arch-card-s">permissions · ui components/themes · mcp · changes</text>
+
+    <rect x="386" y="194" width="286" height="62" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="400" y="216" class="arch-card-t">User &amp; project config</text>
+    <text x="400" y="234" class="arch-card-s">~/.config/mare/init.lua · plugins/</text>
+    <text x="400" y="249" class="arch-card-s">.mare/plugins/ (trusted projects)</text>
+
+    <rect x="686" y="194" width="232" height="62" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="700" y="216" class="arch-card-t">Packages</text>
+    <text x="700" y="234" class="arch-card-s">mare.plugins.add(...)</text>
+    <text x="700" y="249" class="arch-card-s">mare-plugins &amp; git repos</text>
+  </g>
+
+  <!-- Connector 3 <-> 2 -->
+  <g stroke="var(--violet)" stroke-width="1.4" opacity="0.9">
+    <line x1="210" y1="270" x2="210" y2="296" marker-end="url(#arch-arr-v)" marker-start="url(#arch-arr-v)"/>
+    <line x1="750" y1="270" x2="750" y2="296" marker-end="url(#arch-arr-v)" marker-start="url(#arch-arr-v)"/>
+  </g>
+  <text x="480" y="287" text-anchor="middle" class="arch-flow">inject / provide · service contracts</text>
+
+  <!-- Layer 2: Public Lua API -->
+  <g>
+    <rect x="24" y="300" width="912" height="106" rx="12" fill="var(--violet-bg)" stroke="var(--violet-line)" stroke-width="1.4"/>
+    <text x="42" y="325" class="arch-hd" style="fill: var(--violet);">Public Lua API</text>
+    <text x="918" y="325" text-anchor="end" class="arch-tag">stable plugin contract (mare runtime types)</text>
+
+    <rect x="42" y="338" width="284" height="54" rx="8" fill="var(--card)" stroke="var(--violet-line)"/>
+    <text x="56" y="360" class="arch-card-t">Cordis services</text>
+    <text x="56" y="379" class="arch-card-s">ctx.agent · tools · llm · session</text>
+
+    <rect x="338" y="338" width="284" height="54" rx="8" fill="var(--card)" stroke="var(--violet-line)"/>
+    <text x="352" y="360" class="arch-card-t">Events &amp; policy bus</text>
+    <text x="352" y="379" class="arch-card-s">ctx:on · ctx.bus · ctx.policy</text>
+
+    <rect x="634" y="338" width="284" height="54" rx="8" fill="var(--card)" stroke="var(--violet-line)"/>
+    <text x="648" y="360" class="arch-card-t">UI components</text>
+    <text x="648" y="379" class="arch-card-s">ui.* / mare.ui.* · overlays · keymaps</text>
+  </g>
+
+  <!-- Connector 2 <-> 1 -->
+  <g stroke="var(--coral)" stroke-width="1.4" opacity="0.9">
+    <line x1="210" y1="406" x2="210" y2="432" marker-end="url(#arch-arr-c)" marker-start="url(#arch-arr-c)"/>
+    <line x1="750" y1="406" x2="750" y2="432" marker-end="url(#arch-arr-c)" marker-start="url(#arch-arr-c)"/>
+  </g>
+  <text x="480" y="423" text-anchor="middle" class="arch-flow">guarded Rust bindings · safety boundary</text>
+
+  <!-- Layer 1: Rust Core Kernel -->
+  <g>
+    <rect x="24" y="436" width="912" height="112" rx="12" fill="var(--coral-bg)" stroke="var(--coral-line)" stroke-width="1.4"/>
+    <text x="42" y="461" class="arch-hd" style="fill: var(--coral);">Rust core kernel</text>
+    <text x="918" y="461" text-anchor="end" class="arch-tag">confinement, durability &amp; runtime guarantees</text>
+
+    <rect x="42" y="474" width="166" height="60" rx="8" fill="var(--card)" stroke="var(--coral-line)"/>
+    <text x="53" y="495" class="arch-card-t">OS sandbox</text>
+    <text x="53" y="512" class="arch-card-s">bwrap · Landlock</text>
+    <text x="53" y="526" class="arch-card-s">Seatbelt · WinACL/User</text>
+
+    <rect x="219" y="474" width="166" height="60" rx="8" fill="var(--card)" stroke="var(--coral-line)"/>
+    <text x="230" y="495" class="arch-card-t">Durable store</text>
+    <text x="230" y="512" class="arch-card-s">mare-store JSONL</text>
+    <text x="230" y="526" class="arch-card-s">tree via session plugin</text>
+
+    <rect x="396" y="474" width="168" height="60" rx="8" fill="var(--card)" stroke="var(--coral-line)"/>
+    <text x="407" y="495" class="arch-card-t">File snapshots</text>
+    <text x="407" y="512" class="arch-card-s">mare-binding::snapshot</text>
+    <text x="407" y="526" class="arch-card-s">per-turn /rewind</text>
+
+    <rect x="575" y="474" width="166" height="60" rx="8" fill="var(--card)" stroke="var(--coral-line)"/>
+    <text x="586" y="495" class="arch-card-t">Lua watchdog</text>
+    <text x="586" y="512" class="arch-card-s">watchdog_ms</text>
+    <text x="586" y="526" class="arch-card-s">aborts slow coroutine</text>
+
+    <rect x="752" y="474" width="166" height="60" rx="8" fill="var(--card)" stroke="var(--coral-line)"/>
+    <text x="763" y="495" class="arch-card-t">Runtime &amp; TUI</text>
+    <text x="763" y="512" class="arch-card-s">Lua 5.5 (mlua 0.12)</text>
+    <text x="763" y="526" class="arch-card-s">mare-tui · trust</text>
+  </g>
+</svg>

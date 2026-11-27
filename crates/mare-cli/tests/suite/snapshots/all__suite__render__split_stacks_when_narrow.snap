@@ -1,0 +1,7 @@
+---
+source: crates/mare-cli/tests/suite/render.rs
+expression: "render(& env, 60, \"\",\nr#\"ui.Split(ui.List({ \"one\", \"two\" }, { selected = 1 }), ui.Paragraph(\"preview of one\"))\"#).await"
+---
+one
+two
+preview of one

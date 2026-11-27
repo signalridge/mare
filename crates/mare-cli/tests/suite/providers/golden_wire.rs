@@ -1,0 +1,340 @@
+//! Golden wire bodies: the exact request body every provider sends for a fixed matrix of models
+//! and reasoning efforts (the session effort clamped to the model, an explicit per-request
+//! effort sent as it is, output caps and provider config). The model-parameters engine must
+//! reproduce these bytes; `MARE_UPDATE_GOLDEN=1` rewrites the files (review the diff).
+
+use std::fmt::Write as _;
+
+use super::*;
+
+/// Runs every case in order; each one sends exactly one request (no retries, no fallback).
+/// A case: {ref, mode = "default" | "session" | "request" | "compact", effort?, max_tokens?}.
+const DRIVER: &str = r#"
+local cases = mare.json.decode(...)
+local msgs = { { role = "user", content = { { type = "text", text = "hi" } } } }
+for _, c in ipairs(cases) do
+  local m = assert(LLM:resolve(c.ref), "unknown model " .. c.ref)
+  local req = { model = m, system = "S", session_id = "sess-golden", messages = msgs,
+    max_tokens = c.max_tokens, no_fallback = true }
+  if c.mode == "session" then
+    LLM:set_model(c.ref, { save = false })
+    LLM:set_effort(c.effort, { save = false })
+  elseif c.mode == "request" then
+    req.effort = c.effort
+  end
+  if c.mode == "compact" then
+    req.effort = c.effort
+    LLM:compact_remote(req)
+  else
+    LLM:stream(req, function() end)
+  end
+end
+"#;
+
+fn case(r: &str, mode: &str, effort: Option<&str>, max_tokens: Option<i64>) -> Value {
+    json!({ "ref": r, "mode": mode, "effort": effort, "max_tokens": max_tokens })
+}
+
+async fn golden_host(env: &mut TestEnv, server: &MockServer, extra: Value) -> Arc<Host> {
+    env.set_var("OPENCODE_API_KEY", "test-opencode");
+    env.set_var("OPENROUTER_API_KEY", "test-openrouter");
+    env.set_var("MYRESP_KEY", "test-myresp");
+    let base = &server.base;
+    let ok_responses = || (0..400).map(|_| Resp::sse(responses_text("ok"))).collect::<Vec<_>>();
+    server.route("/openai/responses/compact", vec![Resp::status(200, r#"{"output":[]}"#)]);
+    server.route("/openai", ok_responses());
+    server.route("/og", ok_responses());
+    server.route("/myresp", ok_responses());
+    server.route("/anthropic", vec![Resp::sse(fixture("anthropic-text.sse"))]);
+    server.route("/google", vec![Resp::sse(fixture("google.sse"))]);
+    let compat = Resp::sse(compat_events(&[compat_text("ok"), compat_stop()]));
+    for p in ["/compat", "/openrouter", "/localre"] {
+        server.route(p, vec![compat.clone()]);
+    }
+    let config = json!({
+        "providers": {
+            "myresp": { "wire_api": "responses", "base_url": format!("{base}/myresp"), "api_key_env": "MYRESP_KEY" },
+            "openrouter": { "base_url": format!("{base}/openrouter") },
+            "localre": { "base_url": format!("{base}/localre"), "no_key": true, "effort_param": "reasoning_effort",
+                "models": [{ "model_id": "qwen3", "context_window": 32000, "max_output": 8000, "reasoning": true }] },
+        },
+        "plugins": {
+            "llm": { "retries": 0 },
+            "provider-opencode-go": { "base_url": base, "routes": { "responses": { "path": "/og" } } },
+        },
+    });
+    let mut config = config;
+    merge(&mut config, extra);
+    provider_host(env, server, config).await
+}
+
+/// JSON objects merge recursively; anything else replaces.
+fn merge(dst: &mut Value, src: Value) {
+    match (dst, src) {
+        (Value::Object(d), Value::Object(s)) => {
+            for (k, v) in s {
+                merge(d.entry(k).or_insert(Value::Null), v);
+            }
+        }
+        (d, s) if !s.is_null() => *d = s,
+        _ => {}
+    }
+}
+
+/// Sends every case, then compares (or with `MARE_UPDATE_GOLDEN=1` writes) the golden file:
+/// per case a `# label` line, the request path, the `headers` named (in that order; a secret
+/// value is masked) and the raw body bytes.
+async fn check(h: &Host, server: &MockServer, cases: &[Value], name: &str, headers: &[&str]) {
+    let f = h.lua().load(DRIVER).into_function().unwrap();
+    f.call_async::<()>(Value::Array(cases.to_vec()).to_string()).await.unwrap_or_else(|e| panic!("{name}: {e}"));
+    let reqs = server.requests();
+    assert_eq!(reqs.len(), cases.len(), "{name}: one request per case");
+    let mut out = String::new();
+    for (c, r) in cases.iter().zip(&reqs) {
+        let label = [&c["ref"], &c["mode"], &c["effort"], &c["max_tokens"]]
+            .iter()
+            .filter(|v| !v.is_null())
+            .map(|v| v.as_str().map_or_else(|| v.to_string(), str::to_string))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let _ = writeln!(out, "# {label}\nPOST {}", r.path);
+        for name in headers {
+            let shown = match (*name, r.header(name)) {
+                (_, None) => "<absent>".to_string(),
+                ("authorization", Some(v)) => v.split_once(' ').map_or("***".into(), |(s, _)| format!("{s} ***")),
+                ("x-api-key", Some(_)) => "***".to_string(),
+                (_, Some(v)) => v.to_string(),
+            };
+            let _ = writeln!(out, "{name}: {shown}");
+        }
+        let _ = writeln!(out, "{}\n", r.body);
+    }
+    assert!(!out.contains(&server.base), "{name}: no host-specific address in the golden file");
+    assert!(!out.contains("test-opencode"), "{name}: no key in the golden file");
+    let path = format!("{}/tests/fixtures/golden-wire/{name}.txt", env!("CARGO_MANIFEST_DIR"));
+    if std::env::var_os("MARE_UPDATE_GOLDEN").is_some() {
+        std::fs::create_dir_all(std::path::Path::new(&path).parent().unwrap()).unwrap();
+        std::fs::write(&path, &out).unwrap();
+        return;
+    }
+    let want =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e} (MARE_UPDATE_GOLDEN=1 writes it)"));
+    if want != out {
+        let (w, o): (Vec<&str>, Vec<&str>) = (want.lines().collect(), out.lines().collect());
+        let at = w.iter().zip(&o).position(|(a, b)| a != b).unwrap_or(w.len().min(o.len()));
+        panic!(
+            "{name}: wire bodies differ from the golden file at line {}\n  golden: {}\n  now:    {}",
+            at + 1,
+            w.get(at).unwrap_or(&"<end>"),
+            o.get(at).unwrap_or(&"<end>")
+        );
+    }
+}
+
+/// Default config: one case per wire-mapping style (default effort, explicit `off`/`high`, session
+/// clamping, non-reasoning models, output caps, /responses/compact). Per-model level lists and
+/// budget tables are catalog data and are not enumerated here.
+#[tokio::test]
+async fn wire_bodies_match_the_golden_file() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let server = MockServer::start().await;
+        let h = golden_host(&mut env, &server, Value::Null).await;
+        let mut cases = vec![];
+        // One default case per wire-mapping style (plus the two non-reasoning models).
+        for r in [
+            "openai/gpt-6.1-terra",
+            "opencode-go/glm-5.3-flash",
+            "myresp/some-model",
+            "anthropic/claude-sonnet-5-5",
+            "anthropic/claude-sonnet-4-5",
+            "google/gemini-3-pro-preview",
+            "google/gemini-2.5-pro",
+            "deepseek/deepseek-reasoner",
+            "openrouter/anthropic/claude-sonnet-5-5",
+            "localre/qwen3",
+            "deepseek/deepseek-chat",
+            "openrouter/deepseek/deepseek-chat",
+        ] {
+            cases.push(case(r, "default", None, None));
+        }
+        // How each style spells "off" (field removed / none / budget 0 / disabled), explicitly.
+        for r in [
+            "openai/gpt-6.1-terra",
+            "opencode-go/glm-5.3-flash",
+            "myresp/some-model",
+            "anthropic/claude-sonnet-5-5",
+            "anthropic/claude-sonnet-4-5",
+            "google/gemini-3-pro-preview",
+            "google/gemini-2.5-pro",
+            "google/gemini-2.5-flash",
+            "openrouter/anthropic/claude-sonnet-5-5",
+            "localre/qwen3",
+        ] {
+            cases.push(case(r, "request", Some("off"), None));
+        }
+        // An explicit effort is sent as given, on a style of each kind.
+        for r in [
+            "openai/gpt-6.1-terra",
+            "anthropic/claude-sonnet-5-5",
+            "google/gemini-3-pro-preview",
+            "openrouter/anthropic/claude-sonnet-5-5",
+            "localre/qwen3",
+            "deepseek/deepseek-chat",
+        ] {
+            cases.push(case(r, "request", Some("high"), None));
+        }
+        // The session effort is clamped to the model's declared levels (down, tie, explicit map).
+        for (r, e) in [
+            ("openai/gpt-6-luna", "max"),
+            ("google/gemini-3-pro-preview", "medium"),
+            ("opencode-go/deepseek-v4.1-flash", "xhigh"),
+            ("anthropic/claude-sonnet-4-5", "high"),
+        ] {
+            cases.push(case(r, "session", Some(e), None));
+        }
+        // Output caps: below, at and above the thinking budget (answer headroom).
+        for (r, n) in [
+            ("anthropic/claude-sonnet-4-5", 2000),
+            ("anthropic/claude-sonnet-4-5", 30000),
+            ("anthropic/claude-sonnet-5-5", 2000),
+            ("openai/gpt-6.1-terra", 1000),
+            ("google/gemini-2.5-pro", 1000),
+            ("deepseek/deepseek-reasoner", 1000),
+        ] {
+            cases.push(case(r, "request", Some("high"), Some(n)));
+        }
+        for e in [None, Some("off")] {
+            cases.push(case("openai/gpt-6.1-terra", "compact", e, None));
+        }
+        check(&h, &server, &cases, "default", &[]).await;
+        h.shutdown().await;
+    })
+    .await
+}
+
+/// Provider and model config that reach the wire: the configured model effort, the
+/// Responses verbosity override, Anthropic's thinking budgets and answer headroom.
+#[tokio::test]
+async fn wire_bodies_with_provider_config_match_the_golden_file() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let server = MockServer::start().await;
+        let extra = json!({
+            "models": { "openai/gpt-6.1-terra": { "params": { "effort": "high" } } },
+            "plugins": {
+                "provider-openai": { "verbosity": "medium" },
+                "provider-anthropic": {
+                    "reasoning_budgets": { "minimal": 1100, "low": 1200, "medium": 3000, "high": 4000, "xhigh": 5000 },
+                    "answer_headroom": 10,
+                },
+            },
+        });
+        let h = golden_host(&mut env, &server, extra).await;
+        let cases = vec![
+            case("openai/gpt-6.1-terra", "default", None, None),
+            case("anthropic/claude-sonnet-4-5", "request", Some("medium"), Some(3500)),
+            case("anthropic/claude-sonnet-4-5", "session", Some("off"), None),
+        ];
+        check(&h, &server, &cases, "config", &[]).await;
+        h.shutdown().await;
+    })
+    .await
+}
+
+/// opencode Go over both routes: glm by a `model_routes` glob and deepseek by
+/// `mare.model{route=}` on the Anthropic route (`/anthropic/v1/messages`, Bearer auth, the session
+/// header, adaptive thinking with `output_config.effort`, off → disabled), crouton on the default
+/// Responses route under the new gateway root. The Responses golden files above keep the legacy
+/// the configured Responses route and stay byte-identical.
+#[tokio::test]
+async fn wire_bodies_on_the_opencode_go_routes_match_the_golden_file() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        env.set_var("OPENCODE_API_KEY", "test-opencode");
+        let server = MockServer::start().await;
+        let base = &server.base;
+        server.route("/gw/anthropic", (0..60).map(|_| Resp::sse(fixture("anthropic-text.sse"))).collect());
+        server.route("/gw/openai", (0..60).map(|_| Resp::sse(responses_text("ok"))).collect());
+        let config = json!({
+            "models": { "opencode-go/deepseek-v4.1-flash": { "route": "anthropic" } },
+            "plugins": {
+                "llm": { "retries": 0 },
+                "provider-opencode-go": { "base_url": format!("{base}/gw"), "model_routes": { "glm-*": "anthropic" } },
+            },
+        });
+        let h = provider_host(&mut env, &server, config).await;
+        let mut cases = vec![];
+        for r in ["opencode-go/glm-5.3-flash", "opencode-go/deepseek-v4.1-flash", "opencode-go/crouton-alpha-free"] {
+            cases.push(case(r, "default", None, None));
+        }
+        cases.push(case("opencode-go/glm-5.3-flash", "request", Some("off"), None));
+        cases.push(case("opencode-go/glm-5.3-flash", "request", Some("high"), Some(2000)));
+        cases.push(case("opencode-go/deepseek-v4.1-flash", "request", Some("off"), None));
+        cases.push(case("opencode-go/deepseek-v4.1-flash", "session", Some("xhigh"), None));
+        let headers = ["authorization", "x-api-key", "anthropic-version", "accept", "x-opencode-session"];
+        check(&h, &server, &cases, "opencode-go-routes", &headers).await;
+        h.shutdown().await;
+    })
+    .await
+}
+
+/// New shipped presets (`kimi-code` and `lmstudio`): verify wire body shape, keyless local
+/// execution for `lmstudio`, and `KIMI_API_KEY` + `kimi` dialect + `models_dev = "kimi-for-coding"`
+/// for `kimi-code`.
+#[tokio::test]
+async fn wire_bodies_for_kimi_code_and_lmstudio_presets() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        env.set_var("KIMI_API_KEY", "test-kimi-code");
+        let server = MockServer::start().await;
+        let base = &server.base;
+        let compat = Resp::sse(compat_events(&[compat_text("ok"), compat_stop()]));
+        server.route("/kimi-code", vec![compat.clone()]);
+        server.route("/lmstudio", vec![compat]);
+
+        let h = env
+            .host()
+            .config(json!({
+                "providers": {
+                    "kimi-code": { "base_url": format!("{base}/kimi-code") },
+                    "lmstudio": {
+                        "base_url": format!("{base}/lmstudio"),
+                        "models": [{ "model_id": "qwen3", "context_window": 32000, "max_output": 4096 }]
+                    }
+                }
+            }))
+            .no_session()
+            .build()
+            .await;
+        global(&h, "LLM", h.service_table("llm").unwrap());
+
+        let (kc_mdev, kc_def, lm_no_key): (String, String, bool) = eval(
+            &h,
+            r#"
+            local kc = assert(LLM:provider("kimi-code"), "kimi-code preset missing")
+            local lm = assert(LLM:provider("lmstudio"), "lmstudio preset missing")
+            return tostring(kc.models_dev), tostring(kc.default_model), lm.no_key == true
+            "#,
+        )
+        .await;
+        assert_eq!(kc_mdev, "kimi-for-coding");
+        assert_eq!(kc_def, "kimi-for-coding");
+        assert!(lm_no_key, "lmstudio must be keyless");
+
+        let kc_msg = ask(&h, "kimi-code/kimi-for-coding").await;
+        assert_eq!(text_of(&kc_msg), "ok");
+        let lm_msg = ask(&h, "lmstudio/qwen3").await;
+        assert_eq!(text_of(&lm_msg), "ok");
+
+        let kc_req = server.requests().into_iter().find(|r| r.path == "/kimi-code/chat/completions").unwrap();
+        assert_eq!(kc_req.header("authorization"), Some("Bearer test-kimi-code"));
+        assert_eq!(kc_req.json()["model"], "kimi-for-coding");
+        let lm_req = server.requests().into_iter().find(|r| r.path == "/lmstudio/chat/completions").unwrap();
+        assert_eq!(lm_req.header("authorization"), None, "lmstudio must send no Authorization header");
+        assert_eq!(lm_req.json()["model"], "qwen3");
+
+        h.shutdown().await;
+    })
+    .await
+}

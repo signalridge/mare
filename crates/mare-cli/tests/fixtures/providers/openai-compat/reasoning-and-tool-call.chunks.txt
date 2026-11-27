@@ -1,0 +1,8 @@
+{"id":"chatcmpl-syn-xai","object":"chat.completion.chunk","created":1700000000,"model":"grok-3-mini","choices":[{"index":0,"delta":{"reasoning_content":"First","role":"assistant"}}]}
+{"id":"chatcmpl-syn-xai","object":"chat.completion.chunk","created":1700000000,"model":"grok-3-mini","choices":[{"index":0,"delta":{"reasoning_content":","}}]}
+{"id":"chatcmpl-syn-xai","object":"chat.completion.chunk","created":1700000000,"model":"grok-3-mini","choices":[{"index":0,"delta":{"reasoning_content":" the"}}]}
+{"id":"chatcmpl-syn-xai","object":"chat.completion.chunk","created":1700000000,"model":"grok-3-mini","choices":[{"index":0,"delta":{"reasoning_content":" user"}}]}
+{"id":"chatcmpl-syn-xai","object":"chat.completion.chunk","created":1700000000,"model":"grok-3-mini","choices":[{"index":0,"delta":{"reasoning_content":" is"}}]}
+{"id":"chatcmpl-syn-xai","object":"chat.completion.chunk","created":1700000000,"model":"grok-3-mini","choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_syn_weather_sf","function":{"name":"weather","arguments":"{\"location\":\"San Francisco\"}"},"index":0,"type":"function"}]}}]}
+{"id":"chatcmpl-syn-xai","object":"chat.completion.chunk","created":1700000000,"model":"grok-3-mini","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+{"id":"chatcmpl-syn-xai","object":"chat.completion.chunk","created":1700000000,"model":"grok-3-mini","choices":[],"usage":{"prompt_tokens":291,"completion_tokens":26,"total_tokens":513,"prompt_tokens_details":{"text_tokens":291,"cached_tokens":290},"completion_tokens_details":{"reasoning_tokens":196}}}

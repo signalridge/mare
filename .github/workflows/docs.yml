@@ -1,0 +1,84 @@
+name: Docs
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "docs-site/**"
+      - "scripts/gen_docs.py"
+      - "crates/**"
+      - ".nvmrc"
+      - "rust-toolchain.toml"
+      - ".github/ci-tools.json"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "docs-site/**"
+      - "scripts/gen_docs.py"
+      - "crates/**"
+      - ".nvmrc"
+      - "rust-toolchain.toml"
+      - ".github/ci-tools.json"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    name: Build docs
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Build mare (the generated pages read its --help and command registry)
+        run: cargo build -p mare-cli
+      - name: Load pinned CI tool versions
+        id: tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          lua_ver="$(jq -er '.lua | strings' .github/ci-tools.json)"
+          echo "lua=${lua_ver}" >> "$GITHUB_OUTPUT"
+      - uses: leafo/gh-actions-lua@8aace3457a2fcf3f3c4e9007ecc6b869ff6d74d6 # v11
+        with:
+          luaVersion: ${{ steps.tools.outputs.lua }}
+      - name: Generated reference pages are up to date
+        run: python3 scripts/gen_docs.py --mare "$GITHUB_WORKSPACE/target/debug/mare" --check
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: docs-site/package-lock.json
+      - name: Build the site
+        working-directory: docs-site
+        run: |
+          npm ci
+          npm run build
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
+        with:
+          path: docs-site/dist
+  deploy:
+    name: Deploy docs
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5

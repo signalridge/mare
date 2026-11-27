@@ -1,0 +1,9 @@
+data: {"id":"chatcmpl-dsv3-1","choices":[{"index":0,"delta":{"role":"assistant","content":"Checking main. <｜tool▁"}}]}
+
+data: {"id":"chatcmpl-dsv3-1","choices":[{"index":0,"delta":{"content":"calls▁begin｜><｜tool_call_begin｜>read<｜tool▁sep｜>{\"path\":"}}]}
+
+data: {"id":"chatcmpl-dsv3-1","choices":[{"index":0,"delta":{"content":"\"src/main.rs\"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>"}}]}
+
+data: {"id":"chatcmpl-dsv3-1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":25,"completion_tokens":18}}
+
+data: [DONE]

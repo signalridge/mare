@@ -1,0 +1,14 @@
+# FeatureBench-lite subset for `just eval featurebench`. Harbor dataset
+# `featurebench/featurebench-lite`, pinned to revision 1 (registry version 1.0.0, 30 tasks,
+# content sha256:8cc1a98d3087e46dccce1807f6032dbc12ad054aa8a742e668e31ebc05bb1b4d).
+#
+# Selection: "shortest" = the least code to write. The dataset has no time estimate (difficulty is
+# only "medium" for lv1 and "hard" for lv2), so tasks are ranked by the size of the removed
+# implementation (changed lines in environment/setup_patch.diff) and only lv1 tasks qualify (lv2
+# wipes /testbed and asks for a whole package from scratch). The third-shortest,
+# linkedin__liger-kernel ... test_poly_norm (332 lines), is skipped: it is Triton kernels whose
+# tests need a CUDA GPU. Images are libercoders/featurebench-specs_* (~10 GB compressed each, amd64);
+# the two seaborn tasks share one image, so the three tasks pull two images.
+featurebench/mwaskom__seaborn.7001ebe7.test_algorithms.1f0181c2.lv1    # 230 changed lines: re-implement seaborn's bootstrap resampling (algorithms.py, _statistics.py); pure numpy, CPU-only, shortest instruction (11 KB)
+featurebench/mwaskom__seaborn.7001ebe7.test_statistics.0f2ae277.lv1    # 298 changed lines: re-implement statistics preprocessing in seaborn/_statistics.py; same image as the task above
+featurebench/pydata__xarray.97f3a746.test_backends_chunks.fa55f68a.lv1 # 388 changed lines: chunk alignment / grid rechunking helpers (xarray/backends/chunks.py and callers); next shortest lv1 after the GPU-only one, a different repo

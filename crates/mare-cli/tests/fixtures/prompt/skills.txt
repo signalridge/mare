@@ -1,0 +1,47 @@
+@@ after: 
++<skills>
++The following skills provide specialized instructions for specific tasks.
++Use the read tool to load a skill's file when the task matches its description.
++Resolve relative paths against the skill's directory (parent of SKILL.md).
++
++<available_skills>
++  <skill>
++    <name>Bad_Name--</name>
++    <description>The name breaks the spec&apos;s character rules; this is only a warning.</description>
++    <location><CRATE>/tests/fixtures/skills/Bad_Name/SKILL.md</location>
++  </skill>
++  <skill>
++    <name>colon-in-value</name>
++    <description>Use when: the value has an unquoted colon (not valid YAML)</description>
++    <location><CRATE>/tests/fixtures/skills/colon-in-value/SKILL.md</location>
++  </skill>
++  <skill>
++    <name>folded</name>
++    <description>FOLDED-START Review pull requests for correctness and style.
++FOLDED-PARA second paragraph.</description>
++    <location><CRATE>/tests/fixtures/skills/folded/SKILL.md</location>
++  </skill>
++  <skill>
++    <name>full-spec</name>
++    <description>Every optional field of the Agent Skills spec, plus keys mare doesn&apos;t know.</description>
++    <location><CRATE>/tests/fixtures/skills/full-spec/SKILL.md</location>
++  </skill>
++  <skill>
++    <name>literal</name>
++    <description>LITERAL-LINE-1
++LITERAL-LINE-2</description>
++    <location><CRATE>/tests/fixtures/skills/literal/SKILL.md</location>
++  </skill>
++  <skill>
++    <name>no-name</name>
++    <description>A skill without a name field; its directory name is used.</description>
++    <location><CRATE>/tests/fixtures/skills/no-name/SKILL.md</location>
++  </skill>
++  <skill>
++    <name>quoted</name>
++    <description>Use when the user says &quot;ship it&quot;: run the release	checklist (café)</description>
++    <location><CRATE>/tests/fixtures/skills/quoted/SKILL.md</location>
++  </skill>
++</available_skills>
++</skills>
++

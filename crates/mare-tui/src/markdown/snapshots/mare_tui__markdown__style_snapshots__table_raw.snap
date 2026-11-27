@@ -1,0 +1,21 @@
+---
+source: crates/mare-tui/src/markdown.rs
+assertion_line: 1322
+expression: "describe(&render_markdown(table, 12, &t))"
+---
+|| Name ||
+  ⟶ "| Name |"=#8f91b1
+|Description|
+  ⟶ "Description"=#8f91b1
+|| Value ||
+  ⟶ "| Value |"=#8f91b1
+||--|--|--||
+  ⟶ "|--|--|--|"=#8f91b1
+|| alpha ||
+  ⟶ "| alpha |"=#8f91b1
+|the first|
+  ⟶ "the first"=#8f91b1
+|entry of|
+  ⟶ "entry of"=#8f91b1
+|many | 1 ||
+  ⟶ "many | 1 |"=#8f91b1

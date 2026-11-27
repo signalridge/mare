@@ -1,0 +1,51 @@
+[package]
+name         = "mare-plugin"
+description  = "Lua runtime setup and the built-in plugin preset"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+publish                = false
+
+build = "build.rs"
+
+[features]
+# ship the scripted test provider in release builds (`just bench`)
+faux = []
+
+[lints]
+workspace = true
+
+[dependencies]
+mare-shared.workspace = true
+mare-macro.workspace = true
+mare-config.workspace = true
+mare-kernel.workspace = true
+mare-binding.workspace = true
+mare-plugin-manager.workspace = true
+mlua.workspace = true
+tokio.workspace = true
+# cancelling package operations (mare.plugins): git stops when the Lua call is dropped
+tokio-util.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+jiff.workspace = true
+dirs.workspace = true
+flate2.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_SystemInformation"] }
+
+[build-dependencies]
+flate2.workspace = true
+mare-kernel.workspace = true
+mare-protocol.workspace = true
+mlua.workspace = true
+serde_json.workspace = true
+

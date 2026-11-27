@@ -1,0 +1,8 @@
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":"Need to read the file.","thought":true}]}}]}
+
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":"Reading "}]}}]}
+
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":"it now."}]}}]}
+
+data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"read","args":{"path":"src/main.rs"}},"thoughtSignature":"c2lnMTIz"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":120,"cachedContentTokenCount":20,"candidatesTokenCount":35,"thoughtsTokenCount":10}}
+

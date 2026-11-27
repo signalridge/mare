@@ -1,0 +1,20 @@
+data: {"id":"c1","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"Need to read "}}]}
+
+data: {"id":"c1","choices":[{"index":0,"delta":{"reasoning_content":"the file."}}]}
+
+data: {"id":"c1","choices":[{"index":0,"delta":{"content":"Reading "}}]}
+
+data: {"id":"c1","choices":[{"index":0,"delta":{"content":"it now."}}]}
+
+data: {"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"read","arguments":""}}]}}]}
+
+data: {"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":"}}]}}]}
+
+data: {"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"src/main.rs\"}"}}]}}]}
+
+data: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: {"id":"c1","choices":[],"usage":{"prompt_tokens":120,"completion_tokens":45,"prompt_tokens_details":{"cached_tokens":20}}}
+
+data: [DONE]
+

@@ -1,0 +1,36 @@
+[package]
+name         = "mare-plugin-manager"
+description  = "Package manager (mare plugin)"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+publish                = false
+
+[lints]
+workspace = true
+
+[dependencies]
+mare-shared.workspace = true
+anyhow.workspace = true
+dunce.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+semver.workspace = true
+# the lock's content hashes (`LockEntry::hash`, Yazi `hash.rs`)
+sha2.workspace = true
+tempfile.workspace = true
+toml = { workspace = true, features = ["parse", "serde"] }
+# cancelling git operations: the host's cancellation token
+tokio-util.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# killing a timed-out git and its process group
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# killing a timed-out git and its children (ssh, git-remote-https): a Job Object
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading"] }
+

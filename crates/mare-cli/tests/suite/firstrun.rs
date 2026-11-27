@@ -1,0 +1,130 @@
+//! first run, /login, privacy. The update check sends nothing when turned off and
+//! only asks GitHub releases (here a mock) when on; API keys are typed masked and stored 0600.
+
+use crate::common::*;
+use serde_json::json;
+
+#[tokio::test]
+async fn the_update_check_sends_nothing_when_off_and_only_asks_releases_when_on() {
+    local(async {
+        let env = TestEnv::new().await;
+        let mock = MockServer::start().await;
+        mock.route("/releases/latest", vec![Resp::status(200, r#"{"tag_name":"v99.0.0"}"#)]);
+        let url = format!("{}/releases/latest", mock.base);
+
+        // off (`mare.o.update_check = false`): no request at all
+        let h = env
+            .host()
+            .builtins(&["update-check"])
+            .config(json!({ "update_check": false, "plugins": { "update-check": { "url": url } } }))
+            .no_session()
+            .build()
+            .await;
+        global(&h, "UC", h.service_table("update-check").unwrap());
+        let (res, why): (Option<mlua::Value>, String) = eval(&h, "return UC:check()").await;
+        assert!(res.is_none() && why == "disabled", "{why}");
+        h.shutdown().await;
+        assert_eq!(mock.count("/releases"), 0, "no network when off");
+
+        // on: one GET to the releases endpoint, nothing identifying in it
+        let h = env
+            .host()
+            .builtins(&["update-check"])
+            .config(json!({ "plugins": { "update-check": { "url": url } } }))
+            .no_session()
+            .build()
+            .await;
+        global(&h, "UC", h.service_table("update-check").unwrap());
+        let (latest, newer): (String, bool) = eval(&h, "local r = UC:check() return r.latest, r.newer").await;
+        assert_eq!((latest.as_str(), newer), ("v99.0.0", true));
+        h.shutdown().await;
+        let reqs = mock.requests();
+        assert_eq!(reqs.len(), 1);
+        let r = &reqs[0];
+        assert!(r.body.is_empty(), "a GET without a body: {}", r.body);
+        for h in ["authorization", "cookie", "x-api-key"] {
+            assert!(r.header(h).is_none(), "{h} sent");
+        }
+    })
+    .await
+}
+
+/// A persisted `update_check_at` timestamp in the future (e.g. after wall-clock rollback)
+/// must be treated as expired rather than suppressing update checks indefinitely.
+#[tokio::test]
+async fn update_check_treats_future_timestamp_as_expired() {
+    local(async {
+        let env = TestEnv::new().await;
+        let mock = MockServer::start().await;
+        mock.route("/releases/latest", vec![Resp::status(200, r#"{"tag_name":"v99.1.0"}"#)]);
+        let url = format!("{}/releases/latest", mock.base);
+
+        let future_epoch =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 365 * 24 * 3600;
+        let state_dir = env.home.path().join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(state_dir.join("state.json"), format!(r#"{{"update_check_at":{future_epoch}}}"#)).unwrap();
+
+        let h = env
+            .host()
+            .builtins(&["update-check"])
+            .config(json!({ "plugins": { "update-check": { "url": url } } }))
+            .no_session()
+            .build()
+            .await;
+        expose(&h);
+        // Emit ui/ready in non-debug TUI mode to exercise the update_check_at throttle check.
+        exec(
+            &h,
+            r#"local orig_mode, orig_dbg = mare.mode, mare.debug_build
+               mare.mode, mare.debug_build = "tui", false
+               local ok, err = pcall(function() C.cordis:get("bus"):emit("ui/ready", {}) end)
+               mare.mode, mare.debug_build = orig_mode, orig_dbg
+               assert(ok, tostring(err))"#,
+        )
+        .await;
+        wait_until(WAIT_SECS, "update check request", || async { mock.count("/releases/latest") >= 1 }).await;
+        assert!(
+            mock.count("/releases/latest") >= 1,
+            "update check must ignore future update_check_at and hit /releases/latest"
+        );
+        h.shutdown().await;
+    })
+    .await
+}
+
+/// Windows: a private DACL (`mare_shared::private`), below a MARE_HOME open to everyone.
+#[tokio::test]
+async fn login_takes_the_key_masked_and_stores_it_0600() {
+    local(async {
+        let env = TestEnv::new().await;
+        #[cfg(windows)]
+        mare_shared::private::testing::open_to_everyone(env.home.path());
+        let h = env.host().builtins(&["update-check"]).no_session().build().await;
+        global(&h, "LLM", h.service_table("llm").unwrap());
+        let secret: bool = eval(
+            &h,
+            r#"local secret
+               mare.ui.input = function(o) secret = o.secret return "sk-ant-test-123" end
+               -- the public operation (providers() gives data, not the provider's functions)
+               for _, p in ipairs(LLM:providers()) do
+                 if p.name == "anthropic" and p.login then LLM.login(LLM, "anthropic") end
+               end
+               return secret == true"#,
+        )
+        .await;
+        assert!(secret, "the API key prompt is masked");
+        let auth = env.config_dir().join("auth.json");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&auth).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "auth.json is private");
+        }
+        #[cfg(windows)]
+        assert_eq!(mare_shared::private::check(&auth), Ok(()), "auth.json is private");
+        assert!(std::fs::read_to_string(&auth).unwrap().contains("sk-ant-test-123"));
+        h.shutdown().await;
+    })
+    .await
+}

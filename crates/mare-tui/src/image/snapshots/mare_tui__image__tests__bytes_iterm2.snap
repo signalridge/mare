@@ -1,0 +1,5 @@
+---
+source: crates/mare-tui/src/image.rs
+expression: "format!(\"{raw:?}\")"
+---
+"\r\u{1b}[1A\u{1b}]1337;File=inline=1;size=136;width=2;height=2;preserveAspectRatio=1;doNotMoveCursor=1:iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAYAAACp8Z5+AAAAT0lEQVR4AQFEALv/AAAAgP88AID/eACA/7QAgP8AADyA/zw8gP94PID/tDyA/wAAeID/PHiA/3h4gP+0eID/AAC0gP88tID/eLSA/7S0gP85yCMxddvVaAAAAABJRU5ErkJggg==\u{7}\u{1b}[1B"

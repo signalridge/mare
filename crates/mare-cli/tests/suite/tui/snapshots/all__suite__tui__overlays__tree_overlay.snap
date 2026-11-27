@@ -1,0 +1,26 @@
+---
+source: crates/mare-cli/tests/suite/tui/overlays.rs
+assertion_line: 65
+expression: t.snap().await
+---
+❯ question one
+
+● first answer
+
+worked Ns · 3 tokens · HH:MM
+
+❯ question two
+
+● second answer
+
+worked Ns · 4 tokens · HH:MM
+  ╭─ Session tree · default ─────────────────────────────────────────────────╮
+  │ ● › question one  just now                                               │
+  │ ● first answer  just now                                                 │
+  │ ● › question two  just now                                               │
+  │ ◉ second answer  here · just now                                         │
+  ╰───────────────────────────────────────────────────────────────── 4 of 4 ─╯
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ ❯ Ask mare anything… (@ files, / commands, ? keys)                           │
+╰──────────────────────────────────────────────────────────────────────────────╯
+Enter select Ctrl+F filter Ctrl+E fold Ctrl+T label Ctrl+Y copy Esc cancel…

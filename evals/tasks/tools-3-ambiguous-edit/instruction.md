@@ -1,0 +1,1 @@
+Read config.txt. Then change only the second `enabled=false` (the one under [b]) to `enabled=true`. Make your first edit call with old_string exactly `enabled=false`; if the tool says it is ambiguous, add surrounding context so it matches only the second one.

@@ -1,0 +1,120 @@
+[package]
+name         = "mare-cli"
+description  = "mare — terminal coding agent harness (Rust core, Lua plugins)"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+publish                = false
+default-run            = "mare"
+
+# one integration-test binary (tests/all.rs + tests/suite/*): one link instead of one per file
+autotests = false
+# src/main.rs is the library root (see [lib]); the product binary is src/bin/mare.rs
+autobins = false
+
+# The crate root stays `src/main.rs` but builds as a library, so the integration tests can drive
+# the TUI app in-process (`testkit`, TUI e2e); `src/bin/mare.rs` is the thin binary.
+[lib]
+path = "src/main.rs"
+
+[[bin]]
+name = "mare"
+path = "src/bin/mare.rs"
+test = false
+
+# the scripted MCP servers the integration tests run (CARGO_BIN_EXE_mare-test-mcp); never packaged
+[[bin]]
+name = "mare-test-mcp"
+path = "tests/fake_mcp/main.rs"
+test = false
+
+[[test]]
+name = "all"
+path = "tests/all.rs"
+
+[features]
+# include the scripted `faux` provider (tests use debug builds; `just bench` uses this)
+faux = ["mare-plugin/faux"]
+# Explicitly labelled measurement build; ordinary builds keep the mimalloc default.
+bench-system-allocator = []
+
+[lints]
+workspace = true
+
+[dependencies]
+dunce.workspace = true
+mare-shared.workspace = true
+mare-config.workspace = true
+mare-kernel.workspace = true
+mare-binding.workspace = true
+mare-plugin.workspace = true
+mare-tui.workspace = true
+mare-host.workspace = true
+mare-plugin-manager.workspace = true
+mare-protocol.workspace = true
+clap.workspace = true
+clap_complete.workspace = true
+shlex.workspace = true
+anyhow.workspace = true
+base64.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+mimalloc.workspace = true
+libmimalloc-sys.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+futures-util.workspace = true
+lru.workspace = true
+nucleo-matcher.workspace = true
+regex.workspace = true
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+sha2.workspace = true
+agent-client-protocol.workspace = true
+mlua.workspace = true
+mare-store.workspace = true
+jiff.workspace = true
+bytes.workspace = true
+url.workspace = true
+http.workspace = true
+hyper = { workspace = true, features = ["server", "http1"] }
+hyper-util = { workspace = true, features = ["tokio"] }
+http-body-util.workspace = true
+tokio-tungstenite = { workspace = true, features = ["handshake"] }
+rustls = { workspace = true, features = ["aws_lc_rs", "std", "tls12"] }
+rustls-pki-types.workspace = true
+tokio-rustls.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_System_Pipes",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+dirs.workspace = true
+mare-shared = { workspace = true, features = ["test-support"] }
+tokio = { workspace = true, features = ["test-util"] }
+# Kernel::call_export_from_lua, the tests' Lua-side caller of the export surface
+mare-kernel = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true
+# writes an index of an older schema for the rebuild test
+rusqlite.workspace = true
+# in-process virtual terminal for the TUI e2e tests
+vt100.workspace = true
+insta.workspace = true
+pretty_assertions.workspace = true
+mare-edit.workspace = true
+# writes a picture big enough that preparing it takes a while (already built by mare-binding)
+image.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+signal-hook-registry.workspace = true

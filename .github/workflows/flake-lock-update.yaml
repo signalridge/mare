@@ -1,0 +1,43 @@
+name: Flake Lock Update
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: flake-lock-update
+  cancel-in-progress: true
+
+jobs:
+  update-flake-lock:
+    name: Update flake.lock
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: DeterminateSystems/nix-installer-action@33c9ab3ef95cd57c164d9d6eb1f9a46338538d41 # main
+      - uses: DeterminateSystems/magic-nix-cache-action@55718cd9ebf1737a061487d5ada21abf31e99a98 # main
+        with:
+          use-flakehub: false
+          use-gha-cache: true
+      - name: Update lock file
+        run: nix flake update
+      - name: Create pull request
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8
+        with:
+          token: ${{ secrets.GH_PAT }}
+          branch: chore/update-flake-lock
+          delete-branch: true
+          commit-message: "chore(nix): update flake.lock"
+          title: "chore(nix): update flake.lock"
+          body: |
+            Automated update of Nix flake inputs.
+
+            This PR was created by `.github/workflows/flake-lock-update.yaml`.
+          labels: |
+            dependencies
+            nix

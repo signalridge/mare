@@ -1,0 +1,277 @@
+---@meta _
+-- LuaLS definitions: ctx itself, tool definitions, rate limits and the plugin definition (split out of the former types/mare/services.lua; entry: types/mare.lua)
+
+--- A plugin's ctx (`apply(ctx, cfg)`): the cordis context (`effect`, `on`, `emit`, `inject({...}, fn)`,
+--- `get`, ...; `ctx.bus` for mare events, `ctx.policy` for decisions), with each service its definition
+--- injects as a field, and `after` / `every` / `spawn` from the `task` host plugin
+--- (`inject = { "task" }`).
+---@class mare.Ctx : cordis.Context
+--- `inject({ names }, fn)` (Cordis): run `fn(ctx)` while the named optional services are up — a
+--- child fiber on the cordis tree, undone when one goes away or is replaced; the plugin itself does
+--- not restart. Use it for registrations into an optional service made at apply time.
+---@field inject fun(self: mare.Ctx, names: string[], fn: fun(ctx: mare.Ctx)): cordis.Fiber
+---@field kernel mare.host.KernelService
+---@field bus mare.BusService
+---@field options mare.OptionsService
+---@field policy mare.PolicyService
+---@field llm mare.LlmService
+---@field tools mare.ToolsService
+---@field agent mare.AgentService
+---@field hooks mare.HooksService
+---@field message mare.MessageService
+---@field session mare.SessionService
+---@field jobs mare.JobsService
+---@field fs mare.FsService
+---@field context mare.ContextService
+---@field conversations mare.ConversationsService
+---@field approvals mare.ApprovalsService
+---@field permissions mare.PermissionsService
+---@field images ImagesService
+---@field review ReviewService
+---@field changes ChangesService
+---@field copy CopyService
+---@field plugins mare.PluginsService
+---@field commands mare.CommandsService
+---@field compact mare.CompactService
+---@field usage mare.UsageService
+---@field theme mare.ThemeService
+---@field query mare.QueryService
+---@field ui mare.UiService
+---@field status mare.StatusService
+---@field subagent mare.SubagentService
+---@field cells mare.CellsService
+---@field mcp mare.McpService
+---@field web mare.WebService
+---@field proc mare.ProcService
+---@field webserver mare.WebserverService
+---@field terminal mare.TerminalService
+---@field spill mare.SpillService
+---@field workspace mare.WorkspaceService
+local Ctx = {}
+--- Run `fn` once after `ms`; cancelled when the plugin is disposed. Errors are shown in the UI.
+---@param ms number
+---@param fn async fun()
+---@return mare.Task
+function Ctx:after(ms, fn) end
+--- Run `fn` every `ms` until it returns false or the plugin is disposed. Errors are shown in the
+--- UI (the timer keeps going).
+---@param ms number
+---@param fn async fun(): boolean?
+---@return mare.Task
+function Ctx:every(ms, fn) end
+--- Run `fn(...)` as a task of this plugin, cancelled when the plugin is disposed.
+---@param fn async fun(...)
+---@return mare.Task
+function Ctx:spawn(fn, ...) end
+---@overload fun(self: mare.Ctx, name: "agent"): mare.AgentService|nil
+---@overload fun(self: mare.Ctx, name: "approvals"): mare.ApprovalsService|nil
+---@overload fun(self: mare.Ctx, name: "bus"): mare.BusService|nil
+---@overload fun(self: mare.Ctx, name: "changes"): ChangesService|nil
+---@overload fun(self: mare.Ctx, name: "commands"): mare.CommandsService|nil
+---@overload fun(self: mare.Ctx, name: "compact"): mare.CompactService|nil
+---@overload fun(self: mare.Ctx, name: "context"): mare.ContextService|nil
+---@overload fun(self: mare.Ctx, name: "conversations"): mare.ConversationsService|nil
+---@overload fun(self: mare.Ctx, name: "copy"): CopyService|nil
+---@overload fun(self: mare.Ctx, name: "fs"): mare.FsService|nil
+---@overload fun(self: mare.Ctx, name: "hooks"): mare.HooksService|nil
+---@overload fun(self: mare.Ctx, name: "images"): ImagesService|nil
+---@overload fun(self: mare.Ctx, name: "jobs"): mare.JobsService|nil
+---@overload fun(self: mare.Ctx, name: "kernel"): mare.host.KernelService|nil
+---@overload fun(self: mare.Ctx, name: "llm"): mare.LlmService|nil
+---@overload fun(self: mare.Ctx, name: "mcp"): mare.McpService|nil
+---@overload fun(self: mare.Ctx, name: "message"): mare.MessageService|nil
+---@overload fun(self: mare.Ctx, name: "options"): mare.OptionsService|nil
+---@overload fun(self: mare.Ctx, name: "spill"): mare.SpillService|nil
+---@overload fun(self: mare.Ctx, name: "permissions"): mare.PermissionsService|nil
+---@overload fun(self: mare.Ctx, name: "plugins"): mare.PluginsService|nil
+---@overload fun(self: mare.Ctx, name: "policy"): mare.PolicyService|nil
+---@overload fun(self: mare.Ctx, name: "proc"): mare.ProcService|nil
+---@overload fun(self: mare.Ctx, name: "query"): mare.QueryService|nil
+---@overload fun(self: mare.Ctx, name: "review"): ReviewService|nil
+---@overload fun(self: mare.Ctx, name: "cells"): mare.CellsService|nil
+---@overload fun(self: mare.Ctx, name: "session"): mare.SessionService|nil
+---@overload fun(self: mare.Ctx, name: "status"): mare.StatusService|nil
+---@overload fun(self: mare.Ctx, name: "subagent"): mare.SubagentService|nil
+---@overload fun(self: mare.Ctx, name: "terminal"): mare.TerminalService|nil
+---@overload fun(self: mare.Ctx, name: "theme"): mare.ThemeService|nil
+---@overload fun(self: mare.Ctx, name: "tools"): mare.ToolsService|nil
+---@overload fun(self: mare.Ctx, name: "ui"): mare.UiService|nil
+---@overload fun(self: mare.Ctx, name: "update-check"): UpdateCheckService|nil
+---@overload fun(self: mare.Ctx, name: "usage"): mare.UsageService|nil
+---@overload fun(self: mare.Ctx, name: "web"): mare.WebService|nil
+---@overload fun(self: mare.Ctx, name: "webserver"): mare.WebserverService|nil
+---@overload fun(self: mare.Ctx, name: "workspace"): mare.WorkspaceService|nil
+--- The service `name` as this context reads it, or nil when it is not up (Cordis `get`: for an
+--- optional service the definition does not inject).
+---@param name string
+---@return mare.InjectedService|nil
+function Ctx:get(name) end
+
+--- Closed marker type for a service name `ctx:get` does not know: its methods are not an API.
+--- Custom services declare a caller-visible class extension and a service contract; unresolved
+--- service fields must not silently become an untyped API.
+---@class mare.InjectedService
+
+---@class mare.PolicyVote
+---@field decision "allow"|"deny"|"ask"
+---@field categories? string[] with ask: additional required approval categories
+---@field category? string with ask: independent approval policy category (default tool)
+---@field reason? string
+---@field grant? "allow"|"allow_session"|"allow_amend" with allow: the approval decision
+---@field permissions? mare.PermissionProfile with allow in tool/approval: constrain the frozen request; empty object grants nothing
+---@field permission_constraints? mare.PermissionProfile[] additional intersected grant constraints (tool/approval only)
+---@field scope? "turn"|"session" with allow in tool/approval: maximum grant lifetime
+---@field abort? boolean with deny: also end the turn
+---@field unavailable? boolean with deny: nobody could answer (recorded as `unavailable`)
+---@field amendment? table a rule the permissions plugin may persist (opaque to the core)
+---@field sandbox? table|string a per-call restriction, intersected with all other restrictions
+---@field sandbox_constraints? (table|string)[] additional per-call restrictions
+---@field sandbox_grant? table|string explicit escalation candidate (tool/before only; one per dispatch)
+---@class mare.ServiceMethodSpec
+---@field doc string required on every contract method
+---@field params? table JSON Schema with object root (default: no parameters)
+---@field order? string[] positional Lua arguments; a trailing "..." collects the rest into opts
+---@field result? table JSON Schema of the result (required unless `registration = true`)
+---@field lua_result? string|string[] optional LuaLS return type(s) for Lua-only/multi-return methods
+---@field expose? "lua"|"both" default "lua"
+---@field provider? "plugin"|"host" default "plugin"; "host" is reserved for built-in host-provided contracts
+---@field access? "primary"|"peer"|"peer_default" default "primary"; peer methods can be granted by peer.allow
+---@field scope? "host"|"workspace"|"session" default "host"; RPC session methods take session_id
+---@field registration? boolean Lua returns a disposer; JSON callers get {registration_id}
+---@field optional? boolean
+---@field callbacks? table<string, string|table> callback signatures or remote callback specs
+---@field lua? table<string, string> Lua-only parameter LuaLS types
+---@field errors? string[] names of the service errors (the contract's `errors`) this method raises; default: any of them
+---@field poisoned? "allow"|"deny" whether this method may run while the session barrier is poisoned
+---@field confined? boolean direct RPC calls run under the host's active sandbox policy
+---@field baseline? boolean synchronous non-yielding Lua-only method used during baseline snapshot cuts
+---@field host_local? boolean remote Scope::Host registration not replicated across sessions
+---@field lua_unchecked? boolean skip JSON-schema guard checks for Lua-only callers
+---@field history_result? boolean allow the finite history result budget on a Lua-only method
+---@field lua_kind_errors? boolean pass raised tables with a string `kind` field through to Lua callers without settling into `internal`
+---@class mare.ServiceContract
+---@field doc? string
+---@field essential? boolean true on a built-in service whose failure blocks requests
+---@field methods table<string,mare.ServiceMethodSpec>
+---@field errors? table<string,{doc: string, data?: table}> the service's own errors, name -> meaning and the JSON Schema of their data; raised as `<service>.<name>`
+---@class mare.ServiceProvideOptions
+---@field contract? mare.ServiceContract explicit contract for a new runtime service
+
+---@alias mare.ToolContext {cancel: mare.Token, update?: fun(partial: table), cwd: string, tool_call_id: string, idempotency_key: string, declared_tools?: string[], permissions?: mare.PermissionProfile, permission_scope?: "turn"|"session"}
+
+---@class mare.ToolDef
+---@field name? string registered tool name (set by `tools:register`, present on `tools:get` / `tools:list` results)
+---@field description string|fun(model: table, mode: string): string
+---@field parameters table|fun(model: table, mode: string): table JSON schema
+---@field execute async fun(args: table, tctx: mare.ToolContext): table|string
+---@field readonly? boolean no side effects: consecutive read-only calls run in parallel
+---@field side_effect? "read"|"write"|"external" (default: "read" when readonly, else "external"); write = local files only, external = anything beyond them (shell, network, git push)
+---@field command_tool? boolean executes an external OS command/shell; permissions derive dangerous-command checks, rules and "always allow" prefixes from `command` (unanalyzable command tools are never auto-allowed)
+---@field command? {shell: string, arg: string}|{argv: string[], defaults?: table<string, string|number|boolean>} analyzable command representation (either shell kind + string argument name, or argv template + parameter defaults)
+---@field permission_request? boolean generic structured permission-request tool; arguments.additional_permissions + justification + scope use the ordinary policy pipeline
+---@field access? fun(args: table, ctx: {cwd: string}): {kind: 'file', op: 'read'|'write'|'create'|'delete', path: string, recursive: boolean}[] complete file accesses; omission means unknown
+---@field idempotent? boolean safe to run twice (default: true only for read); a side-effecting non-idempotent call that crashed mid-way resumes as outcome_unknown, never replayed
+--- Hidden-value restoration is opt-in. These top-level fields (including nested values) must
+--- be consumed strictly as data, never shell/program text or unprotected model context. Unknown
+--- fields fail closed. Each call still requires approval; changes invalidate the snapshot.
+---@field sensitive_inputs? string[]
+---@field unconfined? boolean runs outside this process (MCP, RPC host): the local sandbox can't confine it; the permissions layer requires approval under safe/auto
+---@field snippet? string one line for the system prompt's tool list
+---@field guidelines? string[] rules added to the system prompt
+---@field summary? fun(args: table): string e.g. "Read(src/main.rs)"
+---@field render? fun(args: table, result: table, expanded: boolean): mare.Node
+---@field enabled? fun(model: table, edit_mode: string): boolean
+---@field timeout_ms? number|false
+---@field timeout_policy? "managed" execution owns its finite timeout; the pipeline still enforces cancellation and cancel_grace_ms
+---@field is_current? fun(): boolean returns false once this dynamic tool version has been superseded
+---@field exposure? "direct"|"deferred"|"nested" nil means direct; deferred tools are discovered via tool_search (invoked natively on tool_update = "addition_only" models, or via call_tool otherwise); nested tools are included only when explicitly named
+---@field search? {aliases?: string[], text?: string} extra exact select: names and description-weighted keyword search text
+---@field allow_nested? boolean false forbids calling this tool from nested/codemode scripts
+---@field freeform? {description?: string, syntax?: "lark"|"regex", definition: string} grammar form; providers that support custom tools (OpenAI Responses) declare it instead of `parameters`, the raw input arrives as `args.input`
+
+---@class mare.RateLimitWindow
+---@field used_percent number
+---@field window_minutes? number
+---@field reset_at_ms? integer unix epoch milliseconds
+
+---@class mare.RateLimits event `llm/rate-limits`: {provider: string, limits: mare.RateLimits}
+---@field received_at_ms? integer
+---@field primary? mare.RateLimitWindow
+---@field secondary? mare.RateLimitWindow
+---@field credits? string
+---@field reached? string
+
+--- What a wire tells other plugins about itself (`llm:register_wire`).
+---@class mare.WireDescribe
+---@field route? string the params route its requests use (resolved by `llm:apply_params`)
+---@field path? string appended to a gateway route's address ("/responses", "/v1/messages")
+---@field auth? string[] the key styles it sends, the default first ("bearer", "x-api-key")
+
+---@alias mare.ConfigApiEntry (fun(config: table, ...: any): any)|table<string, mare.ConfigApiEntry>
+
+---@class mare.PluginDef
+---@field name string
+---@field inject? string[] required services (an optional one is followed: `mare_lib.followers`)
+---@field provide? string[]
+--- Independent contracts for newly defined services (`methods` described one by one);
+--- built-in contracts cannot be redeclared.
+---@field contracts? table<string, mare.ServiceContract>
+--- What kind of plugin it is, read without running it. `"provider"`: a model provider;
+--- `"minimal"`: in the minimal plugin set — `plugins.preset = "minimal"` keeps the built-ins
+--- tagged either way and turns the rest off. `mare.plugins.declaring
+--- ("tags", tag)` lists the plugins with a tag.
+---@field tags? string[]
+--- The llm wire formats it registers (`llm:register_wire`), read without running it: a route over
+--- a wire that isn't registered blames this plugin (`llm:wire_owner`), also while it is off.
+---@field wires? string[]
+--- The llm provider names it registers (`llm:register_provider`), declared up front so
+--- missing-provider diagnostics and undeclared-provider warnings work without running it.
+---@field providers? string[]
+--- Declarative CLI flags registered before startup (`mare.flags.get(name)`).
+---@field flags? table<string, mare.FlagOpts>
+--- Declarative static frontend assets (`web = { dir, prefix?, index?, fallback? }`).
+---@field web? { dir: string, prefix?: string, index?: string, fallback?: string }
+--- true: if this plugin fails to start, every request is refused (with the reason) until a full
+--- `/reload` succeeds — as for any plugin responsible for an essential service (agent, llm,
+--- tools, permissions, session: declared in `provide`, provided at runtime, or inherited from the
+--- definition it overrides) and plugins from packages. Otherwise a failure only warns and
+--- requests continue without it.
+---@field required? boolean
+--- true: this definition may replace a same-name built-in (or other lower-precedence) plugin.
+--- Without it the definition is not loaded and the earlier one stays; the error names the two
+--- fixes (`override = true`, or rename the plugin). `/plugins` and `mare doctor`
+--- show "overrides built-in <name>".
+---@field override? boolean
+--- Config callbacks are discovered before evaluating init.lua for the installed definition set.
+---@field config_api? table<string, mare.ConfigApiEntry>
+--- The plugin's options, one declaration each: `{ type, default, desc, choices?, min?, max?,
+--- unit?, fields?, items?, values?, on_invalid?, apply?, scope? }`. Gives the defaults `apply` receives as `cfg`
+--- and the checks every entry point runs (init.lua, --set, MARE_*, runtime writes).
+---@field config_schema? table<string, mare.ConfigEntry>
+---@field apply? async fun(ctx: mare.Ctx, cfg: table)
+--- A built-in's module table, exposed so an override reaches its internals (e.g. the
+--- providers' wire functions). Any other field is warned about and ignored.
+---@field M? table
+
+--- One option of a `config_schema`.
+---@class mare.ConfigEntry
+---@field type "boolean"|"number"|"integer"|"string"|"enum"|"list"|"object"|"map"|"union"|"function"|string[]
+---@field default? any
+---@field desc string
+---@field choices? string[] the values of an `enum` (or a closed `string`)
+---@field choices_from? string sibling option name (map keys or list items) extending allowed `choices`
+---@field nullable? boolean accept `nil` / `mare.json.null` in addition to the declared `type`
+---@field env? string environment variable name (e.g. `"MARE_APPROVAL_POLICY"`) that overrides this option at the `env` layer
+---@field tag? string discriminator field name for a `union` of `object` variants
+---@field min? number
+---@field max? number
+---@field unit? string `ms`, `bytes`, ...
+---@field fields? table<string, mare.ConfigEntry> an `object`'s keys (every one a user may set)
+---@field items? mare.ConfigEntry a `list`'s elements
+---@field max_items? integer maximum element count for a `list`
+---@field values? mare.ConfigEntry a `map`'s values (its keys are open)
+---@field variants? mare.ConfigEntry[] a `union`'s forms: the value matches one of them exactly
+---@field sensitive? boolean never shown or announced in clear (`/config`, `options.get`, `config.describe`, `option/changed`); applies to everything under it
+---@field on_invalid? "warn_default"|"error"|"fail" what an invalid value does (default: warn, keep the default; "fail": the plugin does not start)
+---@field apply? "live"|"next_op"|"reload"|"restart" when a runtime write takes effect (default: reload)
+---@field scope? "lua" a value that cannot leave Lua (a function)

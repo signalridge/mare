@@ -1,0 +1,3 @@
+event: response.incomplete
+data: {"type":"response.incomplete","response":{"id":"resp_syn_inc","incomplete_details":{"reason":"invalid_recipient"},"output":[{"type":"message","status":"completed"},{"type":"function_call","status":"incomplete","id":"fc_attempt","call_id":"attempt","name":"unknown","arguments":"{}"}]}}
+

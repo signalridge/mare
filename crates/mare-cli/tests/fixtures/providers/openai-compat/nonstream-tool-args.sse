@@ -1,0 +1,12 @@
+data: {"id":"chatcmpl-syn-nonstream","created":1700000000,"object":"chat.completion.chunk","model":"glm-4.5","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"The user requested Paris. "}}]}
+
+data: {"id":"chatcmpl-syn-nonstream","created":1700000000,"object":"chat.completion.chunk","model":"glm-4.5","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"Proceeding with function call."}}]}
+
+data: {"id":"chatcmpl-syn-nonstream","created":1700000000,"object":"chat.completion.chunk","model":"glm-4.5","choices":[{"index":0,"delta":{"tool_calls":[{"id":"tool_syn_glm_0","index":0,"type":"function","function":{"name":"get_weather","arguments":"{\"city\": \"Paris\"}"}}]}}]}
+
+data: {"id":"chatcmpl-syn-nonstream","created":1700000000,"object":"chat.completion.chunk","model":"glm-4.5","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}
+
+data: {"id":"chatcmpl-syn-nonstream","created":1700000000,"object":"chat.completion.chunk","model":"glm-4.5","choices":[{"index":0,"finish_reason":"tool_calls","delta":{"role":"assistant","content":""}}],"usage":{"prompt_tokens":174,"completion_tokens":95,"total_tokens":269,"prompt_tokens_details":{"cached_tokens":0},"completion_tokens_details":{"reasoning_tokens":83}}}
+
+data: [DONE]
+

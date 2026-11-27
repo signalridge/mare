@@ -1,0 +1,12 @@
+/target
+# an agent-local cargo target dir (never commit; safe to delete)
+/target-wt
+
+# generated at release time by `scripts/check_notices.py --generate-rust-notices`
+/licenses/RUST-THIRD-PARTY-NOTICES.txt
+
+# eval fixtures may legitimately be logs; a global "*.log" ignore must not drop them
+!/evals/tasks/**/*.log
+
+# synced by `just eval-sync` / `evals/run.py` from `evals/lib/mare_log.py`
+/evals/tasks/*/tests/mare_log.py

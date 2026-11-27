@@ -1,0 +1,23 @@
+---
+source: crates/mare-cli/tests/suite/tui/overlays.rs
+expression: t.snap().await
+---
+  ╭─ Keys ─────────────────────────────────────────────────────────╮
+  │ / ▏                                                            ┃
+  │ Shortcuts                                                      │
+  │ Ctrl+C  interrupt / clear input · twice to exit (reserved)     │
+  │ ?  all key bindings (on an empty input) [when: editor_empty, … │
+  │ Alt+,  lower reasoning effort (the model's levels)             │
+  │ Alt+.  raise reasoning effort (the model's levels)             │
+  │ Alt+Enter  queue the input as a follow-up [when: working]      │
+  │ Alt+M  next favorite / recent model                            │
+  │ Alt+P  select model (keeps the input)                          │
+  │ Alt+S  select text in the live area with the mouse, release c… │
+  │ Alt+V  paste an image from the clipboard                       │
+  │ Ctrl+B  move the running command to the background             │
+  │ Ctrl+D  exit when the input is empty                           │
+  ╰────────────────────────────────────────────────────── 1 of 77 ─╯
+╭────────────────────────────────────────────────────────────────────╮
+│ ❯ Ask mare anything… (@ files, / commands, ? keys)                 │
+╰────────────────────────────────────────────────────────────────────╯
+ Enter run │ type search │ Esc back

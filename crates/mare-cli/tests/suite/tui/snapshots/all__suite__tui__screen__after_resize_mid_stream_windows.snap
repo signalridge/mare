@@ -1,0 +1,17 @@
+---
+source: crates/mare-cli/tests/suite/tui/screen.rs
+expression: screen
+---
+
+❯ second
+
+● alpha bravo charlie delta echo foxtrot golf hotel india juliett kilo
+  lima mike november oscar papa quebec romeo sierra tango uniform
+  victor whiskey xray yankee zulu END-OF-STREAM
+
+worked Ns · 45 tokens · HH:MM
+
+╭────────────────────────────────────────────────────────────────────╮
+│ ❯ Ask mare anything… (@ files, / commands, ? keys)                 │
+╰────────────────────────────────────────────────────────────────────╯
+   PARTIAL  · ? shortcuts      Faux Echo thinking: medium · ▱▱▱▱▱▱ 0%

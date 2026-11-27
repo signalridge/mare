@@ -1,0 +1,17 @@
+{"type":"message_start","message":{"id":"msg_syn_first","type":"message","role":"assistant","content":[],"model":"claude-sonnet-5-5","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":17,"output_tokens":1}}}
+{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}
+{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"First attempt thinking."}}
+{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig-syn-1"}}
+{"type":"content_block_stop","index":0}
+{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_syn_first","name":"test-tool","input":{}}}
+{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"value\":\"Spark"}}
+{"type":"message_start","message":{"id":"msg_syn_second","type":"message","role":"assistant","content":[],"model":"claude-sonnet-5-5","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":17,"output_tokens":1}}}
+{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}
+{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Second attempt thinking."}}
+{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig-syn-2"}}
+{"type":"content_block_stop","index":0}
+{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_syn_second","name":"test-tool","input":{}}}
+{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"value\":\"Sparkle Day\"}"}}
+{"type":"content_block_stop","index":1}
+{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":65}}
+{"type":"message_stop"}

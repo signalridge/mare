@@ -1,0 +1,21 @@
+@@ after: <start>
+-You are a coding agent running in mare.
++<early>
++EARLY
++</early>
+@@ after: 
+-<cwd>
+-<CWD>
+-</cwd>
++<persona>
++MY PERSONA
++</persona>
+@@ after: 
++<addendum>
++USER APPEND
++</addendum>
++
++<custom>
++USER SECTION {{x}}
++</custom>
++

@@ -1,0 +1,4 @@
+{"type":"message_start","message":{"model":"claude-sonnet-5-5","id":"msg_syn_anth_refusal","type":"message","role":"assistant","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":18,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1}}}
+{"type":"ping"}
+{"type":"message_delta","delta":{"stop_reason":"refusal","stop_sequence":null,"stop_details":{"type":"refusal","category":"cyber","explanation":"This request was blocked under Anthropic's Usage Policy."}},"usage":{"input_tokens":18,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":5}}
+{"type":"message_stop"}

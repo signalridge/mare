@@ -1,0 +1,40 @@
+[package]
+name         = "mare-kernel"
+description  = "Plugin kernel: ctx, services, events, lifecycle, watchdog"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+publish                = false
+
+[lints]
+workspace = true
+
+[features]
+# Kernel::call_export_from_lua for mare-cli's tests (enabled by its dev-dependencies only)
+test-support = []
+
+[dependencies]
+mare-shared.workspace = true
+# the process-only event list (headless.rs): those events are never tapped
+mare-protocol.workspace = true
+mlua.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+dunce.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+
+[dev-dependencies]
+mare-shared = { workspace = true, features = ["test-support"] }
+
+[build-dependencies]
+mlua.workspace = true

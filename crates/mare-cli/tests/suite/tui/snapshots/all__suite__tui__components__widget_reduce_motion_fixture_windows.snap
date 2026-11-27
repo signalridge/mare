@@ -1,0 +1,11 @@
+---
+source: crates/mare-cli/tests/suite/tui/components.rs
+expression: t.snap().await
+---
+╭─ Status ───────────────────────────────────────────────────────────╮
+│ STATIC-READY                                                       │
+╰────────────────────────────────────────────────────────────────────╯
+╭────────────────────────────────────────────────────────────────────╮
+│ ❯ Ask mare anything… (@ files, / commands, ? keys)                 │
+╰────────────────────────────────────────────────────────────────────╯
+   PARTIAL  · ? shortcuts      Faux Echo thinking: medium · ▱▱▱▱▱▱ 0%

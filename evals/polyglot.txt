@@ -1,0 +1,16 @@
+# Aider polyglot subset for `just eval polyglot`. Harbor dataset
+# `aider/aider-polyglot`, pinned to revision 1 (registry version 1.0.0, 225 tasks,
+# content sha256:01e28d85e46beae5b7e29a29f57cb49d882b5486583d52cec4ee5bf3540a1c84).
+#
+# Selection: the same Exercism exercise, "wordy" (parse and evaluate "What is 5 plus 13 times 2?"
+# left to right, reject unsupported or malformed questions), in all four languages, so the four
+# results differ only by language and toolchain, not by problem. It is a mid-sized parsing task
+# (23-25 test cases in each language), one source file, standard library only, no network at test
+# time. Images build locally from buildpack-deps:jammy plus the toolchain (native arm64 too).
+# Caveat from the dataset, not from mare: the Rust and JavaScript runners do not un-ignore
+# Exercism's skipped tests (`#[ignore]` / `xtest`), so there only the first case and compilation
+# are scored; Go and Python run every case.
+aider/polyglot_rust_wordy         # Rust: lib.rs, cargo test (first case + compile)
+aider/polyglot_go_wordy           # Go: wordy.go, go test runs all 24 cases
+aider/polyglot_javascript_wordy   # JavaScript: wordy.js, jest (first case; the other 22 are xtest)
+aider/polyglot_python_wordy       # Python: wordy.py, pytest runs all 25 cases

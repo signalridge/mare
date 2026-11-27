@@ -1,0 +1,28 @@
+# syntax=docker/dockerfile:1
+
+FROM ubuntu:24.04@sha256:562111b88caa79c71391c0c4d3c2114a7d5c35915c20561fd893cb1e07929e6b
+
+ARG TARGETARCH
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates git bubblewrap \
+    && rm -rf /var/lib/apt/lists/* \
+    && git config --system --add safe.directory '*' \
+    && groupadd -g 65532 nonroot \
+    && useradd -u 65532 -g nonroot -m -s /bin/sh nonroot
+
+COPY ${TARGETARCH}/mare /usr/bin/mare
+COPY LICENSE /usr/share/licenses/mare/LICENSE
+COPY THIRD_PARTY_NOTICES.md /usr/share/licenses/mare/THIRD_PARTY_NOTICES.md
+COPY licenses/cordis-LICENSE /usr/share/licenses/mare/cordis-LICENSE
+COPY licenses/RUST-THIRD-PARTY-NOTICES.txt /usr/share/licenses/mare/RUST-THIRD-PARTY-NOTICES.txt
+COPY README.md /usr/share/doc/mare/README.md
+
+USER nonroot:nonroot
+ENTRYPOINT ["/usr/bin/mare"]
+
+LABEL org.opencontainers.image.title="mare"
+LABEL org.opencontainers.image.description="Hyperextensible AI coding agent harness (Rust core, Lua 5.5 plugins)"
+LABEL org.opencontainers.image.source="https://github.com/signalridge/mare"
+LABEL org.opencontainers.image.vendor="SignalRidge"
+LABEL org.opencontainers.image.licenses="Apache-2.0"

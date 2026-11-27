@@ -1,0 +1,590 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+jobs:
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      yaml: ${{ steps.classify.outputs.yaml }}
+      workflows: ${{ steps.classify.outputs.workflows }}
+      rust: ${{ steps.classify.outputs.rust }}
+      lua: ${{ steps.classify.outputs.lua }}
+      deny: ${{ steps.classify.outputs.deny }}
+      scripts: ${{ steps.classify.outputs.scripts }}
+      docs: ${{ steps.classify.outputs.docs }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Classify changed paths
+        id: classify
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_REF: ${{ github.head_ref }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          python3 - <<'PY'
+          import fnmatch
+          import os
+          import subprocess
+
+          GROUPS = ("yaml", "workflows", "rust", "lua", "deny", "scripts", "docs")
+          ZERO_SHA = "0" * 40
+
+          def git(*args: str) -> subprocess.CompletedProcess[str]:
+              return subprocess.run(["git", *args], capture_output=True, text=True, check=False)
+
+          def write_outputs(flags: dict[str, bool], reason: str) -> None:
+              print(f"ci-changes: {reason}")
+              lines = [f"{k}={'true' if flags[k] else 'false'}" for k in GROUPS]
+              print("\n".join(lines))
+              out = os.environ.get("GITHUB_OUTPUT")
+              if out:
+                  with open(out, "a", encoding="utf-8") as fh:
+                      fh.write("\n".join(lines) + "\n")
+
+          def all_true(reason: str) -> None:
+              write_outputs({k: True for k in GROUPS}, reason)
+
+          def changed_files(base: str) -> list[str] | None:
+              if git("cat-file", "-e", f"{base}^{{commit}}").returncode != 0:
+                  if git("fetch", "--no-tags", "--depth=1", "origin", base).returncode != 0:
+                      return None
+              res = git("diff", "--name-only", "--no-renames", "-z", base, "HEAD", "--")
+              if res.returncode != 0:
+                  return None
+              return [p for p in res.stdout.split("\0") if p]
+
+          def classify(files: list[str]) -> dict[str, bool]:
+              flags = {k: False for k in GROUPS}
+              for path in files:
+                  matched = False
+                  if path in (".release-please-manifest.json", ".github/workflows/ci.yml"):
+                      return {k: True for k in GROUPS}
+                  if path.endswith((".yml", ".yaml")) or path in (".yamllint.yaml", ".python-version"):
+                      flags["yaml"] = True
+                      matched = True
+                  if path.startswith((".github/workflows/", ".github/actions/")):
+                      flags["workflows"] = True
+                      matched = True
+                      if path.startswith(".github/actions/setup-rust/"):
+                          flags["rust"] = True
+                  if (
+                      path.startswith(("crates/", ".cargo/", "scripts/cordis-suite/"))
+                      or path in (
+                          "Cargo.toml",
+                          "Cargo.lock",
+                          "rust-toolchain.toml",
+                          "rustfmt.toml",
+                          "clippy.toml",
+                          ".config/nextest.toml",
+                          "scripts/nextest_test_home.py",
+                          "scripts/test_nextest_test_home.py",
+                          "scripts/windows_sandbox_ci.ps1",
+                          "scripts/cordis-suite.sh",
+                          "install.ps1",
+                          "install.sh",
+                      )
+                  ):
+                      flags["rust"] = True
+                      matched = True
+                  if (
+                      path.startswith(("crates/mare-plugin/", "crates/mare-kernel/", "crates/mare-binding/"))
+                      or path.endswith(".lua")
+                      or path in (
+                          ".stylua.toml",
+                          ".luarc.json",
+                          "scripts/check_lua_public_api.py",
+                          ".github/ci-tools.json",
+                      )
+                      or fnmatch.fnmatch(path, "scripts/lua_api_*.py")
+                  ):
+                      flags["lua"] = True
+                      matched = True
+                  if (
+                      path in (
+                          "Cargo.toml",
+                          "Cargo.lock",
+                          "deny.toml",
+                          "about.toml",
+                          "LICENSE",
+                          "THIRD_PARTY_NOTICES.md",
+                      )
+                      or path.endswith("/Cargo.toml")
+                  ):
+                      flags["deny"] = True
+                      matched = True
+                  if (
+                      path.startswith("scripts/")
+                      or path in (
+                          "release-please-config.json",
+                          ".github/ci-tools.json",
+                          ".github/dependabot.yml",
+                          ".python-version",
+                          ".nvmrc",
+                          "Dockerfile.release",
+                          "CONTRIBUTING.md",
+                      )
+                  ):
+                      flags["scripts"] = True
+                      matched = True
+                  if (
+                      path.startswith(("docs/", "docs-site/", "evals/", "examples/", ".github/ISSUE_TEMPLATE/"))
+                      or fnmatch.fnmatch(path, "README*.md")
+                      or path in (
+                          "CHANGELOG.md",
+                          "SECURITY.md",
+                          "Dockerfile",
+                          ".dockerignore",
+                          ".gitignore",
+                          ".gitattributes",
+                          ".github/PULL_REQUEST_TEMPLATE.md",
+                          ".github/pull_request_template.md",
+                          "flake.nix",
+                          "flake.lock",
+                          "justfile",
+                      )
+                      or path.lower().endswith((
+                          ".png",
+                          ".svg",
+                          ".gif",
+                          ".webp",
+                          ".jpg",
+                          ".jpeg",
+                          ".ico",
+                          ".mp4",
+                          ".cast",
+                      ))
+                  ):
+                      flags["docs"] = True
+                      matched = True
+                  if not matched:
+                      return {k: True for k in GROUPS}
+              return flags
+
+          event = os.environ.get("EVENT_NAME", "")
+          if event == "workflow_dispatch":
+              all_true("workflow_dispatch runs full CI")
+          elif event == "pull_request" and os.environ.get("PR_HEAD_REF") == "release-please--branches--main":
+              all_true("release-please PR runs full CI")
+          elif event == "pull_request":
+              if git("rev-parse", "--verify", "HEAD^2").returncode == 0:
+                  files = changed_files("HEAD^1")
+              else:
+                  base = os.environ.get("PR_BASE_SHA", "")
+                  files = changed_files(base) if base else None
+              if not files:
+                  all_true("unable to resolve PR diff; running full CI")
+              else:
+                  print(f"changed files ({len(files)}): {files}")
+                  write_outputs(classify(files), "pull_request path classification")
+          elif event == "push":
+              before = os.environ.get("PUSH_BEFORE_SHA", "")
+              has_parent = git("rev-parse", "--verify", "HEAD^1").returncode == 0
+              if not has_parent or not before or before == ZERO_SHA:
+                  all_true("orphan or initial push has no diff base; running full CI")
+              else:
+                  files = changed_files(before)
+                  if not files:
+                      all_true("unable to diff push base; running full CI")
+                  else:
+                      print(f"changed files ({len(files)}): {files}")
+                      write_outputs(classify(files), "push path classification")
+          else:
+              all_true(f"event {event!r} runs full CI")
+          PY
+
+  yamllint:
+    name: yamllint
+    needs: [changes]
+    if: needs.changes.outputs.yaml == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - name: Install yamllint
+        run: pip install yamllint
+      - name: Run yamllint
+        run: yamllint -c .yamllint.yaml .
+
+  actionlint:
+    name: actionlint
+    needs: [changes]
+    if: needs.changes.outputs.workflows == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Run actionlint
+        uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2
+
+  lint:
+    name: lint
+    needs: [changes]
+    if: >-
+      needs.changes.outputs.rust == 'true' ||
+      needs.changes.outputs.scripts == 'true' ||
+      needs.changes.outputs.workflows == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: ./.github/actions/setup-rust
+        if: needs.changes.outputs.rust == 'true'
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        if: needs.changes.outputs.rust == 'true'
+      - if: needs.changes.outputs.rust == 'true'
+        run: cargo metadata --locked --format-version 1 >/dev/null
+      - name: Verify NEWS.md section on release PR
+        if: github.event_name == 'pull_request' && github.head_ref == 'release-please--branches--main'
+        run: |
+          python3 - <<'PY'
+          import json, pathlib, re, sys
+          ver = json.loads(pathlib.Path(".release-please-manifest.json").read_text("utf-8"))["."]
+          news = pathlib.Path("crates/mare-plugin/preset/NEWS.md").read_text("utf-8")
+          if not re.search(rf"(?m)^##\s+{re.escape(ver)}\s*$", news):
+              sys.exit(f"crates/mare-plugin/preset/NEWS.md is missing '## {ver}' section for release PR")
+          print(f"Verified NEWS.md contains ## {ver}")
+          PY
+      - if: needs.changes.outputs.rust == 'true'
+        run: cargo fmt --check
+      - if: needs.changes.outputs.rust == 'true'
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: python3 scripts/check_release_gate.py --self-test
+      - run: python3 scripts/release_manifests.py --self-test
+      - run: python3 scripts/check_release_policy.py --self-test
+      - run: python3 scripts/check_release_policy.py
+      - run: python3 scripts/verify_release_archive.py --self-test
+
+  deny:
+    name: cargo-deny
+    needs: [changes]
+    if: needs.changes.outputs.deny == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2
+        with:
+          tool: cargo-deny
+      # licenses, advisories (accepted exceptions listed with reasons), bans, sources: deny.toml
+      - run: cargo deny check
+
+  lua:
+    name: stylua · public-api-lint
+    needs: [changes]
+    if: needs.changes.outputs.lua == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - name: Load pinned CI tool versions
+        id: tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          stylua_ver="$(jq -er '.stylua | strings' .github/ci-tools.json)"
+          luals_ver="$(jq -er '.luals | strings' .github/ci-tools.json)"
+          ast_grep_ver="$(jq -er '.ast_grep | strings' .github/ci-tools.json)"
+          {
+            echo "stylua=${stylua_ver}"
+            echo "luals=${luals_ver}"
+            echo "ast_grep=${ast_grep_ver}"
+          } >> "$GITHUB_OUTPUT"
+      - uses: JohnnyMorganz/stylua-action@76fd70c03e6340ceaf673366712db9b20560b402 # v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          version: ${{ steps.tools.outputs.stylua }}
+          args: --check crates/mare-plugin/preset
+      - name: Install lua-language-server and ast-grep
+        shell: bash
+        env:
+          LUALS_VER: ${{ steps.tools.outputs.luals }}
+          AST_GREP_VER: ${{ steps.tools.outputs.ast_grep }}
+        run: |
+          set -euo pipefail
+          tools_dir="${RUNNER_TEMP}/lua-lint-tools"
+          mkdir -p "${tools_dir}/luals" "${tools_dir}/bin"
+          luals_url="https://github.com/LuaLS/lua-language-server/releases/download"
+          curl -fsSL "${luals_url}/${LUALS_VER}/lua-language-server-${LUALS_VER}-linux-x64.tar.gz" \
+            | tar -xz -C "${tools_dir}/luals"
+          curl -fsSL -o "${tools_dir}/ast-grep.zip" \
+            "https://github.com/ast-grep/ast-grep/releases/download/${AST_GREP_VER}/app-x86_64-unknown-linux-gnu.zip"
+          unzip -q "${tools_dir}/ast-grep.zip" -d "${tools_dir}/bin"
+          rm -f "${tools_dir}/ast-grep.zip"
+          {
+            echo "${tools_dir}/luals/bin"
+            echo "${tools_dir}/bin"
+          } >> "$GITHUB_PATH"
+      - name: Check Lua public API
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          base=""
+          zero_sha="0000000000000000000000000000000000000000"
+          if [ -n "${PR_BASE_SHA:-}" ]; then
+            base=$(git merge-base "$PR_BASE_SHA" HEAD 2>/dev/null || printf '%s' "$PR_BASE_SHA")
+          elif [ -n "${PUSH_BEFORE_SHA:-}" ] && [ "$PUSH_BEFORE_SHA" != "$zero_sha" ]; then
+            base=$(git merge-base "$PUSH_BEFORE_SHA" HEAD 2>/dev/null || printf '%s' "$PUSH_BEFORE_SHA")
+          elif mb=$(git merge-base origin/main HEAD 2>/dev/null || true) \
+            && [ -n "$mb" ] && [ "$mb" != "$(git rev-parse HEAD)" ]; then
+            base="$mb"
+          elif prev=$(git rev-parse --verify HEAD~1 2>/dev/null); then
+            base="$prev"
+          else
+            base=$(git rev-parse HEAD)
+          fi
+          python3 scripts/check_lua_public_api.py --self-test
+          python3 scripts/check_lua_public_api.py --base "$base"
+
+  build-linux-tests:
+    name: build tests (ubuntu-latest)
+    needs: [changes]
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.lua == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: ./.github/actions/setup-rust
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2
+        with:
+          tool: nextest
+      - name: Create a private test parent (Unix)
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os, tempfile
+          p = tempfile.mkdtemp(prefix="mare-tests-", dir=os.environ["RUNNER_TEMP"])
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as fh:
+              fh.write("MARE_TMPDIR=" + p + "\n")
+          PY
+      - run: cargo nextest archive --workspace --archive-file mare-tests.tar.zst
+      - name: Ensure runtime test binaries exist for shards
+        run: |
+          if [ ! -x target/debug/mare ] || [ ! -x target/debug/mare-test-mcp ]; then
+            cargo build -p mare-cli --bins
+          fi
+      - run: python scripts/nextest_test_home.py --doc
+      - name: Remove the private test parent
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os, pathlib, shutil, stat, sys
+          raw = os.environ.get("MARE_TMPDIR")
+          if not raw:
+              sys.exit(0)
+          p = pathlib.Path(raw)
+          parent = pathlib.Path(os.environ["RUNNER_TEMP"]).resolve()
+          s = p.lstat()
+          assert (
+              p.parent.resolve() == parent
+              and p.name.startswith(("mare-tests-", "mt-"))
+              and not stat.S_ISLNK(s.st_mode)
+              and not (getattr(s, "st_file_attributes", 0) & 0x400)
+          )
+          shutil.rmtree(p)
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: linux-nextest-archive
+          path: |
+            mare-tests.tar.zst
+            target/debug/mare
+            target/debug/mare-test-mcp
+          retention-days: 1
+
+  test-linux:
+    name: test (ubuntu-latest, shard ${{ matrix.shard }}/4)
+    needs: [changes, build-linux-tests]
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.lua == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2
+        with:
+          tool: nextest
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: linux-nextest-archive
+      - name: Prepare extracted binary paths and target/tmp
+        shell: bash
+        run: |
+          chmod +x target/debug/mare target/debug/mare-test-mcp
+          mkdir -p target/tmp
+      - name: Create a private test parent (Unix)
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os, tempfile
+          p = tempfile.mkdtemp(prefix="mare-tests-", dir=os.environ["RUNNER_TEMP"])
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as fh:
+              fh.write("MARE_TMPDIR=" + p + "\n")
+          PY
+      - if: matrix.shard == 1
+        run: python scripts/test_nextest_test_home.py
+      - run: |
+          cargo nextest run \
+            --archive-file mare-tests.tar.zst \
+            --workspace-remap . \
+            --profile ci \
+            --partition "hash:${{ matrix.shard }}/4"
+        env:
+          NEXTEST_TEST_THREADS: '4'
+      - name: Remove the private test parent
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os, pathlib, shutil, stat, sys
+          raw = os.environ.get("MARE_TMPDIR")
+          if not raw:
+              sys.exit(0)
+          p = pathlib.Path(raw)
+          parent = pathlib.Path(os.environ["RUNNER_TEMP"]).resolve()
+          s = p.lstat()
+          assert (
+              p.parent.resolve() == parent
+              and p.name.startswith(("mare-tests-", "mt-"))
+              and not stat.S_ISLNK(s.st_mode)
+              and not (getattr(s, "st_file_attributes", 0) & 0x400)
+          )
+          shutil.rmtree(p)
+          PY
+
+  test-platform:
+    name: test (${{ matrix.os }})
+    needs: [changes]
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.lua == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: ./.github/actions/setup-rust
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2
+        with:
+          tool: nextest
+      - name: Create a private test parent (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os, tempfile
+          p = tempfile.mkdtemp(prefix="mare-tests-", dir=os.environ["RUNNER_TEMP"])
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as fh:
+              fh.write("MARE_TMPDIR=" + p + "\n")
+          PY
+      - name: Create a private test parent (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          git config --global core.longpaths true
+          $path = Join-Path $env:RUNNER_TEMP ("mt-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+          $null = New-Item -ItemType Directory -Path $path
+          $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+          $acl = [System.Security.AccessControl.DirectorySecurity]::new()
+          $acl.SetAccessRuleProtection($true, $false)
+          $acl.SetOwner($user)
+          $sids = @(
+            $user,
+            [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18'),
+            [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+          )
+          foreach ($sid in $sids) {
+            $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+              $sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'
+            )
+            $null = $acl.AddAccessRule($rule)
+          }
+          Set-Acl -Path $path -AclObject $acl
+          "MARE_TMPDIR=$path" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - run: cargo build -p mare-cli --bin mare
+      - run: python scripts/test_nextest_test_home.py
+      # one process per test (MARE_HOME is process-wide); profile in .config/nextest.toml
+      - run: cargo nextest run --workspace --lib --profile ci
+        env:
+          NEXTEST_TEST_THREADS: '3'
+      - run: python scripts/nextest_test_home.py --doc
+      # the restricted-token + ACL sandbox (default tier) only means something on real Windows:
+      # writes inside the workspace / private temp succeed, outside fail, PowerShell pipelines work
+      - name: Windows sandbox (default tier)
+        if: runner.os == 'Windows'
+        run: cargo nextest run -p mare-cli --profile ci --no-capture -E 'test(/suite::win_sandbox::/)'
+      # Probe the actual runner station. Only WinSta0 exercises enhanced confinement;
+      # service/SSH stations instead verify the explicit unavailable diagnostic.
+      - name: Windows sandbox (enhanced tier or unsupported-station diagnosis)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/windows_sandbox_ci.ps1
+      - name: Remove the private test parent
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os, pathlib, shutil, stat, sys
+          raw = os.environ.get("MARE_TMPDIR")
+          if not raw:
+              sys.exit(0)
+          p = pathlib.Path(raw)
+          parent = pathlib.Path(os.environ["RUNNER_TEMP"]).resolve()
+          s = p.lstat()
+          assert (
+              p.parent.resolve() == parent
+              and p.name.startswith(("mare-tests-", "mt-"))
+              and not stat.S_ISLNK(s.st_mode)
+              and not (getattr(s, "st_file_attributes", 0) & 0x400)
+          )
+          def ro(fn, path, exc):
+              if not isinstance(exc, PermissionError):
+                  raise exc
+              st = os.lstat(path)
+              if stat.S_ISLNK(st.st_mode) or (getattr(st, "st_file_attributes", 0) & 0x400):
+                  raise exc
+              os.chmod(path, stat.S_IWRITE | stat.S_IREAD | (stat.S_IEXEC if stat.S_ISDIR(st.st_mode) else 0))
+              fn(path)
+          shutil.rmtree(p, onexc=ro)
+          PY

@@ -1,0 +1,1 @@
+`orders.csv` in the current directory lists our orders. Count the orders per `status` and publish the result as `/srv/reports/order-status.txt`, where the nightly job picks it up: one line per status, `<status> <count>`, sorted alphabetically by status, nothing else in the file. Do not modify `orders.csv`.

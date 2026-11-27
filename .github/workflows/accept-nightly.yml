@@ -1,0 +1,168 @@
+name: Accept (Nightly)
+
+on:
+  schedule:
+    - cron: '0 19 * * *'
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Git ref or commit SHA to run release acceptance against"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: accept-nightly-${{ inputs.ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_call' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  accept:
+    name: accept (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
+      - name: Fetch origin/main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+      - uses: ./.github/actions/setup-rust
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - name: Load pinned CI tool versions
+        id: tools
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os, pathlib
+          data = json.loads(pathlib.Path(".github/ci-tools.json").read_text(encoding="utf-8"))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              for key in ("stylua", "luals", "ast_grep", "lua"):
+                  fh.write(f"{key}={data[key]}\n")
+          PY
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2
+        with:
+          tool: nextest
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2
+        with:
+          tool: cargo-deny
+      - name: Install stylua and ast-grep
+        shell: bash
+        env:
+          STYLUA_VER: ${{ steps.tools.outputs.stylua }}
+          AST_GREP_VER: ${{ steps.tools.outputs.ast_grep }}
+        run: |
+          set -euo pipefail
+          case "${{ runner.os }}-${{ runner.arch }}" in
+            Linux-X64)   stylua_asset="stylua-linux-x86_64.zip";   sg_asset="app-x86_64-unknown-linux-gnu.zip" ;;
+            Linux-ARM64) stylua_asset="stylua-linux-aarch64.zip";  sg_asset="app-aarch64-unknown-linux-gnu.zip" ;;
+            macOS-ARM64) stylua_asset="stylua-macos-aarch64.zip";  sg_asset="app-aarch64-apple-darwin.zip" ;;
+            macOS-X64)   stylua_asset="stylua-macos-x86_64.zip";   sg_asset="app-x86_64-apple-darwin.zip" ;;
+            Windows-X64) stylua_asset="stylua-windows-x86_64.zip"; sg_asset="app-x86_64-pc-windows-msvc.zip" ;;
+            *) echo "unsupported runner: ${{ runner.os }}-${{ runner.arch }}" >&2; exit 1 ;;
+          esac
+          dest="${RUNNER_TOOL_CACHE}/lua-tools/bin"
+          mkdir -p "$dest"
+          curl -fsSL -o "${RUNNER_TEMP}/stylua.zip" \
+            "https://github.com/JohnnyMorganz/StyLua/releases/download/v${STYLUA_VER}/${stylua_asset}"
+          python -m zipfile -e "${RUNNER_TEMP}/stylua.zip" "$dest"
+          curl -fsSL -o "${RUNNER_TEMP}/ast-grep.zip" \
+            "https://github.com/ast-grep/ast-grep/releases/download/${AST_GREP_VER}/${sg_asset}"
+          python -m zipfile -e "${RUNNER_TEMP}/ast-grep.zip" "$dest"
+          rm -f "${RUNNER_TEMP}/stylua.zip" "${RUNNER_TEMP}/ast-grep.zip"
+          if [ "${{ runner.os }}" != "Windows" ]; then
+            chmod +x "$dest"/stylua "$dest"/ast-grep "$dest"/sg 2>/dev/null || chmod +x "$dest"/*
+          fi
+          echo "$dest" >> "$GITHUB_PATH"
+      - if: runner.os == 'Linux'
+        name: Install system dependencies (lua, bubblewrap)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends lua5.4 bubblewrap
+          if ! command -v lua >/dev/null 2>&1; then
+            sudo ln -sf "$(command -v lua5.4)" /usr/local/bin/lua
+          fi
+      - if: runner.os == 'macOS'
+        name: Install lua (macOS)
+        run: brew install lua
+      - if: runner.os == 'Windows'
+        name: Install lua (Windows)
+        uses: leafo/gh-actions-lua@8aace3457a2fcf3f3c4e9007ecc6b869ff6d74d6 # v11
+        with:
+          luaVersion: ${{ steps.tools.outputs.lua }}
+      - name: Install lua-language-server
+        shell: bash
+        env:
+          LUALS_VER: ${{ steps.tools.outputs.luals }}
+        run: |
+          set -euo pipefail
+          case "${{ runner.os }}-${{ runner.arch }}" in
+            Linux-X64)   asset="lua-language-server-${LUALS_VER}-linux-x64.tar.gz" ;;
+            Linux-ARM64) asset="lua-language-server-${LUALS_VER}-linux-arm64.tar.gz" ;;
+            macOS-ARM64) asset="lua-language-server-${LUALS_VER}-darwin-arm64.tar.gz" ;;
+            macOS-X64)   asset="lua-language-server-${LUALS_VER}-darwin-x64.tar.gz" ;;
+            Windows-X64) asset="lua-language-server-${LUALS_VER}-win32-x64.zip" ;;
+            *) echo "unsupported runner: ${{ runner.os }}-${{ runner.arch }}" >&2; exit 1 ;;
+          esac
+          dest="${RUNNER_TOOL_CACHE}/luals/${LUALS_VER}"
+          mkdir -p "$dest"
+          url="https://github.com/LuaLS/lua-language-server/releases/download/${LUALS_VER}/${asset}"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            curl -fsSL "$url" -o "$dest/$asset"
+            unzip -q "$dest/$asset" -d "$dest"
+          else
+            curl -fsSL "$url" | tar -xz -C "$dest"
+          fi
+          echo "$dest/bin" >> "$GITHUB_PATH"
+      - name: Checkout cordis-lua for vendor check
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="$(sed -n 's/^repo //p' crates/mare-kernel/lua/cordis/VENDOR)"
+          ref="$(sed -n 's/^ref //p' crates/mare-kernel/lua/cordis/VENDOR)"
+          dest="${{ runner.temp }}/cordis-lua"
+          rm -rf "$dest"
+          git clone --depth 1 --branch "$ref" "$repo" "$dest" || {
+            git clone "$repo" "$dest"
+            git -C "$dest" fetch --depth 1 origin "$ref:$ref" || true
+          }
+          echo "CORDIS_LUA_REPO=$dest" >> "$GITHUB_ENV"
+      - name: Provision private tmpfs root (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          tmp_root="$(mktemp -d /tmp/mare-accept-XXXXXX)"
+          sudo mount -t tmpfs -o size=2G,mode=0700,uid="$(id -u)",gid="$(id -g)" tmpfs "$tmp_root"
+          echo "MARE_ACCEPT_TMPDIR=$tmp_root" >> "$GITHUB_ENV"
+      - name: Run release acceptance
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            git config --global core.longpaths true
+          fi
+          sh scripts/accept.sh --release
+      - name: Clean up private tmpfs root (Linux)
+        if: always() && runner.os == 'Linux'
+        shell: bash
+        run: |
+          if [ -n "${MARE_ACCEPT_TMPDIR:-}" ] && [ -d "$MARE_ACCEPT_TMPDIR" ]; then
+            sudo umount "$MARE_ACCEPT_TMPDIR" || true
+            rmdir "$MARE_ACCEPT_TMPDIR" || true
+          fi

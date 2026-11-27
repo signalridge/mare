@@ -1,0 +1,11 @@
+---
+source: crates/mare-tui/src/markdown.rs
+expression: "describe(&render_markdown(table, 24, &t))"
+---
+|Name: alpha|
+  ⟶ "Name: "=b
+|Description: the first|
+  ⟶ "Description: "=b
+|  entry of many|
+|Value: 1|
+  ⟶ "Value: "=b

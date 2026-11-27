@@ -1,0 +1,6 @@
+---
+source: crates/mare-cli/tests/suite/render.rs
+expression: "render(& env, 60, INFO_BRAND, \"ui.Logo:compact(BRAND)\").await"
+---
+◆ mare 0.1.0  ~/src/mare  openai/gpt-x
+/model · /help · @ file · ! bash · Shift+Tab mode · ? keys

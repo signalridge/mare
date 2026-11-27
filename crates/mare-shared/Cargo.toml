@@ -1,0 +1,47 @@
+[package]
+name         = "mare-shared"
+description  = "Shared types for mare: paths, styled text, UI protocol, Lua helpers"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+publish                = false
+
+[lints]
+workspace = true
+
+[features]
+test-support = []
+
+[dependencies]
+dunce.workspace = true
+file-rotate.workspace = true
+mlua.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+schemars.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+unicode-width.workspace = true
+unicode-properties.workspace = true
+unicode-segmentation.workspace = true
+url.workspace = true
+dirs.workspace = true
+tracing.workspace = true
+regex.workspace = true
+pulldown-cmark.workspace = true
+jsonschema.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,14 @@
+---
+source: test_harness_spec.lua
+name: basic_table
+---
+{
+  a = 1,
+  nested = {
+    items = {
+      "x",
+      "y",
+    },
+  },
+  z = "last",
+}

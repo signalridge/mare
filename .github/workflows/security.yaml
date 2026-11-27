@@ -1,0 +1,189 @@
+name: Security
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".cargo/**"
+      - "deny.toml"
+      - "about.toml"
+      - "Dockerfile"
+      - "Dockerfile.release"
+      - "flake.lock"
+      - "docs-site/package.json"
+      - "docs-site/package-lock.json"
+      - ".github/workflows/security.yaml"
+      - ".github/actions/**"
+  pull_request:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".cargo/**"
+      - "deny.toml"
+      - "about.toml"
+      - "Dockerfile"
+      - "Dockerfile.release"
+      - "flake.lock"
+      - "docs-site/package.json"
+      - "docs-site/package-lock.json"
+      - ".github/workflows/security.yaml"
+      - ".github/actions/**"
+  workflow_dispatch:
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+jobs:
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      codeql: ${{ steps.classify.outputs.codeql }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Classify security paths
+        id: classify
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import subprocess
+
+          ZERO_SHA = "0" * 40
+
+          def git(*args: str) -> subprocess.CompletedProcess[str]:
+              return subprocess.run(["git", *args], capture_output=True, text=True, check=False)
+
+          def emit(val: bool, reason: str) -> None:
+              print(f"security-changes: {reason} -> codeql={val}")
+              out = os.environ.get("GITHUB_OUTPUT")
+              if out:
+                  with open(out, "a", encoding="utf-8") as fh:
+                      fh.write(f"codeql={'true' if val else 'false'}\n")
+
+          def changed_files(base: str) -> list[str] | None:
+              if git("cat-file", "-e", f"{base}^{{commit}}").returncode != 0:
+                  if git("fetch", "--no-tags", "--depth=1", "origin", base).returncode != 0:
+                      return None
+              res = git("diff", "--name-only", "--no-renames", "-z", base, "HEAD", "--")
+              if res.returncode != 0:
+                  return None
+              return [p for p in res.stdout.split("\0") if p]
+
+          def needs_codeql(files: list[str]) -> bool:
+              for path in files:
+                  if (
+                      path.startswith(("crates/", ".cargo/", ".github/actions/setup-rust/"))
+                      or path in ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".github/workflows/security.yaml")
+                  ):
+                      return True
+              return False
+
+          event = os.environ.get("EVENT_NAME", "")
+          if event == "workflow_dispatch":
+              emit(True, "workflow_dispatch")
+          elif event == "pull_request":
+              if git("rev-parse", "--verify", "HEAD^2").returncode == 0:
+                  files = changed_files("HEAD^1")
+              else:
+                  base = os.environ.get("PR_BASE_SHA", "")
+                  files = changed_files(base) if base else None
+              emit(True if not files else needs_codeql(files), "pull_request")
+          elif event == "push":
+              before = os.environ.get("PUSH_BEFORE_SHA", "")
+              has_parent = git("rev-parse", "--verify", "HEAD^1").returncode == 0
+              if not has_parent or not before or before == ZERO_SHA:
+                  emit(True, "orphan or initial push")
+              else:
+                  files = changed_files(before)
+                  emit(True if not files else needs_codeql(files), "push")
+          else:
+              emit(True, f"event {event!r}")
+          PY
+
+  codeql:
+    name: CodeQL Rust Analysis
+    needs: [changes]
+    if: needs.changes.outputs.codeql == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@5595ccaf912efad79be6eef63a5619ff05969be3 # v4
+        with:
+          languages: rust
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@5595ccaf912efad79be6eef63a5619ff05969be3 # v4
+        with:
+          category: "/language:rust"
+
+  trivy:
+    name: Trivy Filesystem Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Run Trivy vulnerability scanner
+        # v0.36.0, pinned by commit SHA after GHSA-69fq-xp46-6x23.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH,MEDIUM
+      - name: Upload Trivy SARIF artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: trivy-sarif
+          path: trivy-results.sarif
+          retention-days: 30
+      - name: Upload Trivy SARIF report
+        uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4
+        if: always()
+        continue-on-error: true
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy
+
+  sbom:
+    name: Generate SBOM
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
+      - name: Generate SBOM
+        run: |
+          syft . -o spdx-json > sbom.spdx.json
+          syft . -o cyclonedx-json > sbom.cdx.json
+      - name: Upload SBOM artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: sbom
+          path: |
+            sbom.spdx.json
+            sbom.cdx.json
+          retention-days: 30

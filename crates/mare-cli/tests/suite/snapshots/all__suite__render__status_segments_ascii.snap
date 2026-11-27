@@ -1,0 +1,5 @@
+---
+source: crates/mare-cli/tests/suite/render.rs
+expression: "render(& env, 60, r#\"ui.set_theme_data({ icons = \"ascii\" })\"#,\nr#\"ui.Line(ui.Segments({ { text = \"auto\", style = \"MareModeAuto\" }, { text = \"opus\" } }, \"left\"))\"#).await"
+---
+ auto  opus

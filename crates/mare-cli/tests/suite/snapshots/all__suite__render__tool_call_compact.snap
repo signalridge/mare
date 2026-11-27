@@ -1,0 +1,8 @@
+---
+source: crates/mare-cli/tests/suite/render.rs
+expression: "render(& env, 60, CALL, \"ui.ToolCall:render(CALL, RESULT, false, INFO)\").await"
+---
+● Probe(cargo test)
+  ⎿  running 6 tests
+     test a ... ok
+     … 4 more lines (ctrl+o to expand)

@@ -1,0 +1,2 @@
+data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"ask_with_calculator","args":{"question":"What is 17 plus 25?"}},"thoughtSignature":"c2lnLXNhbXBsaW5nLTA="}],"role":"model"},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":128,"candidatesTokenCount":26,"totalTokenCount":215,"thoughtsTokenCount":61},"modelVersion":"gemini-2.5-flash","responseId":"resp_syn_sampling"}
+

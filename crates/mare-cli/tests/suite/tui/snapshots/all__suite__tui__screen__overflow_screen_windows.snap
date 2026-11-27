@@ -1,0 +1,11 @@
+---
+source: crates/mare-cli/tests/suite/tui.rs
+assertion_line: 253
+expression: t.snap().await
+---
+worked Ns · 90 tokens · HH:MM
+
+╭────────────────────────────────────────────────╮
+│ ❯ Ask mare anything… (@ files, / commands, ? … │
+╰────────────────────────────────────────────────╯
+   PARTIAL                  Faux Echo · ▱▱▱▱▱▱ 0%

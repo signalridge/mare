@@ -1,0 +1,19 @@
+---
+source: crates/mare-cli/tests/suite/tui.rs
+assertion_line: 355
+expression: t.snap().await
+---
+ Transcript (expanded) — ↑/↓ PgUp/PgDn g/G, / search, y cop…
+
+ ❯ find it
+
+ ● needle in the haystack
+
+ worked Ns · 6 tokens · HH:MM
+
+
+
+
+
+
+/needle  1 of 1  n/N next/previous, Esc clears

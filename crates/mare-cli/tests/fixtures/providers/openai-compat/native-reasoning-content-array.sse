@@ -1,0 +1,12 @@
+data: {"id":"chatcmpl-syn-nr","object":"chat.completion.chunk","created":1700000000,"model":"mistral-small-latest","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-syn-nr","object":"chat.completion.chunk","created":1700000000,"model":"mistral-small-latest","choices":[{"index":0,"delta":{"content":""},"finish_reason":null}],"p":"pad"}
+
+data: {"id":"chatcmpl-syn-nr","object":"chat.completion.chunk","created":1700000000,"model":"mistral-small-latest","choices":[{"index":0,"delta":{"content":[{"type":"thinking","thinking":[{"type":"text","text":"Multiplying 17 by 23 gives "}],"closed":true}]},"finish_reason":null}],"p":"pad"}
+
+data: {"id":"chatcmpl-syn-nr","object":"chat.completion.chunk","created":1700000000,"model":"mistral-small-latest","choices":[{"index":0,"delta":{"content":[{"type":"thinking","thinking":[{"type":"text","text":"391."}],"closed":true},{"type":"text","text":"3"}]},"finish_reason":null}],"p":"pad"}
+
+data: {"id":"chatcmpl-syn-nr","object":"chat.completion.chunk","created":1700000000,"model":"mistral-small-latest","choices":[{"index":0,"delta":{"content":"91"},"finish_reason":"stop"}],"usage":{"prompt_tokens":35,"total_tokens":195,"completion_tokens":160,"prompt_tokens_details":{"cached_tokens":0}},"p":"pad"}
+
+data: [DONE]
+

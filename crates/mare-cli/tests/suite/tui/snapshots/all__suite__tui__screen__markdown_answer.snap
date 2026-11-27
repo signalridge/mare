@@ -1,0 +1,28 @@
+---
+source: crates/mare-cli/tests/suite/tui/screen.rs
+expression: t.snap().await
+---
+
+● Title
+
+  Some  code  here.
+
+  • one
+    ◦ nested
+
+  ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+   fn main() {}                                        rust
+  ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+
+  a  b
+  ━━━━
+  1  2
+
+  ▎ quoted
+
+worked Ns · 28 tokens · HH:MM
+
+╭──────────────────────────────────────────────────────────╮
+│ ❯ Ask mare anything… (@ files, / commands, ? keys)       │
+╰──────────────────────────────────────────────────────────╯
+   READ              Faux Echo thinking: medium · ▱▱▱▱▱▱ 0%

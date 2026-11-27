@@ -1,0 +1,33 @@
+[package]
+name         = "mare-store"
+description  = "Session JSONL storage with migrations and crash-safe appends"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+publish                = false
+
+[lints]
+workspace = true
+
+[dependencies]
+libc.workspace = true
+dunce.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_path_to_error.workspace = true
+mare-shared.workspace = true
+mare-protocol.workspace = true
+rusqlite.workspace = true
+flate2.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+mare-shared = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true
+

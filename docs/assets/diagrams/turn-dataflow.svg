@@ -1,0 +1,188 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540" class="mare-svg mare-svg-turn" role="img" aria-labelledby="turn-title turn-desc">
+  <title id="turn-title">mare single turn data flow</title>
+  <desc id="turn-desc">Data flow of one turn in mare: per-prompt preflight (turn/started, input/transform, request/ready), per-step assembly and pre-I/O persistence (agent/step-ready, step/started, request/build, compact:prepare_request, mare-store commit), provider streaming under reload lease (llm:stream, item/delta), direct settle when no tools are called or tool execution (tool/rewrite, tool/before, tool/approval, OS sandbox or file snapshot), Lua tool result pipeline (tool/after, tool/result checked waterfall, truncation) with loop back, and final settle separating public turn/completed from in-process agent/settled.</desc>
+  <defs>
+    <style>
+      .mare-svg-turn {
+        --bg: #0e0f17;
+        --panel: #151724;
+        --card: #1c1f30;
+        --line: #2a2f46;
+        --ink: #f3f4fb;
+        --ink2: #b4b9d4;
+        --ink3: #8c92b0;
+        --violet: #a0a4ff;
+        --violet-bg: rgba(160, 164, 255, 0.10);
+        --violet-line: rgba(160, 164, 255, 0.46);
+        --coral: #ffa38f;
+        --coral-bg: rgba(255, 163, 143, 0.10);
+        --coral-line: rgba(255, 163, 143, 0.46);
+        --ok: #7be0b4;
+        --ok-bg: rgba(123, 224, 180, 0.10);
+        --ok-line: rgba(123, 224, 180, 0.42);
+        font-family: 'Inter Variable', 'Inter', system-ui, -apple-system, sans-serif;
+      }
+      @media (prefers-color-scheme: light) {
+        :root:not([data-theme='dark']) .mare-svg-turn,
+        svg.mare-svg-turn:root {
+          --bg: #fbfbfd;
+          --panel: #f3f4fa;
+          --card: #ffffff;
+          --line: #d8dceb;
+          --ink: #141624;
+          --ink2: #484e6e;
+          --ink3: #646b8c;
+          --violet: #5256d4;
+          --violet-bg: rgba(82, 86, 212, 0.08);
+          --violet-line: rgba(82, 86, 212, 0.42);
+          --coral: #c44f35;
+          --coral-bg: rgba(255, 163, 143, 0.16);
+          --coral-line: rgba(196, 79, 53, 0.42);
+          --ok: #1b7f5a;
+          --ok-bg: rgba(27, 127, 90, 0.09);
+          --ok-line: rgba(27, 127, 90, 0.38);
+        }
+      }
+      :root[data-theme='light'] .mare-svg-turn {
+        --bg: #fbfbfd;
+        --panel: #f3f4fa;
+        --card: #ffffff;
+        --line: #d8dceb;
+        --ink: #141624;
+        --ink2: #484e6e;
+        --ink3: #646b8c;
+        --violet: #5256d4;
+        --violet-bg: rgba(82, 86, 212, 0.08);
+        --violet-line: rgba(82, 86, 212, 0.42);
+        --coral: #c44f35;
+        --coral-bg: rgba(255, 163, 143, 0.16);
+        --coral-line: rgba(196, 79, 53, 0.42);
+        --ok: #1b7f5a;
+        --ok-bg: rgba(27, 127, 90, 0.09);
+        --ok-line: rgba(27, 127, 90, 0.38);
+      }
+      .mare-svg-turn text { user-select: text; }
+      .turn-hd { font-family: 'Space Grotesk', 'Inter Variable', system-ui, sans-serif; font-size: 13.5px; font-weight: 600; fill: var(--ink); }
+      .turn-n { font-family: 'JetBrains Mono Variable', ui-monospace, SFMono-Regular, monospace; font-size: 10.6px; font-weight: 600; fill: var(--violet); }
+      .turn-t { font-size: 12.6px; font-weight: 600; fill: var(--ink); }
+      .turn-s { font-family: 'JetBrains Mono Variable', ui-monospace, SFMono-Regular, monospace; font-size: 10.2px; fill: var(--ink2); }
+      .turn-m { font-family: 'JetBrains Mono Variable', ui-monospace, SFMono-Regular, monospace; font-size: 10.1px; fill: var(--ink3); }
+    </style>
+    <marker id="turn-arr" viewBox="0 0 10 10" refX="7.5" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M1 1.5 L8.5 5 L1 8.5" fill="none" stroke="var(--violet)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="turn-arr-c" viewBox="0 0 10 10" refX="7.5" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M1 1.5 L8.5 5 L1 8.5" fill="none" stroke="var(--coral)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="turn-arr-g" viewBox="0 0 10 10" refX="7.5" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M1 1.5 L8.5 5 L1 8.5" fill="none" stroke="var(--ok)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="960" height="540" rx="14" fill="var(--bg)"/>
+
+  <!-- Header bar -->
+  <text x="28" y="38" class="turn-hd">Single turn data flow</text>
+  <text x="886" y="38" text-anchor="end" class="turn-m">per-prompt preflight → per-step loop → settle</text>
+
+  <!-- Row 1: 01 Prompt Preflight -> 02 Step Assembly & Pre-I/O Commit -> 03 Provider Stream -->
+  <rect x="28" y="54" width="272" height="134" rx="11" fill="var(--panel)" stroke="var(--line)" stroke-width="1.2"/>
+  <text x="42" y="75" class="turn-n">01 · PER PROMPT</text>
+  <text x="42" y="95" class="turn-t">Input &amp; first-request preflight</text>
+  <text x="42" y="114" class="turn-s">agent:prompt / steer / follow_up</text>
+  <text x="42" y="131" class="turn-s">turn/started → snapshot.begin_turn</text>
+  <text x="42" y="148" class="turn-s">build user msg → input/transform</text>
+  <text x="42" y="165" class="turn-s">request/prepare → request/ready</text>
+  <text x="42" y="180" class="turn-m">TUI · Headless · RPC · --web · ACP</text>
+
+  <line x1="300" y1="121" x2="338" y2="121" stroke="var(--violet)" stroke-width="1.6" marker-end="url(#turn-arr)"/>
+
+  <rect x="342" y="54" width="276" height="134" rx="11" fill="var(--violet-bg)" stroke="var(--violet-line)" stroke-width="1.4"/>
+  <text x="356" y="75" class="turn-n">02 · PER STEP (PRE-I/O)</text>
+  <text x="356" y="95" class="turn-t">Assemble, compact &amp; commit</text>
+  <text x="356" y="114" class="turn-s">agent/step-ready → step/started</text>
+  <text x="356" y="131" class="turn-s">context/system · context/transform</text>
+  <text x="356" y="148" class="turn-s">request/build → compact:prepare_request</text>
+  <text x="356" y="165" class="turn-s" style="fill: var(--coral);">commit step &amp; persist JSONL</text>
+  <text x="356" y="180" class="turn-m">agent/step-committed (before I/O)</text>
+
+  <line x1="618" y1="121" x2="656" y2="121" stroke="var(--violet)" stroke-width="1.6" marker-end="url(#turn-arr)"/>
+
+  <rect x="660" y="54" width="272" height="134" rx="11" fill="var(--panel)" stroke="var(--line)" stroke-width="1.2"/>
+  <text x="674" y="75" class="turn-n">03 · PROVIDER STREAM</text>
+  <text x="674" y="95" class="turn-t">Model call under reload lease</text>
+  <text x="674" y="114" class="turn-s">agent acquires lease → llm:stream</text>
+  <text x="674" y="131" class="turn-s">item/started · item/delta (in-mem)</text>
+  <text x="674" y="148" class="turn-s">release lease · llm/usage</text>
+  <text x="674" y="165" class="turn-s" style="fill: var(--coral);">persist final msg (mare-store)</text>
+  <text x="674" y="180" class="turn-m">deltas are not written per-chunk</text>
+
+  <!-- Vertical drop: Provider (03) -> Tools (04) when tool calls present -->
+  <path d="M 750 188 L 750 226" fill="none" stroke="var(--violet)" stroke-width="1.6" marker-end="url(#turn-arr)"/>
+  <text x="738" y="211" text-anchor="end" class="turn-m">tool_call items</text>
+
+  <!-- Direct final-answer bypass: Provider (03) -> Settle (07) along right gutter -->
+  <path d="M 912 188 L 912 214 L 944 214 L 944 424 L 934 424" fill="none" stroke="var(--ok)" stroke-width="1.5" marker-end="url(#turn-arr-g)"/>
+  <text x="904" y="208" text-anchor="end" class="turn-m" style="fill: var(--ok);">no tools → settle</text>
+
+  <!-- Row 2 (right to left): 06 Lua Result Hooks & Store <- 05 Rust Branches <- 04 Tools & Policy -->
+  <rect x="660" y="230" width="272" height="136" rx="11" fill="var(--panel)" stroke="var(--violet-line)" stroke-width="1.3"/>
+  <text x="674" y="251" class="turn-n">04 · TOOLS &amp; POLICY</text>
+  <text x="674" y="271" class="turn-t">Guarded dispatch &amp; approval</text>
+  <text x="674" y="291" class="turn-s">ctx.tools:execute</text>
+  <text x="674" y="308" class="turn-s">tool/rewrite → tool/before</text>
+  <text x="674" y="325" class="turn-s">tool/approval (y / a / A / n)</text>
+  <text x="674" y="342" class="turn-m">pipeline/tool-dispatching</text>
+
+  <line x1="660" y1="298" x2="622" y2="298" stroke="var(--coral)" stroke-width="1.6" marker-end="url(#turn-arr-c)"/>
+
+  <rect x="342" y="230" width="276" height="136" rx="11" fill="var(--coral-bg)" stroke="var(--coral-line)" stroke-width="1.4"/>
+  <text x="356" y="251" class="turn-n" style="fill: var(--coral);">05 · RUST EXECUTION BRANCHES</text>
+  <text x="356" y="271" class="turn-t">Applied per tool kind</text>
+  <text x="356" y="291" class="turn-s">Shell/proc: OS sandbox</text>
+  <text x="356" y="307" class="turn-m">  bwrap · Landlock · Seatbelt · Win</text>
+  <text x="356" y="326" class="turn-s">File writes: mare-binding::snapshot</text>
+  <text x="356" y="342" class="turn-m">  original saved before edit/remove</text>
+  <text x="356" y="357" class="turn-m">denials → SANDBOX_* / retry prompt</text>
+
+  <line x1="342" y1="298" x2="304" y2="298" stroke="var(--violet)" stroke-width="1.6" marker-end="url(#turn-arr)"/>
+
+  <rect x="28" y="230" width="272" height="136" rx="11" fill="var(--panel)" stroke="var(--violet-line)" stroke-width="1.3"/>
+  <text x="42" y="251" class="turn-n">06 · LUA RESULTS &amp; STORE</text>
+  <text x="42" y="271" class="turn-t">Result hooks &amp; persistence</text>
+  <text x="42" y="291" class="turn-s">1. tool/after (waterfall)</text>
+  <text x="42" y="308" class="turn-s">2. tool/result (checked waterfall)</text>
+  <text x="42" y="325" class="turn-s">3. default truncation / spill</text>
+  <text x="42" y="342" class="turn-s" style="fill: var(--coral);">persist tool result (mare-store)</text>
+  <text x="42" y="357" class="turn-m">tool/result error → error tool output</text>
+
+  <!-- Loopback arrow: 06 -> 02 for next tool step -->
+  <path d="M 164 230 L 164 209 L 480 209 L 480 192" fill="none" stroke="var(--violet)" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#turn-arr)"/>
+  <text x="322" y="203" text-anchor="middle" class="turn-m">tool results appended → next step</text>
+
+  <!-- Vertical drop: 06 -> 07 Settle (e.g. max turns / abort) -->
+  <path d="M 164 366 L 164 402" fill="none" stroke="var(--ok)" stroke-width="1.6" marker-end="url(#turn-arr-g)"/>
+  <text x="178" y="389" class="turn-m">turn ends (or agent/turn-stopping continues loop)</text>
+
+  <!-- Row 3: 07 Settle & Event Visibility Boundary -->
+  <rect x="28" y="406" width="904" height="114" rx="12" fill="var(--ok-bg)" stroke="var(--ok-line)" stroke-width="1.3"/>
+  <text x="46" y="429" class="turn-n" style="fill: var(--ok);">07 · SETTLE &amp; VISIBILITY BOUNDARY</text>
+  <text x="914" y="429" text-anchor="end" class="turn-m">turn/completed is public · agent/settled is process-internal</text>
+
+  <rect x="46" y="440" width="268" height="66" rx="8" fill="var(--card)" stroke="var(--ok-line)"/>
+  <text x="60" y="460" class="turn-t">Public lifecycle (expose="both")</text>
+  <text x="60" y="478" class="turn-s">item/completed → step/completed</text>
+  <text x="60" y="494" class="turn-s">→ turn/completed</text>
+
+  <line x1="314" y1="473" x2="342" y2="473" stroke="var(--ok)" stroke-width="1.5" marker-end="url(#turn-arr-g)"/>
+
+  <rect x="346" y="440" width="296" height="66" rx="8" fill="var(--card)" stroke="var(--ok-line)"/>
+  <text x="360" y="460" class="turn-t">External subscribers &amp; front ends</text>
+  <text x="360" y="478" class="turn-s">TUI · RPC 3.0 · --web (via turn/completed)</text>
+  <text x="360" y="494" class="turn-m">--json final: type="settled" · ACP: mapped</text>
+
+  <rect x="658" y="440" width="256" height="66" rx="8" fill="var(--card)" stroke="var(--coral-line)"/>
+  <text x="672" y="460" class="turn-t" style="fill: var(--coral);">In-process only (expose="process")</text>
+  <text x="672" y="478" class="turn-s">agent/settled (after turn/completed)</text>
+  <text x="672" y="494" class="turn-m">Lua plugins only; never on RPC/JSON</text>
+</svg>

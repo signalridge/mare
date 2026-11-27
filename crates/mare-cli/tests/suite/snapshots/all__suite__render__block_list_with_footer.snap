@@ -1,0 +1,9 @@
+---
+source: crates/mare-cli/tests/suite/render.rs
+expression: "render(& env, 40, \"\",\nr#\"ui.Block(ui.List({ \"alpha\", \"beta\", \"gamma\", \"delta\", \"epsilon\" }, { selected = 2, height = 3, focused = true }),\n         { title = \"Models\", footer = \"2 of 5\" })\"#).await"
+---
+╭─ Models ─────────────────────────────╮
+│ alpha                                ┃
+│ beta                                 │
+│ gamma                                │
+╰───────────────────────────── 2 of 5 ─╯

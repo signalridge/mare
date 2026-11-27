@@ -1,0 +1,65 @@
+event: response.created
+data: {"sequence_number":0,"type":"response.created","response":{"created_at":1700000000,"id":"resp_syn_rtc","model":"grok-4.6-build","object":"response","output":[],"status":"in_progress"}}
+
+event: response.in_progress
+data: {"sequence_number":1,"type":"response.in_progress","response":{"created_at":1700000000,"id":"resp_syn_rtc","model":"grok-4.6-build","object":"response","output":[],"status":"in_progress"}}
+
+event: response.output_item.added
+data: {"sequence_number":2,"type":"response.output_item.added","item":{"id":"rs_syn_rtc","summary":[],"type":"reasoning","status":"in_progress"},"output_index":0}
+
+event: response.reasoning_summary_part.added
+data: {"sequence_number":3,"type":"response.reasoning_summary_part.added","item_id":"rs_syn_rtc","output_index":0,"part":{"text":"","type":"summary_text"},"summary_index":0}
+
+event: response.reasoning_summary_text.delta
+data: {"sequence_number":4,"type":"response.reasoning_summary_text.delta","delta":"Need to generate ","item_id":"rs_syn_rtc","output_index":0,"summary_index":0}
+
+: xai-usage {"input_tokens":472,"input_tokens_details":{"cached_tokens":384},"output_tokens":75,"output_tokens_details":{"reasoning_tokens":75},"total_tokens":0}
+
+event: response.reasoning_summary_text.delta
+data: {"sequence_number":5,"type":"response.reasoning_summary_text.delta","delta":"a concise session title.","item_id":"rs_syn_rtc","output_index":0,"summary_index":0}
+
+event: response.reasoning_summary_text.done
+data: {"sequence_number":6,"type":"response.reasoning_summary_text.done","item_id":"rs_syn_rtc","output_index":0,"summary_index":0,"text":"Need to generate a concise session title."}
+
+event: response.reasoning_summary_part.done
+data: {"sequence_number":7,"type":"response.reasoning_summary_part.done","item_id":"rs_syn_rtc","output_index":0,"part":{"text":"Need to generate a concise session title.","type":"summary_text"},"summary_index":0}
+
+event: response.output_item.done
+data: {"sequence_number":8,"type":"response.output_item.done","item":{"id":"rs_syn_rtc","summary":[{"text":"Need to generate a concise session title.","type":"summary_text"}],"type":"reasoning","status":"completed","encrypted_content":"enc_syn_reasoning_payload_01"},"output_index":0}
+
+event: response.output_item.added
+data: {"sequence_number":9,"type":"response.output_item.added","item":{"content":[],"id":"msg_syn_rtc","role":"assistant","type":"message","status":"in_progress"},"output_index":1}
+
+event: response.content_part.added
+data: {"sequence_number":10,"type":"response.content_part.added","content_index":0,"item_id":"msg_syn_rtc","output_index":1,"part":{"type":"output_text","text":"","annotations":[]}}
+
+event: response.output_text.delta
+data: {"sequence_number":11,"type":"response.output_text.delta","content_index":0,"delta":"Creating ","item_id":"msg_syn_rtc","output_index":1}
+
+event: response.output_text.delta
+data: {"sequence_number":12,"type":"response.output_text.delta","content_index":0,"delta":"title.","item_id":"msg_syn_rtc","output_index":1}
+
+event: response.output_item.added
+data: {"sequence_number":13,"type":"response.output_item.added","item":{"arguments":"","call_id":"call_syn_title_0","name":"session_title","type":"function_call","id":"fc_syn_rtc_0","status":"in_progress"},"output_index":2}
+
+event: response.function_call_arguments.delta
+data: {"sequence_number":14,"type":"response.function_call_arguments.delta","delta":"{\"session_title\":\"Sum numbers into c.txt\"}","item_id":"fc_syn_rtc_0","output_index":2}
+
+event: response.function_call_arguments.done
+data: {"sequence_number":15,"type":"response.function_call_arguments.done","arguments":"{\"session_title\":\"Sum numbers into c.txt\"}","item_id":"fc_syn_rtc_0","name":"session_title","output_index":2}
+
+event: response.output_item.done
+data: {"sequence_number":16,"type":"response.output_item.done","item":{"arguments":"{\"session_title\":\"Sum numbers into c.txt\"}","call_id":"call_syn_title_0","name":"session_title","type":"function_call","id":"fc_syn_rtc_0","status":"completed"},"output_index":2}
+
+event: response.output_text.done
+data: {"sequence_number":17,"type":"response.output_text.done","content_index":0,"item_id":"msg_syn_rtc","output_index":1,"text":"Creating title."}
+
+event: response.content_part.done
+data: {"sequence_number":18,"type":"response.content_part.done","content_index":0,"item_id":"msg_syn_rtc","output_index":1,"part":{"type":"output_text","text":"Creating title.","annotations":[]}}
+
+event: response.output_item.done
+data: {"sequence_number":19,"type":"response.output_item.done","item":{"content":[{"type":"output_text","text":"Creating title.","annotations":[]}],"id":"msg_syn_rtc","role":"assistant","type":"message","status":"completed"},"output_index":1}
+
+event: response.completed
+data: {"sequence_number":20,"type":"response.completed","response":{"created_at":1700000000,"id":"resp_syn_rtc","model":"grok-4.6-build","object":"response","output":[{"id":"rs_syn_rtc","summary":[{"text":"Need to generate a concise session title.","type":"summary_text"}],"type":"reasoning","status":"completed","encrypted_content":"enc_syn_reasoning_payload_01"},{"content":[{"type":"output_text","text":"Creating title.","annotations":[]}],"id":"msg_syn_rtc","role":"assistant","type":"message","status":"completed"},{"arguments":"{\"session_title\":\"Sum numbers into c.txt\"}","call_id":"call_syn_title_0","name":"session_title","type":"function_call","id":"fc_syn_rtc_0","status":"completed"}],"status":"completed","usage":{"input_tokens":472,"input_tokens_details":{"cached_tokens":384},"output_tokens":373,"output_tokens_details":{"reasoning_tokens":339},"total_tokens":845}}}
+

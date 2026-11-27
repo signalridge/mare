@@ -1,0 +1,15 @@
+@@ after: Shell for commands: <SHELL>
+-Commands run in Git Bash: use POSIX syntax and forward slashes; Windows paths like C:\x are /c/x there.
++Use the powershell tool for commands (PowerShell syntax). Git Bash can't start inside this sandbox: the bash tool fails with SANDBOX_MSYS_UNSUPPORTED.
+@@ after: 
++<sandbox>
++Sandbox: read-only (permission preset: read-only)
++Already allowed without asking:
++- reading files
++Not allowed by this sandbox:
++- writing files
++- network access (blocked)
++Approved additional rights are included above and expire at their returned turn/session scope.
++Commands run inside this sandbox. Never request what is already allowed above (for example network access when it is open). Reading files, and writing inside the writable directories, never need extra permission: just run the command. Don't request permissions in advance. Only after the sandbox denies a command the task needs, retry that exact command with sandbox_permissions set to the narrowest scope the denial names (network:<host> or write:<path>; "all" only if nothing narrower works) and a justification. After an access denial, request_permissions can request the required read/write/network rights for this turn or session. It may grant a subset: use only the returned additional rights. It cannot override deny_read or a denied tool call. Don't give up on a necessary change because of the sandbox.
++</sandbox>
++

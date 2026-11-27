@@ -1,0 +1,15 @@
+---
+source: crates/mare-cli/tests/suite/tui/components.rs
+assertion_line: 233
+expression: t.snap().await
+---
+     ╭─ Confirm ────────────────────────────────────────────────╮
+     │                                                          │
+     │ Deploy release?                                          │
+     │                                                          │
+     │                    ▸ [Y]es      [N]o                     │
+     ╰──────────────────────────────────────────────────────────╯
+╭────────────────────────────────────────────────────────────────────╮
+│ ❯ Ask mare anything… (@ files, / commands, ? keys)                 │
+╰────────────────────────────────────────────────────────────────────╯
+ Y yes │ N no │ ← choose │ Enter confirm │ Esc cancel

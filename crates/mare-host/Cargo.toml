@@ -1,0 +1,34 @@
+[package]
+name         = "mare-host"
+description  = "Host: kernel + plugins + frontends; sub-agent runner"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+publish                = false
+
+[lints]
+workspace = true
+
+[dependencies]
+mare-binding.workspace = true
+mare-protocol.workspace = true
+mare-shared.workspace = true
+mare-store.workspace = true
+mare-config.workspace = true
+mare-kernel.workspace = true
+mare-plugin.workspace = true
+mare-plugin-manager.workspace = true
+dunce.workspace = true
+sha2.workspace = true
+mlua.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+

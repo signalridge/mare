@@ -1,0 +1,125 @@
+[package]
+name         = "mare-binding"
+description  = "Primitives exposed to Lua (mare.fs/http/proc/pty/task/text/store/image/ui/...)"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+publish                = false
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_path_to_error.workspace = true
+syntect = { workspace = true, features = ["plist-load"] }
+jiff.workspace = true
+shlex.workspace = true
+tree-sitter.workspace = true
+tree-sitter-bash.workspace = true
+dunce.workspace = true
+mare-shared.workspace = true
+mare-config.workspace = true
+mare-protocol.workspace = true
+mare-edit.workspace = true
+mare-store.workspace = true
+mlua.workspace = true
+tokio.workspace = true
+tokio-util = { workspace = true, features = ["rt"] }
+futures-util.workspace = true
+sse-stream.workspace = true
+reqwest.workspace = true
+# MCP client: the official Rust SDK — client features only
+rmcp = { workspace = true, features = [
+    "client",
+    "transport-child-process",
+    "transport-streamable-http-client-reqwest",
+    "auth",
+] }
+async-trait.workspace = true
+# reqwest's own proxy matcher (HTTP(S)_PROXY / NO_PROXY) for the sandbox proxy's upstream; already built via reqwest
+hyper = { workspace = true, features = ["server", "http1"] }
+hyper-util = { workspace = true, features = ["client-proxy", "tokio"] }
+http-body-util.workspace = true
+http.workspace = true
+httparse.workspace = true
+memchr.workspace = true # SSE line scanning (crate::sse); already built via regex
+bytes.workspace = true
+url.workspace = true
+# Responses WebSocket transport; TLS through the same
+# rustls + platform verifier reqwest uses
+tokio-tungstenite = { workspace = true, features = ["connect", "__rustls-tls"] }
+rustls = { workspace = true, features = ["aws_lc_rs", "std", "tls12"] }
+rustls-platform-verifier.workspace = true
+libc.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+base64.workspace = true
+rand.workspace = true
+uuid.workspace = true
+regex.workspace = true
+ignore.workspace = true
+globset.workspace = true
+nucleo-matcher.workspace = true
+open.workspace = true
+which.workspace = true
+image.workspace = true
+arboard.workspace = true
+similar.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+dirs.workspace = true
+encoding_rs.workspace = true
+chardetng.workspace = true # charset encoding fallback detection; 1.0 API (guess with Utf8Detection)
+yaml-rust2.workspace = true
+vt100.workspace = true
+rrule.workspace = true
+htmd.workspace = true
+markup5ever_rcdom.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+codepage.workspace = true
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Storage_FileSystem", # sandbox NUL device DACL grant
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+  "Win32_System_Console",
+  # default sandbox tier: the confined process's private desktop (winsandbox/desktop_win.rs)
+  "Win32_System_StationsAndDesktops",
+  "Win32_Graphics_Gdi",
+  # enhanced sandbox tier (winsandbox_user): accounts, DPAPI, WFP, run-as-account, elevation
+  "Win32_NetworkManagement_NetManagement",
+  "Win32_NetworkManagement_WindowsFilteringPlatform",
+  "Win32_Networking_WinSock",
+  "Win32_Security_Cryptography",
+  "Win32_System_Pipes",
+  "Win32_System_IO",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Diagnostics_Debug",
+  "Win32_System_Registry", # SHELLEXECUTEINFOW (run-as-admin); was only unified in from other crates
+  "Win32_System_Rpc",
+  "Win32_UI_Shell",
+  # native notification fallback (platform::notify_native): message-only window + tray balloon
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+tempfile.workspace = true
+
+[dev-dependencies]
+mare-shared = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+flate2.workspace = true
+

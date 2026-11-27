@@ -1,0 +1,20 @@
+---
+source: crates/mare-cli/tests/suite/tui/dialogs.rs
+expression: t.snap().await
+---
+❯ write a
+ ╭─ Allow write: a.txt?  write a.txt · write · cwd <tmp> ─╮
+▂│ Allow once (y)                                                             │
+ │ Allow for this session (a)                                                 │
+ │ Allow and remember (A): allow all write calls this session                 │
+ │ Deny, and tell the model why (n)                                           │
+ │ Deny and stop this turn (ctrl+c)                                           │
+ ╰─────────────────────────────────────────────────────────────────── 1 of 5 ─╯
+ ╭─ Preview ──────────────────────────────────────────────────────────────────╮
+ │ +1 −0                                                                      │
+ │ 1 + A                                                                      │
+ ╰────────────────────────────────────────────────────────────────────────────╯
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ ❯ Queue a message… (Ctrl+S steer now · Esc interrupt)                        │
+╰──────────────────────────────────────────────────────────────────────────────╯
+Enter confirm y allow once a this session n deny Ctrl+C interrupt Esc cancel…

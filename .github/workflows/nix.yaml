@@ -1,0 +1,78 @@
+name: Nix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - flake.nix
+      - flake.lock
+      - rust-toolchain.toml
+      - Cargo.toml
+      - Cargo.lock
+      - "crates/**"
+      - ".github/workflows/nix.yaml"
+  pull_request:
+    branches: [main]
+    paths:
+      - flake.nix
+      - flake.lock
+      - rust-toolchain.toml
+      - Cargo.toml
+      - Cargo.lock
+      - "crates/**"
+      - ".github/workflows/nix.yaml"
+  workflow_dispatch:
+
+concurrency:
+  group: nix-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  flake-check:
+    name: Flake Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: DeterminateSystems/nix-installer-action@33c9ab3ef95cd57c164d9d6eb1f9a46338538d41 # main
+      - uses: DeterminateSystems/magic-nix-cache-action@55718cd9ebf1737a061487d5ada21abf31e99a98 # main
+        with:
+          use-flakehub: false
+          use-gha-cache: true
+      - name: Check flake
+        run: nix flake check --no-build
+
+  build:
+    name: Nix Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: DeterminateSystems/nix-installer-action@33c9ab3ef95cd57c164d9d6eb1f9a46338538d41 # main
+      - uses: DeterminateSystems/magic-nix-cache-action@55718cd9ebf1737a061487d5ada21abf31e99a98 # main
+        with:
+          use-flakehub: false
+          use-gha-cache: true
+      - name: Build package
+        run: nix build .#mare
+      - name: Test binary
+        run: |
+          ./result/bin/mare --version
+          ./result/bin/mare --help >/dev/null
+
+  devshell:
+    name: Dev Shell
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: DeterminateSystems/nix-installer-action@33c9ab3ef95cd57c164d9d6eb1f9a46338538d41 # main
+      - uses: DeterminateSystems/magic-nix-cache-action@55718cd9ebf1737a061487d5ada21abf31e99a98 # main
+        with:
+          use-flakehub: false
+          use-gha-cache: true
+      - name: Test dev shell
+        run: nix develop --command rustc --version

@@ -1,0 +1,24 @@
+---
+source: crates/mare-cli/tests/suite/tui/overlays.rs
+assertion_line: 84
+expression: t.snap().await
+---
+  ╭─ Trust this folder? ─────────────────────────────────────────────────────╮
+  │ <tmp> │
+  │                                                                          │
+  │ This folder contains project resources:                                  │
+  │   Skills:                                                                │
+  │     • .mare/skills/demo                                                  │
+  │                                                                          │
+  │ Untrusted folders start in read-only permission mode; these resources    │
+  │ don't load.                                                              │
+  │                                                                          │
+  │ Trust and load  remember for this folder                                 │
+  │ Trust this session only  load for this session only; don't save          │
+  │ Don't trust  remember; never load them                                   │
+  │ Not now  don't load them this time; ask again next time                  │
+  ╰───────────────────────────────────────────────────────────────── 4 of 4 ─╯
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ ❯ Ask mare anything… (@ files, / commands, ? keys)                           │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ Enter select │ ↑↓ move │ Esc cancel │ ? all keys

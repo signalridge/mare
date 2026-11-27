@@ -1,0 +1,56 @@
+# cargo-deny (https://embarkstudios.github.io/cargo-deny/): `just deny` / CI run `cargo deny check`.
+
+[graph]
+all-features = false
+
+[advisories]
+# every RustSec advisory fails the check (vulnerabilities, unmaintained, unsound, yanked), except
+# these accepted ones, each with its reason
+ignore = [
+    # bincode 1.x is unmaintained. It is in the runtime tree only through syntect, which uses it to
+    # deserialize the syntax and theme dumps embedded in the binary at compile time
+    # (crates/mare-tui/assets): no external input ever reaches it. Remove once syntect upgrades.
+    { id = "RUSTSEC-2025-0141", reason = "bincode 1.x via syntect: only deserializes syntax/theme assets embedded at compile time, no external input; remove once syntect upgrades" },
+    # yaml-rust is unmaintained. It comes from syntect's `yaml-load` feature, which only mare-tui's
+    # dev-dependency enables (building the syntax dumps in tests); not in the runtime tree.
+    # Remove once syntect upgrades.
+    { id = "RUSTSEC-2024-0320", reason = "yaml-rust via syntect yaml-load: mare-tui dev-dependency only; remove once syntect upgrades" },
+    # chrono is also pulled in by file-rotate, rmcp/oauth2 and rrule; there is no patched release.
+    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained and has no patched release; remove once its dependents replace it or maintenance resumes" },
+    # rrule depends on chrono-tz; there is no patched release.
+    { id = "RUSTSEC-2026-0555", reason = "chrono-tz via rrule is unmaintained and has no patched release; remove once rrule replaces it or maintenance resumes" },
+]
+
+[licenses]
+confidence-threshold = 0.9
+allow = [
+    "MIT",
+    # borrow-or-share via fluent-uri, referencing, and jsonschema
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    # nucleo-matcher, option-ext (dirs)
+    "MPL-2.0",
+    # clipboard-win, error-code (arboard on Windows)
+    "BSL-1.0",
+    # webpki-root-certs (rustls-platform-verifier): the Mozilla root store's data license
+    "CDLA-Permissive-2.0",
+]
+
+[bans]
+# several versions of one crate are worth knowing about, not a failure
+multiple-versions = "warn"
+# the only wildcard dependencies are the workspace's own path crates (`mare-* = { path }`)
+wildcards = "allow"
+
+[sources]
+# crates.io only: no other registry, no git dependency
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

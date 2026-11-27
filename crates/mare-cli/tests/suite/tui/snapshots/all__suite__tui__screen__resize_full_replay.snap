@@ -1,0 +1,21 @@
+---
+source: crates/mare-cli/tests/suite/tui/screen.rs
+expression: trimmed(&t.history())
+---
+❯ first
+
+● alpha bravo charlie delta echo foxtrot golf hotel india juliett kilo lima mike november
+  oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu
+
+worked Ns · 41 tokens · HH:MM
+
+❯ second
+
+● second answer
+
+worked Ns · 4 tokens · HH:MM
+
+╭────────────────────────────────────────────────────────────────────────────────────────╮
+│ ❯ Ask mare anything… (@ files, / commands, ? keys)                                     │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+   READ  · ? shortcuts                    Faux Echo thinking: medium · ▱▱▱▱▱▱ 287/100k 0%

@@ -1,0 +1,9 @@
+data: {"id":"chatcmpl-qwen-1","choices":[{"index":0,"delta":{"role":"assistant","content":"Scanning files.<tool_c"}}]}
+
+data: {"id":"chatcmpl-qwen-1","choices":[{"index":0,"delta":{"content":"alls>\n<read path=\"lib.rs\" />\n<grep pattern=\"fn main\" />\n</tool_ca"}}]}
+
+data: {"id":"chatcmpl-qwen-1","choices":[{"index":0,"delta":{"content":"lls>"}}]}
+
+data: {"id":"chatcmpl-qwen-1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":22,"completion_tokens":16}}
+
+data: [DONE]

@@ -1,0 +1,195 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="560" viewBox="0 0 960 560" class="mare-svg mare-svg-plg" role="img" aria-labelledby="plg-title plg-desc">
+  <title id="plg-title">mare plugin lifecycle, override, and reload flow</title>
+  <desc id="plg-desc">Plugin loading precedence from builtin, package, user, to trusted project; cross-origin override=true vs same-origin collision refusal; Cordis dependency graph and apply(ctx, cfg); /reload, /reload config, and /reload name paths guarded by request lease with rollback and failure containment.</desc>
+  <defs>
+    <style>
+      .mare-svg-plg {
+        --bg: #0e0f17;
+        --panel: #151724;
+        --card: #1c1f30;
+        --line: #2a2f46;
+        --ink: #f3f4fb;
+        --ink2: #b4b9d4;
+        --ink3: #8c92b0;
+        --violet: #a0a4ff;
+        --violet-bg: rgba(160, 164, 255, 0.10);
+        --violet-line: rgba(160, 164, 255, 0.46);
+        --coral: #ffa38f;
+        --coral-bg: rgba(255, 163, 143, 0.10);
+        --coral-line: rgba(255, 163, 143, 0.46);
+        --ok: #7be0b4;
+        --ok-bg: rgba(123, 224, 180, 0.10);
+        --ok-line: rgba(123, 224, 180, 0.42);
+        font-family: 'Inter Variable', 'Inter', system-ui, -apple-system, sans-serif;
+      }
+      @media (prefers-color-scheme: light) {
+        :root:not([data-theme='dark']) .mare-svg-plg,
+        svg.mare-svg-plg:root {
+          --bg: #fbfbfd;
+          --panel: #f3f4fa;
+          --card: #ffffff;
+          --line: #d8dceb;
+          --ink: #141624;
+          --ink2: #484e6e;
+          --ink3: #646b8c;
+          --violet: #5256d4;
+          --violet-bg: rgba(82, 86, 212, 0.08);
+          --violet-line: rgba(82, 86, 212, 0.42);
+          --coral: #c44f35;
+          --coral-bg: rgba(255, 163, 143, 0.16);
+          --coral-line: rgba(196, 79, 53, 0.42);
+          --ok: #1b7f5a;
+          --ok-bg: rgba(27, 127, 90, 0.09);
+          --ok-line: rgba(27, 127, 90, 0.38);
+        }
+      }
+      :root[data-theme='light'] .mare-svg-plg {
+        --bg: #fbfbfd;
+        --panel: #f3f4fa;
+        --card: #ffffff;
+        --line: #d8dceb;
+        --ink: #141624;
+        --ink2: #484e6e;
+        --ink3: #646b8c;
+        --violet: #5256d4;
+        --violet-bg: rgba(82, 86, 212, 0.08);
+        --violet-line: rgba(82, 86, 212, 0.42);
+        --coral: #c44f35;
+        --coral-bg: rgba(255, 163, 143, 0.16);
+        --coral-line: rgba(196, 79, 53, 0.42);
+        --ok: #1b7f5a;
+        --ok-bg: rgba(27, 127, 90, 0.09);
+        --ok-line: rgba(27, 127, 90, 0.38);
+      }
+      .mare-svg-plg text { user-select: text; }
+      .plg-sec { font-family: 'Space Grotesk', 'Inter Variable', system-ui, sans-serif; font-size: 13.5px; font-weight: 600; fill: var(--ink); }
+      .plg-t { font-size: 12.6px; font-weight: 600; fill: var(--ink); }
+      .plg-s { font-family: 'JetBrains Mono Variable', ui-monospace, SFMono-Regular, monospace; font-size: 10.3px; fill: var(--ink2); }
+      .plg-m { font-family: 'JetBrains Mono Variable', ui-monospace, SFMono-Regular, monospace; font-size: 10.2px; fill: var(--ink3); }
+    </style>
+    <marker id="plg-arr" viewBox="0 0 10 10" refX="7.5" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M1 1.5 L8.5 5 L1 8.5" fill="none" stroke="var(--violet)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="plg-arr-c" viewBox="0 0 10 10" refX="7.5" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M1 1.5 L8.5 5 L1 8.5" fill="none" stroke="var(--coral)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="plg-arr-g" viewBox="0 0 10 10" refX="7.5" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M1 1.5 L8.5 5 L1 8.5" fill="none" stroke="var(--ok)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="960" height="560" rx="14" fill="var(--bg)"/>
+
+  <!-- Stage 1: Discovery & Precedence -->
+  <rect x="24" y="20" width="912" height="154" rx="12" fill="var(--panel)" stroke="var(--line)" stroke-width="1.2"/>
+  <text x="42" y="44" class="plg-sec">1. Source discovery &amp; override resolution</text>
+  <text x="876" y="44" text-anchor="end" class="plg-m">--clean = builtins only · enabled = false closes slot</text>
+
+  <!-- 4 Precedence Boxes -->
+  <rect x="42" y="60" width="124" height="60" rx="8" fill="var(--card)" stroke="var(--line)"/>
+  <text x="53" y="80" class="plg-t">1. builtin</text>
+  <text x="53" y="96" class="plg-s">release: embedded</text>
+  <text x="53" y="110" class="plg-s">debug: disk</text>
+
+  <line x1="166" y1="90" x2="182" y2="90" stroke="var(--violet)" stroke-width="1.4" marker-end="url(#plg-arr)"/>
+
+  <rect x="184" y="60" width="124" height="60" rx="8" fill="var(--card)" stroke="var(--line)"/>
+  <text x="195" y="80" class="plg-t">2. package</text>
+  <text x="195" y="96" class="plg-s">plugins/ + only</text>
+  <text x="195" y="110" class="plg-m">mare.plugins.add</text>
+
+  <line x1="308" y1="90" x2="324" y2="90" stroke="var(--violet)" stroke-width="1.4" marker-end="url(#plg-arr)"/>
+
+  <rect x="326" y="60" width="128" height="60" rx="8" fill="var(--card)" stroke="var(--line)"/>
+  <text x="337" y="80" class="plg-t">3. user</text>
+  <text x="337" y="96" class="plg-s">~/.config/mare</text>
+  <text x="337" y="110" class="plg-m">plugins/</text>
+
+  <line x1="454" y1="90" x2="470" y2="90" stroke="var(--violet)" stroke-width="1.4" marker-end="url(#plg-arr)"/>
+
+  <rect x="472" y="60" width="134" height="60" rx="8" fill="var(--card)" stroke="var(--line)"/>
+  <text x="483" y="80" class="plg-t">4. project</text>
+  <text x="483" y="96" class="plg-s">.mare/plugins</text>
+  <text x="483" y="110" class="plg-m">trusted only</text>
+
+  <!-- Arrow to Collision Check -->
+  <line x1="606" y1="90" x2="628" y2="90" stroke="var(--violet)" stroke-width="1.5" marker-end="url(#plg-arr)"/>
+
+  <!-- Collision & Override Gate (cross-origin vs same-origin) -->
+  <rect x="632" y="54" width="286" height="106" rx="9" fill="var(--card)" stroke="var(--violet-line)" stroke-width="1.3"/>
+  <text x="646" y="74" class="plg-t" style="fill: var(--violet);">Same plugin name?</text>
+  <text x="646" y="93" class="plg-s" style="fill: var(--ok);">higher origin + override = true → replace</text>
+  <text x="646" y="111" class="plg-s" style="fill: var(--coral);">higher origin, no override      → refuse</text>
+  <text x="646" y="129" class="plg-s" style="fill: var(--coral);">same origin duplicate → refuse both</text>
+  <text x="646" y="146" class="plg-m">(lower origin stays; override cannot fix)</text>
+
+  <text x="42" y="150" class="plg-m">Top-level runs in pure stdlib sandbox (locals/helpers ok; no non-stdlib globals; returns table)</text>
+
+  <!-- Vertical connector 1 -> 2 -->
+  <line x1="480" y1="174" x2="480" y2="198" stroke="var(--violet)" stroke-width="1.5" marker-end="url(#plg-arr)"/>
+
+  <!-- Stage 2: Cordis Graph & Apply -->
+  <rect x="24" y="202" width="912" height="128" rx="12" fill="var(--violet-bg)" stroke="var(--violet-line)" stroke-width="1.3"/>
+  <text x="42" y="226" class="plg-sec" style="fill: var(--violet);">2. Dependency graph, fiber startup &amp; owned effects</text>
+  <text x="918" y="226" text-anchor="end" class="plg-m">Cordis loader · duplicate provide refused</text>
+
+  <rect x="42" y="240" width="252" height="74" rx="8" fill="var(--card)" stroke="var(--violet-line)"/>
+  <text x="56" y="261" class="plg-t">Validate provide &amp; inject</text>
+  <text x="56" y="279" class="plg-s">check contracts &amp; schema</text>
+  <text x="56" y="296" class="plg-s">wait until inject services live</text>
+
+  <line x1="294" y1="277" x2="324" y2="277" stroke="var(--violet)" stroke-width="1.5" marker-end="url(#plg-arr)"/>
+
+  <rect x="328" y="240" width="276" height="74" rx="8" fill="var(--card)" stroke="var(--violet-line)"/>
+  <text x="342" y="261" class="plg-t">apply(ctx, cfg)</text>
+  <text x="342" y="279" class="plg-s">cfg = config_schema + init.lua</text>
+  <text x="342" y="296" class="plg-s">may yield · watchdog_ms guarded</text>
+
+  <line x1="604" y1="277" x2="634" y2="277" stroke="var(--ok)" stroke-width="1.5" marker-end="url(#plg-arr-g)"/>
+
+  <rect x="638" y="240" width="280" height="74" rx="8" fill="var(--ok-bg)" stroke="var(--ok-line)"/>
+  <text x="652" y="261" class="plg-t" style="fill: var(--ok);">Active fiber owns registrations</text>
+  <text x="652" y="279" class="plg-s">services · ctx:on · tools · commands</text>
+  <text x="652" y="296" class="plg-s">tasks · timers · ui · ctx:effect</text>
+
+  <!-- Vertical connector 2 -> 3 -->
+  <line x1="220" y1="330" x2="220" y2="354" stroke="var(--coral)" stroke-width="1.5" marker-end="url(#plg-arr-c)"/>
+  <text x="234" y="346" class="plg-m">reload commands (blocked while request lease is held)</text>
+
+  <!-- Loopback arrow 3 -> 2 -->
+  <line x1="778" y1="358" x2="778" y2="334" stroke="var(--ok)" stroke-width="1.5" marker-end="url(#plg-arr-g)"/>
+  <text x="764" y="346" text-anchor="end" class="plg-m">re-apply + restart dependents</text>
+
+  <!-- Stage 3: Live Reload, Lease & Containment -->
+  <rect x="24" y="358" width="912" height="182" rx="12" fill="var(--coral-bg)" stroke="var(--coral-line)" stroke-width="1.3"/>
+  <text x="42" y="382" class="plg-sec" style="fill: var(--coral);">3. Reload modes, request lease &amp; failure containment</text>
+  <text x="918" y="382" text-anchor="end" class="plg-m">full host reload emits reload/completed</text>
+
+  <rect x="42" y="396" width="282" height="126" rx="8" fill="var(--card)" stroke="var(--coral-line)"/>
+  <text x="56" y="417" class="plg-t">Three reload paths</text>
+  <text x="56" y="436" class="plg-s">/reload        → re-read config &amp; pkgs,</text>
+  <text x="56" y="451" class="plg-m">                 sync &amp; reload all</text>
+  <text x="56" y="470" class="plg-s">/reload config → diff cfg, sync enable,</text>
+  <text x="56" y="485" class="plg-m">                 retry pending items</text>
+  <text x="56" y="504" class="plg-s">/reload &lt;name&gt; → replace target def</text>
+
+  <line x1="324" y1="459" x2="348" y2="459" stroke="var(--violet)" stroke-width="1.5" marker-end="url(#plg-arr)"/>
+
+  <rect x="352" y="396" width="268" height="126" rx="8" fill="var(--card)" stroke="var(--line)"/>
+  <text x="366" y="417" class="plg-t">Lease guard, dispose &amp; swap</text>
+  <text x="366" y="437" class="plg-s" style="fill: var(--coral);">active stream lease → refused</text>
+  <text x="366" y="456" class="plg-s">1. withdraw old fiber effects</text>
+  <text x="366" y="474" class="plg-s">2. evict provider require cache</text>
+  <text x="366" y="492" class="plg-s">3. apply new definition</text>
+  <text x="366" y="510" class="plg-s" style="fill: var(--coral);">error → rollback to previous def</text>
+
+  <line x1="620" y1="459" x2="644" y2="459" stroke="var(--coral)" stroke-width="1.5" marker-end="url(#plg-arr-c)"/>
+
+  <rect x="648" y="396" width="270" height="126" rx="8" fill="var(--card)" stroke="var(--coral-line)"/>
+  <text x="662" y="417" class="plg-t">Failure containment</text>
+  <text x="662" y="437" class="plg-s">optional plugin/pkg → warn &amp; skip</text>
+  <text x="662" y="457" class="plg-s" style="fill: var(--coral);">essential service, required = true,</text>
+  <text x="662" y="473" class="plg-s" style="fill: var(--coral);">or required package:</text>
+  <text x="662" y="491" class="plg-s">blocks requests until full /reload</text>
+  <text x="662" y="510" class="plg-m">cycle → not loaded: dependency cycle</text>
+</svg>

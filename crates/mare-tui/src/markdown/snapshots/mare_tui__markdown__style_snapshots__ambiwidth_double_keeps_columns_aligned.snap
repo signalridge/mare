@@ -1,0 +1,16 @@
+---
+source: crates/mare-tui/src/markdown.rs
+assertion_line: 1313
+expression: describe(&lines)
+---
+|• one|
+  ⟶ "• "=#a0a4ff
+|   ◦ two|
+  ⟶ "◦ "=#a0a4ff
+|[✓] done|
+  ⟶ "[✓] "=#9cd8b0
+||
+|▎ ⚠ Warning|
+  ⟶ "▎ "=#f0d38f "⚠ Warning"=#f0d38f,b
+|▎ wide icons|
+  ⟶ "▎ "=#f0d38f "wide icons"=#b2b4d4

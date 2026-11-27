@@ -1,0 +1,963 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release, for example v1.0.0"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  validate-tag:
+    name: Validate Release Tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag_name: ${{ steps.tag.outputs.tag_name }}
+      version: ${{ steps.tag.outputs.version }}
+      commit_oid: ${{ steps.revision.outputs.commit_oid }}
+    steps:
+      - name: Validate release tag syntax
+        id: tag
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag || '' }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          tag="${INPUT_TAG:-$REF_NAME}"
+          if [[ "$tag" == *[[:cntrl:]]* ]]; then
+            printf '::error::Invalid release tag contains control characters.\n'
+            exit 1
+          fi
+          core='(0|[1-9][0-9]*)'
+          prerelease_id='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
+          semver="^v${core}\\.${core}\\.${core}(-${prerelease_id}(\\.${prerelease_id})*)?$"
+          if [[ ! "$tag" =~ $semver ]]; then
+            message='Expected canonical v-prefixed SemVer without build metadata.'
+            printf '::error::Invalid release tag %q. %s\n' "$tag" "$message"
+            exit 1
+          fi
+          printf 'tag_name=%s\n' "$tag" >> "$GITHUB_OUTPUT"
+          printf 'version=%s\n' "${tag#v}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ steps.tag.outputs.tag_name }}
+      - name: Match tag to release manifest, Cargo.toml, and NEWS.md
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - shell: bash
+        env:
+          TAG_NAME: ${{ steps.tag.outputs.tag_name }}
+        run: |
+          python - <<'PY'
+          import json, os, pathlib, re, sys, tomllib
+          tag = os.environ["TAG_NAME"]
+          expected = tag[1:]
+          manifest_ver = json.loads(pathlib.Path(".release-please-manifest.json").read_text("utf-8"))["."]
+          if manifest_ver != expected:
+              sys.exit(f".release-please-manifest.json version {manifest_ver!r} != {expected!r}")
+          cargo_ver = tomllib.loads(pathlib.Path("Cargo.toml").read_text("utf-8"))["workspace"]["package"]["version"]
+          if cargo_ver != expected:
+              sys.exit(f"Cargo.toml version {cargo_ver!r} != tag version {expected!r}")
+          news = pathlib.Path("crates/mare-plugin/preset/NEWS.md").read_text("utf-8")
+          if not re.search(rf"(?m)^##\s+{re.escape(expected)}\s*$", news):
+              sys.exit(f"crates/mare-plugin/preset/NEWS.md has no ## {expected} section")
+          print(f"Release version {expected} verified against manifest, Cargo.toml, and NEWS.md")
+          PY
+      - name: Verify Cargo.lock matches Cargo.toml
+        uses: ./.github/actions/setup-rust
+      - shell: bash
+        run: cargo metadata --locked --format-version 1 >/dev/null
+      - name: Record validated release commit
+        id: revision
+        shell: bash
+        env:
+          TRIGGER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          commit_oid="$(git rev-parse --verify 'HEAD^{commit}')"
+          if [[ "$TRIGGER_SHA" != "$commit_oid" ]]; then
+            printf '::error::Workflow ref %s differs from commit %s; use the release tag.\n' \
+              "$TRIGGER_SHA" "$commit_oid"
+            exit 1
+          fi
+          printf 'commit_oid=%s\n' "$commit_oid" >> "$GITHUB_OUTPUT"
+
+  rust-notices:
+    name: Generate Rust Dependency Notices
+    needs: [validate-tag]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.validate-tag.outputs.commit_oid }}
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - uses: ./.github/actions/setup-rust
+      - uses: ./.github/actions/setup-cargo-about
+      - name: Generate and verify Rust dependency notices
+        run: |
+          cargo fetch --locked
+          python3 scripts/check_notices.py --generate-rust-notices licenses/RUST-THIRD-PARTY-NOTICES.txt
+          python3 scripts/check_notices.py --rust-notices licenses/RUST-THIRD-PARTY-NOTICES.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: rust-notices
+          path: licenses/RUST-THIRD-PARTY-NOTICES.txt
+          if-no-files-found: error
+
+  gate:
+    name: Check CI Gate
+    needs: [validate-tag]
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.validate-tag.outputs.commit_oid }}
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - name: Check CI gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/check_release_gate.py --self-test
+          python3 scripts/check_release_gate.py \
+            --commit "${{ needs.validate-tag.outputs.commit_oid }}" \
+            --repo "${{ github.repository }}" \
+            --wait-minutes 45
+
+  build:
+    needs: [validate-tag, gate, rust-notices]
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-latest, target: x86_64-apple-darwin }
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { os: windows-11-arm, target: aarch64-pc-windows-msvc }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.validate-tag.outputs.commit_oid }}
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: rust-notices
+          path: licenses
+      - name: Verify Rust dependency notices match this checkout
+        run: python scripts/check_notices.py --rust-notices licenses/RUST-THIRD-PARTY-NOTICES.txt
+      - uses: ./.github/actions/setup-rust
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo build --release --locked -p mare-cli --target ${{ matrix.target }}
+      - name: Verify release binary seams inert and faux absent
+        if: runner.os != 'Windows'
+        run: |
+          "target/${{ matrix.target }}/release/mare" --version
+          python scripts/check_seams.py \
+            --verify-release "target/${{ matrix.target }}/release/mare" \
+            --verify-faux-absent "target/${{ matrix.target }}/release/mare"
+      - name: Verify release binary seams inert and faux absent (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & "target/${{ matrix.target }}/release/mare.exe" --version
+          python scripts/check_seams.py `
+            --verify-release "target/${{ matrix.target }}/release/mare.exe" `
+            --verify-faux-absent "target/${{ matrix.target }}/release/mare.exe"
+      - name: Package archive (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          dir="mare-${{ needs.validate-tag.outputs.tag_name }}-${{ matrix.target }}"
+          mkdir -p "$dir/licenses"
+          cp "target/${{ matrix.target }}/release/mare" "$dir/"
+          cp -r crates/mare-plugin/preset/types "$dir/"
+          cp LICENSE THIRD_PARTY_NOTICES.md README.md "$dir/"
+          cp crates/mare-kernel/lua/cordis/LICENSE "$dir/licenses/cordis-LICENSE"
+          cp licenses/RUST-THIRD-PARTY-NOTICES.txt "$dir/licenses/"
+          tar czf "$dir.tar.gz" "$dir"
+          python3 scripts/verify_release_archive.py "$dir.tar.gz" "$dir"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$dir.tar.gz"
+          else
+            shasum -a 256 "$dir.tar.gz"
+          fi > "$dir.tar.gz.sha256"
+      - name: Package archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dir = "mare-${{ needs.validate-tag.outputs.tag_name }}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force "$dir/licenses" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/mare.exe" "$dir/"
+          Copy-Item -Recurse crates/mare-plugin/preset/types "$dir/"
+          Copy-Item LICENSE, THIRD_PARTY_NOTICES.md, README.md "$dir/"
+          Copy-Item crates/mare-kernel/lua/cordis/LICENSE "$dir/licenses/cordis-LICENSE"
+          Copy-Item licenses/RUST-THIRD-PARTY-NOTICES.txt "$dir/licenses/"
+          Compress-Archive -Path "$dir" -DestinationPath "$dir.zip"
+          python scripts/verify_release_archive.py "$dir.zip" "$dir"
+          $hash = (Get-FileHash "$dir.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $dir.zip" | Out-File -Encoding ascii "$dir.zip.sha256"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: build-${{ matrix.target }}
+          path: |
+            mare-*.tar.gz*
+            mare-*.zip*
+
+  release:
+    name: Package & Publish Release
+    needs: [validate-tag, build]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      attestations: write
+      contents: write
+      id-token: write
+      packages: write
+    outputs:
+      version: ${{ needs.validate-tag.outputs.version }}
+      tag_name: ${{ needs.validate-tag.outputs.tag_name }}
+      commit_oid: ${{ needs.validate-tag.outputs.commit_oid }}
+      hashes: ${{ steps.metadata.outputs.hashes }}
+      gh_pat_available: ${{ steps.optional-secrets.outputs.gh_pat_available }}
+      aur_key_available: ${{ steps.optional-secrets.outputs.aur_key_available }}
+      deb_asset: ${{ steps.metadata.outputs.deb_asset }}
+      rpm_asset: ${{ steps.metadata.outputs.rpm_asset }}
+      binary_matrix: ${{ steps.metadata.outputs.binary_matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.validate-tag.outputs.commit_oid }}
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - name: Reconfirm validated tag identity
+        shell: bash
+        env:
+          TAG_NAME: ${{ needs.validate-tag.outputs.tag_name }}
+          COMMIT_OID: ${{ needs.validate-tag.outputs.commit_oid }}
+        run: |
+          set -euo pipefail
+          checked_out="$(git rev-parse --verify 'HEAD^{commit}')"
+          if [[ "$checked_out" != "$COMMIT_OID" ]]; then
+            printf '::error::Checked out commit %s differs from validated commit %s.\n' "$checked_out" "$COMMIT_OID"
+            exit 1
+          fi
+          remote_oid="$(
+            git ls-remote --exit-code origin "refs/tags/${TAG_NAME}^{}" \
+              | awk 'NR == 1 { print $1 }'
+          )" || remote_oid=""
+          if [[ -z "$remote_oid" ]]; then
+            remote_oid="$(
+              git ls-remote --exit-code origin "refs/tags/${TAG_NAME}" \
+                | awk 'NR == 1 { print $1 }'
+            )" || remote_oid=""
+          fi
+          if [[ "$remote_oid" != "$COMMIT_OID" ]]; then
+            printf '::error::Release tag %s resolves to %s, not validated commit %s.\n' \
+              "$TAG_NAME" "$remote_oid" "$COMMIT_OID"
+            exit 1
+          fi
+      - name: Detect optional publishing secrets
+        id: optional-secrets
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          if [ -n "$GH_PAT" ]; then
+            printf 'gh_pat_available=true\n' >> "$GITHUB_OUTPUT"
+          else
+            printf 'gh_pat_available=false\n' >> "$GITHUB_OUTPUT"
+          fi
+          if [ -n "$AUR_SSH_PRIVATE_KEY" ]; then
+            printf 'aur_key_available=true\n' >> "$GITHUB_OUTPUT"
+          else
+            printf 'aur_key_available=false\n' >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          path: dist
+          pattern: build-*
+          merge-multiple: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: rust-notices
+          path: licenses
+      - name: Verify Rust dependency notices match this checkout
+        run: python3 scripts/check_notices.py --rust-notices licenses/RUST-THIRD-PARTY-NOTICES.txt
+      - uses: ./.github/actions/setup-nfpm
+      - name: Build .deb and .rpm packages via nfpm
+        shell: bash
+        env:
+          TAG_NAME: ${{ needs.validate-tag.outputs.tag_name }}
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          stage="${RUNNER_TEMP}/nfpm-stage"
+          build_pkg_pair() {
+            local rust_target="$1"
+            local pkg_arch="$2"
+            local extract_dir="${stage}/${pkg_arch}"
+            rm -rf "$extract_dir"
+            mkdir -p "$extract_dir"
+            tar -xzf "dist/mare-${TAG_NAME}-${rust_target}.tar.gz" -C "$extract_dir"
+            local bin_path="${extract_dir}/mare-${TAG_NAME}-${rust_target}/mare"
+            local cfg="${stage}/nfpm-${pkg_arch}.yaml"
+            cat > "$cfg" <<YAML
+          name: mare
+          arch: ${pkg_arch}
+          platform: linux
+          version: ${VERSION}
+          section: utils
+          priority: optional
+          maintainer: Signalridge <support@signalridge.com>
+          vendor: Signalridge
+          homepage: https://github.com/signalridge/mare
+          license: Apache-2.0
+          description: A hyperextensible agent harness (Rust core, Lua plugins).
+          contents:
+            - src: ${bin_path}
+              dst: /usr/bin/mare
+              file_info:
+                mode: 0755
+            - src: LICENSE
+              dst: /usr/share/licenses/mare/LICENSE
+              file_info:
+                mode: 0644
+            - src: THIRD_PARTY_NOTICES.md
+              dst: /usr/share/licenses/mare/THIRD_PARTY_NOTICES.md
+              file_info:
+                mode: 0644
+            - src: crates/mare-kernel/lua/cordis/LICENSE
+              dst: /usr/share/licenses/mare/cordis-LICENSE
+              file_info:
+                mode: 0644
+            - src: licenses/RUST-THIRD-PARTY-NOTICES.txt
+              dst: /usr/share/licenses/mare/RUST-THIRD-PARTY-NOTICES.txt
+              file_info:
+                mode: 0644
+            - src: README.md
+              dst: /usr/share/doc/mare/README.md
+              file_info:
+                mode: 0644
+          YAML
+            nfpm package --config "$cfg" --packager deb --target "dist/mare_${VERSION}_linux_${pkg_arch}.deb"
+            nfpm package --config "$cfg" --packager rpm --target "dist/mare_${VERSION}_linux_${pkg_arch}.rpm"
+          }
+          build_pkg_pair "x86_64-unknown-linux-gnu" "amd64"
+          build_pkg_pair "aarch64-unknown-linux-gnu" "arm64"
+      - name: Generate unified checksums.txt
+        shell: bash
+        run: |
+          set -euo pipefail
+          (
+            cd dist
+            find . -maxdepth 1 -type f \( \
+              -name 'mare-*.tar.gz' -o \
+              -name 'mare-*.zip' -o \
+              -name 'mare_*.deb' -o \
+              -name 'mare_*.rpm' \
+            \) -printf '%f\n' | sort | xargs sha256sum > checksums.txt
+          )
+          cat dist/checksums.txt
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
+      - name: Generate SPDX SBOMs for release archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          for archive in dist/mare-*.tar.gz dist/mare-*.zip; do
+            [ -f "$archive" ] || continue
+            syft scan "file:${archive}" -o "spdx-json=${archive}.sbom.spdx.json"
+          done
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Sign checksums.txt with cosign
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          cosign sign-blob --bundle=dist/checksums.txt.sigstore.json dist/checksums.txt --yes
+      - name: Generate Homebrew cask, Scoop manifest, and release outputs
+        id: metadata
+        shell: bash
+        env:
+          TAG_NAME: ${{ needs.validate-tag.outputs.tag_name }}
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+        run: |
+          python3 scripts/release_manifests.py \
+            --tag "${TAG_NAME}" \
+            --version "${VERSION}" \
+            --dist-dir dist \
+            --manifests-dir manifests \
+            --registry "${REGISTRY}" \
+            --image-name "${IMAGE_NAME}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: package-manifests
+          path: manifests/
+          include-hidden-files: true
+          retention-days: 30
+      - name: Upload SBOM artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: sbom
+          path: dist/*.sbom.spdx.json
+          retention-days: 30
+      - uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3
+        with:
+          tag_name: ${{ needs.validate-tag.outputs.tag_name }}
+          draft: false
+          prerelease: ${{ steps.metadata.outputs.is_prerelease == 'true' }}
+          make_latest: ${{ steps.metadata.outputs.make_latest }}
+          generate_release_notes: true
+          append_body: true
+          body: |
+            Installation: https://signalridge.github.io/mare/en/get-started/installation/
+
+            - Quick install (macOS / Linux): `curl -fsSL https://signalridge.github.io/mare/install.sh | sh`
+            - Quick install (Windows): `irm https://signalridge.github.io/mare/install.ps1 | iex`
+            - Homebrew (macOS / Linux):
+              `brew tap signalridge/tap && brew trust signalridge/tap && brew install --cask mare`
+            - Scoop (Windows): `scoop bucket add signalridge https://github.com/signalridge/scoop-bucket`
+              then `scoop install signalridge/mare`
+            - Nix Flake / NUR:
+              `nix run github:signalridge/mare` or `nix profile install github:signalridge/nur-packages#mare`
+            - Arch Linux (AUR): `yay -S mare-bin`
+            - Container (GHCR): `docker pull ghcr.io/signalridge/mare:${{ needs.validate-tag.outputs.version }}`
+            - Linux packages (`.deb` / `.rpm`), direct archives, SPDX SBOMs,
+              Cosign bundle (`checksums.txt.sigstore.json`), and SLSA provenance are attached to this release.
+          files: |
+            dist/mare-*.tar.gz
+            dist/mare-*.tar.gz.sha256
+            dist/mare-*.tar.gz.sbom.spdx.json
+            dist/mare-*.zip
+            dist/mare-*.zip.sha256
+            dist/mare-*.zip.sbom.spdx.json
+            dist/mare_*.deb
+            dist/mare_*.rpm
+            dist/checksums.txt
+            dist/checksums.txt.sigstore.json
+      - name: Stage multi-arch container build context
+        env:
+          TAG_NAME: ${{ needs.validate-tag.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          ctx="${RUNNER_TEMP}/docker-ctx"
+          rm -rf "$ctx"
+          mkdir -p "$ctx/amd64" "$ctx/arm64" "$ctx/unpack-amd64" "$ctx/unpack-arm64"
+          tar -xzf "dist/mare-${TAG_NAME}-x86_64-unknown-linux-gnu.tar.gz" -C "$ctx/unpack-amd64"
+          tar -xzf "dist/mare-${TAG_NAME}-aarch64-unknown-linux-gnu.tar.gz" -C "$ctx/unpack-arm64"
+          cp "$ctx/unpack-amd64/mare-${TAG_NAME}-x86_64-unknown-linux-gnu/mare" "$ctx/amd64/mare"
+          cp "$ctx/unpack-arm64/mare-${TAG_NAME}-aarch64-unknown-linux-gnu/mare" "$ctx/arm64/mare"
+          mkdir -p "$ctx/licenses"
+          cp LICENSE THIRD_PARTY_NOTICES.md README.md "$ctx/"
+          cp crates/mare-kernel/lua/cordis/LICENSE "$ctx/licenses/cordis-LICENSE"
+          cp licenses/RUST-THIRD-PARTY-NOTICES.txt "$ctx/licenses/"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push multi-arch container image
+        id: docker-build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: ${{ runner.temp }}/docker-ctx
+          file: Dockerfile.release
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.metadata.outputs.docker_tags }}
+          labels: |
+            org.opencontainers.image.title=mare
+            org.opencontainers.image.description=Hyperextensible AI coding agent harness (Rust core, Lua 5.5 plugins)
+            org.opencontainers.image.source=https://github.com/signalridge/mare
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.version=${{ needs.validate-tag.outputs.version }}
+            org.opencontainers.image.revision=${{ needs.validate-tag.outputs.commit_oid }}
+      - name: Sign container image with cosign
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.docker-build.outputs.digest }}
+        run: cosign sign --yes "$IMAGE_REF"
+
+  provenance:
+    name: Generate SLSA Provenance
+    needs: [release]
+    permissions:
+      actions: read
+      id-token: write
+      contents: write
+    # yamllint disable-line rule:line-length
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@f7dd8c54c2067bafc12ca7a55595d5ee9b75204a # v2.1.0
+    with:
+      base64-subjects: ${{ needs.release.outputs.hashes }}
+      upload-assets: true
+      upload-tag-name: ${{ needs.release.outputs.tag_name }}
+      compile-generator: true
+
+  publish-homebrew:
+    name: Publish Homebrew (optional)
+    runs-on: ubuntu-latest
+    needs: [release]
+    if: needs.release.outputs.gh_pat_available == 'true'
+    continue-on-error: true
+    outputs:
+      published: ${{ steps.publish-status.outputs.published }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: package-manifests
+          path: manifests
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: signalridge/homebrew-tap
+          token: ${{ secrets.GH_PAT }}
+          path: tap
+      - name: Publish verified Homebrew cask
+        env:
+          TAG_NAME: ${{ needs.release.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p tap/Casks
+          cp manifests/Casks/mare.rb tap/Casks/mare.rb
+          git -C tap add Casks/mare.rb
+          if git -C tap diff --cached --quiet; then
+            echo "Homebrew cask is already current."
+            exit 0
+          fi
+          git -C tap config user.name "github-actions[bot]"
+          git -C tap config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C tap commit -m "chore: update mare to ${TAG_NAME}"
+          git -C tap push origin HEAD
+      - name: Mark optional channel publication successful
+        id: publish-status
+        if: success()
+        run: echo 'published=true' >> "$GITHUB_OUTPUT"
+
+  publish-scoop:
+    name: Publish Scoop (optional)
+    runs-on: ubuntu-latest
+    needs: [release]
+    if: needs.release.outputs.gh_pat_available == 'true'
+    continue-on-error: true
+    outputs:
+      published: ${{ steps.publish-status.outputs.published }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: package-manifests
+          path: manifests
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: signalridge/scoop-bucket
+          token: ${{ secrets.GH_PAT }}
+          path: bucket
+      - name: Publish verified Scoop manifest
+        env:
+          TAG_NAME: ${{ needs.release.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          cp manifests/mare.json bucket/mare.json
+          git -C bucket add mare.json
+          if git -C bucket diff --cached --quiet; then
+            echo "Scoop manifest is already current."
+            exit 0
+          fi
+          git -C bucket config user.name "github-actions[bot]"
+          git -C bucket config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C bucket commit -m "chore: update mare to ${TAG_NAME}"
+          git -C bucket push origin HEAD
+      - name: Mark optional channel publication successful
+        id: publish-status
+        if: success()
+        run: echo 'published=true' >> "$GITHUB_OUTPUT"
+
+  verify-binary:
+    name: Verify Binary (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: [release]
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.release.outputs.binary_matrix) }}
+    steps:
+      - name: Download, verify checksum, and extract binary
+        shell: bash
+        env:
+          VERSION: ${{ needs.release.outputs.tag_name }}
+          ASSET: ${{ matrix.asset }}
+        run: |
+          set -euo pipefail
+          curl -fsSL -O "https://github.com/signalridge/mare/releases/download/${VERSION}/${ASSET}"
+          curl -fsSL -O "https://github.com/signalridge/mare/releases/download/${VERSION}/checksums.txt"
+          expected="$(awk -v f="${ASSET}" '$2 == f { print tolower($1); exit }' checksums.txt)"
+          if command -v sha256sum >/dev/null 2>&1; then
+            actual="$(sha256sum "${ASSET}" | awk '{ print tolower($1); exit }')"
+          else
+            actual="$(shasum -a 256 "${ASSET}" | awk '{ print tolower($1); exit }')"
+          fi
+          if [[ -z "$expected" || "$expected" != "$actual" ]]; then
+            echo "Checksum mismatch for ${ASSET}: expected=${expected} actual=${actual}" >&2
+            exit 1
+          fi
+          case "${ASSET}" in
+            *.zip) unzip -q "${ASSET}" ;;
+            *.tar.gz) tar xzf "${ASSET}" ;;
+          esac
+      - name: Verify binary
+        shell: bash
+        env:
+          EXPECTED_VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          "${{ matrix.command }}" --version | tee version.txt
+          grep -F "mare ${EXPECTED_VERSION}" version.txt
+          "${{ matrix.command }}" --help >/dev/null
+
+  verify-deb:
+    name: Verify Debian Package
+    runs-on: ubuntu-latest
+    needs: [release]
+    steps:
+      - name: Download and install .deb
+        env:
+          TAG: ${{ needs.release.outputs.tag_name }}
+          ASSET: ${{ needs.release.outputs.deb_asset }}
+        run: |
+          curl -fsSL -O "https://github.com/signalridge/mare/releases/download/${TAG}/${ASSET}"
+          sudo dpkg -i "${ASSET}"
+      - name: Verify installed mare
+        env:
+          EXPECTED_VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          mare --version | tee version.txt
+          grep -F "mare ${EXPECTED_VERSION}" version.txt
+          mare --help >/dev/null
+
+  verify-rpm:
+    name: Verify RPM Package
+    runs-on: ubuntu-latest
+    needs: [release]
+    container: fedora:44@sha256:498c452f32a739b61f0ef215bce9924ebc4866cbe44710f58157d77723b7a6d2
+    steps:
+      - name: Download and install .rpm
+        env:
+          TAG: ${{ needs.release.outputs.tag_name }}
+          ASSET: ${{ needs.release.outputs.rpm_asset }}
+        run: |
+          curl -fsSL -O "https://github.com/signalridge/mare/releases/download/${TAG}/${ASSET}"
+          rpm -i "${ASSET}"
+      - name: Verify installed mare
+        env:
+          EXPECTED_VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          mare --version | tee version.txt
+          grep -F "mare ${EXPECTED_VERSION}" version.txt
+          mare --help >/dev/null
+
+  verify-homebrew:
+    name: Verify Homebrew (optional)
+    runs-on: macos-latest
+    needs: [release, publish-homebrew]
+    if: needs.release.outputs.gh_pat_available == 'true' && needs.publish-homebrew.outputs.published == 'true'
+    continue-on-error: true
+    steps:
+      - name: Install via Homebrew
+        run: |
+          brew tap signalridge/tap
+          brew trust signalridge/tap
+          brew install --cask mare
+      - name: Verify installation
+        env:
+          EXPECTED_VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          mare --version | tee version.txt
+          grep -F "mare ${EXPECTED_VERSION}" version.txt
+          mare --help >/dev/null
+
+  verify-scoop:
+    name: Verify Scoop (optional)
+    runs-on: windows-latest
+    needs: [release, publish-scoop]
+    if: needs.release.outputs.gh_pat_available == 'true' && needs.publish-scoop.outputs.published == 'true'
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - name: Install from disposable Scoop bucket
+        shell: pwsh
+        env:
+          EXPECTED_VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP ('mare-scoop-' + [Guid]::NewGuid().ToString('N'))
+          $engine = Join-Path $root 'engine'
+          $env:SCOOP = $root
+          $env:SCOOP_GLOBAL = Join-Path $root 'global'
+          $env:SCOOP_CACHE = Join-Path $root 'cache'
+          $env:SCOOP_HOME = $engine
+          $env:XDG_CONFIG_HOME = Join-Path $root 'config'
+          try {
+            New-Item -ItemType Directory -Force @(
+              $root
+              (Join-Path $env:SCOOP 'shims')
+              $env:SCOOP_GLOBAL
+              $env:SCOOP_CACHE
+              $env:XDG_CONFIG_HOME
+            ) | Out-Null
+            git init --quiet $engine
+            git -C $engine remote add origin https://github.com/ScoopInstaller/Scoop.git
+            git -C $engine fetch --quiet --depth=1 origin b588a06e41d920d2123ec70aee682bae14935939
+            git -C $engine checkout --quiet --detach FETCH_HEAD
+            $scoop = Join-Path $engine 'bin/scoop.ps1'
+            & $scoop bucket add mare-ci https://github.com/signalridge/scoop-bucket.git
+            if ($LASTEXITCODE -ne 0) { throw 'scoop bucket add failed' }
+            & $scoop install mare-ci/mare
+            if ($LASTEXITCODE -ne 0) { throw 'scoop install failed' }
+            $binary = Join-Path $env:SCOOP 'apps/mare/current/mare.exe'
+            $out = (& $binary --version | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0) { throw 'installed mare --version failed' }
+            if (-not $out.Contains("mare $env:EXPECTED_VERSION")) {
+              throw "Installed Scoop version differs: $out"
+            }
+            & $binary --help | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'installed mare --help failed' }
+          } finally {
+            Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+  publish-aur:
+    name: Publish AUR (optional)
+    runs-on: ubuntu-latest
+    needs: [release]
+    if: needs.release.outputs.aur_key_available == 'true'
+    continue-on-error: true
+    outputs:
+      published: ${{ steps.publish-status.outputs.published }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: package-manifests
+          path: manifests
+      - name: Set up AUR SSH
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur_key
+          chmod 600 ~/.ssh/aur_key
+          ssh-keyscan -t ed25519,rsa,ecdsa aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+          cat >> ~/.ssh/config <<'EOF'
+          Host aur.archlinux.org
+            IdentityFile ~/.ssh/aur_key
+            IdentitiesOnly yes
+            StrictHostKeyChecking accept-new
+            User aur
+          EOF
+      - name: Publish verified AUR package
+        env:
+          TAG_NAME: ${{ needs.release.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          publisher="${RUNNER_TEMP}/mare-aur"
+          rm -rf "$publisher"
+          git clone ssh://aur@aur.archlinux.org/mare-bin.git "$publisher"
+          cp manifests/aur/PKGBUILD "$publisher/PKGBUILD"
+          cp manifests/aur/.SRCINFO "$publisher/.SRCINFO"
+          git -C "$publisher" add PKGBUILD .SRCINFO
+          if git -C "$publisher" diff --cached --quiet; then
+            echo "AUR package is already current."
+            exit 0
+          fi
+          git -C "$publisher" config user.name "github-actions[bot]"
+          git -C "$publisher" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$publisher" commit -m "chore: update mare-bin to ${TAG_NAME}"
+          git -C "$publisher" push origin HEAD:master
+      - name: Mark optional channel publication successful
+        id: publish-status
+        if: success()
+        run: echo 'published=true' >> "$GITHUB_OUTPUT"
+
+  verify-aur:
+    name: Verify AUR (optional)
+    runs-on: ubuntu-latest
+    needs: [release, publish-aur]
+    if: needs.release.outputs.aur_key_available == 'true' && needs.publish-aur.outputs.published == 'true'
+    continue-on-error: true
+    permissions:
+      contents: read
+    container: archlinux:base-devel@sha256:b21289eb1954872de0dc9f88976627e38611b1817be75e50946c83ab7b9c474d
+    steps:
+      - name: Build and install published mare-bin as non-root
+        shell: bash
+        env:
+          EXPECTED_VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          pacman -Syu --noconfirm --needed git sudo
+          useradd --create-home --shell /bin/bash builder
+          printf 'builder ALL=(ALL) NOPASSWD: /usr/bin/pacman\n' > /etc/sudoers.d/mare-builder
+          chmod 0440 /etc/sudoers.d/mare-builder
+          sudo -u builder git clone --depth=1 https://aur.archlinux.org/mare-bin.git /home/builder/mare-bin
+          actual="$(sed -n 's/^pkgver=//p' /home/builder/mare-bin/PKGBUILD | tr '_' '-')"
+          if [ "$actual" != "$EXPECTED_VERSION" ]; then
+            echo "Published AUR version differs: expected $EXPECTED_VERSION, got $actual" >&2
+            exit 1
+          fi
+          sudo -u builder bash -lc 'cd /home/builder/mare-bin && makepkg -si --noconfirm --needed'
+          mare --version | grep -F "mare ${EXPECTED_VERSION}"
+          mare --help >/dev/null
+
+  publish-nur:
+    name: Publish NUR (optional)
+    runs-on: ubuntu-latest
+    needs: [release]
+    if: needs.release.outputs.gh_pat_available == 'true'
+    continue-on-error: true
+    outputs:
+      published: ${{ steps.publish-status.outputs.published }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: package-manifests
+          path: manifests
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: signalridge/nur-packages
+          token: ${{ secrets.GH_PAT }}
+          path: nur
+      - name: Publish verified NUR package
+        env:
+          TAG_NAME: ${{ needs.release.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p nur/pkgs/mare
+          cp manifests/nur/default.nix nur/pkgs/mare/default.nix
+          git -C nur add pkgs/mare/default.nix
+          if git -C nur diff --cached --quiet; then
+            echo "NUR package is already current."
+            exit 0
+          fi
+          git -C nur config user.name "github-actions[bot]"
+          git -C nur config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C nur commit -m "feat(mare): update to ${TAG_NAME}"
+          git -C nur push origin HEAD
+      - name: Mark optional channel publication successful
+        id: publish-status
+        if: success()
+        run: echo 'published=true' >> "$GITHUB_OUTPUT"
+
+  verify-container:
+    name: Verify Container
+    runs-on: ubuntu-latest
+    needs: [release]
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+    steps:
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Pull and verify container
+        env:
+          EXPECTED_VERSION: ${{ needs.release.outputs.version }}
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker pull "$IMAGE"
+          docker run --rm "$IMAGE" --version | tee version.txt
+          grep -F "mare ${EXPECTED_VERSION}" version.txt
+          docker run --rm "$IMAGE" --help >/dev/null
+      - name: Scan container image with Trivy
+        # v0.36.0, pinned by commit SHA after GHSA-69fq-xp46-6x23.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.release.outputs.version }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4
+        if: always()
+        continue-on-error: true
+        with:
+          sarif_file: trivy-results.sarif
+          category: container-trivy
+
+  verify-nix:
+    name: Verify Nix
+    runs-on: ubuntu-latest
+    needs: [release]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.release.outputs.commit_oid }}
+      - uses: DeterminateSystems/nix-installer-action@33c9ab3ef95cd57c164d9d6eb1f9a46338538d41 # main
+      - uses: DeterminateSystems/magic-nix-cache-action@55718cd9ebf1737a061487d5ada21abf31e99a98 # main
+        with:
+          use-flakehub: false
+          use-gha-cache: true
+      - name: Build package
+        run: nix build .#mare
+      - name: Verify binary
+        env:
+          EXPECTED_VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          ./result/bin/mare --version | tee version.txt
+          grep -F "mare ${EXPECTED_VERSION}" version.txt
+          ./result/bin/mare --help >/dev/null

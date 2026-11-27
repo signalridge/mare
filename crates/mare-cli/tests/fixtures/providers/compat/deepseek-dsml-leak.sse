@@ -1,0 +1,13 @@
+data: {"id":"chatcmpl-dsml-1","choices":[{"index":0,"delta":{"role":"assistant","content":"Let me read "}}]}
+
+data: {"id":"chatcmpl-dsml-1","choices":[{"index":0,"delta":{"content":"that file.\n<｜DS"}}]}
+
+data: {"id":"chatcmpl-dsml-1","choices":[{"index":0,"delta":{"content":"ML｜tool_calls>\n<｜DSML｜inv"}}]}
+
+data: {"id":"chatcmpl-dsml-1","choices":[{"index":0,"delta":{"content":"oke name=\"read\">\n<｜DSML｜parameter name=\"path\" string=\"true\">README"}}]}
+
+data: {"id":"chatcmpl-dsml-1","choices":[{"index":0,"delta":{"content":".md</｜DSML｜parameter>\n<｜DSML｜parameter name=\"limit\" string=\"false\">42</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>"}}]}
+
+data: {"id":"chatcmpl-dsml-1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":30,"completion_tokens":20}}
+
+data: [DONE]

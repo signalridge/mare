@@ -1,0 +1,5 @@
+---
+source: crates/mare-tui/src/image.rs
+expression: "format!(\"{raw:?}\")"
+---
+"\r\u{1b}[1A\u{1b}_Ga=T,f=100,q=2,C=1,c=2,r=2,i=10703913,p=1;iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAYAAACp8Z5+AAAAT0lEQVR4AQFEALv/AAAAgP88AID/eACA/7QAgP8AADyA/zw8gP94PID/tDyA/wAAeID/PHiA/3h4gP+0eID/AAC0gP88tID/eLSA/7S0gP85yCMxddvVaAAAAABJRU5ErkJggg==\u{1b}\\\u{1b}[1B"

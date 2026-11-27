@@ -1,0 +1,12 @@
+# openai/gpt-6.1-terra default
+POST /openai/responses
+{"include":["reasoning.encrypted_content"],"input":[{"content":[{"text":"hi","type":"input_text"}],"role":"user"}],"instructions":"S","max_output_tokens":128000,"model":"gpt-6.1-terra","parallel_tool_calls":true,"prompt_cache_key":"sess-golden","reasoning":{"effort":"high","summary":"auto"},"store":false,"stream":true,"text":{"verbosity":"medium"},"tool_choice":"auto"}
+
+# anthropic/claude-sonnet-4-5 request medium 3500
+POST /anthropic/v1/messages
+{"max_tokens":3500,"messages":[{"content":[{"cache_control":{"type":"ephemeral"},"text":"hi","type":"text"}],"role":"user"}],"model":"claude-sonnet-4-5","stream":true,"system":[{"cache_control":{"type":"ephemeral"},"text":"S","type":"text"}],"thinking":{"budget_tokens":3000,"display":"summarized","type":"enabled"}}
+
+# anthropic/claude-sonnet-4-5 session off
+POST /anthropic/v1/messages
+{"max_tokens":64000,"messages":[{"content":[{"cache_control":{"type":"ephemeral"},"text":"hi","type":"text"}],"role":"user"}],"model":"claude-sonnet-4-5","stream":true,"system":[{"cache_control":{"type":"ephemeral"},"text":"S","type":"text"}]}
+

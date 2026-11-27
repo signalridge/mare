@@ -1,0 +1,8 @@
+---
+source: crates/mare-cli/tests/suite/render.rs
+expression: "render(& env, 60, \"\",\nr#\"ui.Diff({ path = \"src/a.rs\", old = \"let x = 1;\\nlet y = 2;\\n\", new = \"let x = 10;\\nlet y = 2;\\n\" })\"#).await"
+---
++1 −1
+1 - let x = 1;
+1 + let x = 10;
+2   let y = 2;

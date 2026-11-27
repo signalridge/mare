@@ -1,0 +1,6 @@
+---
+source: crates/mare-cli/tests/suite/render.rs
+assertion_line: 35
+expression: "render(& env, 60, \"\",\nr#\"ui.UserMessage:render(\"fix the failing test in src/lib.rs\")\"#).await"
+---
+❯ fix the failing test in src/lib.rs

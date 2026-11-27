@@ -1,0 +1,63 @@
+event: response.created
+data: {"response":{"id":"rot-resp-0","model":"gpt-5.5","object":"response","status":"in_progress","output":[]},"sequence_number":0,"type":"response.created"}
+
+event: response.in_progress
+data: {"response":{"id":"rot-resp-1","model":"gpt-5.5","object":"response","status":"in_progress","output":[]},"sequence_number":1,"type":"response.in_progress"}
+
+event: response.output_item.added
+data: {"item":{"content":[],"encrypted_content":"enc-rot-0","id":"rot-rs-added","summary":[],"type":"reasoning"},"output_index":0,"sequence_number":2,"type":"response.output_item.added"}
+
+event: response.output_item.done
+data: {"item":{"content":[],"encrypted_content":"enc-rot-1","id":"rot-rs-done","summary":[],"type":"reasoning"},"output_index":0,"sequence_number":3,"type":"response.output_item.done"}
+
+event: response.output_item.added
+data: {"item":{"id":"rot-ws-0","status":"in_progress","type":"web_search_call"},"output_index":1,"sequence_number":4,"type":"response.output_item.added"}
+
+event: response.web_search_call.in_progress
+data: {"item_id":"rot-ws-1","output_index":1,"sequence_number":5,"type":"response.web_search_call.in_progress"}
+
+event: response.web_search_call.searching
+data: {"item_id":"rot-ws-2","output_index":1,"sequence_number":6,"type":"response.web_search_call.searching"}
+
+event: response.web_search_call.completed
+data: {"item_id":"rot-ws-3","output_index":1,"sequence_number":7,"type":"response.web_search_call.completed"}
+
+event: response.output_item.done
+data: {"item":{"action":{"queries":["latest release"],"query":"latest release","type":"search"},"id":"rot-ws-4","status":"completed","type":"web_search_call"},"output_index":1,"sequence_number":8,"type":"response.output_item.done"}
+
+event: response.output_item.added
+data: {"item":{"content":[],"id":"rot-msg-0","phase":"commentary","role":"assistant","status":"in_progress","type":"message"},"output_index":2,"sequence_number":9,"type":"response.output_item.added"}
+
+event: response.content_part.added
+data: {"content_index":0,"item_id":"rot-msg-1","output_index":2,"part":{"annotations":[],"logprobs":[],"text":"","type":"output_text"},"sequence_number":10,"type":"response.content_part.added"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":"Checking ","item_id":"rot-msg-2","logprobs":[],"output_index":2,"sequence_number":11,"type":"response.output_text.delta"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":"local version.","item_id":"rot-msg-3","logprobs":[],"output_index":2,"sequence_number":12,"type":"response.output_text.delta"}
+
+event: response.output_text.done
+data: {"content_index":0,"item_id":"rot-msg-4","logprobs":[],"output_index":2,"sequence_number":13,"text":"Checking local version.","type":"response.output_text.done"}
+
+event: response.content_part.done
+data: {"content_index":0,"item_id":"rot-msg-5","output_index":2,"part":{"annotations":[],"logprobs":[],"text":"Checking local version.","type":"output_text"},"sequence_number":14,"type":"response.content_part.done"}
+
+event: response.output_item.done
+data: {"item":{"content":[{"annotations":[],"logprobs":[],"text":"Checking local version.","type":"output_text"}],"id":"rot-msg-6","phase":"commentary","role":"assistant","status":"completed","type":"message"},"output_index":2,"sequence_number":15,"type":"response.output_item.done"}
+
+event: response.output_item.added
+data: {"item":{"arguments":"","call_id":"call_syn_exec_0","id":"rot-fc-0","name":"exec_command","status":"in_progress","type":"function_call"},"output_index":3,"sequence_number":16,"type":"response.output_item.added"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"{\"cmd\":\"echo ok\"}","item_id":"rot-fc-1","output_index":3,"sequence_number":17,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.done
+data: {"arguments":"{\"cmd\":\"echo ok\"}","item_id":"rot-fc-2","output_index":3,"sequence_number":18,"type":"response.function_call_arguments.done"}
+
+event: response.output_item.done
+data: {"item":{"arguments":"{\"cmd\":\"echo ok\"}","call_id":"call_syn_exec_0","id":"rot-fc-3","name":"exec_command","status":"completed","type":"function_call"},"output_index":3,"sequence_number":19,"type":"response.output_item.done"}
+
+event: response.completed
+data: {"response":{"id":"rot-resp-2","model":"gpt-5.5","object":"response","output":[{"content":[],"encrypted_content":"enc-rot-2","id":"rot-rs-final","summary":[],"type":"reasoning"},{"action":{"queries":["latest release"],"query":"latest release","type":"search"},"id":"rot-ws-final","status":"completed","type":"web_search_call"},{"content":[{"annotations":[],"logprobs":[],"text":"Checking local version.","type":"output_text"}],"id":"rot-msg-final","phase":"commentary","role":"assistant","status":"completed","type":"message"},{"arguments":"{\"cmd\":\"echo ok\"}","call_id":"call_syn_exec_0","id":"rot-fc-final","name":"exec_command","status":"completed","type":"function_call"}],"status":"completed","usage":{"input_tokens":8997,"input_tokens_details":{"cache_write_tokens":0,"cached_tokens":3712},"output_tokens":107,"output_tokens_details":{"reasoning_tokens":41},"total_tokens":9104}},"sequence_number":20,"type":"response.completed"}
+

@@ -1,0 +1,122 @@
+---
+source: crates/mare-tui/src/markdown.rs
+expression: "describe(&render_markdown(ELEMENTS, 60, &flavor(true)))"
+---
+|Heading one|
+  ⟶ "Heading one"=#a0a4ff,b
+||
+|Paragraph with bold, italic, 斜体中文, struck and  inline|
+  ⟶ "bold"=b "italic"=i "struck"=#8f91b1,s " inline"=#ffa38f,bg#181825
+|code .|
+  ⟶ "code "=#ffa38f,bg#181825
+||
+|Heading two|
+  ⟶ "Heading two"=#a0a4ff,b
+||
+|Heading three|
+  ⟶ "Heading three"=#cdd6f4,b
+||
+|Heading four|
+  ⟶ "Heading four"=#b2b4d4,b
+||
+|• level one|
+  ⟶ "• "=#a0a4ff
+|  ◦ level two|
+  ⟶ "◦ "=#a0a4ff
+|    ▪ level three|
+  ⟶ "▪ "=#a0a4ff
+|• loose? no|
+  ⟶ "• "=#a0a4ff
+||
+| 1. first|
+  ⟶ " 1. "=#a0a4ff
+| 2. second|
+  ⟶ " 2. "=#a0a4ff
+| 3. third|
+  ⟶ " 3. "=#a0a4ff
+| 4. fourth|
+  ⟶ " 4. "=#a0a4ff
+| 5. fifth|
+  ⟶ " 5. "=#a0a4ff
+| 6. sixth|
+  ⟶ " 6. "=#a0a4ff
+| 7. seventh|
+  ⟶ " 7. "=#a0a4ff
+| 8. eighth|
+  ⟶ " 8. "=#a0a4ff
+| 9. ninth|
+  ⟶ " 9. "=#a0a4ff
+|10. tenth|
+  ⟶ "10. "=#a0a4ff
+||
+|[✓] done|
+  ⟶ "[✓] "=#9cd8b0
+|[ ] todo|
+  ⟶ "[ ] "=#8f91b1
+||
+|▎ a quote|
+  ⟶ "▎ "=#707199 "a quote"=#b2b4d4
+|▎|
+  ⟶ "▎"=#707199
+|▎ ▎ nested|
+  ⟶ "▎ "=#707199 "▎ "=#707199 "nested"=#b2b4d4
+||
+|▎ ⓘ Note|
+  ⟶ "▎ "=#85c1f5 "ⓘ Note"=#85c1f5,b
+|▎ note text|
+  ⟶ "▎ "=#85c1f5 "note text"=#b2b4d4
+||
+|▎ ✓ Tip|
+  ⟶ "▎ "=#9cd8b0 "✓ Tip"=#9cd8b0,b
+|▎ tip text|
+  ⟶ "▎ "=#9cd8b0 "tip text"=#b2b4d4
+||
+|▎ ! Important|
+  ⟶ "▎ "=#a0a4ff "! Important"=#a0a4ff,b
+|▎ important text|
+  ⟶ "▎ "=#a0a4ff "important text"=#b2b4d4
+||
+|▎ ⚠ Warning|
+  ⟶ "▎ "=#f0d38f "⚠ Warning"=#f0d38f,b
+|▎ warning text|
+  ⟶ "▎ "=#f0d38f "warning text"=#b2b4d4
+||
+|▎ ✕ Caution|
+  ⟶ "▎ "=#f57fa0 "✕ Caution"=#f57fa0,b
+|▎ caution text|
+  ⟶ "▎ "=#f57fa0 "caution text"=#b2b4d4
+||
+|Name  Count  Note|
+  ⟶ "Name"=b "Count"=b "Note"=b
+|━━━━━━━━━━━━━━━━━|
+  ⟶ "━━━━━━━━━━━━━━━━━"=#707199
+|a         1   ok|
+|bb       22  fine|
+||
+|────────────────────────────────────────────────────────────|
+  ⟶ "────────────────────────────────────────────────────────────"=#707199
+||
+|A link (https://example.com), a same (https://same.test)|
+  ⟶ "link"=#85c1f5,u " (https://example.com)"=#8f91b1 "same"=#85c1f5,u " (https://same.test)"=#8f91b1
+|link written as https://same.test, and a file.|
+  ⟶ "https://same.test"=#85c1f5,u "file"=#ffa38f,bg#181825
+||
+|[image: remote]|
+  ⟶ "[image: remote]"=#8f91b1
+||
+|Footnote[1] here. <span>inline html</span>|
+  ⟶ "[1]"=#8f91b1 "<span>"=#8f91b1 "</span>"=#8f91b1
+||
+|▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄|
+  ⟶ "▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄"=#181825
+| fn main() {                                           rust |
+  ⟶ " "=bg#181825 "fn"=#b48ead,bg#181825 " "=#c0c5ce,bg#181825 "main"=#8fa1b3,bg#181825 "() {"=#c0c5ce,bg#181825 " "=bg#181825 "                                          "=bg#181825 "rust "=#8f91b1,bg#181825 fill=#181825
+|     println!("hi"); |
+  ⟶ " "=bg#181825 "    println!(\""=#c0c5ce,bg#181825 "hi"=#a3be8c,bg#181825 "\");"=#c0c5ce,bg#181825 " "=bg#181825 fill=#181825
+| } |
+  ⟶ " "=bg#181825 "}"=#c0c5ce,bg#181825 " "=bg#181825 fill=#181825
+|▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀|
+  ⟶ "▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀"=#181825
+||
+|[1] the footnote.|
+  ⟶ "[1] "=#8f91b1 "the footnote."=#8f91b1
