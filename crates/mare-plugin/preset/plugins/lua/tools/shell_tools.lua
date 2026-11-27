@@ -27,13 +27,16 @@ return function(D)
 		local cwd = (type(call_cwd) == "string" and call_cwd ~= "") and call_cwd or resolve_workdir(a)
 		local items = {}
 		if type(cwd) == "string" and cwd ~= "" then
-			items[#items + 1] = ui.Paragraph(ui.Line({
-				ui.Span("cwd: "):hl("MareMuted"),
-				ui.Span(cwd):hl("MareTitle"),
-			}))
+			items[#items + 1] = ui.Paragraph(
+				ui.Line({
+					ui.Span("cwd: "):hl("MareMuted"),
+					ui.Span(cwd):hl("MareTitle"),
+				}),
+				{ hard_wrap = true }
+			)
 		end
 		for _, line in ipairs(mare.text.split_lines(cmd)) do
-			items[#items + 1] = ui.Paragraph(ui.Line({ ui.Span(line):hl("MareText") }))
+			items[#items + 1] = ui.Paragraph(ui.Line({ ui.Span(line):hl("MareText") }), { hard_wrap = true })
 		end
 		return #items > 0 and ui.Lines(items) or nil
 	end

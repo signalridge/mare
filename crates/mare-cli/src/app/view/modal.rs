@@ -185,6 +185,7 @@ impl App {
                 tab,
                 body_scroll_max,
                 filter_cache,
+                approval,
                 ..
             }) => {
                 let c = crate::app::input::select_chain(*searching, *vim);
@@ -212,7 +213,9 @@ impl App {
                 }
                 if filter_cache.get(items, *tab, filter).get(*selected).is_some_and(|&i| items[i].preview.is_some()) {
                     push(&mut h, self.modal_hint_entry(&["select.preview_up", "select.preview_down"], c, "preview"));
-                    push(&mut h, self.modal_hint_entry(&["select.toggle_preview"], c, "toggle preview"));
+                    if !*approval {
+                        push(&mut h, self.modal_hint_entry(&["select.toggle_preview"], c, "toggle preview"));
+                    }
                 }
                 if body_scroll_max.is_some_and(|m| m > 0) {
                     push(&mut h, self.modal_hint_entry(&["select.body_up", "select.body_down"], c, "scroll"));
@@ -541,10 +544,11 @@ impl App {
                 preview_hidden,
                 multi,
                 filter_cache,
+                approval,
                 ..
             }) => {
                 let visible = filter_cache.get(items, *tab, filter);
-                let preview = (!*preview_hidden)
+                let preview = (*approval || !*preview_hidden)
                     .then(|| visible.get(*selected).and_then(|&i| items[i].preview.as_ref()))
                     .flatten();
                 let wide = w >= 84;
@@ -570,7 +574,9 @@ impl App {
                 }
                 let search_rows = usize::from(*searching || !filter.is_empty());
                 let min_list_rows = visible.len().clamp(1, 6);
-                let head_budget = max_h.saturating_sub(2 + search_rows + min_list_rows).max(1);
+                let reserved_pv_h =
+                    if *approval && preview.is_some() && !wide && max_h >= 10 { (max_h / 3).clamp(4, 10) } else { 0 };
+                let head_budget = max_h.saturating_sub(2 + search_rows + min_list_rows + reserved_pv_h).max(1);
                 body_scroll_max = head.len().saturating_sub(head_budget);
                 let body_sc = (*body_scroll).min(body_scroll_max);
                 let head_total = head.len();

@@ -1490,7 +1490,6 @@ fn acp_permission_request_forwards_detail_and_session_grant_resets_on_new_sessio
                 ctx.tools:register("unconfined_sh", {
                     description = "unconfined command test tool",
                     side_effect = "external",
-                    command_tool = true,
                     unconfined = true,
                     parameters = {
                         type = "object",
@@ -1542,12 +1541,12 @@ fn acp_permission_request_forwards_detail_and_session_grant_resets_on_new_sessio
         p["options"].as_array().unwrap().iter().find(|o| o["optionId"] == "allow-always").expect("allow-always option");
     assert_eq!(always["name"], "Allow for this session", "allow-always label mismatch: {p}");
     assert_eq!(always["kind"], "allow_always", "allow-always kind must stay unchanged: {p}");
-    let tc_str = p["toolCall"].to_string();
-    assert!(tc_str.contains("ACP_TAIL_MARKER"), "ACP toolCall must include full command: {p}");
-    assert!(tc_str.contains("Working directory:"), "ACP toolCall must include cwd: {p}");
-    assert!(tc_str.contains("Reason:"), "ACP toolCall must include reason: {p}");
+    let content_str = p["toolCall"]["content"].to_string();
+    assert!(content_str.contains("ACP_TAIL_MARKER"), "ACP toolCall.content must include full command: {p}");
+    assert!(content_str.contains("Working directory:"), "ACP toolCall.content must include cwd: {p}");
+    assert!(content_str.contains("Reason:"), "ACP toolCall.content must include reason: {p}");
     assert!(
-        tc_str.contains("Runs outside the local sandbox") && p["toolCall"]["_meta"]["unconfined"] == json!(true),
+        content_str.contains("Runs outside the local sandbox") && p["toolCall"]["_meta"]["unconfined"] == json!(true),
         "ACP toolCall must include outside-sandbox marker: {p}"
     );
 
