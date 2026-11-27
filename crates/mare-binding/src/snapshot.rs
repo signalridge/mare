@@ -34,6 +34,8 @@ struct Journal {
     dir: PathBuf,
     cap: u64,
     turn: Option<String>,
+    /// whether a shell command has already been recorded for the active turn
+    shell: bool,
     /// paths already captured in the current turn (only the first touch matters)
     seen: HashSet<PathBuf>,
     /// total size of `blobs/`, counted once and then kept up to date (not rescanned per capture)
@@ -49,7 +51,7 @@ impl Journal {
                 let _ = std::fs::remove_file(e.path());
             }
         }
-        Self { dir, cap, turn: None, seen: HashSet::new(), blob_bytes: None }
+        Self { dir, cap, turn: None, shell: false, seen: HashSet::new(), blob_bytes: None }
     }
 }
 
@@ -84,9 +86,24 @@ impl SnapshotJournal {
         let mut g = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let Some(j) = g.as_mut() else { return Ok(false) };
         j.turn = Some(id.clone());
+        j.shell = false;
         j.seen.clear();
         append(&j.dir, &json!({ "turn": id }))?;
         Ok(true)
+    }
+
+    /// Record that the active turn ran a shell command (whose file changes cannot be snapshotted).
+    pub fn mark_shell(&self) {
+        let mut g = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(j) = g.as_mut() else { return };
+        let Some(turn) = j.turn.clone() else { return };
+        if j.shell {
+            return;
+        }
+        j.shell = true;
+        if let Err(e) = append(&j.dir, &json!({ "turn": turn, "shell": true })) {
+            tracing::warn!("snapshot journal: shell record not written: {e}");
+        }
     }
 
     fn dir(&self) -> Option<PathBuf> {
@@ -335,20 +352,30 @@ fn turn_order(idx: &[J]) -> Vec<String> {
     order
 }
 
-/// Per turn (oldest first): `{turn, files = {{path, before, missing, after}}}` with the file's
-/// state before and after that turn.
-fn turns(dir: &Path) -> Vec<(String, Vec<(String, J)>)> {
+struct TurnRecord {
+    turn: String,
+    shell: bool,
+    files: Vec<(String, J)>,
+}
+
+/// Per turn (oldest first): each turn's `shell` flag and every file's state before and after that turn.
+fn turns(dir: &Path) -> Vec<TurnRecord> {
     let idx = read_index(dir);
     let order = turn_order(&idx);
-    let mut out: Vec<(String, Vec<(String, J)>)> = order.iter().map(|t| (t.clone(), vec![])).collect();
+    let mut out: Vec<TurnRecord> =
+        order.iter().map(|t| TurnRecord { turn: t.clone(), shell: false, files: vec![] }).collect();
     // turn -> slot, (turn, path) -> file: one pass, no linear searches
     let slot_of: std::collections::HashMap<String, usize> =
         order.iter().cloned().enumerate().map(|(i, t)| (t, i)).collect();
     let mut file_of: std::collections::HashMap<(usize, String), usize> = Default::default();
     for r in &idx {
-        let (Some(t), Some(p)) = (r["turn"].as_str(), r["path"].as_str()) else { continue };
+        let Some(t) = r["turn"].as_str() else { continue };
         let Some(&si) = slot_of.get(t) else { continue };
-        let files = &mut out[si].1;
+        if r.get("shell").and_then(J::as_bool) == Some(true) {
+            out[si].shell = true;
+        }
+        let Some(p) = r["path"].as_str() else { continue };
+        let files = &mut out[si].files;
         let fi = *file_of.entry((si, p.to_string())).or_insert_with(|| {
             files.push((p.to_string(), json!({})));
             files.len() - 1
@@ -385,13 +412,13 @@ struct Outcome {
 /// left alone. Paths that are links now are refused.
 fn restore(dir: &Path, from: &str, force: bool) -> Result<Outcome, String> {
     let all = turns(dir);
-    let Some(start) = all.iter().position(|(t, _)| t == from) else {
+    let Some(start) = all.iter().position(|t| t.turn == from) else {
         return Err(format!("no snapshots for turn {from}"));
     };
     // earliest "before" per path (from `start` on) and the latest "after" written by mare
     let mut plan: BTreeMap<String, (J, bool, Option<J>, Option<u32>)> = BTreeMap::new();
-    for (_, files) in &all[start..] {
-        for (p, e) in files {
+    for t in &all[start..] {
+        for (p, e) in &t.files {
             let slot = plan.entry(p.clone()).or_insert_with(|| {
                 (
                     e.get("before").cloned().unwrap_or(J::Null),
@@ -608,15 +635,16 @@ pub fn install(lua: &Lua, mare: &Table) -> mlua::Result<()> {
             let Some(dir) = handle(lua).dir() else { return Ok(Value::Nil) };
             let list: Vec<J> = turns(&dir)
                 .into_iter()
-                .map(|(t, files)| {
-                    let files: Vec<J> = files
+                .map(|t| {
+                    let files: Vec<J> = t
+                        .files
                         .into_iter()
                         .map(|(p, mut e)| {
                             e["path"] = J::String(p);
                             e
                         })
                         .collect();
-                    json!({ "turn": t, "files": files })
+                    json!({ "turn": t.turn, "shell": t.shell, "files": files })
                 })
                 .collect();
             mare_shared::lua::json_to_lua(lua, &J::Array(list))
@@ -879,12 +907,14 @@ mod tests {
         let t1 = turns(&j1_dir);
         let t2 = turns(&j2_dir);
         assert_eq!(t1.len(), 1);
-        assert_eq!(t1[0].0, "t-a");
-        assert_eq!(t1[0].1.len(), 1);
-        assert_eq!(t1[0].1[0].0, f1.to_string_lossy());
+        assert_eq!(t1[0].turn, "t-a");
+        assert!(!t1[0].shell);
+        assert_eq!(t1[0].files.len(), 1);
+        assert_eq!(t1[0].files[0].0, f1.to_string_lossy());
         assert_eq!(t2.len(), 1);
-        assert_eq!(t2[0].0, "t-b");
-        assert_eq!(t2[0].1.len(), 1);
-        assert_eq!(t2[0].1[0].0, f2.to_string_lossy());
+        assert_eq!(t2[0].turn, "t-b");
+        assert!(!t2[0].shell);
+        assert_eq!(t2[0].files.len(), 1);
+        assert_eq!(t2[0].files[0].0, f2.to_string_lossy());
     }
 }

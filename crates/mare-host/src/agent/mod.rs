@@ -414,6 +414,7 @@ fn start_with_spec(lua: &Lua, mut spec: serde_json::Value) -> Result<(AgentHandl
     }
     let shares_rules = crate::approvals::shared_rule::shares_parent_rules(&spec);
     let parent_net_approver = mare_binding::netauth::approver(lua);
+    let parent_snapshot = mare_binding::snapshot::handle(lua);
     if spec.get("agent_label").is_none()
         && let Some(l) = origin.get("label").cloned()
     {
@@ -461,6 +462,7 @@ fn start_with_spec(lua: &Lua, mut spec: serde_json::Value) -> Result<(AgentHandl
         scope: scope.clone(),
         reservation,
         parent_net_approver,
+        parent_snapshot: Some(parent_snapshot),
         transcript,
         origin,
         shares_rules,

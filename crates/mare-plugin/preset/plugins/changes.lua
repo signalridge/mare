@@ -23,6 +23,11 @@ return {
 		},
 	},
 	apply = function(ctx, cfg)
+		-- Subagents share the parent session's SnapshotJournal; never reconfigure, rotate turns,
+		-- or clear it from a child VM.
+		if mare.mode == "child" then
+			return
+		end
 		-- the optional services, read on each call
 		local svc = require("mare_lib").followers(ctx, { "session", "tools", "agent" })
 		local turns_meta = {} -- turn id -> {text, shell = bool, n}
@@ -144,7 +149,7 @@ return {
 					out[#out + 1] = {
 						turn = t.turn,
 						label = m.text and mare.text.trunc_width((m.text:gsub("%s+", " ")), 60) or ("turn " .. t.turn),
-						shell = m.shell or false,
+						shell = m.shell or t.shell or false,
 						files = t.files,
 					}
 				end

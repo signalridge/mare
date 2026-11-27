@@ -85,9 +85,9 @@ Picker keys: `Ctrl+D` delete, `Ctrl+R` rename, `Ctrl+S` sort by created or updat
 `/undo` and `/rewind` are different.
 
 - `/undo` rewinds the conversation to before a prompt and puts the prompt text back in the input. Files on disk stay as they are. `/undo` opens a picker; `/undo 2` goes back two prompts. Only prompts since the last compaction can be undone. Pressing `Esc` twice on an empty idle input opens the same picker. The undone messages stay in the file on their own branch (see `/tree`).
-- `/rewind` restores files. mare saves the original of a file before any tool writes, removes or renames it, and `/rewind [turn]` puts those files back to how they were before a turn. You choose between restoring files only, restoring files and the conversation, or summarizing the conversation from that turn on.
+- `/rewind` restores files. mare saves the original of a file before any tool writes, removes or renames it — including file-tool edits made by subagents, which are recorded under the parent turn that spawned them — and `/rewind [turn]` puts those files back to how they were before a turn. You choose between restoring files only, restoring files and the conversation, or summarizing the conversation from that turn on.
 
-`/rewind` cannot undo changes made by shell commands, and the turn says so. If a file changed outside mare after the turn, it is listed and restored only after you confirm. Backups are capped (`changes` plugin option `cap_bytes`, 64 MiB by default); when the oldest are trimmed they are reported as missing. `/diff` shows the files changed in each turn.
+`/rewind` cannot undo changes made by shell commands (including shell commands run by subagents), and the turn says so. If a file changed outside mare after the turn, it is listed and restored only after you confirm. Backups are capped (`changes` plugin option `cap_bytes`, 64 MiB by default); when the oldest are trimmed they are reported as missing. `/diff` shows the files changed in each turn, including subagent edits.
 
 ### Compaction
 
