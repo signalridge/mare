@@ -209,7 +209,7 @@ return function(D)
 		end
 		-- `like` decides only the approval behaviour; the sandbox is always the preset's own
 		-- effective policy (the session's current one) — never switched off by a vote
-		local preset = P.approval_like or LIKE[P.preset] or P.preset
+		local preset = LIKE[P.preset] or P.preset
 		-- every automatic allow (full-access, a matching rule, this session's approvals) goes
 		-- into /permission log with its basis
 		local function auto_allow(basis, sandbox, extra)

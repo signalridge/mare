@@ -321,23 +321,20 @@ return function(D)
 		local pol = sandbox_current()
 		local level = pol and pol.level or "danger-full-access"
 		if LEVEL[name] == level then
-			return name, nil
+			return name
 		end
 		if level == "read-only" then
-			return "read-only", nil
-		elseif
-			level == "workspace-write"
-			and RANK[name]
-			and RANK[name] > RANK["auto"]
-			and approval_rank_of(name) >= approval_rank_of("auto")
-		then
-			return "auto", nil
+			return "read-only"
+		elseif level == "workspace-write" and RANK[name] and RANK[name] > RANK["auto"] then
+			-- Keep the original preset name when its approval behavior is stricter than `auto`
+			-- (e.g. `like = "read-only"`): `base_spec()` still enforces the clamped sandbox while
+			-- `LIKE[P.preset]` preserves the stricter approval rule.
+			if approval_rank_of(name) < approval_rank_of("auto") then
+				return name
+			end
+			return "auto"
 		end
-		-- Preserve a stricter approval behavior (e.g. `approval-read`: sandbox `danger-full-access`,
-		-- approval `like = "read-only"`) when the sandbox level is clamped to `custom`.
-		local like = LIKE[name] or name
-		local preserve_like = approval_rank_of(name) < approval_rank_of("full-access") and like or nil
-		return "custom", preserve_like
+		return "custom"
 	end
 
 	--- switch preset. opts: {source = "user"|"cli"|"rpc"|"resume"|"init", confirm = bool,
@@ -400,9 +397,8 @@ return function(D)
 		-- If the host's inherited sandbox ceiling clamped the applied policy below `name`
 		-- (for example when a parent tightened mid-startup), keep `P.preset` synchronized
 		-- with the enforced sandbox level without relaxing the preset's approval semantics.
-		local effective, approval_like = effective_preset_for_sandbox(name)
+		local effective = effective_preset_for_sandbox(name)
 		P.preset = effective
-		P.approval_like = approval_like
 		D.reset_session_grants()
 		if opts.source ~= "resume" then
 			record("preset", { preset = effective, from = prev, source = opts.source })

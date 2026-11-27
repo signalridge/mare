@@ -339,11 +339,7 @@ return function(D)
 		else
 			P.streak = { key = kind, n = 1 }
 		end
-		if
-			P.streak.n >= cfg.suggest_after
-			and (P.approval_like or LIKE[P.preset]) ~= "full-access"
-			and mare.ui.connected()
-		then
+		if P.streak.n >= cfg.suggest_after and LIKE[P.preset] ~= "full-access" and mare.ui.connected() then
 			P.streak.n = 0
 			local SNOOZE_KEY = "permission_suggest_snooze_until"
 			local SNOOZE_SECONDS = 7 * 86400
@@ -352,7 +348,7 @@ return function(D)
 			if snooze_until > os.time() or P.suggesting_preset then
 				return
 			end
-			local target = (P.approval_like or LIKE[P.preset]) == "read-only" and "auto" or "full-access"
+			local target = LIKE[P.preset] == "read-only" and "auto" or "full-access"
 			local ceiling = child and mare.args and mare.args.permission_ceiling
 			if not mare.trusted or (ceiling and D.presets.exceeds_ceiling(target, ceiling)) then
 				return
@@ -402,7 +398,7 @@ return function(D)
 		if type(key) == "string" then
 			pending[key] = nil
 		end
-		if type(res) ~= "table" or (P.approval_like or LIKE[P.preset]) == "full-access" then
+		if type(res) ~= "table" or LIKE[P.preset] == "full-access" then
 			return res
 		end
 		local evidence = res.sandbox_denials or (res.details and res.details.sandbox_denials)

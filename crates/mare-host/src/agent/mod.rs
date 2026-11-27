@@ -371,7 +371,7 @@ fn start_with_spec(lua: &Lua, mut spec: serde_json::Value) -> Result<(AgentHandl
     })?;
     let cwd = resolve_cwd(lua, &spec);
     let inherits_preset = inherits_parent_preset(&spec);
-    let (parent_policy, config, carried) = apply_inheritance(lua, &mut spec, &cwd)?;
+    let (parent_policy, config, carried) = apply_inheritance(lua, &mut spec)?;
     let history_model = validate_and_resolve_history_model(lua, &spec)?;
 
     let (ev_tx, ev_rx) = mpsc::channel(mare_kernel::SESSION_LOG_CAPACITY);

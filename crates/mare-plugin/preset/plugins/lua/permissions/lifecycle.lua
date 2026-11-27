@@ -74,11 +74,10 @@ return function(D)
 		end
 		P.sandbox_gen = gen
 		D.reset_session_grants()
-		if P.preset ~= "custom" or P.approval_like ~= nil then
-			local next_preset, approval_like = Pr.effective_preset_for_sandbox(P.approval_like or P.preset)
-			if next_preset ~= P.preset or approval_like ~= P.approval_like then
+		if P.preset ~= "custom" then
+			local next_preset = Pr.effective_preset_for_sandbox(P.preset)
+			if next_preset ~= P.preset then
 				P.preset = next_preset
-				P.approval_like = approval_like
 				emit()
 			end
 		end
@@ -95,9 +94,7 @@ return function(D)
 		local pol = ev and ev.policy
 		local level = pol and pol.level or "danger-full-access"
 		if P.preset ~= "custom" and LEVEL[P.preset] ~= level then
-			local _, approval_like = Pr.effective_preset_for_sandbox(P.preset)
 			P.preset = "custom"
-			P.approval_like = approval_like
 			emit()
 		end
 	end)

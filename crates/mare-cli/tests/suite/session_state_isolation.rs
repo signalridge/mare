@@ -1233,12 +1233,12 @@ async fn clamping_custom_approval_read_preset_to_workspace_write_preserves_write
             "#,
         )
         .await;
-        assert_eq!(ext_preset, "custom", "must not display AUTO when approval-read is clamped");
+        assert_eq!(ext_preset, "approval-read", "must keep stricter preset name instead of demoting to auto");
         assert_eq!(ext_level, "workspace-write");
         assert_eq!(ext_vote, "ask", "clamped approval-read must still ask before workspace writes");
 
         // 2. Calling P:set("approval-read") under an already-installed workspace-write ceiling
-        // must also keep `custom` and preserve `ask` for workspace writes.
+        // must also preserve `approval-read` and `ask` for workspace writes.
         let (set_ret, set_preset, set_vote): (String, String, String) = eval(
             &h,
             r#"
@@ -1249,8 +1249,8 @@ async fn clamping_custom_approval_read_preset_to_workspace_write_preserves_write
             "#,
         )
         .await;
-        assert_eq!(set_ret, "custom");
-        assert_eq!(set_preset, "custom");
+        assert_eq!(set_ret, "approval-read");
+        assert_eq!(set_preset, "approval-read");
         assert_eq!(set_vote, "ask", "P:set(approval-read) under workspace-write ceiling must still ask on write");
         h.shutdown().await;
     })

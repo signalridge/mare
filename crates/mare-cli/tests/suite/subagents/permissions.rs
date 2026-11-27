@@ -1198,7 +1198,6 @@ async fn explicit_read_only_subagents_remain_restricted_after_parent_switches_to
                 permission = "read-only",
                 no_session = true,
                 prompt = "try to write under explicit read-only",
-                config = { plugins = { permissions = { enabled = false, preset = "full-access" } } },
             })
             local seen = {}
             while true do

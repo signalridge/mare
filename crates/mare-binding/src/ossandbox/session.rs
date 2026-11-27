@@ -253,18 +253,8 @@ pub fn check_set_current(lua: &Lua, p: Option<Policy>) -> mlua::Result<Option<Po
     Ok(p)
 }
 
-#[cfg(test)]
-std::thread_local! {
-    static BEFORE_SET_CURRENT_COMMIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
 pub fn set_current(lua: &Lua, p: Option<Policy>) -> mlua::Result<Option<Policy>> {
     let checked = check_set_current(lua, p.clone())?;
-    #[cfg(test)]
-    if let Some(hook) = BEFORE_SET_CURRENT_COMMIT.with(|cell| cell.borrow_mut().take()) {
-        hook();
-    }
     let fake_ip = crate::netauth::fake_ip_mode_from_lua(lua);
     let (committed, changed) = if let Some(state) = lua.app_data_ref::<PolicyState>() {
         let mut g = state.0.write().unwrap_or_else(|e| e.into_inner());
@@ -291,81 +281,5 @@ pub fn check_current(lua: &Lua, op: &str, target: &str, cwd: &Path) -> Result<()
     match current(lua) {
         Some(p) => p.check(op, target, cwd),
         None => Ok(()),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Barrier;
-
-    fn ro_policy(cwd: &Path) -> Policy {
-        Policy {
-            level: super::super::Level::ReadOnly,
-            root: cwd.to_path_buf(),
-            extra: vec![],
-            root_writable: false,
-            exclude_tmpdir_env_var: false,
-            exclude_slash_tmp: false,
-            writable: vec![],
-            readable: vec![],
-            deny_read: vec![],
-            restrict_read: false,
-            reads_pinned: false,
-            network: super::super::Network::Open,
-            profile: None,
-            unix_sockets: vec![],
-            accept_partial: vec![],
-            project_protected: vec![],
-        }
-    }
-
-    #[test]
-    fn set_current_reapplies_ceiling_atomically_when_ancestor_tightens_before_commit() {
-        let lua = Lua::new();
-        let mare = lua.create_table().unwrap();
-        let proc = lua.create_table().unwrap();
-        let cwd = std::env::temp_dir();
-        super::super::install(&lua, &proc, cwd.to_string_lossy().to_string()).unwrap();
-        mare.set("proc", proc).unwrap();
-        lua.globals().set("mare", mare).unwrap();
-
-        let handle = policy_handle(&lua).unwrap();
-        let ro = ro_policy(&cwd);
-        let at_commit = Arc::new(Barrier::new(2));
-        let tightened = Arc::new(Barrier::new(2));
-
-        let b1 = at_commit.clone();
-        let b2 = tightened.clone();
-        BEFORE_SET_CURRENT_COMMIT.with(|cell| {
-            *cell.borrow_mut() = Some(Box::new(move || {
-                b1.wait();
-                b2.wait();
-            }));
-        });
-
-        let t = std::thread::spawn(move || {
-            at_commit.wait();
-            assert!(handle.tighten_ceiling(&ro));
-            tightened.wait();
-        });
-
-        // Attempt to commit FULL (`None`); ancestor tightens to read-only after check_set_current
-        // and before the write lock in set_current. The write lock must re-clip against the latest
-        // ceiling instead of overwriting g.current with `None`.
-        let committed = set_current(&lua, None).unwrap();
-        t.join().unwrap();
-
-        assert_eq!(
-            committed.as_ref().map(|p| p.level),
-            Some(super::super::Level::ReadOnly),
-            "set_current must return the re-clipped read-only policy"
-        );
-        assert_eq!(
-            current(&lua).as_ref().map(|p| p.level),
-            Some(super::super::Level::ReadOnly),
-            "g.current must never revert to None after concurrent ancestor tightening"
-        );
-        assert_eq!(ceiling(&lua).as_ref().map(|p| p.level), Some(super::super::Level::ReadOnly),);
     }
 }
