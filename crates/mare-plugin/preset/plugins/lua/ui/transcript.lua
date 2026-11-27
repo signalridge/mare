@@ -785,6 +785,21 @@ return function(D)
 		end
 	end)
 
+	local function format_retry_delay(delay_ms)
+		local ms = tonumber(delay_ms)
+		if not ms or ms <= 0 then
+			return nil
+		end
+		if ms < 1000 then
+			local tenths = math.max(1, math.floor(ms / 100 + 0.5))
+			if tenths >= 10 then
+				return "1s"
+			end
+			return ("%.1fs"):format(tenths / 10)
+		end
+		return ("%ds"):format(math.max(1, math.floor(ms / 1000 + 0.5)))
+	end
+
 	on("step/completed", function(ev)
 		if not (type(ev) == "table" and ev.will_retry) then
 			return
@@ -812,12 +827,22 @@ return function(D)
 				pcall(U.remove, cur.reasoning.id)
 				cur.reasoning = nil
 			end
+			cur.out_chars = 0
 		end
+		local attempt = math.max(1, math.floor(tonumber(ev.attempt) or 1))
+		local max_attempts = tonumber(ev.max_attempts)
+		local count = (max_attempts and max_attempts >= attempt) and ("%d/%d"):format(attempt, math.floor(max_attempts))
+			or tostring(attempt)
+		local wait = format_retry_delay(ev.delay_ms)
+		local label = wait and ("Retrying (%s) in %s"):format(count, wait) or ("Retrying (%s)"):format(count)
 		local err_msg = (type(ev.error) == "table" and ev.error.message) or ev.error or ""
-		U.notify(
-			("Retrying (%d) in %.0fs: %s"):format(ev.attempt or 1, (ev.delay_ms or 0) / 1000, tostring(err_msg)),
-			"warning"
-		)
+		if err_msg ~= "" then
+			mare.log("warn", ("%s: %s"):format(label, tostring(err_msg)))
+		else
+			mare.log("warn", label)
+		end
+		cur.last_working_label = label
+		working(label)
 	end)
 	on("host/notice", function(ev)
 		U.notify(ev.text or tostring(ev), ev.level or "warning")
