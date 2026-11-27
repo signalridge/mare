@@ -208,32 +208,7 @@ return {
 				return raw_key or llm:api_key(name, envs)
 			end
 
-			local function custom_catalog_target(eff)
-				local headers = {}
-				for k, v in pairs(eff.headers or {}) do
-					headers[k] = v
-				end
-				local wire = {
-					provider = name,
-					method = "GET",
-					url = mare.http.build_url(anthropic_v1_url(live_base_url(eff), "models"), { limit = "1000" }),
-					headers = headers,
-				}
-				wire = ctx.bus:waterfall("provider/request", wire) or wire
-				local header_digests = {}
-				for k, v in pairs((type(wire) == "table" and wire.headers) or {}) do
-					if v ~= nil then
-						header_digests[string.lower(tostring(k))] = mare.crypto.sha256(tostring(v))
-					end
-				end
-				return {
-					url_digest = (type(wire) == "table" and wire.url) and mare.crypto.sha256(tostring(wire.url)) or nil,
-					headers = next(header_digests) and header_digests or nil,
-					proxy = type(wire) == "table" and wire.proxy or nil,
-				}
-			end
-
-			local function custom_endpoint(_req)
+			local function custom_endpoint(req)
 				local eff = live_entry()
 				local key = custom_api_key(eff)
 				if not key and not eff.no_key then
@@ -251,18 +226,26 @@ return {
 					merged_headers[k] = v
 				end
 				local base = live_base_url(eff)
+				local model = type(req) == "table" and req.model or nil
+				local replay_unsigned
+				if model and model.replay_unsigned_reasoning ~= nil then
+					replay_unsigned = model.replay_unsigned_reasoning
+				else
+					replay_unsigned = eff.replay_unsigned_reasoning == true
+				end
 				return {
 					provider = name,
 					label = eff.label or name,
 					dialect = eff.dialect,
 					base_url = base,
 					url = anthropic_v1_url(base, "messages"),
-					auth = "x-api-key",
+					auth = eff.auth or "x-api-key",
 					key = key,
 					headers = merged_headers,
 					drop_fields = eff.drop_fields,
 					transport = eff.transport,
-					endpoint_config = eff,
+					replay_unsigned_reasoning = replay_unsigned,
+					fine_grained_tool_streaming = eff.fine_grained_tool_streaming,
 				}
 			end
 
@@ -304,7 +287,13 @@ return {
 				errors = wire_errors,
 				params = param_rules,
 				catalog_target = entry.list_models ~= false and function()
-					return custom_catalog_target(live_entry())
+					local eff = live_entry()
+					return lib.catalog_target(
+						ctx.bus,
+						name,
+						mare.http.build_url(anthropic_v1_url(live_base_url(eff), "models"), { limit = "1000" }),
+						eff.headers
+					)
 				end or nil,
 				catalog_scope = entry.list_models ~= false and function()
 					if live_entry().no_key then
@@ -323,13 +312,29 @@ return {
 						label = label,
 						url = anthropic_v1_url(live_base_url(eff), "models") .. "?limit=1000",
 						headers = headers,
-						auth = "x-api-key",
+						auth = eff.auth or "x-api-key",
 						key = for_fetch and custom_api_key(eff) or nil,
 						no_key = eff.no_key,
 						decode = decode_anthropic_models(label),
 					}
 				end or nil,
 			}
+		end
+
+		-- Register generic Anthropic route parameter rules before `register_wire`, because
+		-- `register_wire` synchronously materializes configured data providers whose
+		-- provider-scoped rules must register later and take precedence.
+		for _, rule in
+			ipairs(
+				build_anthropic_param_rules(
+					nil,
+					cfg.reasoning_budgets or BUDGETS,
+					cfg.reasoning_display,
+					cfg.answer_headroom
+				)
+			)
+		do
+			llm:define_params(rule)
 		end
 
 		llm:register_wire({
@@ -353,6 +358,9 @@ return {
 			errors = wire_errors,
 			provider = anthropic_provider_factory,
 			provider_fields = {
+				auth = "string",
+				replay_unsigned_reasoning = "boolean",
+				fine_grained_tool_streaming = "boolean",
 				supports_long_cache_retention = "boolean",
 				reasoning_budgets = "table",
 				reasoning_display = "string",
@@ -391,25 +399,6 @@ return {
 
 		local function stream(req, sink)
 			return wire_stream(endpoint, req, sink)
-		end
-
-		-- the Anthropic route's effort mappings, today's
-		-- constants as data. Adaptive models: thinking.type adaptive + output_config.effort
-		-- (minimal → low, xhigh → max, any other level → high); off sends no thinking.
-		-- Budget models: thinking.type enabled + budget_tokens from `reasoning_budgets` (unknown
-		-- level → medium's), max_tokens raised to budget + answer_headroom when it doesn't exceed
-		-- the budget.
-		for _, rule in
-			ipairs(
-				build_anthropic_param_rules(
-					nil,
-					cfg.reasoning_budgets or BUDGETS,
-					cfg.reasoning_display,
-					cfg.answer_headroom
-				)
-			)
-		do
-			llm:define_params(rule)
 		end
 
 		local efforts = { "off", "low", "medium", "high", "xhigh" }

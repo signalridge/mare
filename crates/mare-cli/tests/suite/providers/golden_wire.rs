@@ -841,3 +841,282 @@ return (a1 ~= nil and a1.listed == true),
     })
     .await
 }
+
+/// Custom Anthropic data providers honor `auth = "bearer"` (on POST and catalog GET),
+/// `fine_grained_tool_streaming = false`, `replay_unsigned_reasoning` (with model-level explicit
+/// `false` override), and explicit `tool_update = "addition_only"` (`defer_loading` + beta).
+#[tokio::test]
+async fn custom_anthropic_bearer_unsigned_replay_and_explicit_addition_only() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        env.set_var("ANTHROPIC_API_KEY", "");
+        std::fs::write(env.cwd.join("note.txt"), "bearer note").unwrap();
+
+        let server = MockServer::start().await;
+        let base = &server.base;
+        let turn1_sse = concat!(
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_b1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-bearer\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"unsigned plan\"}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_b1\",\"name\":\"read\",\"input\":{}}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"note.txt\\\"}\"}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":8}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        );
+        let text_sse = |id: &str, text: &str| {
+            format!(
+                concat!(
+                    "event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\"id\":\"{id}\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-bearer\",\"content\":[],\"stop_reason\":null,\"usage\":{{\"input_tokens\":10,\"output_tokens\":1}}}}}}\n\n",
+                    "event: content_block_start\ndata: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{{\"type\":\"text\",\"text\":\"\"}}}}\n\n",
+                    "event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":\"{text}\"}}}}\n\n",
+                    "event: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":0}}\n\n",
+                    "event: message_delta\ndata: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\"}},\"usage\":{{\"output_tokens\":4}}}}\n\n",
+                    "event: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n",
+                ),
+                id = id,
+                text = text
+            )
+        };
+        server.route(
+            "/bearer-ant/v1/messages",
+            vec![
+                Resp::sse(turn1_sse),
+                Resp::sse(text_sse("msg_b2", "bearer-done")),
+                Resp::sse(text_sse("msg_b3", "no-replay-done")),
+            ],
+        );
+        server.route(
+            "/bearer-ant/v1/models",
+            vec![Resp::status(200, r#"{"data":[{"id":"claude-listed","display_name":"Bearer Listed"}]}"#)],
+        );
+
+        let plugin_dir = env.config_dir().join("plugins/deferred-probe");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("init.lua"),
+            r#"return {
+  name = "deferred-probe",
+  inject = { "tools" },
+  apply = function(ctx)
+    ctx.tools:register("probe_deferred", {
+      description = "Deferred probe tool",
+      exposure = "deferred",
+      side_effect = "read",
+      parameters = { type = "object", properties = {} },
+      execute = function() return { content = "ok" } end,
+    })
+  end,
+}"#,
+        )
+        .unwrap();
+
+        std::fs::write(
+            env.config_dir().join("init.lua"),
+            format!(
+                r#"
+mare.setup {{ model = "bearer-ant/claude-bearer" }}
+mare.provider("bearer-ant", {{
+  wire_api = "anthropic",
+  base_url = "{base}/bearer-ant",
+  auth = "bearer",
+  api_key = "test-bearer-tok",
+  replay_unsigned_reasoning = true,
+  fine_grained_tool_streaming = false,
+  tool_update = "addition_only",
+  models = {{
+    {{ model_id = "claude-bearer", context_window = 200000, max_output = 8192, reasoning = true }},
+    {{
+      model_id = "claude-no-replay",
+      context_window = 200000,
+      max_output = 8192,
+      reasoning = true,
+      replay_unsigned_reasoning = false,
+    }},
+  }},
+}})
+"#
+            ),
+        )
+        .unwrap();
+
+        let h = env.host().user_config(false).no_session().build().await;
+        global(&h, "LLM", h.service_table("llm").unwrap());
+
+        let res = h.prompt("Read note.txt.", json!({})).await.unwrap();
+        assert!(res["error"].is_null(), "bearer custom anthropic turn failed: {res}");
+        assert_eq!(res["text"], "bearer-done", "{res}");
+
+        let (listed_ok, no_replay_ok): (bool, bool) = eval(
+            &h,
+            r#"
+            LLM:refresh_models("bearer-ant")
+            local listed = LLM:resolve("bearer-ant/claude-listed")
+            local m = assert(LLM:resolve("bearer-ant/claude-no-replay"))
+            local out = LLM:stream({
+              model = m,
+              system = "S",
+              messages = {
+                { role = "user", content = { { type = "text", text = "hi" } } },
+                {
+                  role = "assistant",
+                  content = {
+                    { type = "reasoning", text = "should-not-replay" },
+                    { type = "tool_call", id = "toolu_nr", name = "read", arguments = { path = "note.txt" } },
+                  },
+                },
+                {
+                  role = "tool_result",
+                  tool_call_id = "toolu_nr",
+                  tool_name = "read",
+                  content = { { type = "text", text = "bearer note" } },
+                },
+              },
+            })
+            return (listed ~= nil and listed.name == "Bearer Listed"), (out.stop_reason == "stop")
+            "#,
+        )
+        .await;
+        assert!(listed_ok, "bearer catalog refresh must succeed");
+        assert!(no_replay_ok, "model-level replay_unsigned_reasoning=false stream must succeed");
+
+        h.shutdown().await;
+
+        let reqs = server.requests();
+        let posts: Vec<_> = reqs.iter().filter(|r| r.path == "/bearer-ant/v1/messages").collect();
+        assert_eq!(posts.len(), 3, "expected 2 agent turns + 1 model override stream: {reqs:#?}");
+        for r in &posts {
+            assert_eq!(r.header("authorization"), Some("Bearer test-bearer-tok"));
+            assert_eq!(r.header("x-api-key"), None, "auth=bearer must not send x-api-key");
+        }
+        let beta1 = posts[0].header("anthropic-beta").unwrap_or("");
+        assert!(
+            beta1.contains("advanced-tool-use-2025-11-20"),
+            "explicit tool_update=addition_only must enable advanced-tool-use beta: {beta1:?}"
+        );
+        assert!(
+            !beta1.contains("fine-grained-tool-streaming-2025-05-14"),
+            "fine_grained_tool_streaming=false must omit fine-grained-tool-streaming beta: {beta1:?}"
+        );
+        let tools1 = posts[0].json()["tools"].as_array().cloned().unwrap_or_default();
+        assert!(
+            tools1.iter().any(|t| t["name"] == "probe_deferred" && t["defer_loading"] == true),
+            "deferred tool must carry defer_loading=true: {tools1:?}"
+        );
+
+        let body2 = posts[1].json();
+        let has_replayed_thinking = body2["messages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|m| m["role"] == "assistant")
+            .flat_map(|m| m["content"].as_array().into_iter().flatten())
+            .any(|b| b["type"] == "thinking" && b["thinking"] == "unsigned plan");
+        assert!(has_replayed_thinking, "replay_unsigned_reasoning=true must replay unsigned thinking: {body2}");
+
+        let body3 = posts[2].json();
+        let leaked_thinking = body3["messages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|m| m["role"] == "assistant")
+            .flat_map(|m| m["content"].as_array().into_iter().flatten())
+            .any(|b| b["type"] == "thinking");
+        assert!(!leaked_thinking, "explicit model replay_unsigned_reasoning=false must override provider true: {body3}");
+
+        let models_req = reqs
+            .iter()
+            .find(|r| r.path.starts_with("/bearer-ant/v1/models"))
+            .expect("catalog GET must hit /bearer-ant/v1/models");
+        assert_eq!(models_req.header("authorization"), Some("Bearer test-bearer-tok"));
+        assert_eq!(models_req.header("x-api-key"), None, "auth=bearer catalog GET must not send x-api-key");
+    })
+    .await
+}
+
+/// Provider-level `reasoning_budgets` and `reasoning_display` configured in `init.lua` must win
+/// over the generic Anthropic route rules for both budget and adaptive models at startup.
+#[tokio::test]
+async fn custom_anthropic_init_provider_reasoning_budgets_and_display_win() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        env.set_var("ANTHROPIC_API_KEY", "");
+
+        let server = MockServer::start().await;
+        let base = &server.base;
+        let ok_sse = concat!(
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_r1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-budget\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        );
+        server.route("/tuned-ant/v1/messages", vec![Resp::sse(ok_sse), Resp::sse(ok_sse)]);
+
+        std::fs::create_dir_all(env.config_dir()).unwrap();
+        std::fs::write(
+            env.config_dir().join("init.lua"),
+            format!(
+                r#"
+mare.provider("tuned-ant", {{
+  wire_api = "anthropic",
+  base_url = "{base}/tuned-ant",
+  api_key = "test-tuned-key",
+  list_models = false,
+  reasoning_budgets = {{ medium = 3333 }},
+  reasoning_display = "omitted",
+  models = {{
+    {{ model_id = "claude-budget", context_window = 200000, max_output = 16000, reasoning = true, adaptive = false }},
+    {{ model_id = "claude-adaptive", context_window = 200000, max_output = 16000, reasoning = true, adaptive = true }},
+  }},
+}})
+"#
+            ),
+        )
+        .unwrap();
+
+        let h = env.host().user_config(false).no_session().build().await;
+        global(&h, "LLM", h.service_table("llm").unwrap());
+
+        let ok: bool = eval(
+            &h,
+            r#"
+            for _, ref in ipairs({ "tuned-ant/claude-budget", "tuned-ant/claude-adaptive" }) do
+              local m = assert(LLM:resolve(ref))
+              local res = LLM:stream({
+                model = m,
+                system = "S",
+                effort = "medium",
+                messages = { { role = "user", content = { { type = "text", text = "hi" } } } },
+              })
+              assert(res.stop_reason == "stop", "unexpected stop_reason for " .. ref)
+            end
+            return true
+            "#,
+        )
+        .await;
+        assert!(ok);
+        h.shutdown().await;
+
+        let reqs: Vec<_> = server.requests().into_iter().filter(|r| r.path == "/tuned-ant/v1/messages").collect();
+        assert_eq!(reqs.len(), 2, "expected budget + adaptive requests: {reqs:#?}");
+
+        let budget_body = reqs[0].json();
+        assert_eq!(budget_body["thinking"]["type"], "enabled", "{budget_body}");
+        assert_eq!(budget_body["thinking"]["budget_tokens"], 3333, "provider reasoning_budgets must win: {budget_body}");
+        assert_eq!(
+            budget_body["thinking"]["display"], "omitted",
+            "provider reasoning_display must apply to budget model: {budget_body}"
+        );
+
+        let adaptive_body = reqs[1].json();
+        assert_eq!(adaptive_body["thinking"]["type"], "adaptive", "{adaptive_body}");
+        assert_eq!(
+            adaptive_body["thinking"]["display"], "omitted",
+            "provider reasoning_display must win for adaptive model: {adaptive_body}"
+        );
+    })
+    .await
+}

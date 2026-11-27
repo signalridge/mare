@@ -5,8 +5,9 @@
 //!   `tool_result` batch.
 //! - Non-Kimi dialects and Kimi K2 models (without `defer_loading`) never emit tool-bearing
 //!   system messages.
-//! - DeepSeek preset stays on `openai-chat` without `defer_loading`; `anthropic-messages` does not
-//!   accept data-tier configured endpoints.
+//! - DeepSeek preset stays on `openai-chat` without `defer_loading`; third-party
+//!   `anthropic-messages` data-tier providers register cleanly without implicitly enabling
+//!   `tool_update`.
 
 use super::*;
 use crate::suite::kernel::write_plugin;

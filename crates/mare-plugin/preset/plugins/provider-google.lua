@@ -117,32 +117,6 @@ return {
 				return raw_key or llm:api_key(name, envs)
 			end
 
-			local function custom_catalog_target(eff)
-				local headers = {}
-				for k, v in pairs(eff.headers or {}) do
-					headers[k] = v
-				end
-				local base = tostring(live_base_url(eff) or ""):gsub("/+$", "")
-				local wire = {
-					provider = name,
-					method = "GET",
-					url = mare.http.build_url(base .. "/models", { pageSize = "1000" }),
-					headers = headers,
-				}
-				wire = ctx.bus:waterfall("provider/request", wire) or wire
-				local header_digests = {}
-				for k, v in pairs((type(wire) == "table" and wire.headers) or {}) do
-					if v ~= nil then
-						header_digests[string.lower(tostring(k))] = mare.crypto.sha256(tostring(v))
-					end
-				end
-				return {
-					url_digest = (type(wire) == "table" and wire.url) and mare.crypto.sha256(tostring(wire.url)) or nil,
-					headers = next(header_digests) and header_digests or nil,
-					proxy = type(wire) == "table" and wire.proxy or nil,
-				}
-			end
-
 			local function custom_endpoint(_req)
 				local eff = live_entry()
 				local key = custom_api_key(eff)
@@ -171,7 +145,6 @@ return {
 					headers = merged_headers,
 					drop_fields = eff.drop_fields,
 					transport = eff.transport,
-					endpoint_config = eff,
 				}
 			end
 
@@ -201,7 +174,14 @@ return {
 				end,
 				errors = wire_errors,
 				catalog_target = entry.list_models ~= false and function()
-					return custom_catalog_target(live_entry())
+					local eff = live_entry()
+					local base = tostring(live_base_url(eff) or ""):gsub("/+$", "")
+					return lib.catalog_target(
+						ctx.bus,
+						name,
+						mare.http.build_url(base .. "/models", { pageSize = "1000" }),
+						eff.headers
+					)
 				end or nil,
 				catalog_scope = entry.list_models ~= false and function()
 					if live_entry().no_key then

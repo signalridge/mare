@@ -474,6 +474,14 @@ function M.has_error_field(t) end
 ---@return table[], table[], table
 function M.decode_models_envelope(raw, field, id_field, label) end
 
+--- Build a hashed catalog cache identity for a custom provider's model-listing GET request.
+---@param bus table
+---@param provider string
+---@param url string
+---@param eff_headers? table<string, any>
+---@return {url_digest?: string, headers?: table<string, string>, proxy?: any}
+function M.catalog_target(bus, provider, url, eff_headers) end
+
 --- Slice `items` by `{ cursor?, limit? }` with positive-integer validation.
 ---@generic T
 ---@param items T[]
