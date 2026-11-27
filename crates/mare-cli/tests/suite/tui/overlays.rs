@@ -38,6 +38,72 @@ async fn the_transcript_overlay_opens_searches_and_closes() {
     .await
 }
 
+/// Repeatedly opening and closing the Ctrl+T transcript overlay (both on a fresh session and
+/// after a committed turn, via Ctrl+T / Esc / q) must restore the main screen in place with a
+/// single input box and no ghost rows or downward drift.
+#[tokio::test]
+async fn ctrl_t_repeated_toggle_leaves_no_ghost_input_box() {
+    local(async {
+        let mut t = Term::new(json!([{ "text": "completed reply" }]), 70, 20).await;
+        t.vt.dismiss_notices();
+        t.until("initial prompt", |s| s.contains("Ask mare")).await;
+
+        let assert_clean_prompt = |screen: &str, expected_top_row: usize, label: &str| {
+            assert_eq!(screen.matches("Ask mare").count(), 1, "{label}: duplicate prompt:\n{screen}");
+            assert_eq!(screen.matches('╭').count(), 1, "{label}: duplicate top border:\n{screen}");
+            assert_eq!(screen.matches('╰').count(), 1, "{label}: duplicate bottom border:\n{screen}");
+            let top_row = screen.lines().position(|l| l.contains('╭')).expect("top border row");
+            assert_eq!(top_row, expected_top_row, "{label}: live area shifted:\n{screen}");
+        };
+
+        // 1. Fresh session (cursor_row == 1): toggle 3 times via Ctrl+T / Esc / q.
+        let fresh_before = t.screen();
+        let fresh_top = fresh_before.lines().position(|l| l.contains('╭')).expect("fresh top border");
+        for (i, close_key) in [
+            (KeyCode::Char('t'), Modifiers::CONTROL),
+            (KeyCode::Escape, Modifiers::NONE),
+            (KeyCode::Char('q'), Modifiers::NONE),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            t.key(KeyCode::Char('t'), Modifiers::CONTROL);
+            t.until("transcript opened", |s| s.contains("Transcript")).await;
+            t.key(close_key.0, close_key.1);
+            t.until("main screen restored", |s| !s.contains("Transcript") && s.contains('╰')).await;
+            let after = t.screen();
+            assert_clean_prompt(&after, fresh_top, &format!("fresh cycle {i}"));
+            assert_eq!(after, fresh_before, "fresh cycle {i} drifted:\n{after}");
+        }
+
+        // 2. After a committed turn (cursor_row == 2): toggle 4 times and verify no stacking/shift.
+        t.submit("hello ghost").await;
+        t.idle().await;
+        t.until("committed reply", |s| s.contains("completed reply") && s.contains("Ask mare")).await;
+        let committed_before = t.screen();
+        let committed_top = committed_before.lines().position(|l| l.contains('╭')).expect("committed top border");
+        for (i, close_key) in [
+            (KeyCode::Char('t'), Modifiers::CONTROL),
+            (KeyCode::Escape, Modifiers::NONE),
+            (KeyCode::Char('q'), Modifiers::NONE),
+            (KeyCode::Char('c'), Modifiers::CONTROL),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            t.key(KeyCode::Char('t'), Modifiers::CONTROL);
+            t.until("transcript opened after turn", |s| s.contains("Transcript") && s.contains("completed reply"))
+                .await;
+            t.key(close_key.0, close_key.1);
+            t.until("main screen restored after turn", |s| !s.contains("Transcript") && s.contains('╰')).await;
+            let after = t.screen();
+            assert_clean_prompt(&after, committed_top, &format!("committed cycle {i}"));
+            assert_eq!(after, committed_before, "committed cycle {i} drifted:\n{after}");
+        }
+    })
+    .await
+}
+
 #[tokio::test]
 async fn the_key_menu_lists_keys() {
     local(async {

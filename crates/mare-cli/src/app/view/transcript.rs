@@ -243,6 +243,9 @@ impl App {
         }
         self.pending_prefix = None;
         self.transcript.frame.clear();
+        if !self.transcript.is_open() {
+            self.renderer.erase();
+        }
         mare_tui::modes::set_alt_screen(true);
         let n = self.transcript_lines().len();
         self.transcript.top = Some(n.saturating_sub(self.height.saturating_sub(1)));
