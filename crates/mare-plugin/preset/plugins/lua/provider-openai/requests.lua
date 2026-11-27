@@ -842,14 +842,6 @@ return function(D)
 			local raw = llm:base_url(name, (eff and eff.base_url) or entry.base_url)
 			return tostring(raw or ""):gsub("/+$", "")
 		end
-		local function custom_catalog_target(eff)
-			return require("mare_lib").catalog_target(
-				ctx.bus,
-				name,
-				mare.http.build_url(live_base_url(eff) .. "/models"),
-				eff.headers
-			)
-		end
 		local function custom_endpoint(_req)
 			local eff = live_entry()
 			local key = custom_api_key(eff)
@@ -910,7 +902,12 @@ return function(D)
 				return entry.no_key or raw_key ~= nil or llm:has_api_key(name, envs)
 			end,
 			catalog_target = entry.list_models ~= false and function()
-				return custom_catalog_target(live_entry())
+				local eff = live_entry()
+				return {
+					url = mare.http.build_url(live_base_url(eff) .. "/models"),
+					headers = eff.headers,
+					query_params = eff.query_params,
+				}
 			end or nil,
 			catalog_scope = entry.list_models ~= false and function()
 				if live_entry().no_key then

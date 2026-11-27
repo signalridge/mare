@@ -288,12 +288,11 @@ return {
 				params = param_rules,
 				catalog_target = entry.list_models ~= false and function()
 					local eff = live_entry()
-					return lib.catalog_target(
-						ctx.bus,
-						name,
-						mare.http.build_url(anthropic_v1_url(live_base_url(eff), "models"), { limit = "1000" }),
-						eff.headers
-					)
+					return {
+						url = mare.http.build_url(anthropic_v1_url(live_base_url(eff), "models"), { limit = "1000" }),
+						headers = eff.headers,
+						query_params = eff.query_params,
+					}
 				end or nil,
 				catalog_scope = entry.list_models ~= false and function()
 					if live_entry().no_key then

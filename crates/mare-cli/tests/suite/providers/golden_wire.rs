@@ -517,6 +517,15 @@ async fn custom_responses_and_google_data_providers_end_to_end() {
         let base = &server.base;
         server.route("/my-resp/responses", vec![Resp::sse(responses_text("custom-resp-ok"))]);
         server.route(
+            "/my-resp/models",
+            vec![Resp::status(200, r#"{"data":[{"id":"resp-listed"}]}"#)],
+        );
+        server.route("/my-resp-nk/responses", vec![Resp::sse(responses_text("custom-resp-nk-ok"))]);
+        server.route(
+            "/my-resp-nk/models",
+            vec![Resp::status(200, r#"{"data":[{"id":"resp-nk-listed"}]}"#)],
+        );
+        server.route(
             "/my-goog/v1beta/models/gem-m1:streamGenerateContent",
             vec![Resp::sse(fixture("google.sse"))],
         );
@@ -533,6 +542,14 @@ async fn custom_responses_and_google_data_providers_end_to_end() {
         );
 
         std::fs::create_dir_all(env.config_dir()).unwrap();
+        let auth_path = env.config_dir().join("auth.json");
+        std::fs::write(&auth_path, r#"{"version":1,"my-resp-nk":{"type":"api_key","key":"stale-resp-login-key"}}"#)
+            .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&auth_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
         std::fs::write(
             env.config_dir().join("init.lua"),
             format!(
@@ -543,6 +560,12 @@ mare.provider("my-resp", {{
   api_key = "test-resp-custom-key",
   headers = {{ ["x-resp-hdr"] = "r1" }},
   models = {{ {{ model_id = "resp-m1", context_window = 128000, max_output = 8192 }} }},
+}})
+mare.provider("my-resp-nk", {{
+  wire_api = "responses",
+  base_url = "{base}/my-resp-nk",
+  no_key = true,
+  models = {{ {{ model_id = "resp-nk", context_window = 128000, max_output = 8192 }} }},
 }})
 mare.provider("my-gemini", {{
   wire_api = "google",
@@ -569,22 +592,33 @@ mare.provider("my-gemini-nk", {{
         let resp_msg = ask(&h, "my-resp/resp-m1").await;
         assert_eq!(text_of(&resp_msg), "custom-resp-ok");
 
+        let resp_nk_msg = ask(&h, "my-resp-nk/resp-nk").await;
+        assert_eq!(text_of(&resp_nk_msg), "custom-resp-nk-ok");
+
         let goog_msg = stream(&h, "my-gemini/gem-m1").await;
         assert_fixture_message("my-gemini/gem-m1", &goog_msg, 0);
 
         let goog_nk_msg = stream(&h, "my-gemini-nk/gem-local").await;
         assert_fixture_message("my-gemini-nk/gem-local", &goog_nk_msg, 0);
 
-        let listed_ok: bool = eval(
+        let (resp_listed_ok, resp_nk_listed_ok, goog_listed_ok): (bool, bool, bool) = eval(
             &h,
             r#"
+            LLM:refresh_models("my-resp")
+            local rm = LLM:resolve("my-resp/resp-listed")
+            LLM:refresh_models("my-resp-nk")
+            local rnm = LLM:resolve("my-resp-nk/resp-nk-listed")
             LLM:refresh_models("my-gemini")
-            local m = LLM:resolve("my-gemini/gem-listed")
-            return m ~= nil and m.name == "Gemini Listed"
+            local gm = LLM:resolve("my-gemini/gem-listed")
+            return (rm ~= nil and rm.listed == true),
+              (rnm ~= nil and rnm.listed == true),
+              (gm ~= nil and gm.name == "Gemini Listed")
             "#,
         )
         .await;
-        assert!(listed_ok, "GET /models must populate custom google provider catalog");
+        assert!(resp_listed_ok, "GET /models must populate custom responses provider catalog");
+        assert!(resp_nk_listed_ok, "no_key GET /models must populate custom responses provider catalog");
+        assert!(goog_listed_ok, "GET /models must populate custom google provider catalog");
 
         h.shutdown().await;
 
@@ -596,6 +630,26 @@ mare.provider("my-gemini-nk", {{
         assert_eq!(resp_req.header("authorization"), Some("Bearer test-resp-custom-key"));
         assert_eq!(resp_req.header("x-resp-hdr"), Some("r1"));
         assert_eq!(resp_req.header("chatgpt-account-id"), None, "custom responses provider must not send Codex headers");
+
+        let resp_models_req = reqs
+            .iter()
+            .find(|r| r.path == "/my-resp/models")
+            .expect("catalog refresh must hit /my-resp/models");
+        assert_eq!(resp_models_req.header("authorization"), Some("Bearer test-resp-custom-key"));
+
+        let resp_nk_post = reqs
+            .iter()
+            .find(|r| r.path == "/my-resp-nk/responses")
+            .expect("keyless responses POST must hit /my-resp-nk/responses");
+        let resp_nk_get = reqs
+            .iter()
+            .find(|r| r.path == "/my-resp-nk/models")
+            .expect("keyless responses GET must hit /my-resp-nk/models");
+        for r in [resp_nk_post, resp_nk_get] {
+            assert_eq!(r.header("authorization"), None, "no_key responses must omit authorization on {}", r.path);
+            let serialized = format!("{:?}", r.headers);
+            assert!(!serialized.contains("stale-resp-login-key"), "stale responses key leaked on {}", r.path);
+        }
 
         let goog_req = reqs
             .iter()
@@ -716,39 +770,29 @@ mare.provider("my-goog-nk", {{
     .await
 }
 
-/// Custom Anthropic and Google model catalog caches must key on effective resolved `query_params`
-/// and `headers` (hashed, never storing plaintext values on disk) so changing tenant parameters
-/// under the same API key never returns stale cached models.
+/// Custom Anthropic, Google, and Responses catalog scope computation must stay static (never
+/// firing extra `provider/request` hooks during scope checks) so a dynamic per-request hook
+/// neither sees phantom GETs nor invalidates the freshly fetched catalog.
 #[tokio::test]
-async fn custom_anthropic_and_google_catalog_cache_isolates_query_params_and_resolved_headers() {
+async fn custom_catalog_target_is_static_without_extra_request_hook_calls() {
     local(async {
         let env = TestEnv::new().await;
         let server = MockServer::start().await;
         let base = &server.base;
         server.route(
-            "/tenant-ant/v1/models",
-            vec![
-                Resp::status(200, r#"{"data":[{"id":"ant-tenant-a","display_name":"Ant A"}]}"#),
-                Resp::status(200, r#"{"data":[{"id":"ant-tenant-b","display_name":"Ant B"}]}"#),
-                Resp::status(200, r#"{"data":[{"id":"ant-tenant-c","display_name":"Ant C"}]}"#),
-            ],
+            "/static-ant/v1/models",
+            vec![Resp::status(200, r#"{"data":[{"id":"ant-static-a","display_name":"Ant A"}]}"#)],
         );
         server.route(
-            "/tenant-goog/v1beta/models",
-            vec![
-                Resp::status(
-                    200,
-                    r#"{"models":[{"name":"models/goog-tenant-a","displayName":"Goog A","supportedGenerationMethods":["generateContent"]}]}"#,
-                ),
-                Resp::status(
-                    200,
-                    r#"{"models":[{"name":"models/goog-tenant-b","displayName":"Goog B","supportedGenerationMethods":["generateContent"]}]}"#,
-                ),
-                Resp::status(
-                    200,
-                    r#"{"models":[{"name":"models/goog-tenant-c","displayName":"Goog C","supportedGenerationMethods":["generateContent"]}]}"#,
-                ),
-            ],
+            "/static-goog/v1beta/models",
+            vec![Resp::status(
+                200,
+                r#"{"models":[{"name":"models/goog-static-a","displayName":"Goog A","supportedGenerationMethods":["generateContent"]}]}"#,
+            )],
+        );
+        server.route(
+            "/static-resp/models",
+            vec![Resp::status(200, r#"{"data":[{"id":"resp-static-a"}]}"#)],
         );
 
         std::fs::create_dir_all(env.config_dir()).unwrap();
@@ -757,19 +801,26 @@ async fn custom_anthropic_and_google_catalog_cache_isolates_query_params_and_res
             format!(
                 r#"
 mare.plugin("llm", {{ catalog_refresh_ms = 60000 }})
-mare.provider("tenant-ant", {{
+mare.provider("static-ant", {{
   wire_api = "anthropic",
-  base_url = "{base}/tenant-ant",
+  base_url = "{base}/static-ant",
   api_key = "shared-ant-key",
-  headers = {{ ["x-tenant"] = "MARE_TEST_TENANT_HDR" }},
-  query_params = {{ tenant = "MARE_TEST_TENANT_Q" }},
+  headers = {{ ["x-tenant"] = "secret-hdr" }},
+  query_params = {{ tenant = "secret-q" }},
 }})
-mare.provider("tenant-goog", {{
+mare.provider("static-goog", {{
   wire_api = "google",
-  base_url = "{base}/tenant-goog/v1beta",
+  base_url = "{base}/static-goog/v1beta",
   api_key = "shared-goog-key",
-  headers = {{ ["x-tenant"] = "MARE_TEST_TENANT_HDR" }},
-  query_params = {{ tenant = "MARE_TEST_TENANT_Q" }},
+  headers = {{ ["x-tenant"] = "secret-hdr" }},
+  query_params = {{ tenant = "secret-q" }},
+}})
+mare.provider("static-resp", {{
+  wire_api = "responses",
+  base_url = "{base}/static-resp",
+  api_key = "shared-resp-key",
+  headers = {{ ["x-tenant"] = "secret-hdr" }},
+  query_params = {{ tenant = "secret-q" }},
 }})
 "#
             ),
@@ -778,66 +829,48 @@ mare.provider("tenant-goog", {{
 
         let h = env.host().user_config(false).no_session().build().await;
         global(&h, "LLM", h.service_table("llm").unwrap());
+        expose(&h);
 
-        for (prov, prefix) in [("tenant-ant", "ant"), ("tenant-goog", "goog")] {
-            let script = format!(
-                r#"
-local env_map = {{
-  MARE_TEST_TENANT_HDR = "hdr-secret-a",
-  MARE_TEST_TENANT_Q = "q-secret-a",
-}}
-mare.env = function(k) return env_map[k] end
+        let (hook_counts, all_listed, no_plaintext): (String, bool, bool) = eval(
+            &h,
+            r#"
+            local counts = { ["static-ant"] = 0, ["static-goog"] = 0, ["static-resp"] = 0 }
+            local seq = 0
+            C.cordis:on("provider/request", function(wire)
+              if counts[wire.provider] ~= nil then
+                counts[wire.provider] = counts[wire.provider] + 1
+                seq = seq + 1
+                wire.headers = wire.headers or {}
+                wire.headers["x-req-nonce"] = "nonce-" .. tostring(seq)
+              end
+              return wire
+            end)
 
-LLM:refresh_catalog({{ name = "{prov}" }})
-local a1 = LLM:resolve("{prov}/{prefix}-tenant-a")
-LLM:refresh_catalog({{ name = "{prov}" }})
-local a2 = LLM:resolve("{prov}/{prefix}-tenant-a")
-
-env_map.MARE_TEST_TENANT_Q = "q-secret-b"
-LLM:refresh_catalog({{ name = "{prov}" }})
-local b = LLM:resolve("{prov}/{prefix}-tenant-b")
-local a_after_b = LLM:resolve("{prov}/{prefix}-tenant-a")
-
-env_map.MARE_TEST_TENANT_HDR = "hdr-secret-c"
-LLM:refresh_catalog({{ name = "{prov}" }})
-local c = LLM:resolve("{prov}/{prefix}-tenant-c")
-local b_after_c = LLM:resolve("{prov}/{prefix}-tenant-b")
-
-local disk = mare.fs.read(mare.paths.state .. "/models-cache/{prov}.json") or ""
-local leaked = disk:find("hdr-secret-c", 1, true) ~= nil or disk:find("q-secret-b", 1, true) ~= nil
-return (a1 ~= nil and a1.listed == true),
-  (a2 ~= nil and a2.listed == true),
-  (b ~= nil and b.listed == true),
-  (a_after_b == nil or a_after_b.listed ~= true),
-  (c ~= nil and c.listed == true),
-  (b_after_c == nil or b_after_c.listed ~= true),
-  (not leaked)
-"#
-            );
-            let (has_a, hit_a, has_b, no_a_after_b, has_c, no_b_after_c, no_raw): (
-                bool,
-                bool,
-                bool,
-                bool,
-                bool,
-                bool,
-                bool,
-            ) = eval(&h, &script).await;
-            assert!(has_a && hit_a, "{prov}: initial tenant A must publish and hit cache");
-            assert!(has_b && no_a_after_b, "{prov}: changing resolved query_params must replace tenant A with B");
-            assert!(has_c && no_b_after_c, "{prov}: changing resolved headers must replace tenant B with C");
-            assert!(no_raw, "{prov}: disk cache must not contain plaintext header/query values");
-        }
+            local ok = true
+            local clean = true
+            for _, spec in ipairs({
+              { "static-ant", "ant-static-a" },
+              { "static-goog", "goog-static-a" },
+              { "static-resp", "resp-static-a" },
+            }) do
+              local p, mid = spec[1], spec[2]
+              LLM:refresh_catalog({ name = p })
+              local m = LLM:resolve(p .. "/" .. mid)
+              ok = ok and (m ~= nil and m.listed == true)
+              local disk = assert(mare.fs.read(mare.paths.state .. "/models-cache/" .. p .. ".json"))
+              if disk:find("secret-hdr", 1, true) ~= nil or disk:find("secret-q", 1, true) ~= nil then
+                clean = false
+              end
+            end
+            return ("%d,%d,%d"):format(counts["static-ant"], counts["static-goog"], counts["static-resp"]), ok, clean
+            "#,
+        )
+        .await;
+        assert_eq!(hook_counts, "1,1,1", "provider/request must fire once per real GET, never during scope calculation");
+        assert!(all_listed, "dynamic provider/request nonce must not discard freshly fetched catalog");
+        assert!(no_plaintext, "disk catalog cache must hash scope rather than storing plaintext config");
 
         h.shutdown().await;
-
-        let reqs = server.requests();
-        for (path_prefix, label) in [("/tenant-ant/v1/models", "anthropic"), ("/tenant-goog/v1beta/models", "google")] {
-            let matched: Vec<_> = reqs.iter().filter(|r| r.path.starts_with(path_prefix)).collect();
-            assert_eq!(matched.len(), 3, "{label}: expected 3 HTTP requests (A, query->B, header->C), got {matched:#?}");
-            assert!(matched[1].path.contains("tenant=q-secret-b"), "{label}: 2nd request missing updated query_params");
-            assert_eq!(matched[2].header("x-tenant"), Some("hdr-secret-c"), "{label}: 3rd request missing updated header");
-        }
     })
     .await
 }

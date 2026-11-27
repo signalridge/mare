@@ -176,12 +176,11 @@ return {
 				catalog_target = entry.list_models ~= false and function()
 					local eff = live_entry()
 					local base = tostring(live_base_url(eff) or ""):gsub("/+$", "")
-					return lib.catalog_target(
-						ctx.bus,
-						name,
-						mare.http.build_url(base .. "/models", { pageSize = "1000" }),
-						eff.headers
-					)
+					return {
+						url = mare.http.build_url(base .. "/models", { pageSize = "1000" }),
+						headers = eff.headers,
+						query_params = eff.query_params,
+					}
 				end or nil,
 				catalog_scope = entry.list_models ~= false and function()
 					if live_entry().no_key then

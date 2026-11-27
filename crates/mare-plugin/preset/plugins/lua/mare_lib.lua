@@ -1959,32 +1959,6 @@ function M.decode_models_envelope(raw, field, id_field, label)
 	return j[field], lossless[field], j
 end
 
---- Build a hashed catalog cache identity for a custom provider's model-listing GET request.
-function M.catalog_target(bus, provider, url, eff_headers)
-	local headers = {}
-	for k, v in pairs(eff_headers or {}) do
-		headers[k] = v
-	end
-	local wire = {
-		provider = provider,
-		method = "GET",
-		url = url,
-		headers = headers,
-	}
-	wire = bus:waterfall("provider/request", wire) or wire
-	local header_digests = {}
-	for k, v in pairs((type(wire) == "table" and wire.headers) or {}) do
-		if v ~= nil then
-			header_digests[string.lower(tostring(k))] = mare.crypto.sha256(tostring(v))
-		end
-	end
-	return {
-		url_digest = (type(wire) == "table" and wire.url) and mare.crypto.sha256(tostring(wire.url)) or nil,
-		headers = next(header_digests) and header_digests or nil,
-		proxy = type(wire) == "table" and wire.proxy or nil,
-	}
-end
-
 --- Slice `items` by `{ cursor?, limit? }` with strict positive-integer validation.
 function M.paginate(items, opts)
 	opts = type(opts) == "table" and opts or {}
