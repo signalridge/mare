@@ -594,7 +594,7 @@ async fn lazy_hydration_is_single_flight_checks_refresh_gen_and_logs_errors() {
             local d1_tx, d1_rx = mare.task.channel()
             local d2_tx, d2_rx = mare.task.channel()
             mare.task.spawn(function()
-              local args = { model = LLM:resolve("deepseek/cached-sf") }
+              local args = { model = LLM:resolve("deepseek/deepseek-chat") }
               LLM:prepare_request(args)
               local m = LLM:resolve("deepseek/cached-sf")
               d1_tx:send(m ~= nil and m.listed == true and m.context_window == 77000)
@@ -609,7 +609,7 @@ async fn lazy_hydration_is_single_flight_checks_refresh_gen_and_logs_errors() {
             mare.task.spawn(function()
               -- Second concurrent caller while first read is in flight
               local _ = LLM:models()
-              local args = { model = LLM:resolve("deepseek/cached-sf") }
+              local args = { model = LLM:resolve("deepseek/deepseek-chat") }
               LLM:prepare_request(args)
               local m = LLM:resolve("deepseek/cached-sf")
               d2_tx:send(m ~= nil and m.listed == true and m.context_window == 77000)

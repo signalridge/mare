@@ -35,6 +35,15 @@ local function check_kind(v, kind)
 			end
 		end
 		return true
+	elseif type(kind) == "string" and kind:sub(1, 5) == "enum:" then
+		local allowed = {}
+		for choice in kind:sub(6):gmatch("[^|]+") do
+			if v == choice then
+				return true
+			end
+			allowed[#allowed + 1] = choice
+		end
+		return false, "one of " .. table.concat(allowed, ", ")
 	end
 	return true
 end
@@ -200,7 +209,10 @@ local function check_fields(tbl, schema, scope)
 		if val ~= nil then
 			local ok, expected = check_kind(val, kind)
 			if not ok then
-				return false, field, ("expected %s for field `%s`, got %s"):format(expected, field, type(val)), scope
+				local got = (type(kind) == "string" and kind:sub(1, 5) == "enum:" and type(val) == "string")
+						and ("%q"):format(val)
+					or type(val)
+				return false, field, ("expected %s for field `%s`, got %s"):format(expected, field, got), scope
 			end
 		end
 	end

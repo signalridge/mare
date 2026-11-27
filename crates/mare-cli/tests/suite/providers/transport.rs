@@ -915,7 +915,7 @@ LLM:auth_set("openai-codex", {
         eval::<()>(
             &h,
             r#"
-local m = LLM:resolve("openai/gpt-5.3-codex")
+local m = LLM:resolve("openai/gpt-6.1-terra")
 LLM:stream({ model = m, session_id = "same-sess", messages = { { role = "user", content = { { type = "text", text = "hi 1" } } } }, no_fallback = true }, function() end)
 "#,
         )
@@ -937,7 +937,7 @@ LLM:auth_set("openai-codex", {
         eval::<()>(
             &h,
             r#"
-local m = LLM:resolve("openai/gpt-5.3-codex")
+local m = LLM:resolve("openai/gpt-6.1-terra")
 LLM:stream({ model = m, session_id = "same-sess", messages = { { role = "user", content = { { type = "text", text = "hi 2" } } } }, no_fallback = true }, function() end)
 "#,
         )
@@ -1056,7 +1056,7 @@ LLM:auth_set("openai-codex", {
         let ok_res: bool = eval(
             &h2,
             r#"
-local m = LLM:resolve("openai/gpt-5.3-codex")
+local m = LLM:resolve("openai/gpt-6.1-terra")
 local res1 = LLM:stream({ model = m, session_id = "s-401", messages = { { role = "user", content = { { type = "text", text = "hi 1" } } } }, no_fallback = true }, function() end)
 local res2 = LLM:stream({ model = m, session_id = "s-401", messages = { { role = "user", content = { { type = "text", text = "hi 2" } } } }, no_fallback = true }, function() end)
 return tostring(res1.content[1].text) == "ws-recovered" and tostring(res2.content[1].text) == "ws-recovered"

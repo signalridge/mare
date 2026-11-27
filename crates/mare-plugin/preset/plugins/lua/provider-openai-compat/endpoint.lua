@@ -48,6 +48,13 @@ local function resolve_reasoning_format(entry, base_url)
 		return "openrouter"
 	elseif d == "deepseek" or host_matches(url, "deepseek.com") then
 		return "deepseek"
+	elseif
+		d == "kimi"
+		or host_matches(url, "moonshot.ai")
+		or host_matches(url, "moonshot.cn")
+		or host_matches(url, "kimi.com")
+	then
+		return "kimi"
 	elseif d == "zai" or host_matches(url, "z.ai") or host_matches(url, "bigmodel.cn") then
 		return "zai"
 	elseif d == "together" or host_matches(url, "together.xyz") then
@@ -121,6 +128,11 @@ local function build_param_rules(name, entry, live_entry, live_base_url)
 									if on and cur.supports_reasoning_effort then
 										req.body.reasoning_effort = c.value
 									end
+								elseif cur_tf == "kimi" then
+									-- Official MoonshotAI/kimi-code OpenAI-compat thinking encoding:
+									-- { thinking = { type = "disabled" } } or { type = "enabled", effort = <level> }.
+									req.body.thinking = on and { type = "enabled", effort = c.value }
+										or { type = "disabled" }
 								elseif cur_tf == "zai" then
 									req.body.thinking = on and { type = "enabled", clear_thinking = false }
 										or { type = "disabled" }

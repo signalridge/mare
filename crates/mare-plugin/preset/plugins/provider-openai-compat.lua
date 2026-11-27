@@ -152,8 +152,8 @@ end
 table.sort(PRESET_PROVIDERS)
 
 local PROVIDER_FIELDS = {
-	effort_param = "string",
-	reasoning_format = "string",
+	effort_param = "enum:openrouter|reasoning_effort",
+	reasoning_format = "enum:openrouter|reasoning_effort|deepseek|kimi|zai|together|qwen|qwen-chat-template|chat-template",
 	reasoning_budget_field = "string",
 	reasoning_budgets = "table",
 	supports_reasoning_effort = "boolean",
