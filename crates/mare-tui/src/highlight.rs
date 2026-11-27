@@ -110,38 +110,24 @@ fn pattern_compiles(m: &MatchPattern) -> bool {
         }
         esc = c == '\\' && !esc;
     }
-    if digits.len() <= 4 {
-        for bits in 0..(1u32 << digits.len()) {
-            let mut mask = 0u16;
-            for (bit, &d) in digits.iter().enumerate() {
-                if (bits & (1 << bit)) != 0 {
-                    mask |= 1 << d;
-                }
-            }
-            if SynRegex::try_compile(&substitute_backrefs(raw, mask)).is_some() {
-                return false;
+    for bits in 0..(1u32 << digits.len()) {
+        let mut mask = 0u16;
+        for (bit, &d) in digits.iter().enumerate() {
+            if (bits & (1 << bit)) != 0 {
+                mask |= 1 << d;
             }
         }
-        return true;
+        if SynRegex::try_compile(&substitute_backrefs(raw, mask)).is_some() {
+            return false;
+        }
     }
-    let all = digits.iter().fold(0u16, |acc, &d| acc | (1 << d));
-    let mut masks = vec![0u16, all];
-    for &d in &digits {
-        masks.push(1 << d);
-        masks.push(all & !(1 << d));
-    }
-    masks.into_iter().all(|mask| SynRegex::try_compile(&substitute_backrefs(raw, mask)).is_none())
+    true
 }
 
 fn syntax_patterns_valid<'a>(ss: &'a SyntaxSet, defs: &'a [SyntaxDefinition], idx: usize) -> bool {
     let Some(def) = defs.get(idx) else {
         return false;
     };
-    if let Some(flm) = &def.first_line_match
-        && SynRegex::try_compile(flm).is_some()
-    {
-        return false;
-    }
     let mut stack: Vec<&'a Context> = def.contexts.values().collect();
     let mut seen_resolved = FxHashSet::default();
     fn enqueue<'a>(ss: &'a SyntaxSet, r: &ContextReference, stack: &mut Vec<&'a Context>, seen: &mut FxHashSet<usize>) {
@@ -477,33 +463,32 @@ fn highlight_uncached(code: &str, lang: &str, theme: &Theme, light: bool) -> Vec
     };
     let selected = selected_theme(theme, light);
     let mut h = HighlightLines::new(syntax, &selected);
-    code.split_inclusive('\n')
-        .map(|raw| {
-            highlight_one(&mut h, ss, raw)
-                .unwrap_or_else(|_| Line::raw(expand_tabs(raw).trim_end_matches(['\n', '\r'])))
-        })
-        .collect()
+    code.split_inclusive('\n').map(|raw| highlight_one(&mut h, ss, raw)).collect()
 }
 
-fn highlight_one(h: &mut HighlightLines<'_>, ss: &SyntaxSet, raw: &str) -> Result<Line, syntect::Error> {
+fn highlight_one(h: &mut HighlightLines<'_>, ss: &SyntaxSet, raw: &str) -> Line {
     let line_src = expand_tabs(raw);
-    let regions = h.highlight_line(&line_src, ss)?;
-    let mut line = Line::empty();
-    for (st, text) in regions {
-        let text = text.trim_end_matches(['\n', '\r']);
-        if text.is_empty() {
-            continue;
+    match h.highlight_line(&line_src, ss) {
+        Ok(regions) => {
+            let mut line = Line::empty();
+            for (st, text) in regions {
+                let text = text.trim_end_matches(['\n', '\r']);
+                if text.is_empty() {
+                    continue;
+                }
+                let mut s = Style::new().fg(convert_color(st.foreground));
+                if st.font_style.contains(FontStyle::BOLD) {
+                    s = s.bold();
+                }
+                if st.font_style.contains(FontStyle::ITALIC) {
+                    s = s.italic();
+                }
+                line.push(Span::styled(text, s));
+            }
+            line
         }
-        let mut s = Style::new().fg(convert_color(st.foreground));
-        if st.font_style.contains(FontStyle::BOLD) {
-            s = s.bold();
-        }
-        if st.font_style.contains(FontStyle::ITALIC) {
-            s = s.italic();
-        }
-        line.push(Span::styled(text, s));
+        Err(_) => Line::raw(line_src.trim_end_matches(['\n', '\r'])),
     }
-    Ok(line)
 }
 
 /// Per-stream highlighter for an append-only, still-open code block.
@@ -602,23 +587,12 @@ impl StreamingHighlight {
         match &mut c.kind {
             CheckpointKind::Syntect { set, state } => {
                 let selected = selected_theme(theme, light);
-                let mut failed = false;
                 if c.completed < end {
                     let mut h = HighlightLines::from_state(&selected, state.0.clone(), state.1.clone());
-                    let plain_st = theme.fg("text");
                     for raw in code[c.completed..end].split_inclusive('\n') {
-                        if failed {
-                            c.lines.push(Line::styled(expand_tabs(raw.trim_end_matches(['\n', '\r'])), plain_st));
-                        } else if let Ok(line) = highlight_one(&mut h, set, raw) {
-                            c.lines.push(line);
-                        } else {
-                            failed = true;
-                            c.lines.push(Line::styled(expand_tabs(raw.trim_end_matches(['\n', '\r'])), plain_st));
-                        }
+                        c.lines.push(highlight_one(&mut h, set, raw));
                     }
-                    if !failed {
-                        *state = h.state();
-                    }
+                    *state = h.state();
                     c.completed = end;
                 }
                 if !known_append {
@@ -626,26 +600,15 @@ impl StreamingHighlight {
                 }
                 let tail = (end < code.len()).then(|| {
                     let raw_tail = &code[end..];
-                    let plain = || Line::styled(expand_tabs(raw_tail.trim_end_matches(['\n', '\r'])), theme.fg("text"));
-                    if failed
-                        || raw_tail.trim_end_matches(['\n', '\r']).len() > MAX_HIGHLIGHT_LINE_BYTES
+                    if raw_tail.trim_end_matches(['\n', '\r']).len() > MAX_HIGHLIGHT_LINE_BYTES
                         || c.lines.len() >= MAX_HIGHLIGHT_LINES
                     {
-                        plain()
+                        Line::styled(expand_tabs(raw_tail.trim_end_matches(['\n', '\r'])), theme.fg("text"))
                     } else {
                         let mut h = HighlightLines::from_state(&selected, state.0.clone(), state.1.clone());
-                        match highlight_one(&mut h, set, raw_tail) {
-                            Ok(line) => line,
-                            Err(_) => {
-                                failed = true;
-                                plain()
-                            }
-                        }
+                        highlight_one(&mut h, set, raw_tail)
                     }
                 });
-                if failed {
-                    c.kind = CheckpointKind::Plain(theme.fg("text"));
-                }
                 (&c.lines, tail)
             }
             CheckpointKind::Plain(st) => {
@@ -1012,5 +975,20 @@ contexts:
         let next = sh.highlight("let ok = 1;\n", "rust", &t);
         assert_eq!(next[0].plain(), "let ok = 1;");
         assert!(next[0].spans.len() > 1, "normal syntax must stay highlighted after broken syntax fallback");
+    }
+
+    #[test]
+    fn streaming_recovers_per_line_after_syntect_parse_error() {
+        // `// language=sql` in Go hits a missing embedded context in the curated pack, producing a
+        // per-line ParsingError; streaming must match full highlight and keep highlighting later lines.
+        let t = Theme::default();
+        let code = "package main\n// language=sql\n// query\nfunc main() { return }\n";
+        let full = highlight(code, "go", &t);
+        let mut sh = StreamingHighlight::default();
+        let _ = sh.update("package main\n// language=sql\n// query\nfunc main()", "go", &t, false);
+        let (done, tail) = sh.update(code, "go", &t, false);
+        assert!(tail.is_none());
+        assert_eq!(done, full.as_slice(), "streaming and full highlight must match across per-line parse error");
+        assert!(done[3].spans.len() > 1, "lines after a per-line syntect Err must still be highlighted");
     }
 }
