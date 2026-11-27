@@ -389,9 +389,11 @@ return {
 				if not res.details or not res.details.changes then
 					return nil
 				end
-				local out = {}
+				local changes = res.details.changes
 				local outcomes = res.details.outcomes or {}
-				for i, ch in ipairs(res.details.changes) do
+				local multi = #changes > 1
+				local out = {}
+				for i, ch in ipairs(changes) do
 					local status = outcomes[i] and outcomes[i].status or "completed"
 					local path = mare.fs.relative(ch.move_to or ch.path)
 					if status ~= "completed" then
@@ -401,10 +403,13 @@ return {
 						})
 					elseif ch.kind == "delete" then
 						out[#out + 1] = ui.Line({ ui.Span("Deleted " .. path):hl("MareMuted") })
-					elseif ch.diff then
-						out[#out + 1] = ui.Diff({ unified = ch.diff, path = path, lines = ch.lines })
 					else
-						out[#out + 1] = ui.Diff({ old = ch.old or "", new = ch.new or "", path = path })
+						if multi then
+							-- `ui.Diff` already renders `+A −D` on row 1, so only the path header is needed
+							out[#out + 1] = ui.Line({ ui.Span(path):hl("MareToolName") })
+						end
+						out[#out + 1] = ch.diff and ui.Diff({ unified = ch.diff, path = path, lines = ch.lines })
+							or ui.Diff({ old = ch.old or "", new = ch.new or "", path = path })
 					end
 				end
 				return ui.Lines(out)

@@ -446,16 +446,20 @@ end
 --- rows a compact diff keeps before "… N more lines" (nil: diffs always show in full, today)
 ui.ToolCall.diff_fold = nil
 
+local function is_diff_node(node)
+	return type(node) == "table" and (node.type == "diff" or node.type == "unified")
+end
+
 --- has_diff(node) -> the node is, or holds, a diff (edit / write / apply_patch results)
 function ui.ToolCall:has_diff(node)
+	if is_diff_node(node) then
+		return true
+	end
 	if type(node) ~= "table" then
 		return false
 	end
-	if node.type == "diff" or node.type == "unified" then
-		return true
-	end
 	for _, c in ipairs(node.items or node) do
-		if type(c) == "table" and (c.type == "diff" or c.type == "unified") then
+		if is_diff_node(c) then
 			return true
 		end
 	end
@@ -496,10 +500,27 @@ function ui.ToolCall:render(call, result, expanded, info)
 	end
 	-- a long diff folds like command output (`diff_fold` rows, then "… N more lines"; nil keeps
 	-- today's full diff). The expanded view (ctrl+o, the Ctrl+T transcript) always shows it all.
+	-- Multi-item `ui.Lines` (e.g. multi-file apply_patch) clips each diff individually so later
+	-- file headers and status lines are not hidden behind the first file.
 	if node ~= nil and not expanded and self.diff_fold and self:has_diff(node) then
 		local fold_lines = self.diff_fold == true and 8 or self.diff_fold
 		if type(fold_lines) == "number" and fold_lines > 0 then
-			node = ui.Clip(node, fold_lines, false)
+			if node.type == "lines" and type(node.items) == "table" and #node.items > 1 then
+				local diffs = 0
+				for _, c in ipairs(node.items) do
+					if is_diff_node(c) then
+						diffs = diffs + 1
+					end
+				end
+				local per_diff = math.min(fold_lines, math.max(3, math.floor(fold_lines / diffs)))
+				local folded = {}
+				for i, c in ipairs(node.items) do
+					folded[i] = is_diff_node(c) and ui.Clip(c, per_diff, false) or c
+				end
+				node = ui.Lines(folded)
+			else
+				node = ui.Clip(node, fold_lines, false)
+			end
 		end
 	end
 	if node == nil then

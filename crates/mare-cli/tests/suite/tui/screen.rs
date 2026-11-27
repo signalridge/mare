@@ -828,6 +828,144 @@ async fn diff_fold_lines_defaults_to_8_folds_expands_and_respects_reduce_motion(
     .await
 }
 
+/// Large `edit`, `write`, and multi-file `apply_patch` diffs fold in compact view (with
+/// per-file headers and stats on multi-file patches), show full diffs when expanded,
+/// and emit no fold hint for small diffs that fit within the limit.
+#[tokio::test]
+async fn diff_fold_covers_edit_write_and_multifile_apply_patch() {
+    local(async {
+        let old_big: String = (1..=120).map(|i| format!("old_row_{i:03}\n")).collect();
+        let new_big: String = (1..=120).map(|i| format!("new_row_{i:03}\n")).collect();
+        let write_big: String = (1..=120).map(|i| format!("written_row_{i:03}\n")).collect();
+
+        // Session 1: default edit/write mode (120-line edit, 120-line write overwrite, 1-line edit).
+        let edit_script = json!([
+            { "tool_calls": [
+                { "name": "read", "arguments": { "path": "big.txt" } },
+                { "name": "read", "arguments": { "path": "over.txt" } },
+                { "name": "read", "arguments": { "path": "tiny.txt" } }
+            ] },
+            { "tool_calls": [{ "name": "edit", "arguments": { "path": "big.txt", "old_string": old_big, "new_string": new_big } }] },
+            { "text": "edit done" },
+            { "tool_calls": [{ "name": "write", "arguments": { "path": "over.txt", "content": write_big } }] },
+            { "text": "write done" },
+            { "tool_calls": [{ "name": "edit", "arguments": { "path": "tiny.txt", "old_string": "a\n", "new_string": "b\n" } }] },
+            { "text": "tiny edit done" }
+        ]);
+        let mut t = Term::build(
+            edit_script,
+            json!({ "plugins": { "permissions": { "enabled": false } } }),
+            json!({}),
+            90,
+            30,
+            |env| {
+                std::fs::write(env.cwd.join("big.txt"), &old_big).unwrap();
+                std::fs::write(env.cwd.join("over.txt"), &old_big).unwrap();
+                std::fs::write(env.cwd.join("tiny.txt"), "a\n").unwrap();
+            },
+        )
+        .await;
+        t.vt.dismiss_notices();
+
+        t.submit("edit big").await;
+        t.idle().await;
+        t.until("edit done", |s| s.contains("edit done")).await;
+        let h1 = t.history();
+        assert!(h1.contains("more line"), "120-line edit must fold in compact view:\n{h1}");
+        assert!(!h1.contains("new_row_120"), "120-line edit must elide tail in compact view:\n{h1}");
+        t.key(KeyCode::Char('t'), Modifiers::CONTROL);
+        t.until("expanded transcript shows edit tail", |s| s.contains("new_row_120")).await;
+        t.key(KeyCode::Escape, Modifiers::NONE);
+        t.until("back to main after edit", |s| !s.contains("Transcript") && s.contains("Ask mare")).await;
+
+        t.submit("write big").await;
+        t.idle().await;
+        t.until("write done", |s| s.contains("write done")).await;
+        let h2 = t.history();
+        assert!(!h2.contains("written_row_120"), "120-line write must fold in compact view:\n{h2}");
+        assert_eq!(h2.matches("more line").count(), 2, "edit and write must each emit a fold hint:\n{h2}");
+        t.key(KeyCode::Char('t'), Modifiers::CONTROL);
+        t.until("expanded transcript shows write tail", |s| s.contains("written_row_120")).await;
+        t.key(KeyCode::Escape, Modifiers::NONE);
+        t.until("back to main after write", |s| !s.contains("Transcript") && s.contains("Ask mare")).await;
+
+        t.submit("tiny edit").await;
+        t.idle().await;
+        t.until("tiny edit done", |s| s.contains("tiny edit done")).await;
+        assert_eq!(
+            t.history().matches("more line").count(),
+            2,
+            "small edit must not emit fold hint:\n{}",
+            t.history()
+        );
+    })
+    .await;
+
+    local(async {
+        let patch_body = |file: &str, prefix: &str, count: usize| -> String {
+            use std::fmt::Write;
+            let mut s = format!("*** Add File: {file}\n");
+            for i in 1..=count {
+                let _ = writeln!(s, "+{prefix}_{i:02}");
+            }
+            s
+        };
+        let big_patch = format!(
+            "*** Begin Patch\n{}{}{}*** End Patch\n",
+            patch_body("p1.txt", "alpha", 20),
+            patch_body("p2.txt", "beta", 20),
+            patch_body("p3.txt", "gamma", 20),
+        );
+        let small_patch = "*** Begin Patch\n*** Add File: s1.txt\n+one\n*** Add File: s2.txt\n+two\n*** End Patch\n";
+
+        // Session 2: apply_patch mode (3-file large patch + 2-file small patch).
+        let patch_script = json!([
+            { "tool_calls": [{ "name": "apply_patch", "arguments": { "input": big_patch } }] },
+            { "text": "patch done" },
+            { "tool_calls": [{ "name": "apply_patch", "arguments": { "input": small_patch } }] },
+            { "text": "small patch done" }
+        ]);
+        let mut t = Term::build(
+            patch_script,
+            json!({ "plugins": {
+                "permissions": { "enabled": false },
+                "tools": { "edit_mode": "apply_patch" }
+            } }),
+            json!({}),
+            90,
+            30,
+            |_| {},
+        )
+        .await;
+        t.vt.dismiss_notices();
+
+        t.submit("patch big").await;
+        t.idle().await;
+        t.until("patch done", |s| s.contains("patch done")).await;
+        let h1 = t.history();
+        for header in ["p1.txt", "p2.txt", "p3.txt"] {
+            assert!(h1.contains(header), "3-file patch compact view missing {header}:\n{h1}");
+        }
+        assert_eq!(h1.matches("+20").count(), 3, "each of the 3 files must show its +20 stats row once:\n{h1}");
+        assert_eq!(h1.matches("more line").count(), 3, "each of the 3 files must fold individually:\n{h1}");
+        for tail in ["alpha_20", "beta_20", "gamma_20"] {
+            assert!(!h1.contains(tail), "3-file patch compact view must elide {tail}:\n{h1}");
+        }
+        t.key(KeyCode::Char('t'), Modifiers::CONTROL);
+        t.until("expanded transcript shows patch tails", |s| s.contains("gamma_20") && s.contains("p3.txt")).await;
+        t.key(KeyCode::Escape, Modifiers::NONE);
+        t.until("back to main after patch", |s| !s.contains("Transcript") && s.contains("Ask mare")).await;
+
+        t.submit("small patch").await;
+        t.idle().await;
+        t.until("small patch done", |s| s.contains("small patch done")).await;
+        let h2 = t.history();
+        assert!(h2.contains("s1.txt") && h2.contains("s2.txt"), "small patch headers:\n{h2}");
+        assert_eq!(h2.matches("more line").count(), 3, "small multi-file patch must not emit fold hint:\n{h2}");
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn ui_working_presets_glyphs_tail_leaves_and_spinners() {
     local(async {
