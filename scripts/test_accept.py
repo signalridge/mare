@@ -36,6 +36,11 @@ def native_path(path):
         path = subprocess.check_output(["cygpath", "-w", str(path)], text=True, encoding="utf-8", errors="replace").strip()
     return Path(path)
 
+def isolated_accept_env(home, base=None, **extra):
+    env = dict(os.environ if base is None else base, HOME=shell_path(home), **extra)
+    env.pop("XDG_CACHE_HOME", None)
+    return env
+
 class AcceptanceTempTests(FixtureTestCase):
     @staticmethod
     @contextlib.contextmanager
@@ -54,14 +59,12 @@ class AcceptanceTempTests(FixtureTestCase):
             temp_root = parent / "tmp"
             temp_root.mkdir(parents=True)
             (parent / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
-            env = dict(
-                os.environ,
-                HOME=shell_path(root / "home"),
+            env = isolated_accept_env(
+                root / "home",
                 CARGO_TARGET_DIR=shell_path(root / "target"),
                 MARE_ACCEPT_TMPDIR=shell_path(temp_root),
                 MARE_ACCEPT_MIN_FREE_GB="0",
             )
-            env.pop("XDG_CACHE_HOME", None)
             result = subprocess.run(
                 ["sh", shell_path(Path(__file__).with_name("accept.sh")), "--no-git", "--steps", "temporary-file cleanup"],
                 cwd=root, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False, timeout=(120 if WINDOWS else 10),
@@ -77,12 +80,12 @@ class AcceptanceTempTests(FixtureTestCase):
                                    (shell_path(root / "missing"), "writable directory"),
                                    ("/dev", "temporary root")):
                 with self.subTest(value=value):
-                    env = dict(
-                        os.environ, HOME=shell_path(root / "home"),
-                        CARGO_TARGET_DIR=shell_path(root / "target"), MARE_ACCEPT_TMPDIR=value,
+                    env = isolated_accept_env(
+                        root / "home",
+                        CARGO_TARGET_DIR=shell_path(root / "target"),
+                        MARE_ACCEPT_TMPDIR=value,
                         MARE_ACCEPT_MIN_FREE_GB="0",
                     )
-                    env.pop("XDG_CACHE_HOME", None)
                     result = subprocess.run(
                         ["sh", shell_path(Path(__file__).with_name("accept.sh")), "--no-git", "--steps", "temporary-file cleanup"],
                         cwd=root, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False, timeout=(120 if WINDOWS else 10),
@@ -109,9 +112,10 @@ class AcceptanceTempTests(FixtureTestCase):
                     if variant == "physical":
                         selected = root / "indirect"
                         selected.symlink_to(target, target_is_directory=True)
-                    env = dict(
-                        os.environ, HOME=shell_path(root / "home"),
-                        CARGO_TARGET_DIR=shell_path(root / "target"), MARE_ACCEPT_TMPDIR=shell_path(selected),
+                    env = isolated_accept_env(
+                        root / "home",
+                        CARGO_TARGET_DIR=shell_path(root / "target"),
+                        MARE_ACCEPT_TMPDIR=shell_path(selected),
                         MARE_ACCEPT_MIN_FREE_GB="0",
                     )
                     result = subprocess.run(
@@ -140,11 +144,13 @@ class AcceptanceTempTests(FixtureTestCase):
                 with self.subTest(route=route):
                     log = root / "log"
                     log.unlink(missing_ok=True)
-                    env = dict(
-                        os.environ, HOME=shell_path(root / "home"),
+                    env = isolated_accept_env(
+                        root / "home",
                         PATH=os.pathsep.join((str(commands), os.environ["PATH"])),
-                        CARGO_TARGET_DIR=shell_path(root / "target"), TMPDIR=shell_path(inherited),
-                        LOG=shell_path(log), MARE_ACCEPT_MIN_FREE_GB="0",
+                        CARGO_TARGET_DIR=shell_path(root / "target"),
+                        TMPDIR=shell_path(inherited),
+                        LOG=shell_path(log),
+                        MARE_ACCEPT_MIN_FREE_GB="0",
                     )
                     if route == "explicit": env["MARE_ACCEPT_TMPDIR"] = shell_path(explicit)
                     else: env.pop("MARE_ACCEPT_TMPDIR", None)
@@ -241,9 +247,8 @@ class AcceptanceTempTests(FixtureTestCase):
                     shim.chmod(0o755)
                     target_relative = "build/" + "/".join(["long-target-component"] * 6)
                     residue = f"{old}-new"
-                    env = dict(
-                        os.environ,
-                        HOME=shell_path(root / "home"),
+                    env = isolated_accept_env(
+                        root / "home",
                         PATH=os.pathsep.join((str(commands), os.environ["PATH"])),
                         CARGO_TARGET_DIR=target_relative,
                         MARE_TMPDIR=shell_path(root / "outside-acceptance"),
@@ -432,9 +437,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 class AcceptanceCounterProofTests(FixtureTestCase):
     def _run_steps(self, steps: str, path_env: str, home: Path) -> subprocess.CompletedProcess[str]:
-        env = dict(
-            os.environ,
-            HOME=shell_path(home),
+        env = isolated_accept_env(
+            home,
             PATH=path_env,
             MARE_ACCEPT_MIN_FREE_GB="0",
         )
@@ -524,6 +528,30 @@ class AcceptanceCounterProofTests(FixtureTestCase):
             self.assertIn(": PARTIAL", result.stdout)
             self.assertNotIn(": PASS", result.stdout)
 
+    def test_outer_xdg_cache_home_is_never_polluted_by_selftests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            outer_xdg = tmp_path / "outer-xdg-cache"
+            outer_xdg.mkdir()
+            shims = tmp_path / "bin"
+            shims.mkdir()
+            bad = shims / "stylua"
+            bad.write_text("#!/bin/sh\nexit 1\n")
+            bad.chmod(0o755)
+            path_env = os.pathsep.join((str(shims), os.environ.get("PATH", "")))
+            with mock.patch.dict(os.environ, {"XDG_CACHE_HOME": shell_path(outer_xdg)}):
+                res = self._run_steps("stylua --check", path_env, tmp_path / "home-steps")
+                self.assertNotEqual(res.returncode, 0)
+                rel_root = tmp_path / "release-repo"
+                rel_root.mkdir()
+                _, rel_env = self._prepare_release_mode_repo(rel_root)
+                rel_res = subprocess.run(
+                    ["sh", "scripts/accept.sh", "--release", "--selftest-legacy-tmp-dir", shell_path(rel_root / "legacy-tmp")],
+                    cwd=rel_root, check=False, env=rel_env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=(120 if WINDOWS else 90),
+                )
+                self.assertEqual(rel_res.returncode, 0, rel_res.stdout + rel_res.stderr)
+            self.assertEqual(list(outer_xdg.iterdir()), [], f"selftests wrote into outer XDG_CACHE_HOME: {list(outer_xdg.rglob('*'))}")
+
     def test_stale_generated_options_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -550,9 +578,8 @@ class AcceptanceCounterProofTests(FixtureTestCase):
                     root / "crates/mare-plugin/preset/plugins",
                 )
 
-            env = dict(
-                os.environ,
-                HOME=shell_path(root / "home"),
+            env = isolated_accept_env(
+                root / "home",
                 CARGO_TARGET_DIR=shell_path(root / "target"),
                 MARE_ACCEPT_MIN_FREE_GB="0",
             )
@@ -729,9 +756,8 @@ if "--rpc" in sys.argv:
         cargo_cmd.chmod(0o755)
 
         (root / "legacy-tmp").mkdir()
-        env = dict(
-            os.environ,
-            HOME=shell_path(root / "home"),
+        env = isolated_accept_env(
+            root / "home",
             PATH=os.pathsep.join((str(commands), os.environ["PATH"])),
             CARGO_TARGET_DIR=shell_path(root / "target"),
             MBX_DISABLE="1",
@@ -883,9 +909,9 @@ if "--rpc" in sys.argv:
                 check=True,
                 capture_output=True,
             )
-            env = dict(
+            env = isolated_accept_env(
+                tmp_path / "home",
                 origin_env,
-                HOME=shell_path(tmp_path / "home"),
                 PATH=os.pathsep.join((str(cloned / "bin"), os.environ["PATH"])),
                 CARGO_TARGET_DIR=shell_path(tmp_path / "target"),
                 COMMAND_LOG=shell_path(tmp_path / "commands"),
@@ -1316,9 +1342,8 @@ if "--rpc" in sys.argv:
             (target_dir / "release").mkdir(parents=True)
             (target_dir / "release" / "mare").write_text("#!/bin/sh\nexit 0\n")
 
-            env = dict(
-                os.environ,
-                HOME=shell_path(root / "home"),
+            env = isolated_accept_env(
+                root / "home",
                 PATH=os.pathsep.join((str(commands), os.environ["PATH"])),
                 CARGO_TARGET_DIR=shell_path(target_dir),
                 MBX_DISABLE="1",
@@ -1405,9 +1430,8 @@ if "--rpc" in sys.argv:
             (target_dir / "release").mkdir(parents=True)
             (target_dir / "release" / "mare").write_text("#!/bin/sh\nexit 0\n")
 
-            env = dict(
-                os.environ,
-                HOME=shell_path(root / "home"),
+            env = isolated_accept_env(
+                root / "home",
                 PATH=os.pathsep.join((str(commands), os.environ["PATH"])),
                 CARGO_TARGET_DIR=shell_path(target_dir),
                 MBX_DISABLE="1",
@@ -1504,9 +1528,8 @@ if "--rpc" in sys.argv:
             (target_dir / "release").mkdir(parents=True)
             (target_dir / "release" / "mare").write_text("#!/bin/sh\nexit 0\n")
 
-            env = dict(
-                os.environ,
-                HOME=shell_path(root / "home"),
+            env = isolated_accept_env(
+                root / "home",
                 PATH=os.pathsep.join((str(commands), os.environ["PATH"])),
                 CARGO_TARGET_DIR=shell_path(target_dir),
                 MBX_DISABLE="1",
@@ -1576,9 +1599,8 @@ if "--rpc" in sys.argv:
             sentinel.write_text("do-not-delete\n")
             temp_root = root / "t"
             temp_root.mkdir()
-            env = dict(
-                os.environ,
-                HOME=shell_path(root / "home"),
+            env = isolated_accept_env(
+                root / "home",
                 PATH=os.pathsep.join((str(commands), os.environ["PATH"])),
                 CARGO_TARGET_DIR=shell_path(target_dir),
                 MARE_ACCEPT_TMPDIR=shell_path(temp_root),
@@ -1618,9 +1640,8 @@ class SnapshotGateTests(FixtureTestCase):
         py_cmd = commands / "python3"
         py_cmd.write_text(py_script)
         py_cmd.chmod(0o755)
-        env = dict(
-            os.environ,
-            HOME=shell_path(root / "home"),
+        env = isolated_accept_env(
+            root / "home",
             PATH=os.pathsep.join((str(commands), os.environ["PATH"])),
             CARGO_TARGET_DIR=shell_path(root / "target"),
             MBX_DISABLE="1",

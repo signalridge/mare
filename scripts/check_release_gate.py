@@ -85,13 +85,25 @@ def evaluate_jobs(jobs: list[dict]) -> list[str]:
     return errors
 
 
+REQUIRED_EVENT = "push"
+REQUIRED_BRANCH = "main"
+
+
+def _matches_expected_run(run: dict, expected_commit: str | None) -> bool:
+    if expected_commit is None:
+        return True
+    return (
+        run.get("event") == REQUIRED_EVENT
+        and run.get("headBranch") == REQUIRED_BRANCH
+        and run.get("headSha") == expected_commit
+    )
+
+
 def check_runs(
     runs: list[dict],
     fetch_jobs,
     *,
     expected_commit: str | None = None,
-    required_event: str = "push",
-    required_branch: str = "main",
 ) -> tuple[bool, list[str]]:
     if not runs:
         return False, ["no ci.yml workflow runs found for commit"]
@@ -100,17 +112,14 @@ def check_runs(
     matching_runs: list[dict] = []
     for run in runs:
         run_id = run.get("databaseId")
-        if expected_commit is not None:
-            event = run.get("event")
-            branch = run.get("headBranch")
-            head_sha = run.get("headSha")
-            if event != required_event or branch != required_branch or head_sha != expected_commit:
-                last_errors = [
-                    f"ci.yml run {run_id} does not match event={required_event!r}, "
-                    f"branch={required_branch!r}, head_sha={expected_commit!r} "
-                    f"(got event={event!r}, branch={branch!r}, head_sha={head_sha!r})"
-                ]
-                continue
+        if not _matches_expected_run(run, expected_commit):
+            last_errors = [
+                f"ci.yml run {run_id} does not match event={REQUIRED_EVENT!r}, "
+                f"branch={REQUIRED_BRANCH!r}, head_sha={expected_commit!r} "
+                f"(got event={run.get('event')!r}, branch={run.get('headBranch')!r}, "
+                f"head_sha={run.get('headSha')!r})"
+            ]
+            continue
         matching_runs.append(run)
 
     if not matching_runs:
@@ -154,15 +163,7 @@ def wait_for_runs(
         pending = [
             r
             for r in runs
-            if r.get("status") != "completed"
-            and (
-                expected_commit is None
-                or (
-                    r.get("event") == "push"
-                    and r.get("headBranch") == "main"
-                    and r.get("headSha") == expected_commit
-                )
-            )
+            if r.get("status") != "completed" and _matches_expected_run(r, expected_commit)
         ]
         if not runs or pending:
             remaining = deadline - monotonic()
