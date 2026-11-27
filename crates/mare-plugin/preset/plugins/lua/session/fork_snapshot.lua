@@ -215,7 +215,13 @@ return function(D)
 		return selected
 	end
 
-	local function load_source(opts, caller)
+	local function validate_before_item_id(before_item_id)
+		if type(before_item_id) ~= "string" or before_item_id == "" then
+			lib.fail("invalid_arguments", "before_item_id must be a non-empty string")
+		end
+	end
+
+	local function load_source(opts, caller, allow_memory)
 		local sid = opts.session_id or S.id
 		if type(sid) ~= "string" or sid == "" then
 			lib.fail("invalid_arguments", "session_id must be a non-empty string")
@@ -261,10 +267,14 @@ return function(D)
 				source_path = D.recorded_path
 				expected_id = S.id
 				entries = mare.store.read_fork_snapshot(source_path, S.id)
-			elseif opts.allow_memory then
+			elseif allow_memory then
 				local msgs = ctx.agent and ctx.agent:messages() or {}
-				if #msgs == 0 then
-					lib.fail("session.no_history", "source session has no history")
+				if opts.before_item_id ~= nil and #msgs == 0 then
+					validate_before_item_id(opts.before_item_id)
+					lib.fail(
+						"session.unknown_item",
+						("item is absent from the observed source: %s"):format(opts.before_item_id)
+					)
 				end
 				local mem = D.store.new_snapshot()
 				mem.id = S.id
@@ -294,9 +304,7 @@ return function(D)
 
 	local function resolve_boundary(source, before_item_id)
 		if before_item_id ~= nil then
-			if type(before_item_id) ~= "string" or before_item_id == "" then
-				lib.fail("invalid_arguments", "before_item_id must be a non-empty string")
-			end
+			validate_before_item_id(before_item_id)
 			local target_entry = D.resolve_item_entry(source, before_item_id)
 			if not target_entry then
 				lib.fail("session.unknown_item", ("item is absent from the observed source: %s"):format(before_item_id))
@@ -312,7 +320,7 @@ return function(D)
 	--- Build a non-switching, non-blocking snapshot context (`session:snapshot_context`).
 	function session.snapshot_context(_, caller, opts)
 		opts = opts or {}
-		local source, source_history, memory_only = load_source(opts, caller)
+		local source, source_history, memory_only = load_source(opts, caller, opts.allow_memory == true)
 		if memory_only then
 			local msgs = {}
 			for _, m in ipairs(ctx.agent:messages() or {}) do
@@ -326,7 +334,7 @@ return function(D)
 				name = source.name,
 				cwd = source.cwd or mare.cwd,
 				leaf_entry_id = source.leaf,
-				messages = msgs,
+				messages = mare.json.array(msgs),
 				model = opts.model or (cur and cur.ref or nil),
 				effort = opts.effort or (params and params.effort or nil),
 				persisted = false,
@@ -334,9 +342,9 @@ return function(D)
 			}
 		end
 		-- A persistent fork can validly contain no selected turns.  Its parent link
-		-- distinguishes that published empty snapshot from an unsaved source.
+		-- or `allow_memory = true` distinguishes an empty side-chat snapshot from a history-requiring fork.
 		local boundary_id
-		if source.leaf or opts.before_item_id or not source.parent_session_id then
+		if source.leaf or opts.before_item_id or (not source.parent_session_id and not opts.allow_memory) then
 			boundary_id = resolve_boundary(source, opts.before_item_id)
 		end
 		local path = source_history.path_to(boundary_id)

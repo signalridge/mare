@@ -1093,3 +1093,119 @@ async fn side_turn_cache_clears_on_session_switch_so_wait_does_not_leak_across_s
     })
     .await;
 }
+
+#[tokio::test]
+async fn side_and_btw_answer_on_empty_session_with_project_context_and_keep_no_history_forks() {
+    local(async {
+        let env = TestEnv::new().await;
+        std::fs::write(env.work.path().join("AGENTS.md"), "PROJECT_CONTEXT_MARKER_42\n").unwrap();
+        let h = env
+            .host()
+            .builtins(&["conversations", "usage"])
+            .faux(json!([
+                { "text": "main turn after empty side" }
+            ]))
+            .build()
+            .await;
+        expose(&h);
+
+        // Brand-new persistent session: nothing sent yet, no session file yet.
+        exec(
+            &h,
+            r#"
+            assert(#A:messages() == 0, "main session must start empty")
+            local L = C.cordis:get("llm")
+            local done_tx, done_rx = mare.task.channel()
+            CAPTURED = {}
+            L:register_provider({
+                provider = "emptyprobe",
+                is_configured = function() return true end,
+                models = {
+                    { model_id = "m", context_window = 128000, max_output = 4096 },
+                    { model_id = "alt", context_window = 128000, max_output = 4096 },
+                },
+                stream = function(req, emit)
+                    CAPTURED[#CAPTURED + 1] = {
+                        purpose = req.purpose,
+                        system = req.system or "",
+                        model_id = req.model and req.model.model_id or nil,
+                        tool_count = #(req.tools or {}),
+                        msg_count = #(req.messages or {}),
+                    }
+                    done_tx:send(true)
+                    local reply = "empty-side-ok-" .. tostring(#CAPTURED)
+                    if emit then emit({ type = "text_delta", delta = reply }) end
+                    return { role = "assistant", stop_reason = "stop", content = { { type = "text", text = reply } } }
+                end,
+            })
+            assert(L:set_model("emptyprobe/m"))
+
+            local cmds = C.cordis:get("commands")
+            local conv = C.cordis:get("conversations")
+
+            -- 1. /btw on brand-new unpersisted session answers with project system prompt and tools.
+            cmds:run("/btw first empty question")
+            assert(mare.task.timeout(5000, function() return done_rx:recv() end), "/btw never ran on empty session")
+            local info = conv:info()
+            assert(info ~= nil and info.selected == true, "side conversation should be open")
+            cmds:run("/btw back")
+            assert(conv:info() == nil, "/btw back should close side conversation")
+            assert(#A:messages() == 0, "main session history must remain empty")
+
+            -- 2. Second /side after usage/side-v1 may have created S.file (still S.leaf == nil) also answers.
+            assert(L:set_model("emptyprobe/alt"))
+            cmds:run("/side second empty question")
+            assert(mare.task.timeout(5000, function() return done_rx:recv() end), "second /side never ran on empty session")
+            cmds:run("/side back")
+            assert(#A:messages() == 0, "main session history must still remain empty")
+
+            assert(#CAPTURED == 2, "expected 2 side calls, got " .. tostring(#CAPTURED))
+            for i, cap in ipairs(CAPTURED) do
+                assert(cap.purpose == "side", "expected purpose=side on call " .. i)
+                assert(cap.system:find("PROJECT_CONTEXT_MARKER_42", 1, true), "missing project AGENTS.md context on call " .. i)
+                assert(cap.tool_count > 0, "expected tools bound on call " .. i)
+                assert(cap.msg_count == 2, "expected boundary + user message on empty fork, got " .. tostring(cap.msg_count))
+            end
+            assert(CAPTURED[2].model_id == "alt", "expected updated session model on second side call")
+
+            -- 3. Forks that genuinely require history still fail with session.no_history.
+            local sid = S:info().session_id
+            local ok_snap, err_snap = pcall(function() return S:snapshot({ session_id = sid }) end)
+            assert(not ok_snap and err_snap.code == "session.no_history", tostring(err_snap))
+            local ok_ctx, err_ctx = pcall(function() return S:snapshot_context({ session_id = sid, allow_memory = false }) end)
+            assert(not ok_ctx and err_ctx.code == "session.no_history", tostring(err_ctx))
+            local ok_ctx_default, err_ctx_default = pcall(function() return S:snapshot_context({ session_id = sid }) end)
+            assert(not ok_ctx_default and err_ctx_default.code == "session.no_history", tostring(err_ctx_default))
+            "#,
+        )
+        .await;
+
+        // 4. Subsequent main conversation turn works normally.
+        exec(&h, r#"assert(C.cordis:get("llm"):set_model("faux/echo"))"#).await;
+        let main_reply = h.prompt("hello main", json!({})).await.unwrap();
+        assert_eq!(main_reply["text"], "main turn after empty side");
+
+        h.shutdown().await;
+
+        // 5. --no-session empty session also answers /btw while rejecting S:snapshot.
+        let nosess = env.host().no_session().faux(json!([{ "text": "nosess side ok" }])).build().await;
+        expose(&nosess);
+        exec(
+            &nosess,
+            r#"
+            local conv = C.cordis:get("conversations")
+            local info, err = conv:start()
+            assert(info ~= nil, "empty --no-session conversations:start failed: " .. tostring(err))
+            local started = A:prompt("empty nosess question")
+            local reply = A:wait(started.turn_id)
+            assert(reply and reply.text == "nosess side ok", mare.json.encode(reply))
+            assert(conv:close() == true)
+            local ok_snap, err_snap = pcall(function() return S:snapshot({ session_id = S:info().session_id }) end)
+            assert(not ok_snap and err_snap.code == "session.no_history", tostring(err_snap))
+            "#,
+        )
+        .await;
+        nosess.shutdown().await;
+    })
+    .await;
+}
