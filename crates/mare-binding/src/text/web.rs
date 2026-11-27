@@ -40,17 +40,16 @@ fn decode(bytes: &[u8], charset: &str, final_chunk: bool) -> Result<String, &'st
     Ok(text.strip_prefix('\u{feff}').unwrap_or(&text).to_owned())
 }
 
-// Tags whose subtrees are unconditionally omitted when converting HTML to Markdown.
-const ALWAYS_NON_VISIBLE_TAGS: &[&str] =
-    &["script", "style", "head", "noscript", "template", "iframe", "object", "embed"];
-
 // Elements omitted when converting HTML to Markdown.
-fn non_visible(node: &htmd::node::Node<'_>) -> bool {
-    let Some(tag) = node.tag_name() else { return false };
-    if ALWAYS_NON_VISIBLE_TAGS.contains(&tag) {
+fn non_visible(node: &markup5ever_rcdom::Node) -> bool {
+    let markup5ever_rcdom::NodeData::Element { name, attrs, .. } = &node.data else { return false };
+    let tag: &str = name.local.as_ref();
+    if matches!(tag, "script" | "style" | "head" | "noscript" | "template" | "iframe" | "object" | "embed") {
         return true;
     }
-    node.attrs().iter().any(|(key, value)| {
+    attrs.borrow().iter().any(|attribute| {
+        let key: &str = attribute.name.local.as_ref();
+        let value = attribute.value.as_ref();
         key == "hidden"
             || (key == "aria-hidden" && value.eq_ignore_ascii_case("true"))
             || (tag == "input" && key == "type" && value.eq_ignore_ascii_case("hidden"))
@@ -157,9 +156,6 @@ fn extract_tr_cells(
     let mut aligns = Vec::new();
     let mut all_th = true;
     for child in tr.children().iter() {
-        if non_visible(&child) {
-            continue;
-        }
         let Some(tag) = child.tag_name() else {
             continue;
         };
@@ -183,9 +179,6 @@ fn render_gfm_table(
     element: &htmd::Element<'_>,
     budget: &TableBudget,
 ) -> Option<htmd::element_handler::HandlerResult> {
-    if non_visible(element.node) {
-        return None;
-    }
     let limit = budget.remaining.load(std::sync::atomic::Ordering::Relaxed);
     if limit == 0 {
         budget.truncated.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -194,9 +187,6 @@ fn render_gfm_table(
     let mut captions = Vec::new();
     let mut rows: Vec<(Vec<String>, Vec<&'static str>, bool)> = Vec::new();
     for child in element.node.children().iter() {
-        if non_visible(&child) {
-            continue;
-        }
         let Some(tag) = child.tag_name() else {
             continue;
         };
@@ -212,7 +202,7 @@ fn render_gfm_table(
             "thead" | "tbody" | "tfoot" => {
                 let in_thead = tag == "thead";
                 for row_node in child.children().iter() {
-                    if !non_visible(&row_node) && row_node.tag_name() == Some("tr") {
+                    if row_node.tag_name() == Some("tr") {
                         let (cells, aligns, all_th) = extract_tr_cells(handlers, &row_node);
                         if !cells.is_empty() {
                             rows.push((cells, aligns, in_thead || all_th));
@@ -297,96 +287,6 @@ fn html(
     Ok((md, truncated))
 }
 
-const EXPOSED_TEMPLATE_TAG: &str = "x-mare-template";
-
-fn check_dom_budget(
-    root: &htmd::node::Node<'_>,
-    max_nodes: usize,
-    max_depth: usize,
-    exposed_template_tag: Option<&str>,
-) -> Result<(bool, std::collections::BTreeSet<String>), String> {
-    let mut pending = vec![(root.clone(), 0usize)];
-    let mut count = 0usize;
-    let mut has_template = false;
-    let mut hidden_tags = std::collections::BTreeSet::new();
-    while let Some((node, depth)) = pending.pop() {
-        count += 1;
-        if count > max_nodes {
-            return Err("HTML exceeds max_nodes complexity budget".into());
-        }
-        if depth > max_depth {
-            return Err("HTML exceeds max_depth complexity budget".into());
-        }
-        let mut child_depth = depth + 1;
-        if let Some(tag) = node.tag_name() {
-            if tag == "template" {
-                has_template = true;
-            }
-            if exposed_template_tag == Some(tag) {
-                // Each `<template>` owns a DocumentFragment node at `depth + 1`, with its
-                // parsed contents starting at `depth + 2`.
-                count += 1;
-                if count > max_nodes {
-                    return Err("HTML exceeds max_nodes complexity budget".into());
-                }
-                if child_depth > max_depth {
-                    return Err("HTML exceeds max_depth complexity budget".into());
-                }
-                child_depth += 1;
-            }
-            if exposed_template_tag.is_none()
-                && !ALWAYS_NON_VISIBLE_TAGS.contains(&tag)
-                && tag != "table"
-                && non_visible(&node)
-            {
-                hidden_tags.insert(tag.to_owned());
-            }
-        }
-        let mut child = node.first_child();
-        while let Some(c) = child {
-            child = c.next_sibling();
-            pending.push((c, child_depth));
-        }
-    }
-    Ok((has_template, hidden_tags))
-}
-
-// htmd 0.6's ego-tree backend stores `<template>` contents in a private DocumentFragment
-// unreachable through `Node::children()`. Rewrite `<template...>` / `</template...>` tags
-// solely for a budget-counting parse (counting each template's DocumentFragment node and
-// extra depth level) so template subtrees match real DOM budgets; Markdown conversion always
-// runs on the original unmodified tree.
-fn expose_templates(input: &str) -> String {
-    const TAG: &[u8] = b"template";
-    let bytes = input.as_bytes();
-    let mut out = String::with_capacity(input.len() + 32);
-    let mut i = 0;
-    let mut last = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'<' {
-            let mut j = i + 1;
-            if bytes.get(j) == Some(&b'/') {
-                j += 1;
-            }
-            if bytes.get(j..j + TAG.len()).is_some_and(|s| s.eq_ignore_ascii_case(TAG))
-                && matches!(
-                    bytes.get(j + TAG.len()).copied(),
-                    None | Some(b'>' | b'/' | b' ' | b'\t' | b'\n' | b'\r' | b'\x0c')
-                )
-            {
-                out.push_str(&input[last..j]);
-                out.push_str("x-mare-");
-                last = j;
-                i = j + TAG.len();
-                continue;
-            }
-        }
-        i += 1;
-    }
-    out.push_str(&input[last..]);
-    out
-}
-
 fn html_with_stats(
     input: &str,
     max_input: usize,
@@ -395,6 +295,8 @@ fn html_with_stats(
     max_nodes: usize,
     max_depth: usize,
 ) -> Result<(String, bool, HtmlStats), String> {
+    use html5ever::tendril::TendrilSink;
+
     if input.len() > max_input {
         return Err("HTML input exceeds max_bytes".into());
     }
@@ -403,16 +305,35 @@ fn html_with_stats(
     if input.bytes().filter(|b| *b == b'<').take(max_tags + 1).count() > max_tags {
         return Err("HTML exceeds max_tags complexity budget".into());
     }
-    let parser = htmd::HtmlToMarkdown::new();
-    let tree = parser.html_to_tree(input).map_err(|e| e.to_string())?;
-    // Count the entire parsed tree first: hidden subtrees do not evade resource
-    // ceilings. Collect tag names that actually carry non-visible attributes so the
-    // immutable ego-tree walk can skip those subtrees without regex over HTML.
-    let (has_template, hidden_tags) = check_dom_budget(&tree.root(), max_nodes, max_depth, None)?;
-    if has_template {
-        let exposed = expose_templates(input);
-        let exposed_tree = parser.html_to_tree(&exposed).map_err(|e| e.to_string())?;
-        check_dom_budget(&exposed_tree.root(), max_nodes, max_depth, Some(EXPOSED_TEMPLATE_TAG))?;
+    let opts = html5ever::ParseOpts {
+        tree_builder: html5ever::tree_builder::TreeBuilderOpts { scripting_enabled: true, ..Default::default() },
+        ..Default::default()
+    };
+    let root = html5ever::parse_document(markup5ever_rcdom::RcDom::default(), opts).one(input).document;
+    // Count the entire parsed tree first (including template DocumentFragments): hidden subtrees
+    // do not evade resource ceilings. Then prune using the parser's attributes, never regex.
+    let mut pending = vec![(root.clone(), 0usize)];
+    let mut count = 0usize;
+    while let Some((node, depth)) = pending.pop() {
+        count += 1;
+        if count > max_nodes {
+            return Err("HTML exceeds max_nodes complexity budget".into());
+        }
+        if depth > max_depth {
+            return Err("HTML exceeds max_depth complexity budget".into());
+        }
+        pending.extend(node.children.borrow().iter().map(|child| (child.clone(), depth + 1)));
+        if let markup5ever_rcdom::NodeData::Element { template_contents, .. } = &node.data
+            && let Some(contents) = template_contents.borrow().as_ref()
+        {
+            pending.push((contents.clone(), depth + 1));
+        }
+    }
+    let mut visible = vec![root.clone()];
+    while let Some(node) = visible.pop() {
+        let mut children = node.children.borrow_mut();
+        children.retain(|child| !non_visible(child));
+        visible.extend(children.iter().cloned());
     }
     let budget = std::sync::Arc::new(TableBudget {
         remaining: std::sync::atomic::AtomicUsize::new(max_output.saturating_add(1)),
@@ -420,30 +341,21 @@ fn html_with_stats(
         cells_written: std::sync::atomic::AtomicUsize::new(0),
     });
     let budget_handler = budget.clone();
-    let mut builder = htmd::HtmlToMarkdown::builder()
+    let converter = htmd::HtmlToMarkdown::builder()
         .options(htmd::options::Options {
             bullet_list_marker: htmd::options::BulletListMarker::Dash,
             ul_bullet_spacing: 1,
             ..Default::default()
         })
-        .skip_tags(ALWAYS_NON_VISIBLE_TAGS.to_vec())
+        .skip_tags(vec!["script", "style", "head", "template", "noscript"])
         .add_handler(
             vec!["table"],
             move |handlers: &dyn htmd::element_handler::Handlers, element: &htmd::Element<'_>| {
                 render_gfm_table(handlers, element, &budget_handler)
             },
-        );
-    if !hidden_tags.is_empty() {
-        let tag_refs: Vec<&str> = hidden_tags.iter().map(String::as_str).collect();
-        builder = builder.add_handler(
-            tag_refs,
-            |handlers: &dyn htmd::element_handler::Handlers, element: &htmd::Element<'_>| {
-                if non_visible(element.node) { None } else { handlers.fallback(element) }
-            },
-        );
-    }
-    let converter = builder.build();
-    let output = converter.convert(&tree).map_err(|e| e.to_string())?;
+        )
+        .build();
+    let output = converter.convert(&root).map_err(|e| e.to_string())?;
     let pre_cut_len = output.len();
     let table_cells_written = budget.cells_written.load(std::sync::atomic::Ordering::Relaxed);
     let truncated = pre_cut_len > max_output || budget.truncated.load(std::sync::atomic::Ordering::Relaxed);
@@ -757,5 +669,25 @@ mod decoding_prefixes {
         assert!(html(nested_tpl, MAX_INPUT, MAX_OUTPUT, MAX_TAGS, 10, MAX_DEPTH).is_ok());
         assert!(html(nested_tpl, MAX_INPUT, MAX_OUTPUT, MAX_TAGS, MAX_NODES, 7).unwrap_err().contains("max_depth"));
         assert!(html(nested_tpl, MAX_INPUT, MAX_OUTPUT, MAX_TAGS, MAX_NODES, 8).is_ok());
+
+        // Table-row templates parse under HTML5 template insertion mode (preserving tr/td):
+        // Document(0) -> html(1) -> {head(2), body(2) -> template(3) -> frag(4) -> tr(5) -> td(6) -> text(7)}
+        // = 9 nodes, max depth 7.
+        let table_tpl = "<body><template><tr><td>x</td></tr></template></body>";
+        assert!(html(table_tpl, MAX_INPUT, MAX_OUTPUT, MAX_TAGS, 8, MAX_DEPTH).unwrap_err().contains("max_nodes"));
+        assert!(html(table_tpl, MAX_INPUT, MAX_OUTPUT, MAX_TAGS, 9, MAX_DEPTH).is_ok());
+        assert!(html(table_tpl, MAX_INPUT, MAX_OUTPUT, MAX_TAGS, MAX_NODES, 6).unwrap_err().contains("max_depth"));
+        assert!(html(table_tpl, MAX_INPUT, MAX_OUTPUT, MAX_TAGS, MAX_NODES, 7).is_ok());
+    }
+
+    #[test]
+    fn web_html_hidden_list_items_do_not_consume_ordered_list_numbers() {
+        let (md, truncated) =
+            html("<ol><li hidden>A</li><li>B</li></ol>", MAX_INPUT, MAX_OUTPUT, MAX_TAGS, MAX_NODES, MAX_DEPTH)
+                .unwrap();
+        let (expected, _) = html("<ol><li>B</li></ol>", MAX_INPUT, MAX_OUTPUT, MAX_TAGS, MAX_NODES, MAX_DEPTH).unwrap();
+        assert!(!truncated);
+        assert_eq!(md, expected, "hidden <li> must not produce an empty 1. or shift B to 2.: {md:?}");
+        assert!(!md.contains('A') && !md.contains("2.") && md.contains("1.") && md.contains('B'), "{md:?}");
     }
 }

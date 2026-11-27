@@ -78,6 +78,8 @@ yaml-rust2.workspace = true
 vt100.workspace = true
 rrule.workspace = true
 htmd.workspace = true
+html5ever.workspace = true
+markup5ever_rcdom.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 codepage.workspace = true
