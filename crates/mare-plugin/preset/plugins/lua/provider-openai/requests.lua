@@ -825,7 +825,10 @@ return function(D)
 		local raw_key = not cfg_has_key and type(entry.api_key) == "string" and entry.api_key ~= "" and entry.api_key
 			or nil
 		local hosted = normalize_hosted_tools(entry, false)
-		local function api_key()
+		local function custom_api_key(eff)
+			if eff and eff.no_key then
+				return nil
+			end
 			return raw_key or llm:api_key(name, envs)
 		end
 		local function live_entry()
@@ -839,9 +842,33 @@ return function(D)
 			local raw = llm:base_url(name, (eff and eff.base_url) or entry.base_url)
 			return tostring(raw or ""):gsub("/+$", "")
 		end
+		local function custom_catalog_target(eff)
+			local headers = {}
+			for k, v in pairs(eff.headers or {}) do
+				headers[k] = v
+			end
+			local wire = {
+				provider = name,
+				method = "GET",
+				url = mare.http.build_url(live_base_url(eff) .. "/models"),
+				headers = headers,
+			}
+			wire = ctx.bus:waterfall("provider/request", wire) or wire
+			local header_digests = {}
+			for k, v in pairs((type(wire) == "table" and wire.headers) or {}) do
+				if v ~= nil then
+					header_digests[string.lower(tostring(k))] = mare.crypto.sha256(tostring(v))
+				end
+			end
+			return {
+				url_digest = (type(wire) == "table" and wire.url) and mare.crypto.sha256(tostring(wire.url)) or nil,
+				headers = next(header_digests) and header_digests or nil,
+				proxy = type(wire) == "table" and wire.proxy or nil,
+			}
+		end
 		local function custom_endpoint(_req)
 			local eff = live_entry()
-			local key = api_key()
+			local key = custom_api_key(eff)
 			if not key and not eff.no_key then
 				error({
 					message = ("%s is not configured: run /login %s or set %s"):format(
@@ -899,14 +926,13 @@ return function(D)
 				return entry.no_key or raw_key ~= nil or llm:has_api_key(name, envs)
 			end,
 			catalog_target = entry.list_models ~= false and function()
-				local eff = live_entry()
-				return {
-					url = mare.http.build_url(live_base_url(eff) .. "/models"),
-					headers = eff.headers,
-				}
+				return custom_catalog_target(live_entry())
 			end or nil,
-			catalog_scope = (entry.list_models ~= false and raw_key ~= nil) and function()
-				return "api_key:" .. mare.crypto.sha256(raw_key)
+			catalog_scope = entry.list_models ~= false and function()
+				if live_entry().no_key then
+					return "no_key"
+				end
+				return raw_key ~= nil and ("api_key:" .. mare.crypto.sha256(raw_key)) or nil
 			end or nil,
 			catalog = entry.list_models ~= false and function(for_fetch)
 				local eff = live_entry()
@@ -919,7 +945,7 @@ return function(D)
 					url = live_base_url(eff) .. "/models",
 					headers = headers,
 					auth = "bearer",
-					key = for_fetch and api_key() or nil,
+					key = for_fetch and custom_api_key(eff) or nil,
 					no_key = eff.no_key,
 					decode = decode_openai_models(name),
 				}

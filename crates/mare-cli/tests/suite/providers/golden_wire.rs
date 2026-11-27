@@ -620,3 +620,224 @@ mare.provider("my-gemini-nk", {{
     })
     .await
 }
+
+/// `no_key = true` on data-tier Anthropic and Google providers must never fetch or transmit a
+/// previously saved `/login` credential on either streaming POST or catalog GET requests.
+#[tokio::test]
+async fn no_key_custom_anthropic_and_google_never_send_saved_login_credentials() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        env.set_var("ANTHROPIC_API_KEY", "");
+        env.set_var("GEMINI_API_KEY", "");
+        env.set_var("GOOGLE_API_KEY", "");
+
+        let server = MockServer::start().await;
+        let base = &server.base;
+        server.route("/nk-ant/v1/messages", vec![Resp::sse(anthropic_text_sse("nk-ant-ok"))]);
+        server.route(
+            "/nk-ant/v1/models",
+            vec![Resp::status(200, r#"{"data":[{"id":"claude-nk","display_name":"Claude NK"}]}"#)],
+        );
+        server.route(
+            "/nk-goog/v1beta/models/gem-nk:streamGenerateContent",
+            vec![Resp::sse(fixture("google.sse"))],
+        );
+        server.route(
+            "/nk-goog/v1beta/models",
+            vec![Resp::status(
+                200,
+                r#"{"models":[{"name":"models/gem-nk-listed","displayName":"Gem NK","supportedGenerationMethods":["generateContent"]}]}"#,
+            )],
+        );
+
+        std::fs::create_dir_all(env.config_dir()).unwrap();
+        let auth_path = env.config_dir().join("auth.json");
+        std::fs::write(
+            &auth_path,
+            r#"{"version":1,"my-ant-nk":{"type":"api_key","key":"stale-ant-login-key"},"my-goog-nk":{"type":"api_key","key":"stale-goog-login-key"}}"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&auth_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        std::fs::write(
+            env.config_dir().join("init.lua"),
+            format!(
+                r#"
+mare.provider("my-ant-nk", {{
+  wire_api = "anthropic",
+  base_url = "{base}/nk-ant",
+  no_key = true,
+  models = {{ {{ model_id = "claude-nk", context_window = 64000, max_output = 4096 }} }},
+}})
+mare.provider("my-goog-nk", {{
+  wire_api = "google",
+  base_url = "{base}/nk-goog/v1beta",
+  no_key = true,
+  models = {{ {{ model_id = "gem-nk", context_window = 64000, max_output = 4096 }} }},
+}})
+"#
+            ),
+        )
+        .unwrap();
+
+        let h = env.host().user_config(false).no_session().build().await;
+        global(&h, "LLM", h.service_table("llm").unwrap());
+
+        assert_eq!(text_of(&ask(&h, "my-ant-nk/claude-nk").await), "nk-ant-ok");
+        assert_fixture_message("my-goog-nk/gem-nk", &stream(&h, "my-goog-nk/gem-nk").await, 0);
+
+        let catalogs_ok: bool = eval(
+            &h,
+            r#"
+            LLM:refresh_models("my-ant-nk")
+            LLM:refresh_models("my-goog-nk")
+            return LLM:resolve("my-ant-nk/claude-nk") ~= nil and LLM:resolve("my-goog-nk/gem-nk-listed") ~= nil
+            "#,
+        )
+        .await;
+        assert!(catalogs_ok, "no_key catalog refresh must succeed for both wires");
+
+        h.shutdown().await;
+
+        let reqs = server.requests();
+        assert_eq!(reqs.len(), 4, "expected 2 POST + 2 GET requests: {reqs:#?}");
+        for r in &reqs {
+            assert_eq!(r.header("x-api-key"), None, "no_key leaked x-api-key on {}", r.path);
+            assert_eq!(r.header("x-goog-api-key"), None, "no_key leaked x-goog-api-key on {}", r.path);
+            assert_eq!(r.header("authorization"), None, "no_key leaked authorization on {}", r.path);
+            let serialized = format!("{:?}", r.headers);
+            assert!(!serialized.contains("stale-ant-login-key"), "stale anthropic key leaked on {}", r.path);
+            assert!(!serialized.contains("stale-goog-login-key"), "stale google key leaked on {}", r.path);
+        }
+    })
+    .await
+}
+
+/// Custom Anthropic and Google model catalog caches must key on effective resolved `query_params`
+/// and `headers` (hashed, never storing plaintext values on disk) so changing tenant parameters
+/// under the same API key never returns stale cached models.
+#[tokio::test]
+async fn custom_anthropic_and_google_catalog_cache_isolates_query_params_and_resolved_headers() {
+    local(async {
+        let env = TestEnv::new().await;
+        let server = MockServer::start().await;
+        let base = &server.base;
+        server.route(
+            "/tenant-ant/v1/models",
+            vec![
+                Resp::status(200, r#"{"data":[{"id":"ant-tenant-a","display_name":"Ant A"}]}"#),
+                Resp::status(200, r#"{"data":[{"id":"ant-tenant-b","display_name":"Ant B"}]}"#),
+                Resp::status(200, r#"{"data":[{"id":"ant-tenant-c","display_name":"Ant C"}]}"#),
+            ],
+        );
+        server.route(
+            "/tenant-goog/v1beta/models",
+            vec![
+                Resp::status(
+                    200,
+                    r#"{"models":[{"name":"models/goog-tenant-a","displayName":"Goog A","supportedGenerationMethods":["generateContent"]}]}"#,
+                ),
+                Resp::status(
+                    200,
+                    r#"{"models":[{"name":"models/goog-tenant-b","displayName":"Goog B","supportedGenerationMethods":["generateContent"]}]}"#,
+                ),
+                Resp::status(
+                    200,
+                    r#"{"models":[{"name":"models/goog-tenant-c","displayName":"Goog C","supportedGenerationMethods":["generateContent"]}]}"#,
+                ),
+            ],
+        );
+
+        std::fs::create_dir_all(env.config_dir()).unwrap();
+        std::fs::write(
+            env.config_dir().join("init.lua"),
+            format!(
+                r#"
+mare.plugin("llm", {{ catalog_refresh_ms = 60000 }})
+mare.provider("tenant-ant", {{
+  wire_api = "anthropic",
+  base_url = "{base}/tenant-ant",
+  api_key = "shared-ant-key",
+  headers = {{ ["x-tenant"] = "MARE_TEST_TENANT_HDR" }},
+  query_params = {{ tenant = "MARE_TEST_TENANT_Q" }},
+}})
+mare.provider("tenant-goog", {{
+  wire_api = "google",
+  base_url = "{base}/tenant-goog/v1beta",
+  api_key = "shared-goog-key",
+  headers = {{ ["x-tenant"] = "MARE_TEST_TENANT_HDR" }},
+  query_params = {{ tenant = "MARE_TEST_TENANT_Q" }},
+}})
+"#
+            ),
+        )
+        .unwrap();
+
+        let h = env.host().user_config(false).no_session().build().await;
+        global(&h, "LLM", h.service_table("llm").unwrap());
+
+        for (prov, prefix) in [("tenant-ant", "ant"), ("tenant-goog", "goog")] {
+            let script = format!(
+                r#"
+local env_map = {{
+  MARE_TEST_TENANT_HDR = "hdr-secret-a",
+  MARE_TEST_TENANT_Q = "q-secret-a",
+}}
+mare.env = function(k) return env_map[k] end
+
+LLM:refresh_catalog({{ name = "{prov}" }})
+local a1 = LLM:resolve("{prov}/{prefix}-tenant-a")
+LLM:refresh_catalog({{ name = "{prov}" }})
+local a2 = LLM:resolve("{prov}/{prefix}-tenant-a")
+
+env_map.MARE_TEST_TENANT_Q = "q-secret-b"
+LLM:refresh_catalog({{ name = "{prov}" }})
+local b = LLM:resolve("{prov}/{prefix}-tenant-b")
+local a_after_b = LLM:resolve("{prov}/{prefix}-tenant-a")
+
+env_map.MARE_TEST_TENANT_HDR = "hdr-secret-c"
+LLM:refresh_catalog({{ name = "{prov}" }})
+local c = LLM:resolve("{prov}/{prefix}-tenant-c")
+local b_after_c = LLM:resolve("{prov}/{prefix}-tenant-b")
+
+local disk = mare.fs.read(mare.paths.state .. "/models-cache/{prov}.json") or ""
+local leaked = disk:find("hdr-secret-c", 1, true) ~= nil or disk:find("q-secret-b", 1, true) ~= nil
+return (a1 ~= nil and a1.listed == true),
+  (a2 ~= nil and a2.listed == true),
+  (b ~= nil and b.listed == true),
+  (a_after_b == nil or a_after_b.listed ~= true),
+  (c ~= nil and c.listed == true),
+  (b_after_c == nil or b_after_c.listed ~= true),
+  (not leaked)
+"#
+            );
+            let (has_a, hit_a, has_b, no_a_after_b, has_c, no_b_after_c, no_raw): (
+                bool,
+                bool,
+                bool,
+                bool,
+                bool,
+                bool,
+                bool,
+            ) = eval(&h, &script).await;
+            assert!(has_a && hit_a, "{prov}: initial tenant A must publish and hit cache");
+            assert!(has_b && no_a_after_b, "{prov}: changing resolved query_params must replace tenant A with B");
+            assert!(has_c && no_b_after_c, "{prov}: changing resolved headers must replace tenant B with C");
+            assert!(no_raw, "{prov}: disk cache must not contain plaintext header/query values");
+        }
+
+        h.shutdown().await;
+
+        let reqs = server.requests();
+        for (path_prefix, label) in [("/tenant-ant/v1/models", "anthropic"), ("/tenant-goog/v1beta/models", "google")] {
+            let matched: Vec<_> = reqs.iter().filter(|r| r.path.starts_with(path_prefix)).collect();
+            assert_eq!(matched.len(), 3, "{label}: expected 3 HTTP requests (A, query->B, header->C), got {matched:#?}");
+            assert!(matched[1].path.contains("tenant=q-secret-b"), "{label}: 2nd request missing updated query_params");
+            assert_eq!(matched[2].header("x-tenant"), Some("hdr-secret-c"), "{label}: 3rd request missing updated header");
+        }
+    })
+    .await
+}
