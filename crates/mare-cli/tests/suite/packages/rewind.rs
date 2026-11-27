@@ -620,61 +620,10 @@ async fn commands_run_rewind_completes_session_switch_before_returning() {
     .await
 }
 
-fn install_splitfaux_plugin(env: &TestEnv) {
-    let plugins = env.config_dir().join("plugins");
-    std::fs::create_dir_all(&plugins).unwrap();
-    std::fs::write(
-        plugins.join("splitfaux.lua"),
-        r#"return {
-    name = "splitfaux",
-    inject = { "llm" },
-    config_schema = {
-        parent_json = { type = "string", desc = "Parent scripted turns as JSON." },
-        child_json = { type = "string", desc = "Child scripted turns as JSON." },
-    },
-    apply = function(ctx, cfg)
-        local raw = mare.mode == "child" and cfg.child_json or cfg.parent_json
-        local script = raw and mare.json.decode(raw) or {}
-        local turn = 0
-        ctx.llm:register_provider({
-            provider = "splitfaux",
-            default_model = "echo",
-            is_configured = function() return true end,
-            models = {
-                { model_id = "echo", name = "Split Faux", context_window = 100000, max_output = 4096 },
-            },
-            stream = function(_req, sink)
-                turn = turn + 1
-                local step = script[turn] or { text = "done" }
-                local content = {}
-                if step.text then
-                    sink({ type = "text_delta", delta = step.text })
-                    content[#content + 1] = { type = "text", text = step.text }
-                end
-                for n, tc in ipairs(step.tool_calls or {}) do
-                    local id = "call_" .. turn .. "_" .. n
-                    sink({ type = "tool_call_start", tool_call_id = id, name = tc.name })
-                    content[#content + 1] = { type = "tool_call", id = id, name = tc.name, arguments = tc.arguments }
-                end
-                return {
-                    role = "assistant",
-                    content = content,
-                    stop_reason = (#(step.tool_calls or {}) > 0) and "tool_use" or "stop",
-                    usage = { input = 1, output = 1, cache_read = 0, cache_write = 0 },
-                }
-            end,
-        })
-    end,
-}"#,
-    )
-    .unwrap();
-}
-
 #[tokio::test]
 async fn subagent_edits_appear_in_diff_and_rewind_restores_disk() {
     local(async {
         let env = TestEnv::new().await;
-        install_splitfaux_plugin(&env);
 
         let existing = env.cwd.join("existing.txt");
         let shared = env.cwd.join("shared.txt");
@@ -719,18 +668,21 @@ async fn subagent_edits_appear_in_diff_and_rewind_restores_disk() {
         let h = env
             .host()
             .builtins(&["changes", "subagent", "agents", "commands"])
-            .user_plugins()
-            .config(json!({
-                "model": "splitfaux/echo",
-                "plugins": {
-                    "splitfaux": {
-                        "parent_json": parent_script.to_string(),
-                        "child_json": child_script.to_string(),
-                    }
-                }
-            }))
+            .faux(parent_script)
             .build_exposed()
             .await;
+        global(&h, "CHILD_SCRIPT", child_script.to_string());
+        exec(
+            &h,
+            r#"
+            local spawn = mare.subagent.start
+            mare.subagent.start = function(opts)
+                opts.config = { plugins = { ["provider-faux"] = { script_json = CHILD_SCRIPT } } }
+                return spawn(opts)
+            end
+            "#,
+        )
+        .await;
 
         let res = h.prompt("delegate edits to subagent", json!({})).await.unwrap();
         assert_eq!(res["text"], "parent turn 1 done", "parent prompt failed: {res}");
@@ -828,7 +780,6 @@ async fn subagent_edits_appear_in_diff_and_rewind_restores_disk() {
 async fn subagent_shell_command_marks_parent_turn_and_persists_across_reopen() {
     local(async {
         let env = TestEnv::new().await;
-        install_splitfaux_plugin(&env);
 
         let parent_script = json!([
             {
@@ -853,21 +804,19 @@ async fn subagent_shell_command_marks_parent_turn_and_persists_across_reopen() {
             { "text": "child shell done" }
         ]);
 
-        let h = env
-            .host()
-            .builtins(&["changes", "subagent", "agents"])
-            .user_plugins()
-            .config(json!({
-                "model": "splitfaux/echo",
-                "plugins": {
-                    "splitfaux": {
-                        "parent_json": parent_script.to_string(),
-                        "child_json": child_script.to_string(),
-                    }
-                }
-            }))
-            .build_exposed()
-            .await;
+        let h = env.host().builtins(&["changes", "subagent", "agents"]).faux(parent_script).build_exposed().await;
+        global(&h, "CHILD_SCRIPT", child_script.to_string());
+        exec(
+            &h,
+            r#"
+            local spawn = mare.subagent.start
+            mare.subagent.start = function(opts)
+                opts.config = { plugins = { ["provider-faux"] = { script_json = CHILD_SCRIPT } } }
+                return spawn(opts)
+            end
+            "#,
+        )
+        .await;
 
         let res = h.prompt("delegate shell work", json!({})).await.unwrap();
         assert_eq!(res["text"], "parent done", "parent prompt failed: {res}");

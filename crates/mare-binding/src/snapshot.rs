@@ -419,15 +419,21 @@ fn restore(dir: &Path, from: &str, force: bool) -> Result<Outcome, String> {
     let mut plan: BTreeMap<String, (J, bool, Option<J>, Option<u32>)> = BTreeMap::new();
     for t in &all[start..] {
         for (p, e) in &t.files {
-            let slot = plan.entry(p.clone()).or_insert_with(|| {
-                (
-                    e.get("before").cloned().unwrap_or(J::Null),
-                    e.get("missing").is_some(),
-                    None,
-                    e.get("mode").and_then(J::as_u64).map(|m| m as u32),
-                )
-            });
-            if let Some(a) = e.get("after") {
+            if e.get("before").is_some() || e.get("missing").is_some() {
+                let slot = plan.entry(p.clone()).or_insert_with(|| {
+                    (
+                        e.get("before").cloned().unwrap_or(J::Null),
+                        e.get("missing").is_some(),
+                        None,
+                        e.get("mode").and_then(J::as_u64).map(|m| m as u32),
+                    )
+                });
+                if let Some(a) = e.get("after") {
+                    slot.2 = Some(a.clone());
+                }
+            } else if let Some(a) = e.get("after")
+                && let Some(slot) = plan.get_mut(p)
+            {
                 slot.2 = Some(a.clone());
             }
         }
@@ -625,6 +631,15 @@ pub fn install(lua: &Lua, mare: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, id: String| {
             crate::exec_ctx::refuse_deny_read(lua, "snapshot.begin_turn")?;
             handle(lua).begin_turn(id).map_err(rt_err)
+        })?,
+    )?;
+    // mark_shell(): record that the active turn ran a shell command
+    t.set(
+        "mark_shell",
+        lua.create_function(|lua, ()| {
+            crate::exec_ctx::refuse_deny_read(lua, "snapshot.mark_shell")?;
+            handle(lua).mark_shell();
+            Ok(())
         })?,
     )?;
     // turns() -> { {turn, files = {{path, before?, after?, missing?}}} } oldest first
@@ -916,5 +931,35 @@ mod tests {
         assert!(!t2[0].shell);
         assert_eq!(t2[0].files.len(), 1);
         assert_eq!(t2[0].files[0].0, f2.to_string_lossy());
+    }
+
+    #[test]
+    fn after_only_record_in_later_turn_does_not_delete_existing_file() {
+        let journal = SnapshotJournal::default();
+        let tmp = tempfile::tempdir().unwrap();
+        let j = tmp.path().join("journal");
+        let f = tmp.path().join("existing.txt");
+        std::fs::write(&f, "v1").unwrap();
+        setup(&journal, &j, DEFAULT_CAP);
+
+        // Simulate a cross-thread race where `capture` ran in t1, parent called `begin_turn("t2")`
+        // before the write finished, and `after` landed in t2 with no `before` record in t2.
+        begin(&journal, "t1");
+        journal.capture(&f, Some("c1"));
+        std::fs::write(&f, "v2").unwrap();
+        begin(&journal, "t2");
+        journal.after(&f);
+
+        // Restoring t2 must NOT synthesize `before = null` and delete the existing file.
+        let o2 = restore(&j, "t2", false).unwrap();
+        assert!(o2.restored.is_empty(), "after-only entry in t2 must not be restored/deleted: {o2:?}");
+        assert!(o2.conflicts.is_empty(), "{o2:?}");
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "v2");
+
+        // Restoring t1 still picks up t2's `after` hash (no false conflict) and restores v1.
+        let o1 = restore(&j, "t1", false).unwrap();
+        assert!(o1.conflicts.is_empty(), "t1 restore should see t2's after hash: {o1:?}");
+        assert_eq!(o1.restored, vec![f.to_string_lossy().to_string()]);
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "v1");
     }
 }

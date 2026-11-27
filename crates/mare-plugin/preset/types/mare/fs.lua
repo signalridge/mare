@@ -162,6 +162,8 @@ mare.snapshot = {}
 function mare.snapshot.configure(opts) end
 ---@param id string later captures belong to this turn
 function mare.snapshot.begin_turn(id) end
+--- Record that the active turn ran a shell command (whose file changes cannot be snapshotted).
+function mare.snapshot.mark_shell() end
 ---@return {turn: string, shell?: boolean, files: {path: string, before?: string|false, after?: string|false, missing?: boolean}[]}[]|nil
 function mare.snapshot.turns() end
 ---@param hash string a backup's hash

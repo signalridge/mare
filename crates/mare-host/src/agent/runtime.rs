@@ -355,7 +355,6 @@ async fn run_child_host(mut args: ChildHostArgs) -> Result<serde_json::Value, su
     }
     let cancel_scope = args.scope.clone();
     let progress_id = args.session_id.clone();
-    let child_snapshot = args.parent_snapshot.clone();
     let startup = Host::new_child(
         HostOptions {
             cwd: args.cwd,
@@ -394,21 +393,6 @@ async fn run_child_host(mut args: ChildHostArgs) -> Result<serde_json::Value, su
         if let Err(e) = bridge_approvals(&host, tx, args.origin, args.shares_rules) {
             tracing::warn!("sub-agent approvals: {e}");
         }
-    }
-    if let Some(snapshot) = child_snapshot
-        && let (Ok(ctx), Ok(owner)) = (host.kernel.host_ctx(), host.kernel.host_owner())
-        && let Ok(cb) = host.lua().create_function(move |_, ev: mlua::Value| {
-            if let mlua::Value::Table(t) = ev
-                && let Ok(call) = t.get::<Table>("call")
-                && let Ok(name) = call.get::<String>("name")
-                && matches!(name.as_str(), "bash" | "powershell" | "shell")
-            {
-                snapshot.mark_shell();
-            }
-            Ok(())
-        })
-    {
-        let _ = host.kernel.host_on(&ctx, owner, "pipeline/tool-dispatching", cb, mare_kernel::HostOn::default());
     }
     let ev_cursor = host.kernel.open_cursor(std::sync::Arc::new(|_| Some(true)));
     let ev_tx = args.ev_tx;
