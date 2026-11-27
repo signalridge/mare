@@ -827,7 +827,6 @@ return function(D)
 				pcall(U.remove, cur.reasoning.id)
 				cur.reasoning = nil
 			end
-			cur.out_chars = 0
 		end
 		local attempt = math.max(1, math.floor(tonumber(ev.attempt) or 1))
 		local max_attempts = tonumber(ev.max_attempts)

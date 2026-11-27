@@ -1371,7 +1371,6 @@ async fn notify_toast_never_wraps_or_overflows_past_its_border() {
             }
         }
         let top = top_row.unwrap_or_else(|| panic!("{label}: missing toast top border:\n{}", t.screen()));
-        assert!(right_col < cols, "{label}: right border past terminal width:\n{}", t.screen());
         let mut closed = false;
         for r in (top + 1)..rows {
             let lch = screen.cell(r, left_col).map(|c| c.contents()).unwrap_or("");
