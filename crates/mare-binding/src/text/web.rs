@@ -297,10 +297,13 @@ fn html(
     Ok((md, truncated))
 }
 
+const EXPOSED_TEMPLATE_TAG: &str = "x-mare-template";
+
 fn check_dom_budget(
     root: &htmd::node::Node<'_>,
     max_nodes: usize,
     max_depth: usize,
+    exposed_template_tag: Option<&str>,
 ) -> Result<(bool, std::collections::BTreeSet<String>), String> {
     let mut pending = vec![(root.clone(), 0usize)];
     let mut count = 0usize;
@@ -314,18 +317,35 @@ fn check_dom_budget(
         if depth > max_depth {
             return Err("HTML exceeds max_depth complexity budget".into());
         }
+        let mut child_depth = depth + 1;
         if let Some(tag) = node.tag_name() {
             if tag == "template" {
                 has_template = true;
             }
-            if !ALWAYS_NON_VISIBLE_TAGS.contains(&tag) && tag != "table" && non_visible(&node) {
+            if exposed_template_tag == Some(tag) {
+                // Each `<template>` owns a DocumentFragment node at `depth + 1`, with its
+                // parsed contents starting at `depth + 2`.
+                count += 1;
+                if count > max_nodes {
+                    return Err("HTML exceeds max_nodes complexity budget".into());
+                }
+                if child_depth > max_depth {
+                    return Err("HTML exceeds max_depth complexity budget".into());
+                }
+                child_depth += 1;
+            }
+            if exposed_template_tag.is_none()
+                && !ALWAYS_NON_VISIBLE_TAGS.contains(&tag)
+                && tag != "table"
+                && non_visible(&node)
+            {
                 hidden_tags.insert(tag.to_owned());
             }
         }
         let mut child = node.first_child();
         while let Some(c) = child {
             child = c.next_sibling();
-            pending.push((c, depth + 1));
+            pending.push((c, child_depth));
         }
     }
     Ok((has_template, hidden_tags))
@@ -333,12 +353,13 @@ fn check_dom_budget(
 
 // htmd 0.6's ego-tree backend stores `<template>` contents in a private DocumentFragment
 // unreachable through `Node::children()`. Rewrite `<template...>` / `</template...>` tags
-// solely for a budget-counting parse so template subtrees still count against `max_nodes`
-// and `max_depth`; Markdown conversion always runs on the original unmodified tree.
+// solely for a budget-counting parse (counting each template's DocumentFragment node and
+// extra depth level) so template subtrees match real DOM budgets; Markdown conversion always
+// runs on the original unmodified tree.
 fn expose_templates(input: &str) -> String {
     const TAG: &[u8] = b"template";
     let bytes = input.as_bytes();
-    let mut out = String::with_capacity(input.len() + 16);
+    let mut out = String::with_capacity(input.len() + 32);
     let mut i = 0;
     let mut last = 0;
     while i < bytes.len() {
@@ -354,7 +375,7 @@ fn expose_templates(input: &str) -> String {
                 )
             {
                 out.push_str(&input[last..j]);
-                out.push_str("x-");
+                out.push_str("x-mare-");
                 last = j;
                 i = j + TAG.len();
                 continue;
@@ -387,11 +408,11 @@ fn html_with_stats(
     // Count the entire parsed tree first: hidden subtrees do not evade resource
     // ceilings. Collect tag names that actually carry non-visible attributes so the
     // immutable ego-tree walk can skip those subtrees without regex over HTML.
-    let (has_template, hidden_tags) = check_dom_budget(&tree.root(), max_nodes, max_depth)?;
+    let (has_template, hidden_tags) = check_dom_budget(&tree.root(), max_nodes, max_depth, None)?;
     if has_template {
         let exposed = expose_templates(input);
         let exposed_tree = parser.html_to_tree(&exposed).map_err(|e| e.to_string())?;
-        check_dom_budget(&exposed_tree.root(), max_nodes, max_depth)?;
+        check_dom_budget(&exposed_tree.root(), max_nodes, max_depth, Some(EXPOSED_TEMPLATE_TAG))?;
     }
     let budget = std::sync::Arc::new(TableBudget {
         remaining: std::sync::atomic::AtomicUsize::new(max_output.saturating_add(1)),
@@ -719,9 +740,22 @@ mod decoding_prefixes {
         assert!(md.contains("日本語") && md.contains("表示"), "{md}");
         assert!(!md.contains("秘密"), "{md}");
 
-        let deep_template = format!("<template>{}leaf{}</template>", "<div>".repeat(40), "</div>".repeat(40));
-        assert!(
-            html(&deep_template, MAX_INPUT, MAX_OUTPUT, MAX_TAGS, MAX_NODES, 20).unwrap_err().contains("max_depth")
-        );
+        // Exact DocumentFragment accounting:
+        // Document(0) -> html(1) -> {head(2), body(2) -> template(3) -> frag(4) -> p(5) -> text(6)}
+        // = 8 nodes, max depth 6.
+        let single_tpl = "<body><template><p>x</p></template></body>";
+        assert!(html(single_tpl, MAX_INPUT, MAX_OUTPUT, MAX_TAGS, 7, MAX_DEPTH).unwrap_err().contains("max_nodes"));
+        assert!(html(single_tpl, MAX_INPUT, MAX_OUTPUT, MAX_TAGS, 8, MAX_DEPTH).is_ok());
+        assert!(html(single_tpl, MAX_INPUT, MAX_OUTPUT, MAX_TAGS, MAX_NODES, 5).unwrap_err().contains("max_depth"));
+        assert!(html(single_tpl, MAX_INPUT, MAX_OUTPUT, MAX_TAGS, MAX_NODES, 6).is_ok());
+
+        // Nested templates add one DocumentFragment node and one depth level per template:
+        // Document(0) -> html(1) -> {head(2), body(2) -> tpl(3) -> frag(4) -> tpl(5) -> frag(6) -> p(7) -> text(8)}
+        // = 10 nodes, max depth 8.
+        let nested_tpl = "<body><template><template><p>x</p></template></template></body>";
+        assert!(html(nested_tpl, MAX_INPUT, MAX_OUTPUT, MAX_TAGS, 9, MAX_DEPTH).unwrap_err().contains("max_nodes"));
+        assert!(html(nested_tpl, MAX_INPUT, MAX_OUTPUT, MAX_TAGS, 10, MAX_DEPTH).is_ok());
+        assert!(html(nested_tpl, MAX_INPUT, MAX_OUTPUT, MAX_TAGS, MAX_NODES, 7).unwrap_err().contains("max_depth"));
+        assert!(html(nested_tpl, MAX_INPUT, MAX_OUTPUT, MAX_TAGS, MAX_NODES, 8).is_ok());
     }
 }
