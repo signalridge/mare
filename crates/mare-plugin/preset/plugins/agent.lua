@@ -3,7 +3,7 @@
 --
 -- Events (emit): turn/started {turn_id, trigger, input_item_ids?, text?, source?},
 --   step/started {turn_id, step_id, turn, model?, attempt?},
---   step/completed {turn_id, step_id, status, stop_reason?, usage?, error?, kind?, will_retry?, attempt?, delay_ms?, reset?},
+--   step/completed {turn_id, step_id, status, stop_reason?, usage?, error?, kind?, will_retry?, attempt?, max_attempts?, delay_ms?, reset?},
 --   item/started {turn_id?, item_id, step_id?, item},
 --   item/delta {turn_id, item_id, kind, delta, offset, tool_call_id?, partial?, event?},
 --   item/completed {turn_id?, item_id, status, item?, item_omitted?},

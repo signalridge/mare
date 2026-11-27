@@ -115,6 +115,7 @@ Model step finished (completed, failed, or retrying).
 | `error_kind` | `string \| null` |  |  |
 | `will_retry` | `boolean \| null` |  |  |
 | `attempt` | `integer \| null` |  |  |
+| `max_attempts` | `integer \| null` |  |  |
 | `delay_ms` | `number \| null` |  |  |
 | `reset` | `boolean \| null` |  |  |
 | `truncated` | `boolean \| null` |  |  |

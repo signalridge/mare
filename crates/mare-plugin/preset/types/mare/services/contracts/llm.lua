@@ -1273,6 +1273,7 @@ return {
 				expose = "lua",
 				data = object({
 					attempt = integer,
+					max_attempts = integer,
 					delay_ms = integer,
 					error = C.error,
 					kind = string,

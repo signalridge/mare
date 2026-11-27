@@ -28,7 +28,7 @@
 -- agent/input-ready (policy {input_id, attempt_id, revision, turn_id, cancel, session: {session_id, session_epoch}, content, input_context?, source?, delivery}: a deny stops admission without mutating history or queue; abort = true halts the run),
 -- agent/step-ready (policy {id, step, cancel, turn_id}: a deny stops the run before the request),
 -- agent/step-committed {step_id, step, turn_id} (after a step's participant state was committed),
--- step/completed {turn_id, step_id, status, stop_reason?, usage?, error?, kind?, will_retry?, attempt?, delay_ms?, reset?},
+-- step/completed {turn_id, step_id, status, stop_reason?, usage?, error?, kind?, will_retry?, attempt?, max_attempts?, delay_ms?, reset?},
 -- item/started {turn_id?, item_id, step_id?, item},
 -- item/delta {turn_id, item_id, kind, delta, offset, tool_call_id?, partial?, event?},
 -- item/completed {turn_id?, item_id, status, item?, item_omitted?},
@@ -90,7 +90,7 @@
 -- input/transform / context/transform / request/build / context/system (waterfall),
 -- llm/model-changed {model, effort?, global_effort?, scope?, scoped_only?, params_only?} (process-local;
 --   params_only: the same model with a changed effort — recorded for resume, not a model switch),
--- model/changed {ref, provider_id, model_id}, llm/retry {attempt, delay_ms, error, kind?, reset},
+-- model/changed {ref, provider_id, model_id}, llm/retry {attempt, max_attempts?, delay_ms, error, kind?, reset},
 -- usage/changed {input, output, cache_read, cache_write, cache_write_1h?, cost, cost_unknown?, requests, subscription_requests,
 --   side_requests, last_context, last_cache_read, rate_limits?},
 -- llm/usage {usage = {input, output, cache_read, cache_write, cache_write_1h?, reasoning?, cost?, cost_unknown?}, model_ref, provider_id,
