@@ -18,7 +18,7 @@ mare -p - < prompt.md                            # "-" reads the prompt from std
 mare -p explain @src/main.rs                     # a separate @path argument attaches that text file
 ```
 
-- 同时有提示词参数和管道标准输入时，标准输入的文本会读取到 EOF 并加在提示词之后，包在 `<stdin>` 标签内。
+- 同时有提示词参数和管道标准输入时，标准输入的文本会读取到 EOF 并加在提示词之后，包在 `<stdin>` 标签内。未关闭的管道会一直等待直到 EOF 或达到 `--timeout`。
 - 标准输入必须是 UTF-8，且最大 64 MiB。没有提示词且标准输入为空属于用法错误（退出码 2）。
 - `@path` 参数是以 `@` 开头的完整 shell 单词。文本文件会被内联附加；图片和无法读取的路径保持原样。
 

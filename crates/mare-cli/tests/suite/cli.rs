@@ -113,6 +113,94 @@ fn delayed_piped_stdin_is_read_to_eof_and_appended_to_prompt() {
     assert_eq!(stdout.trim_end(), "echo: Explain this\n\n<stdin>\nSLOW_STDIN_MARKER_9182\n</stdin>", "{stdout}");
 }
 
+/// An unclosed stdin pipe is bounded by `--timeout`: expires with exit code 4, `--json` `timeout`
+/// terminal state, and zero model requests, and any time spent reading stdin counts against the
+/// same `--timeout` budget for the subsequent turn.
+#[test]
+fn piped_stdin_without_eof_honors_timeout() {
+    let home = tempfile::tempdir().unwrap();
+    let req_log = home.path().join("requests.log");
+    let plugins = home.path().join("config/plugins");
+    std::fs::create_dir_all(&plugins).unwrap();
+    std::fs::write(
+        plugins.join("req_counter.lua"),
+        format!(
+            r#"return {{
+                name = "req_counter",
+                inject = {{ "agent" }},
+                apply = function(ctx)
+                    ctx:on("request/build", function(_, next)
+                        local f = assert(io.open({:?}, "a"))
+                        f:write("req\n")
+                        f:close()
+                        return next()
+                    end)
+                end,
+            }}"#,
+            req_log.to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    // 1) Write end stays open past `--timeout 300ms`: exits 4 with timeout settled record and 0 requests.
+    let mut cmd = mare_cmd();
+    cmd.args(["-p", "--json", "--model", "faux/echo", "--no-session", "--timeout", "300ms", "hello"])
+        .env("MARE_HOME", home.path())
+        .current_dir(home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = ChildGroup::spawn(&mut cmd).unwrap();
+    let _keep_open = child.0.stdin.take().unwrap();
+    let out = wait_output_timeout(child, Duration::from_secs(10));
+    drop(_keep_open);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(4), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(stderr.contains("--timeout"), "{stderr}");
+    assert!(!req_log.exists(), "provider must receive zero requests when stdin times out");
+    let lines: Vec<Value> = stdout
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("invalid JSONL ({e}): {l}")))
+        .collect();
+    assert_eq!(lines[0]["type"], "session", "{lines:?}");
+    let tf = lines.iter().find(|l| l["type"] == "turn.failed").expect("turn.failed line");
+    assert_eq!(tf["data"]["error"]["code"], "timed_out", "{tf}");
+    let settled = lines.last().expect("settled line");
+    assert_eq!(settled["type"], "settled", "{lines:?}");
+    assert_eq!(settled["data"]["exit_code"], 4, "{settled}");
+    assert_eq!(settled["data"]["reason"], "timeout", "{settled}");
+
+    // 2) Remaining budget: stdin spends ~250ms before EOF; the subsequent slow stream exceeds the
+    // remaining ~200ms of a 450ms total budget and exits 4 (`timeout`).
+    let slow_script = home.path().join("slow.json");
+    std::fs::write(&slow_script, json!([{ "text": "x".repeat(4000), "delay_ms": 20 }]).to_string()).unwrap();
+    let mut cmd2 = mare_cmd();
+    cmd2.args(["-p", "--json", "--model", "faux/echo", "--no-session", "--timeout", "450ms", "hello"])
+        .env("MARE_HOME", home.path())
+        .env("MARE_FAUX_SCRIPT", &slow_script)
+        .current_dir(home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child2 = ChildGroup::spawn(&mut cmd2).unwrap();
+    let mut stdin2 = child2.0.stdin.take().unwrap();
+    let writer2 = std::thread::spawn(move || {
+        // sleep-ok: deliberate delay consuming part of the total --timeout budget before stdin EOF
+        std::thread::sleep(Duration::from_millis(250));
+        stdin2.write_all(b"partial budget stdin\n").unwrap();
+    });
+    let out2 = wait_output_timeout(child2, Duration::from_secs(10));
+    writer2.join().unwrap();
+    let stdout2 = String::from_utf8_lossy(&out2.stdout);
+    let stderr2 = String::from_utf8_lossy(&out2.stderr);
+    assert_eq!(out2.status.code(), Some(4), "stdout:\n{stdout2}\nstderr:\n{stderr2}");
+    let settled2: Value =
+        serde_json::from_str(stdout2.lines().last().expect("settled line")).expect("valid settled JSON");
+    assert_eq!(settled2["type"], "settled");
+    assert_eq!(settled2["data"]["reason"], "timeout", "{settled2}");
+}
+
 /// stdout closed under a `--json` run (`| head -1`): the turn stops and mare leaves quietly —
 /// no panic, no crash report, no "failed printing" noise.
 #[cfg(unix)]

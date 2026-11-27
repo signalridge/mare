@@ -18,7 +18,7 @@ mare -p - < prompt.md                            # "-" reads the prompt from std
 mare -p explain @src/main.rs                     # a separate @path argument attaches that text file
 ```
 
-- With a prompt argument and piped stdin, the stdin text is read to EOF and added after the prompt inside `<stdin>` tags.
+- With a prompt argument and piped stdin, the stdin text is read to EOF and added after the prompt inside `<stdin>` tags. An unclosed pipe waits until EOF or until `--timeout` expires.
 - Stdin must be UTF-8 and at most 64 MiB. Empty stdin with no prompt is a usage error (exit code 2).
 - An `@path` argument is a whole shell word that starts with `@`. A text file is attached inline; images and unreadable paths stay as written.
 

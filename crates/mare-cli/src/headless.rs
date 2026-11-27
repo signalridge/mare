@@ -160,22 +160,31 @@ fn parse_agent_error(v: &Value) -> Option<mare_protocol::events::EventError> {
     err.as_str().map(|s| event_error("internal", clean_error(s), None))
 }
 
-/// Settled line for a run that never started (bad arguments or configuration): exit code 2.
-pub fn usage_error(json: bool, msg: &str) -> i32 {
+/// Settled line for a run that never started (usage error or `--timeout` while reading stdin).
+fn pre_run_error(json: bool, exit_code: i32, reason: &str, error_code: &str, msg: &str) -> i32 {
     if json {
         let record = headless::SessionRecord {
             cwd: std::env::current_dir().unwrap_or_default().to_string_lossy().into_owned(),
             ..Default::default()
         };
         usage_line("session", serde_json::to_value(record).unwrap_or_default());
-        let err = event_error("invalid_arguments", msg, None);
-        let s =
-            headless::Settled { error: Some(err.clone()), exit_code: 2, reason: "usage".into(), ..Default::default() };
+        let err = event_error(error_code, msg, None);
+        let s = headless::Settled { error: Some(err.clone()), exit_code, reason: reason.into(), ..Default::default() };
         usage_line("turn.failed", serde_json::to_value(headless::TurnFailed { error: err }).unwrap_or_default());
         usage_line("settled", serde_json::to_value(&s).unwrap_or_default());
     }
     eprintln!("mare: {msg}");
-    2
+    exit_code
+}
+
+/// Settled line for a run that never started (bad arguments or configuration): exit code 2.
+pub fn usage_error(json: bool, msg: &str) -> i32 {
+    pre_run_error(json, 2, "usage", "invalid_arguments", msg)
+}
+
+/// Settled line when `--timeout` expires before a host starts (e.g. waiting on piped stdin): exit code 4.
+pub fn timeout_error(json: bool, msg: &str) -> i32 {
+    pre_run_error(json, Outcome::Timeout.code(), Outcome::Timeout.reason(), "timed_out", msg)
 }
 
 /// `--timeout` values: `90`, `90s`, `5m`, `1h`, `1500ms`.

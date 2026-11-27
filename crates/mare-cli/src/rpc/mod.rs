@@ -158,17 +158,11 @@ fn sync_trust_args(
     project_trusted: bool,
     anchor_cli_trust: Option<bool>,
     anchor_load_init: bool,
-    no_user_plugins: bool,
 ) {
     if !args.is_object() {
         *args = json!({});
     }
     let Some(map) = args.as_object_mut() else { return };
-    if no_user_plugins {
-        map.remove("trust_source");
-        map.insert("trust".to_string(), J::String("untrusted".to_string()));
-        return;
-    }
     if let Some(cli_trust) = anchor_cli_trust {
         map.insert("trust_source".to_string(), J::String("cli".to_string()));
         map.insert("trust".to_string(), J::String(if cli_trust { "trusted" } else { "untrusted" }.to_string()));
@@ -316,7 +310,7 @@ impl RpcRuntime {
             anchor_cli_trust,
             no_user_plugins,
         );
-        sync_trust_args(&mut args, &anchor_cwd, initial_trusted, anchor_cli_trust, anchor_load_init, no_user_plugins);
+        sync_trust_args(&mut args, &anchor_cwd, initial_trusted, anchor_cli_trust, anchor_load_init);
         let base_opts = HostOptions {
             cwd: host.cwd.clone(),
             mode: host.mode,
@@ -635,14 +629,7 @@ impl RpcRuntime {
             self.anchor_cli_trust,
             opts.no_user_plugins,
         );
-        sync_trust_args(
-            &mut opts.args,
-            &opts.cwd,
-            opts.project_trusted,
-            self.anchor_cli_trust,
-            opts.load_init,
-            opts.no_user_plugins,
-        );
+        sync_trust_args(&mut opts.args, &opts.cwd, opts.project_trusted, self.anchor_cli_trust, opts.load_init);
         Ok(opts)
     }
 
