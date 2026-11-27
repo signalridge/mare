@@ -747,6 +747,7 @@ jobs:
             New-Item -ItemType Directory -Force @(
               $root
               (Join-Path $env:SCOOP 'shims')
+              (Join-Path $env:SCOOP 'buckets')
               $env:SCOOP_GLOBAL
               $env:SCOOP_CACHE
               $env:XDG_CONFIG_HOME
