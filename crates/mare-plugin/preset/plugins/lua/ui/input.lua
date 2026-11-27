@@ -334,6 +334,7 @@ return function(D)
 	end
 	D.new_session_banner = function()
 		welcome_id = nil
+		mare.g[WELCOMED] = true
 		return welcome_node(current_welcome_model(), false)
 	end
 	local function welcome(skip_status)

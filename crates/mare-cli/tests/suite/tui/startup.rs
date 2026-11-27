@@ -391,6 +391,64 @@ async fn new_session_respects_logo_config_and_lifts_resumed_compact_mode() {
     .await;
 }
 
+/// If `/new` runs before `app/ready` (for example, while startup is blocked on a failing trusted
+/// `init.lua`), the freshly drawn banner marks `ui.welcomed` so a subsequent `/reload` (reloading
+/// UI plugins) does not push a duplicate welcome banner.
+#[tokio::test]
+async fn new_session_before_app_ready_followed_by_reload_draws_single_banner() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        env.color_terminal();
+        std::fs::create_dir_all(env.config_dir()).unwrap();
+        let init_lua = env.config_dir().join("init.lua");
+        std::fs::write(&init_lua, "error('BROKEN trust init')").unwrap();
+        let mut opts = env
+            .host()
+            .user_config(false)
+            .faux(json!([]))
+            .config(json!({ "trust_default": "trust" }))
+            .args(json!({ "trust_pending": true }))
+            .opts;
+        opts.mode = Mode::Tui;
+        let vt = OwnedVt::new(env, opts, 100, 40).await;
+        let mut t = Term { owned: vt, parser: vt100::Parser::new(nz(40), nz(100), 2000), ended: 0 };
+        t.until("blocked startup before app/ready", |s| s.contains("Startup blocked")).await;
+        expose(&t.vt.host);
+        assert!(
+            !eval::<bool>(&t.vt.host, "return mare.g['ui.welcomed'] == true").await,
+            "app/ready must not have set ui.welcomed while trust init failed"
+        );
+
+        t.submit("/new").await;
+        t.until("fresh welcome banner after /new while startup blocked", |s| {
+            !s.contains("Startup blocked") && s.contains("/model · /help · @ file · ! bash") && s.contains('▀')
+        })
+        .await;
+        assert!(
+            eval::<bool>(&t.vt.host, "return mare.g['ui.welcomed'] == true").await,
+            "/new must mark ui.welcomed so subsequent UI reloads do not duplicate the banner"
+        );
+
+        std::fs::write(&init_lua, "mare.setup { model = 'faux/echo' }\nmare.plugin('provider-faux', {})").unwrap();
+        t.submit("/reload").await;
+        t.until("reload completes after fixing init.lua", |s| {
+            s.contains("Startup unblocked") || s.contains("Reloaded")
+        })
+        .await;
+        for _ in 0..5 {
+            t.step().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let all = t.history();
+        assert_eq!(
+            all.matches("/model · /help · @ file · ! bash").count(),
+            1,
+            "exactly one welcome banner after pre-ready /new + /reload:\n{all}"
+        );
+    })
+    .await
+}
+
 /// A startup refusal can remain in scrollback while a retry Enter is already completing a
 /// different, config-blocked request. A channel holds that request's real `turn/completed` boundary.
 #[tokio::test]
