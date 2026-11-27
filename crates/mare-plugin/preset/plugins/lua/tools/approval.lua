@@ -138,12 +138,12 @@ return function(D)
 			end
 			choices[#choices + 1] = "deny"
 			choices[#choices + 1] = "abort"
-			-- what the call would change (diff shown in the dialog): a tool's
-			-- `preview(arguments) -> node` is shown next to (or under) the choices
+			-- what the call would change (diff or command preview shown in the dialog): a tool's
+			-- `preview(arguments, cwd) -> node` is shown next to (or under) the choices
 			local def = registry[call.name]
 			local pok, pv = false, nil
 			if def and def.preview then
-				pok, pv = pcall(def.preview, call.arguments or {})
+				pok, pv = pcall(def.preview, call.arguments or {}, call.cwd)
 			end
 			local d, human_approval = mare.ui.approve({
 				approval_binding = call.approval_binding,
