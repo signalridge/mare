@@ -307,7 +307,7 @@ return function(D)
 		local m = llm_service and llm_service:current()
 		return m and m.ref or false
 	end
-	local function welcome_node(model_ref)
+	local function welcome_node(model_ref, allow_resumed)
 		-- `~` and middle elision (`…/uxlab/repo`): the rule shared with the status bar and the
 		-- trust question; what's left of the line after `mare <version>  ` and the model
 		local cwd = U.display_path(mare.cwd, math.max(16, math.min(48, U.width() - 40)))
@@ -320,7 +320,7 @@ return function(D)
 		if logo == nil then
 			logo = true
 		end
-		local resumed = args.continue or args.resume ~= nil
+		local resumed = allow_resumed ~= false and (args.continue or args.resume ~= nil)
 		if logo == false then
 			return nil
 		end
@@ -331,6 +331,10 @@ return function(D)
 			and ui.color_depth() ~= "none"
 			and (U.icon_set and U.icon_set() or "unicode") ~= "ascii"
 		return ui.Lines({ full and ui.Logo:render(info) or ui.Logo:compact(info), ui.Gap() })
+	end
+	D.new_session_banner = function()
+		welcome_id = nil
+		return welcome_node(current_welcome_model(), false)
 	end
 	local function welcome(skip_status)
 		if mare.g[WELCOMED] then

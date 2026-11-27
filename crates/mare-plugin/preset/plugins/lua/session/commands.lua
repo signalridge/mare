@@ -94,7 +94,6 @@ return function(D)
 							return why
 						end
 						session_svc():create()
-						ui.clear()
 					end)
 					new_pending = false
 					if not ok then
@@ -109,7 +108,6 @@ return function(D)
 				return
 			end
 			session_svc():create()
-			ui.clear()
 		end,
 	})
 	reg("resume", {
@@ -467,7 +465,6 @@ return function(D)
 				mare.log("warn", "session index not updated: " .. tostring(ierr))
 			end
 			local failures = D.metadata.archive_children(prev_id, true, ts)
-			ui.clear()
 			if #failures > 0 then
 				ui.notify(
 					"Archived " .. name .. " (" .. D.metadata.format_child_failures(failures, "archived") .. ")",
@@ -592,7 +589,6 @@ return function(D)
 				end
 				local ok, err = pcall(session.delete, session, ctx, p or id)
 				if ok then
-					ui.clear()
 					ui.notify("Deleted session")
 				else
 					local msg = tostring(type(err) == "table" and err.message or err)

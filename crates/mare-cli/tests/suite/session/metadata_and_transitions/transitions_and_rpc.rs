@@ -774,24 +774,24 @@ async fn tui_slash_archive_and_delete_explicitly_switch_without_implicit_service
             eval(&h, "local i = C.cordis:get('session'):info(); return i.session_id, i.path").await;
         assert_eq!(before_del_id, second_id);
 
-        let (third_id, cleared): (String, bool) = eval(
+        let (third_id, saw_session_new): (String, bool) = eval(
             &h,
             r#"
             local tx, rx = mare.task.channel()
-            local cleared = false
+            local saw_new = false
             mare.ui.confirm = function() return true end
-            mare.ui.clear = function() cleared = true end
+            C.cordis:on("session/new", function() saw_new = true end)
             mare.ui.notify = function(msg)
                 if tostring(msg):find("Deleted session", 1, true) then tx:send(true) end
             end
             C.cordis:get("commands"):run("/delete")
             rx:recv()
-            return C.cordis:get("session"):info().session_id, cleared
+            return C.cordis:get("session"):info().session_id, saw_new
             "#,
         )
         .await;
         assert_ne!(third_id, before_del_id, "TUI /delete must explicitly switch to a new session");
-        assert!(cleared, "TUI /delete must clear the UI");
+        assert!(saw_session_new, "TUI /delete must emit session/new so the UI clears and redraws");
         assert!(!std::path::Path::new(&before_del_path).exists(), "deleted session file must be removed");
 
         h.shutdown().await;
