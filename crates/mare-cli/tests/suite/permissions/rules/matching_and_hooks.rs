@@ -138,6 +138,61 @@ async fn two_writers_never_lose_a_saved_rule() {
 }
 
 #[tokio::test]
+async fn shared_rules_reload_between_vote_and_decision_keeps_unrelated_amendment_and_rejects_forbidden() {
+    local(async {
+        let env = TestEnv::new().await;
+        let h = host(&env, true, json!({ "accept_partial": ["fs_protect"] }), json!({ "no_session": true })).await;
+        exec(&h, VOTE).await;
+        let file = env.home.path().join("state/permissions.json");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, json!({ "version": 1, "rules": [] }).to_string()).unwrap();
+
+        // Vote on `git push`, then another session persists an unrelated `cargo publish` rule
+        // before `pipeline/approval-decided` fires: the pending amendment must still be saved.
+        exec(&h, r#"C_GIT = BASH("git push origin main", "all", "x"); V_GIT = VOTE(C_GIT)"#).await;
+        std::fs::write(
+            &file,
+            json!({ "version": 1, "rules": [{ "argv": ["cargo", "publish"], "decision": "allow" }] }).to_string(),
+        )
+        .unwrap();
+        exec(
+            &h,
+            r#"C.cordis:get("bus"):emit("pipeline/approval-decided", { call = C_GIT, decision = "allow_amend", amendment = V_GIT.amendment })"#,
+        )
+        .await;
+        let doc: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        let mut argvs: Vec<String> =
+            doc["rules"].as_array().unwrap().iter().map(|r| r["argv"].as_array().unwrap()[0].to_string()).collect();
+        argvs.sort();
+        assert_eq!(argvs, ["\"cargo\"", "\"git\""], "{doc}");
+
+        // Vote on `npm publish`, then another session writes a `forbidden` rule for `npm publish`
+        // before `pipeline/approval-decided` fires: the pending amendment must be rejected.
+        exec(&h, r#"C_NPM = BASH("npm publish", "all", "x"); V_NPM = VOTE(C_NPM)"#).await;
+        std::fs::write(
+            &file,
+            json!({
+                "version": 1,
+                "rules": [{ "argv": ["npm", "publish"], "decision": "forbidden", "justification": "blocked" }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        exec(
+            &h,
+            r#"C.cordis:get("bus"):emit("pipeline/approval-decided", { call = C_NPM, decision = "allow_amend", amendment = V_NPM.amendment })"#,
+        )
+        .await;
+        let doc: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        let rules = doc["rules"].as_array().unwrap();
+        assert_eq!(rules.len(), 1, "forbidden rule must block persisting stale allow amendment: {doc}");
+        assert_eq!(rules[0]["decision"], "forbidden");
+        h.shutdown().await;
+    })
+    .await
+}
+
+#[tokio::test]
 async fn approval_and_saved_rule_use_the_command_working_directory() {
     local(async {
         let env = TestEnv::new().await;

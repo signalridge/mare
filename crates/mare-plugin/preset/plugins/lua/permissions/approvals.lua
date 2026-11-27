@@ -198,10 +198,30 @@ return function(D)
 	ctx:on("session/new", reset_pending)
 	ctx:on("session/loaded", reset_pending)
 
-	local function current_pending(v, call)
+	local function current_pending(v, call, decision)
+		local rev_before = D.policy_revision()
 		shared.refresh()
-		if v.revision ~= D.policy_revision() or not v.call or call.snapshot ~= v.call.snapshot then
+		if v.revision ~= rev_before or not v.call or call.snapshot ~= v.call.snapshot then
 			return false
+		end
+		if D.policy_revision() ~= rev_before then
+			if shared.error then
+				return false
+			end
+			local co = coroutine.running()
+			local prev_quiet = D.quiet[co]
+			D.quiet[co] = true
+			local ok_v, revote = pcall(vote, v.call, v.info or {})
+			D.quiet[co] = prev_quiet
+			if
+				not ok_v
+				or type(revote) ~= "table"
+				or revote.decision == "deny"
+				or (revote.category == "rules" and v.category ~= "rules")
+				or (decision == "allow_amend" and v.amendment and revote.decision == "ask" and not revote.amendment)
+			then
+				return false
+			end
 		end
 		local ok, same = pcall(function()
 			if call.access == nil or v.call.access == nil then
@@ -256,7 +276,7 @@ return function(D)
 			return
 		end
 		local own = not (call and call.origin)
-		if own and v and not current_pending(v, call) then
+		if own and v and not current_pending(v, call, d) then
 			pending[key] = nil
 			return
 		end

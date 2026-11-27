@@ -176,10 +176,11 @@ pub(super) fn connect(db: &Path) -> std::result::Result<(Connection, bool, Strin
     }
     // Pre-create `index.sqlite` with private permissions (0600 on Unix, protected DACL on Windows)
     // so SQLite creates `-wal` / `-shm` sidecars with matching private permissions too.
-    drop(
-        crate::lock::open_private(std::fs::OpenOptions::new().read(true).write(true), db, true)
-            .map_err(|e| OpenError::Other(e.into()))?,
-    );
+    match mare_shared::private::create_new(db) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(OpenError::Other(e.into())),
+    }
     let mut conn = Connection::open(db)?;
     conn.busy_timeout(Duration::from_millis(5000))?;
     let mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;

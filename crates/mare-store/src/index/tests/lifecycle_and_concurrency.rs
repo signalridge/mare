@@ -69,7 +69,8 @@ fn concurrent_writers_from_processes() {
                 .args(["--exact", "index::tests::lifecycle_and_concurrency::index_writer_child", "--test-threads=1"])
                 .env("MARE_INDEX_CHILD", &root)
                 .env("MARE_INDEX_WHO", w.to_string())
-                .stdout(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
                 .spawn()
                 .unwrap()
         })
@@ -79,8 +80,15 @@ fn concurrent_writers_from_processes() {
         let _ = reconcile(&s);
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    for mut c in children {
-        assert!(c.wait().unwrap().success());
+    let outputs: Vec<_> = children.into_iter().map(|c| c.wait_with_output().unwrap()).collect();
+    for (w, out) in outputs.iter().enumerate() {
+        assert!(
+            out.status.success(),
+            "writer {w} failed ({}):\nstdout:\n{}\nstderr:\n{}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
     }
     let ix = s.lock().unwrap();
     let rows = all(&ix);
@@ -88,6 +96,56 @@ fn concurrent_writers_from_processes() {
     assert!(rows.iter().all(|r| r.message_count == 2), "every catch-up landed");
     let seqs: HashSet<i64> = rows.iter().map(|r| r.seq).collect();
     assert_eq!(seqs.len(), rows.len());
+}
+
+#[test]
+fn update_rebases_when_concurrent_reconcile_commits_same_generation() {
+    let dir = OwnedTempDir::new();
+    let root = dir.path().join("sessions");
+    let path = root.join("--w--/session.jsonl");
+    let mut writer = Index::open(&root).unwrap();
+    writer.ensure_built().unwrap();
+    let mut peer = Index::open(&root).unwrap();
+
+    // Capture a header-only row (L0), clear the table, then append message 1 (L1).
+    append(&path, &[header("s1", "/w")]);
+    let row_l0 = peer.update(&path, None).unwrap().unwrap();
+    peer.conn.execute("DELETE FROM sessions", []).unwrap();
+    append(&path, &[user("1", "first", 1)]);
+
+    // Simulate reconcile committing L0 before writer's first tx (and L1 if it ever retried).
+    let mut calls = 0usize;
+    let peer_path = path.clone();
+    let peer_l0 = row_l0.clone();
+    before_update_tx(Some(Box::new(move || {
+        calls += 1;
+        if calls == 1 {
+            write_row(&peer.conn, &peer_l0).unwrap();
+        } else {
+            peer.update(&peer_path, None).unwrap();
+        }
+    })));
+    let landed = writer.update(&path, None);
+    before_update_tx(None);
+    let landed = landed.unwrap().unwrap();
+    assert_eq!(landed.message_count, 1);
+    assert!(landed.seq > row_l0.seq, "rebasing a prefix commit that gained a message must advance seq");
+
+    // Also verify identical-watermark concurrent commit succeeds without burning a seq.
+    append(&path, &[user("2", "second", 2)]);
+    let mut peer2 = Index::open(&root).unwrap();
+    let peer2_path = path.clone();
+    let committed_seq = std::rc::Rc::new(std::cell::Cell::new(0i64));
+    let committed_seq_hook = committed_seq.clone();
+    before_update_tx(Some(Box::new(move || {
+        let r = peer2.update(&peer2_path, None).unwrap().unwrap();
+        committed_seq_hook.set(r.seq);
+    })));
+    let same = writer.update(&path, None);
+    before_update_tx(None);
+    let same = same.unwrap().unwrap();
+    assert_eq!(same.message_count, 2);
+    assert_eq!(same.seq, committed_seq.get());
 }
 
 /// `cargo test -p mare-store bench_500 -- --ignored --nocapture`
