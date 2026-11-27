@@ -663,21 +663,7 @@ return function(D)
 		-- fall back to the first provider that reports being configured
 		for _, p in ipairs(all_providers()) do
 			if p.default_model and (not p.is_configured or p.is_configured()) then
-				local candidate_ref = p.name .. "/" .. p.default_model
-				local m
-				if models[candidate_ref] then
-					m = self:resolve(caller, candidate_ref)
-				else
-					local first
-					for _, entry in pairs(models) do
-						if entry.provider == p.name and not entry.hidden then
-							if not first or entry.ref < first.ref then
-								first = entry
-							end
-						end
-					end
-					m = self:resolve(caller, (first and first.ref) or candidate_ref)
-				end
+				local m = self:resolve(caller, p.name .. "/" .. p.default_model)
 				if m and not m.unavailable and (not p.unavailable_for or not p.unavailable_for(m)) then
 					return m
 				end
@@ -942,6 +928,11 @@ return function(D)
 		state.scoped_cleared = {}
 		state.model = state.default_model
 		local m = self:current(caller)
+		if not m and type(state.default_model) == "string" and state.default_model ~= "" then
+			-- Explicit default_model did not resolve: keep state.model = state.default_model
+			-- so session lifecycle warns and readiness reports the exact unresolved reason.
+			return nil
+		end
 		local p = m and providers[m.provider]
 		if
 			not m
@@ -951,20 +942,8 @@ return function(D)
 			or (p.unavailable_for and p.unavailable_for(m))
 		then
 			state.model = nil
-			m = nil
-			for _, candidate in ipairs(all_providers()) do
-				if candidate.default_model and (not candidate.is_configured or candidate.is_configured()) then
-					local model = self:resolve(caller, candidate.name .. "/" .. candidate.default_model)
-					if
-						model
-						and not model.unavailable
-						and (not candidate.unavailable_for or not candidate.unavailable_for(model))
-					then
-						m, p, state.model = model, candidate, model.ref
-						break
-					end
-				end
-			end
+			m = self:current(caller)
+			p = m and providers[m.provider]
 		end
 		if
 			not m

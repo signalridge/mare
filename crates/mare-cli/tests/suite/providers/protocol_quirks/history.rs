@@ -417,7 +417,6 @@ async fn encrypted_content_replayed_only_to_same_provider_and_model() {
             &server,
             json!({
                 "models": { "opencode-go/gpt-6.1-terra": { "route": "responses" } },
-                "models": { "opencode-go/gpt-6.1-terra": {} },
                 "plugins": { "provider-opencode-go": { "base_url": server.base, "routes": { "responses": { "path": "/og" } } } }
             }),
         )
@@ -491,7 +490,6 @@ async fn encrypted_content_absent_from_gateway_keeps_summary_only() {
             &server,
             json!({
                 "models": { "opencode-go/gpt-6.1-terra": { "route": "responses" } },
-                "models": { "opencode-go/gpt-6.1-terra": {} },
                 "plugins": { "provider-opencode-go": { "base_url": server.base, "routes": { "responses": { "path": "/og" } } } }
             }),
         )

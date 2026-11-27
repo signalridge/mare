@@ -127,7 +127,7 @@ return function(ctx, args)
 			end
 		end,
 	})
-	local i, _, key = ui.select({
+	local i, _, key, _, chosen_id = ui.select({
 		title = "Select model (current: " .. (cur and cur.ref or "none") .. ")",
 		items = items,
 		selected = sel,
@@ -142,14 +142,32 @@ return function(ctx, args)
 				end
 				local next_models, next_items, _, next_can_use = build_picker_items(cur)
 				if sel_handle:update(next_items) then
-					models, items, can_use = next_models, next_items, next_can_use
+					models, can_use = next_models, next_can_use
 				end
 			end)
 		end,
 	})
+	local function resolve_selected()
+		if not i then
+			return nil
+		end
+		if type(chosen_id) == "string" and chosen_id ~= "" then
+			for _, entry in ipairs(models) do
+				if entry.ref == chosen_id then
+					return entry
+				end
+			end
+			ui.notify(("Model %s is no longer available"):format(chosen_id), "warning")
+			return nil
+		end
+		return models[i]
+	end
 	local E = require("commands.effort")
 	if i and key == "tab" then
-		local m = models[i]
+		local m = resolve_selected()
+		if not m then
+			return
+		end
 		local levels = E.levels(m, ctx:get("llm"))
 		if not levels then
 			ui.notify(m.ref .. " has no parameters to adjust (no reasoning effort)", "info")
@@ -182,7 +200,10 @@ return function(ctx, args)
 		return
 	end
 	if i then
-		local m = models[i]
+		local m = resolve_selected()
+		if not m then
+			return
+		end
 		local mp = ctx:get("llm"):provider(m.provider)
 		if not can_use(m.provider) and mp and mp.login then
 			-- picking a model of a provider without credentials logs in first
