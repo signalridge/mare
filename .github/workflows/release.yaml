@@ -163,8 +163,8 @@ jobs:
         include:
           - { os: macos-latest, target: aarch64-apple-darwin }
           - { os: macos-latest, target: x86_64-apple-darwin }
-          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
-          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-musl }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
           - { os: windows-latest, target: x86_64-pc-windows-msvc }
           - { os: windows-11-arm, target: aarch64-pc-windows-msvc }
     steps:
@@ -183,6 +183,22 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           targets: ${{ matrix.target }}
+      - name: Install Linux musl build tools
+        if: contains(matrix.target, 'unknown-linux-musl')
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+          target_upper="${{ matrix.target }}"
+          target_upper="${target_upper^^}"
+          target_upper="${target_upper//-/_}"
+          target_under="${{ matrix.target }}"
+          target_under="${target_under//-/_}"
+          {
+            echo "CARGO_TARGET_${target_upper}_LINKER=musl-gcc"
+            echo "CC_${target_under}=musl-gcc"
+            echo "AWS_LC_SYS_NO_JITTER_ENTROPY=1"
+          } >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: ${{ matrix.target }}
@@ -194,6 +210,16 @@ jobs:
           python scripts/check_seams.py \
             --verify-release "target/${{ matrix.target }}/release/mare" \
             --verify-faux-absent "target/${{ matrix.target }}/release/mare"
+      - name: Verify Linux musl binary is statically linked
+        if: contains(matrix.target, 'unknown-linux-musl')
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/mare"
+          if readelf -l "$bin" | grep -q 'INTERP'; then
+            echo "::error::Expected static musl binary, found PT_INTERP in $bin"
+            readelf -l "$bin"
+            exit 1
+          fi
       - name: Verify release binary seams inert and faux absent (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -383,8 +409,8 @@ jobs:
             nfpm package --config "$cfg" --packager deb --target "dist/mare_${VERSION}_linux_${pkg_arch}.deb"
             nfpm package --config "$cfg" --packager rpm --target "dist/mare_${VERSION}_linux_${pkg_arch}.rpm"
           }
-          build_pkg_pair "x86_64-unknown-linux-gnu" "amd64"
-          build_pkg_pair "aarch64-unknown-linux-gnu" "arm64"
+          build_pkg_pair "x86_64-unknown-linux-musl" "amd64"
+          build_pkg_pair "aarch64-unknown-linux-musl" "arm64"
       - name: Generate unified checksums.txt
         shell: bash
         run: |
@@ -484,10 +510,10 @@ jobs:
           ctx="${RUNNER_TEMP}/docker-ctx"
           rm -rf "$ctx"
           mkdir -p "$ctx/amd64" "$ctx/arm64" "$ctx/unpack-amd64" "$ctx/unpack-arm64"
-          tar -xzf "dist/mare-${TAG_NAME}-x86_64-unknown-linux-gnu.tar.gz" -C "$ctx/unpack-amd64"
-          tar -xzf "dist/mare-${TAG_NAME}-aarch64-unknown-linux-gnu.tar.gz" -C "$ctx/unpack-arm64"
-          cp "$ctx/unpack-amd64/mare-${TAG_NAME}-x86_64-unknown-linux-gnu/mare" "$ctx/amd64/mare"
-          cp "$ctx/unpack-arm64/mare-${TAG_NAME}-aarch64-unknown-linux-gnu/mare" "$ctx/arm64/mare"
+          tar -xzf "dist/mare-${TAG_NAME}-x86_64-unknown-linux-musl.tar.gz" -C "$ctx/unpack-amd64"
+          tar -xzf "dist/mare-${TAG_NAME}-aarch64-unknown-linux-musl.tar.gz" -C "$ctx/unpack-arm64"
+          cp "$ctx/unpack-amd64/mare-${TAG_NAME}-x86_64-unknown-linux-musl/mare" "$ctx/amd64/mare"
+          cp "$ctx/unpack-arm64/mare-${TAG_NAME}-aarch64-unknown-linux-musl/mare" "$ctx/arm64/mare"
           mkdir -p "$ctx/licenses"
           cp LICENSE THIRD_PARTY_NOTICES.md README.md "$ctx/"
           cp crates/mare-kernel/lua/cordis/LICENSE "$ctx/licenses/cordis-LICENSE"
@@ -658,6 +684,24 @@ jobs:
           "${{ matrix.command }}" --version | tee version.txt
           grep -F "mare ${EXPECTED_VERSION}" version.txt
           "${{ matrix.command }}" --help >/dev/null
+      - name: Verify static Linux binary on older distributions
+        if: runner.os == 'Linux'
+        env:
+          EXPECTED_VERSION: ${{ needs.release.outputs.version }}
+          CMD: ${{ matrix.command }}
+        run: |
+          set -euo pipefail
+          for image in ubuntu:20.04 debian:11 registry.access.redhat.com/ubi8/ubi; do
+            docker run --rm \
+              -v "$PWD/${CMD}:/usr/local/bin/mare:ro" \
+              "$image" \
+              sh -eu -c '
+                out="$(mare --version)"
+                printf "%s: %s\n" "'"$image"'" "$out"
+                printf "%s\n" "$out" | grep -F "mare '"${EXPECTED_VERSION}"'"
+                mare --help >/dev/null
+              '
+          done
 
   verify-deb:
     name: Verify Debian Package

@@ -10,8 +10,8 @@
 | --- | --- | --- |
 | macOS，Apple silicon | `aarch64-apple-darwin` | `.tar.gz`、Homebrew cask、Nix |
 | macOS，Intel | `x86_64-apple-darwin` | `.tar.gz`、Homebrew cask、Nix |
-| Linux，x86-64（glibc 2.39+） | `x86_64-unknown-linux-gnu` | `.tar.gz`、`.deb`、`.rpm`、Homebrew cask、AUR、Nix、GHCR 容器 |
-| Linux，ARM64（glibc 2.39+） | `aarch64-unknown-linux-gnu` | `.tar.gz`、`.deb`、`.rpm`、Homebrew cask、AUR、Nix、GHCR 容器 |
+| Linux，x86-64（静态 musl） | `x86_64-unknown-linux-musl` | `.tar.gz`、`.deb`、`.rpm`、Homebrew cask、AUR、Nix、GHCR 容器 |
+| Linux，ARM64（静态 musl） | `aarch64-unknown-linux-musl` | `.tar.gz`、`.deb`、`.rpm`、Homebrew cask、AUR、Nix、GHCR 容器 |
 | Windows，x86-64 | `x86_64-pc-windows-msvc` | `.zip`、Scoop 清单 |
 | Windows，ARM64 | `aarch64-pc-windows-msvc` | `.zip`、Scoop 清单 |
 
@@ -73,7 +73,7 @@ fi
 
 ### 一键安装脚本
 
-自动下载最新的 Linux 压缩包（`x86_64-unknown-linux-gnu` 或 `aarch64-unknown-linux-gnu`，要求 glibc 2.39+）并对照 `checksums.txt` 校验 SHA-256：
+自动下载最新的 Linux 压缩包（`x86_64-unknown-linux-musl` 或 `aarch64-unknown-linux-musl`，静态链接）并对照 `checksums.txt` 校验 SHA-256：
 
 ```sh
 curl -fsSL https://signalridge.github.io/mare/install.sh | sh
@@ -131,7 +131,7 @@ nix profile install github:signalridge/nur-packages#mare
 
 ```sh
 VERSION=vX.Y.Z
-TARGET=x86_64-unknown-linux-gnu   # ARM64 请使用 aarch64-unknown-linux-gnu
+TARGET=x86_64-unknown-linux-musl   # ARM64 请使用 aarch64-unknown-linux-musl
 ARCHIVE="mare-$VERSION-$TARGET.tar.gz"
 EXPECTED=$(awk 'NR==1 && length($1)==64 && $1 ~ /^[[:xdigit:]]+$/{print tolower($1)}' "$ARCHIVE.sha256")
 ACTUAL=$(sha256sum "$ARCHIVE" | awk 'NR==1{print tolower($1)}')

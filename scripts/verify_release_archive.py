@@ -44,7 +44,7 @@ class VerifyReleaseArchiveTests(unittest.TestCase):
     def test_tar_gz_pass_and_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
-            prefix = "mare-v1.0.0-x86_64-unknown-linux-gnu"
+            prefix = "mare-v1.0.0-x86_64-unknown-linux-musl"
             stage = root / prefix
             (stage / "licenses").mkdir(parents=True)
             for rel in REQUIRED_REL_PATHS:
