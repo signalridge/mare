@@ -9,26 +9,30 @@ use mare_shared::ui::Mode;
 
 use crate::cli::{Cli, Cmd, McpCmd, ModelCmd, PeerCmd, PluginCmd, RpcCmd, SandboxCmd, TokenCmd, WebCmd};
 
+fn headless_no_session_opts(
+    cli: &Cli,
+    cwd: &Path,
+    cli_flags: &serde_json::Map<String, serde_json::Value>,
+) -> Result<HostOptions> {
+    let mode = Mode::Print;
+    let (cfg, trust, trusted, no_plugins) = crate::build_cli_config_and_trust(cli, cwd, mode)?;
+    let mut opts =
+        crate::build_host_options(cli, cwd, mode, &cfg, &trust, trusted, no_plugins, "", &[], cli_flags.clone());
+    opts.args["no_session"] = serde_json::Value::Bool(true);
+    Ok(opts)
+}
+
 /// Dispatch a CLI subcommand. Returns `Ok(Some(exit_code))` when the subcommand handled the
 /// invocation, or `Ok(None)` when execution should continue into normal host startup (e.g. `acp`).
-pub(crate) async fn dispatch(cmd: &Cmd, cli: &Cli, cwd: &Path) -> Result<Option<i32>> {
+pub(crate) async fn dispatch(
+    cmd: &Cmd,
+    cli: &Cli,
+    cwd: &Path,
+    cli_flags: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Option<i32>> {
     match cmd {
         Cmd::Plugin { action: PluginCmd::Tree { json } } => {
-            let mode = Mode::Print;
-            let (cfg, trust, trusted, no_plugins) = crate::build_cli_config_and_trust(cli, cwd, mode)?;
-            let mut opts = crate::build_host_options(
-                cli,
-                cwd,
-                mode,
-                &cfg,
-                &trust,
-                trusted,
-                no_plugins,
-                "",
-                &[],
-                Default::default(),
-            );
-            opts.args["no_session"] = serde_json::Value::Bool(true);
+            let opts = headless_no_session_opts(cli, cwd, cli_flags)?;
             Ok(Some(crate::plugins_cmd::run(opts, *json).await?))
         }
         Cmd::Plugin { action } => {
@@ -92,13 +96,16 @@ pub(crate) async fn dispatch(cmd: &Cmd, cli: &Cli, cwd: &Path) -> Result<Option<
                     oauth: *oauth,
                 }
             };
-            Ok(Some(crate::login_cmd::run(cwd, req).await?))
+            let opts = headless_no_session_opts(cli, cwd, cli_flags)?;
+            Ok(Some(crate::login_cmd::run(opts, req).await?))
         }
         Cmd::Logout { provider } => {
-            Ok(Some(crate::login_cmd::run(cwd, crate::login_cmd::Request::Logout(provider.clone())).await?))
+            let opts = headless_no_session_opts(cli, cwd, cli_flags)?;
+            Ok(Some(crate::login_cmd::run(opts, crate::login_cmd::Request::Logout(provider.clone())).await?))
         }
         Cmd::Model { action: ModelCmd::Refresh } => {
-            Ok(Some(crate::login_cmd::run(cwd, crate::login_cmd::Request::ModelsRefresh).await?))
+            let opts = headless_no_session_opts(cli, cwd, cli_flags)?;
+            Ok(Some(crate::login_cmd::run(opts, crate::login_cmd::Request::ModelsRefresh).await?))
         }
         Cmd::Completion { shell } => {
             use clap::CommandFactory;

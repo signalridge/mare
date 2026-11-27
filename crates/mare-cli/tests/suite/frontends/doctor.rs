@@ -94,6 +94,22 @@ fn doctor_fix_creates_directories_and_tightens_permissions() {
     let loose = if cfg!(windows) { "readable by other users" } else { "readable by group/others" };
     assert!(before.contains(loose) && before.contains("auth.json"), "{before}");
     let _ = doctor(true);
+    let json_fix = mare_cmd()
+        .args(["doctor", "--fix", "--json"])
+        .env("MARE_HOME", home.path())
+        .current_dir(home.path())
+        .stdin(Stdio::null())
+        .run_output();
+    let json_fix_text = String::from_utf8_lossy(&json_fix.stdout).to_string();
+    let json_fix_doc: Value = serde_json::from_str(&json_fix_text).unwrap_or_else(|e| panic!("{e}: {json_fix_text}"));
+    let perm_check = json_fix_doc["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "permissions")
+        .expect("permissions check in doctor --fix --json");
+    assert_eq!(perm_check["ok"], true, "{perm_check}");
+    assert_eq!(perm_check["detail"], "credentials and sessions are private", "{perm_check}");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

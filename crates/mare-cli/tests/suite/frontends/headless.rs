@@ -624,3 +624,58 @@ fn headless_turn_failed_and_settled_emit_structured_event_errors() {
     assert_eq!(tf_parsed.error.code, "timed_out");
     assert_eq!(settled_parsed.error, Some(tf_parsed.error));
 }
+
+/// `--max-turns 0` stops before the first turn: exit code 4, terminal state `max_turns`, and
+/// zero model requests sent.
+#[test]
+fn headless_max_turns_zero_exits_4_without_sending_any_request() {
+    let home = tempfile::tempdir().unwrap();
+    let req_log = home.path().join("requests.log");
+    let plugins = home.path().join("config/plugins");
+    std::fs::create_dir_all(&plugins).unwrap();
+    std::fs::write(
+        plugins.join("req_counter.lua"),
+        format!(
+            r#"return {{
+                name = "req_counter",
+                inject = {{ "agent" }},
+                apply = function(ctx)
+                    ctx:on("request/build", function(_, next)
+                        local f = assert(io.open({:?}, "a"))
+                        f:write("req\n")
+                        f:close()
+                        return next()
+                    end)
+                end,
+            }}"#,
+            req_log.to_string_lossy()
+        ),
+    )
+    .unwrap();
+    let script = home.path().join("script.json");
+    std::fs::write(&script, json!([{ "text": "should never be requested" }]).to_string()).unwrap();
+
+    let out = mare_cmd()
+        .args(["-p", "--json", "--model", "faux/echo", "--no-session", "--max-turns", "0", "hi"])
+        .env("MARE_HOME", home.path())
+        .env("MARE_FAUX_SCRIPT", &script)
+        .current_dir(home.path())
+        .stdin(Stdio::null())
+        .run_output();
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(4), "expected exit 4 for --max-turns 0\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(!req_log.exists(), "provider must receive zero requests under --max-turns 0");
+
+    let events: Vec<Value> = stdout
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("invalid JSONL ({e}): {l}")))
+        .collect();
+    assert!(!events.iter().any(|e| e["type"] == "step/started"), "no step may start under --max-turns 0: {events:?}");
+    let settled = events.last().expect("settled record");
+    assert_eq!(settled["type"], "settled", "{events:?}");
+    assert_eq!(settled["data"]["exit_code"], 4, "{settled}");
+    assert_eq!(settled["data"]["reason"], "max_turns", "{settled}");
+    assert_eq!(settled["data"]["termination_reason"], "turn_limit", "{settled}");
+}

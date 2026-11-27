@@ -436,3 +436,142 @@ fn rpc_focused_side_agent_get_preserves_projected_activity_and_unifies_side_turn
 
     rpc.shutdown_and_wait();
 }
+
+/// `--clean` must also apply to RPC sibling sessions created via `session.create { cwd }`: even
+/// when the target project directory is saved as trusted, a `--clean --rpc` sibling session must
+/// stay untrusted and load no project skills or project MCP servers, whereas without `--clean` it
+/// loads both.
+#[test]
+fn rpc_clean_sibling_session_skips_saved_trust_skills_and_mcp() {
+    let home = tempfile::tempdir().unwrap();
+    let anchor_dir = tempfile::tempdir().unwrap();
+    let proj = tempfile::tempdir().unwrap();
+
+    let skill_dir = proj.path().join(".agents/skills/proj-only-skill");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: proj-only-skill\ndescription: project fixture skill\n---\nBody\n",
+    )
+    .unwrap();
+
+    let mcp_log = home.path().join("proj-mcp.log");
+    let mcp_cfg = json!({ "log": mcp_log, "tools": ["proj_echo"] }).to_string();
+    let mare_dir = proj.path().join(".mare");
+    std::fs::create_dir_all(&mare_dir).unwrap();
+    std::fs::write(
+        mare_dir.join("mcp.json"),
+        json!({
+            "mcpServers": {
+                "proj_mcp": {
+                    "command": fake_mcp_bin(),
+                    "args": ["scripted", mcp_cfg],
+                    "tier": "direct"
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let trust_out = mare_cmd()
+        .args(["trust"])
+        .env("MARE_HOME", home.path())
+        .current_dir(proj.path())
+        .stdin(Stdio::null())
+        .run_output();
+    assert!(trust_out.status.success(), "{}", String::from_utf8_lossy(&trust_out.stderr));
+
+    let probe = |clean: bool| -> (bool, Vec<String>, Option<String>, Vec<String>) {
+        let mut cmd = mare_cmd();
+        cmd.args(["--rpc", "--no-session", "--model", "faux/echo", "--approve-mcps"]);
+        if clean {
+            cmd.arg("--clean");
+        }
+        cmd.env("MARE_HOME", home.path()).current_dir(anchor_dir.path()).stderr(Stdio::null());
+        let mut rpc = RpcClient::spawn_cmd(&mut cmd);
+        let init = rpc.call_raw("initialize", json!({ "protocol_version": "3.0" }), |_| json!(null));
+        assert!(init.get("error").is_none(), "{init}");
+        let sub =
+            rpc.call_raw("events.subscribe", json!({ "scope": "all", "include": ["mcp/ready", "mcp/error"] }), |_| {
+                json!(null)
+            });
+        assert!(sub.get("error").is_none(), "{sub}");
+
+        let created = rpc.call_raw("session.create", json!({ "cwd": proj.path().to_string_lossy() }), |_| json!(null));
+        assert!(created.get("error").is_none(), "session.create failed: {created}");
+        let _sid = created["result"]["session_id"].as_str().unwrap().to_string();
+
+        let ws = rpc.call("workspace.get", json!({ "cwd": proj.path().to_string_lossy() }));
+        let trusted = ws["trusted"].as_bool().unwrap();
+
+        let cmds = rpc.call("commands.list", json!({}));
+        let cmd_names: Vec<String> =
+            cmds["data"].as_array().unwrap().iter().filter_map(|c| c["name"].as_str().map(str::to_owned)).collect();
+
+        let mut servers = rpc.call("mcp.list_servers", json!({}));
+        let state_of = |res: &Value| {
+            res["data"]
+                .as_array()
+                .and_then(|rows| rows.iter().find(|r| r["name"] == "proj_mcp"))
+                .and_then(|r| r["state"].as_str())
+                .map(str::to_owned)
+        };
+        if state_of(&servers).as_deref() == Some("connecting") {
+            let deadline =
+                std::time::Instant::now() + mare_cli::testkit::scaled_test_timeout(std::time::Duration::from_secs(15));
+            loop {
+                let msg = rpc.read_deadline(deadline).expect("timed out waiting for mcp/ready");
+                if msg["method"] == "event"
+                    && matches!(msg["params"]["type"].as_str(), Some("mcp/ready") | Some("mcp/error"))
+                {
+                    break;
+                }
+            }
+            servers = rpc.call("mcp.list_servers", json!({}));
+        }
+        let mcp_state = state_of(&servers);
+        let tools = rpc.call("mcp.list_tools", json!({}));
+        let tool_names: Vec<String> = tools["data"]
+            .as_array()
+            .unwrap_or(&vec![])
+            .iter()
+            .filter_map(|t| t["name"].as_str().map(str::to_owned))
+            .collect();
+
+        rpc.shutdown_and_wait();
+        (trusted, cmd_names, mcp_state, tool_names)
+    };
+
+    let (clean_trusted, clean_cmds, clean_mcp_state, clean_tools) = probe(true);
+    assert!(!clean_trusted, "--clean sibling session must not resolve saved trust");
+    assert!(
+        !clean_cmds.iter().any(|n| n == "skill:proj-only-skill"),
+        "--clean sibling session must not load project skill: {clean_cmds:?}"
+    );
+    assert_ne!(
+        clean_mcp_state.as_deref(),
+        Some("connected"),
+        "--clean sibling session must not connect project MCP server: {clean_mcp_state:?}"
+    );
+    assert!(
+        !clean_tools.iter().any(|t| t.contains("proj_echo")),
+        "--clean sibling session must not expose project MCP tools: {clean_tools:?}"
+    );
+
+    let (plain_trusted, plain_cmds, plain_mcp_state, plain_tools) = probe(false);
+    assert!(plain_trusted, "non-clean sibling session must resolve saved trust");
+    assert!(
+        plain_cmds.iter().any(|n| n == "skill:proj-only-skill"),
+        "non-clean sibling session must load project skill: {plain_cmds:?}"
+    );
+    assert_eq!(
+        plain_mcp_state.as_deref(),
+        Some("connected"),
+        "non-clean sibling session must connect project MCP server: {plain_mcp_state:?}"
+    );
+    assert!(
+        plain_tools.iter().any(|t| t.contains("proj_echo")),
+        "non-clean sibling session must expose project MCP tools: {plain_tools:?}"
+    );
+}

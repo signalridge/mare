@@ -18,7 +18,7 @@ mare -p - < prompt.md                            # "-" reads the prompt from std
 mare -p explain @src/main.rs                     # a separate @path argument attaches that text file
 ```
 
-- プロンプト引数とパイプされた stdin の両方がある場合、stdin のテキストは `<stdin>` タグで囲まれてプロンプトの後ろに追加されます。1 秒以内に stdin から何も届かなければ、継承されたパイプで実行が止まらないよう、mare は stdin を無視します。
+- プロンプト引数とパイプされた stdin の両方がある場合、stdin のテキストは EOF まで読み取られ、`<stdin>` タグで囲まれてプロンプトの後ろに追加されます。
 - stdin は UTF-8 で、64 MiB 以下である必要があります。プロンプトがなく stdin も空の場合は使い方の誤りです (終了コード 2)。
 - `@path` 引数は、`@` で始まるシェルの 1 語全体です。テキストファイルはインラインで添付されます。画像と読み取れないパスは、書かれたままになります。
 

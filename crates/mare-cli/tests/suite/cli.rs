@@ -85,22 +85,32 @@ fn piped_stdin_is_appended_read_with_dash_or_alone_and_empty_input_is_handled() 
     assert!(err.contains("not valid UTF-8"), "{err}");
 }
 
-/// An inherited pipe that never reaches EOF doesn't hang a run that has a prompt argument.
+/// Explicitly piped stdin arriving after >1s is read to EOF and appended as `<stdin>` (Codex
+/// `exec/src/lib.rs:2643-2674`).
 #[test]
-fn a_stdin_pipe_without_eof_does_not_hang_a_prompt_argument() {
+fn delayed_piped_stdin_is_read_to_eof_and_appended_to_prompt() {
     let home = tempfile::tempdir().unwrap();
     let mut cmd = mare_cmd();
-    cmd.args(["-p", "--model", "faux/echo", "--no-session", "hello"])
+    cmd.args(["-p", "--model", "faux/echo", "--no-session", "Explain this"])
         .env("MARE_HOME", home.path())
         .current_dir(home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = ChildGroup::spawn(&mut cmd).unwrap();
-    let _keep_open = child.0.stdin.take().unwrap();
+    let mut stdin = child.0.stdin.take().unwrap();
+    let writer = std::thread::spawn(move || {
+        // Delay past the former 1s first-byte cutoff before sending the marker and EOF.
+        // sleep-ok: deliberate producer delay to verify delayed piped stdin is not dropped
+        std::thread::sleep(Duration::from_millis(1200));
+        stdin.write_all(b"SLOW_STDIN_MARKER_9182\n").unwrap();
+    });
     let out = wait_output_timeout(child, Duration::from_secs(30));
-    let out = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(out.trim_end(), "echo: hello");
+    writer.join().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(stdout.trim_end(), "echo: Explain this\n\n<stdin>\nSLOW_STDIN_MARKER_9182\n</stdin>", "{stdout}");
 }
 
 /// stdout closed under a `--json` run (`| head -1`): the turn stops and mare leaves quietly —
@@ -2269,4 +2279,164 @@ fn cli_permission_and_approval_flags_populate_cli_config_layer_without_args_bypa
     assert_eq!(r4["src_policy"], "cli", "{r4}");
     assert_eq!(r4["live_preset"], "read-only", "{r4}");
     assert_eq!(r4["live_policy"], "never", "{r4}");
+}
+
+/// Auth subcommands (`login status`, `logout`, `model refresh`) honor `--no-trust` and `--clean`
+/// just like normal runs: in a saved-trusted project, a project plugin provider is present in a
+/// plain run, absent under `--no-trust`, and absent along with user providers under `--clean`.
+#[test]
+fn auth_subcommands_honor_no_trust_and_clean() {
+    let home = tempfile::tempdir().unwrap();
+    let proj = tempfile::tempdir().unwrap();
+
+    let user_plug = home.path().join("config/plugins/user_prov");
+    std::fs::create_dir_all(&user_plug).unwrap();
+    std::fs::write(
+        user_plug.join("init.lua"),
+        r#"return {
+            name = "user_prov",
+            inject = { "llm" },
+            apply = function(ctx)
+                ctx.llm:register_provider({
+                    provider = "user-test-prov",
+                    default_model = "m1",
+                    is_configured = function() return true end,
+                    list_models = function()
+                        return { { id = "m1", name = "M1", context_window = 1000, max_output = 100 } }
+                    end,
+                    models = { { model_id = "m1", name = "M1", context_window = 1000, max_output = 100 } },
+                    stream = function() error("unused") end,
+                })
+            end,
+        }"#,
+    )
+    .unwrap();
+
+    let proj_plug = proj.path().join(".mare/plugins/proj_prov");
+    std::fs::create_dir_all(&proj_plug).unwrap();
+    std::fs::write(
+        proj_plug.join("init.lua"),
+        r#"return {
+            name = "proj_prov",
+            inject = { "llm" },
+            apply = function(ctx)
+                ctx.llm:register_provider({
+                    provider = "proj-test-prov",
+                    default_model = "m1",
+                    is_configured = function() return true end,
+                    list_models = function()
+                        return { { id = "m1", name = "M1", context_window = 1000, max_output = 100 } }
+                    end,
+                    models = { { model_id = "m1", name = "M1", context_window = 1000, max_output = 100 } },
+                    stream = function() error("unused") end,
+                })
+            end,
+        }"#,
+    )
+    .unwrap();
+
+    let trust_out = mare_cmd()
+        .args(["trust"])
+        .env("MARE_HOME", home.path())
+        .current_dir(proj.path())
+        .stdin(Stdio::null())
+        .run_output();
+    assert!(trust_out.status.success(), "{}", String::from_utf8_lossy(&trust_out.stderr));
+
+    let run = |args: &[&str]| -> (Option<i32>, String, String) {
+        let out = mare_cmd()
+            .args(args)
+            .env("MARE_HOME", home.path())
+            .current_dir(proj.path())
+            .stdin(Stdio::null())
+            .run_output();
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+
+    let (code, plain_status, err) = run(&["login", "status"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert!(plain_status.contains("proj-test-prov"), "plain login status missing project provider:\n{plain_status}");
+    assert!(plain_status.contains("user-test-prov"), "plain login status missing user provider:\n{plain_status}");
+
+    let (code, no_trust_status, err) = run(&["--no-trust", "login", "status"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert!(
+        !no_trust_status.contains("proj-test-prov"),
+        "--no-trust login status must not load project provider:\n{no_trust_status}"
+    );
+    assert!(
+        no_trust_status.contains("user-test-prov"),
+        "--no-trust login status must keep user provider:\n{no_trust_status}"
+    );
+
+    let (code, clean_status, err) = run(&["--clean", "login", "status"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert!(
+        !clean_status.contains("proj-test-prov"),
+        "--clean login status must not load project provider:\n{clean_status}"
+    );
+    assert!(
+        !clean_status.contains("user-test-prov"),
+        "--clean login status must not load user provider:\n{clean_status}"
+    );
+
+    // `logout` and `model refresh` also honor `--no-trust` and `--clean`: save credentials for both
+    // custom providers so `logout` / `model refresh` would see them if those flags were ignored.
+    let auth_path = home.path().join("config/auth.json");
+    std::fs::write(
+        &auth_path,
+        json!({
+            "version": 1,
+            "proj-test-prov": { "type": "api_key", "key": "sk-proj-test-0000" },
+            "user-test-prov": { "type": "api_key", "key": "sk-user-test-0000" }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&auth_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    let (_code, plain_refresh, _) = run(&["model", "refresh"]);
+    assert!(
+        plain_refresh.contains("proj-test-prov: refreshed") && plain_refresh.contains("user-test-prov: refreshed"),
+        "plain model refresh must refresh both project and user providers:\n{plain_refresh}"
+    );
+
+    let (_code, no_trust_refresh, _) = run(&["--no-trust", "model", "refresh"]);
+    assert!(
+        !no_trust_refresh.contains("proj-test-prov"),
+        "--no-trust model refresh must not load project provider:\n{no_trust_refresh}"
+    );
+    assert!(
+        no_trust_refresh.contains("user-test-prov: refreshed"),
+        "--no-trust model refresh must keep user provider:\n{no_trust_refresh}"
+    );
+
+    let (_code, clean_refresh, _) = run(&["--clean", "model", "refresh"]);
+    assert!(
+        !clean_refresh.contains("proj-test-prov") && !clean_refresh.contains("user-test-prov"),
+        "--clean model refresh must not load project or user providers:\n{clean_refresh}"
+    );
+
+    // Without --no-trust / --clean, `logout` without argument sees both registered providers and asks to pick one;
+    // under `--clean`, neither provider is registered so `logout` reports neither as a registered login.
+    let (code, plain_logout, _) = run(&["logout"]);
+    assert_eq!(code, Some(2), "{plain_logout}");
+    assert!(
+        plain_logout.contains("proj-test-prov") && plain_logout.contains("user-test-prov"),
+        "plain logout must see both registered providers:\n{plain_logout}"
+    );
+    let (code, clean_logout, err) = run(&["--clean", "logout"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert!(
+        !clean_logout.contains("proj-test-prov") && !clean_logout.contains("user-test-prov"),
+        "--clean logout must not load project or user providers:\n{clean_logout}"
+    );
 }

@@ -97,6 +97,8 @@ return function(D)
 		end
 		if 1 > cfg.max_turns then
 			S.run_error = "max turns exceeded"
+			S.termination_reason = "turn_limit"
+			S.error_kind = "max_turns"
 			return nil
 		end
 		local lease, lease_error

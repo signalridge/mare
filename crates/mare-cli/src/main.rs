@@ -194,7 +194,7 @@ async fn run(cli: Cli, cli_flags: serde_json::Map<String, serde_json::Value>) ->
         None => std::env::current_dir()?,
     };
     if let Some(cmd) = &cli.command
-        && let Some(code) = commands::dispatch(cmd, &cli, &cwd).await?
+        && let Some(code) = commands::dispatch(cmd, &cli, &cwd, &cli_flags).await?
     {
         return Ok(code);
     }
@@ -326,7 +326,7 @@ pub(crate) fn build_cli_config_and_trust(
         }
     }
     if let Some(n) = cli.max_turns {
-        cfg.set_dotted("plugins.agent.max_turns", serde_json::json!(n.max(1)));
+        cfg.set_dotted("plugins.agent.max_turns", serde_json::json!(n));
     }
     if let Some(a) = &cli.append_system_prompt {
         cfg.set_dotted("plugins.context.append", serde_json::Value::String(a.clone()));
@@ -384,14 +384,14 @@ fn resolve_prompt(cli: &Cli, cwd: &Path, mode: Mode) -> std::result::Result<Stri
     let mut prompt = join_prompt_args(args, cwd);
     let piped = !std::io::stdin().is_terminal();
     if dash || (prompt.is_empty() && piped && !cli.continue_) {
-        match read_stdin_prompt(None) {
-            Ok(Some(s)) if !s.trim().is_empty() => prompt = s,
+        match read_stdin_prompt() {
+            Ok(s) if !s.trim().is_empty() => prompt = s,
             Ok(_) => return Err(crate::headless::usage_error(headless_json, "no prompt provided via stdin")),
             Err(e) => return Err(crate::headless::usage_error(headless_json, &e)),
         }
     } else if piped && (!prompt.is_empty() || cli.continue_) {
-        match read_stdin_prompt(Some(STDIN_FIRST_BYTE_WAIT)) {
-            Ok(Some(s)) if !s.trim().is_empty() => {
+        match read_stdin_prompt() {
+            Ok(s) if !s.trim().is_empty() => {
                 prompt = if prompt.is_empty() { s } else { prompt_with_stdin(&prompt, &s) };
             }
             Ok(_) => {}
@@ -635,62 +635,24 @@ pub(crate) async fn settle_headless_trust(host: &std::sync::Arc<Host>) -> anyhow
     Ok(())
 }
 
-/// With a prompt argument, piped stdin is only appended when its first byte (or EOF) arrives
-/// within this long: an inherited pipe that never closes must not hang the run.
-const STDIN_FIRST_BYTE_WAIT: std::time::Duration = std::time::Duration::from_millis(1000);
 /// Largest stdin prompt (larger input is a usage error, not unbounded memory).
 const MAX_STDIN_PROMPT: usize = 64 * 1024 * 1024;
 
-/// Read the prompt from stdin (UTF-8, at most [`MAX_STDIN_PROMPT`]). `first_byte_wait`: give
-/// up (`Ok(None)`, stdin ignored) when nothing — not even EOF — arrives within it.
-fn read_stdin_prompt(first_byte_wait: Option<std::time::Duration>) -> Result<Option<String>, String> {
+/// Read the prompt from stdin to EOF (UTF-8, at most [`MAX_STDIN_PROMPT`]).
+/// Reference: Codex `codex-rs/exec/src/lib.rs:2643-2674` (`read_to_end` without a first-byte cutoff).
+fn read_stdin_prompt() -> Result<String, String> {
     use std::io::Read;
-    let (tx, rx) = std::sync::mpsc::channel::<std::io::Result<Vec<u8>>>();
-    let (first_tx, first_rx) = std::sync::mpsc::channel::<()>();
-    std::thread::spawn(move || {
-        let mut stdin = std::io::stdin().lock();
-        let mut buf = vec![0u8; 64 * 1024];
-        let mut out = Vec::new();
-        let mut first = Some(first_tx);
-        loop {
-            match stdin.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    if let Some(f) = first.take() {
-                        let _ = f.send(());
-                    }
-                    out.extend_from_slice(&buf[..n]);
-                    if out.len() > MAX_STDIN_PROMPT {
-                        break;
-                    }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => {
-                    let _ = tx.send(Err(e));
-                    return;
-                }
-            }
-        }
-        drop(first);
-        let _ = tx.send(Ok(out));
-    });
-    if let Some(wait) = first_byte_wait {
-        // Ok: data arrived; Disconnected: EOF (or an error) before any data
-        if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) = first_rx.recv_timeout(wait) {
-            tracing::info!("stdin: nothing arrived within {wait:?}; not appending it to the prompt");
-            return Ok(None);
-        }
-    }
-    let bytes = match rx.recv() {
-        Ok(Ok(b)) => b,
-        Ok(Err(e)) => return Err(format!("failed to read the prompt from stdin: {e}")),
-        Err(_) => return Err("failed to read the prompt from stdin".into()),
-    };
+    let mut bytes = Vec::new();
+    std::io::stdin()
+        .lock()
+        .take((MAX_STDIN_PROMPT as u64) + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("failed to read the prompt from stdin: {e}"))?;
     if bytes.len() > MAX_STDIN_PROMPT {
         return Err(format!("stdin is larger than {} MiB", MAX_STDIN_PROMPT / (1024 * 1024)));
     }
     let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes);
-    String::from_utf8(bytes.to_vec()).map(Some).map_err(|e| {
+    String::from_utf8(bytes.to_vec()).map_err(|e| {
         format!(
             "stdin is not valid UTF-8 (invalid byte at offset {}): pass text, or convert it first",
             e.utf8_error().valid_up_to()
