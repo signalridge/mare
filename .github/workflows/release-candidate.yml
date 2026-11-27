@@ -57,11 +57,11 @@ jobs:
               exit 1
             fi
             pr_json="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${pr_num}")"
-            pr_state="$(jq -er '.state' <<<"$pr_json")"
-            pr_head_sha="$(jq -er '.head.sha' <<<"$pr_json")"
-            pr_head_ref="$(jq -er '.head.ref' <<<"$pr_json")"
-            pr_base_ref="$(jq -er '.base.ref' <<<"$pr_json")"
-            pr_base_sha="$(jq -er '.base.sha' <<<"$pr_json")"
+            pr_state="$(jq -ej '.state' <<<"$pr_json")"
+            pr_head_sha="$(jq -ej '.head.sha' <<<"$pr_json")"
+            pr_head_ref="$(jq -ej '.head.ref' <<<"$pr_json")"
+            pr_base_ref="$(jq -ej '.base.ref' <<<"$pr_json")"
+            pr_base_sha="$(jq -ej '.base.sha' <<<"$pr_json")"
             if [[ "$pr_state" != "open" ]]; then
               printf '::error::Release PR #%s is %s (expected open)\n' "$pr_num" "$pr_state"
               exit 1
@@ -243,7 +243,7 @@ jobs:
           fi
           lua -e "print(_VERSION)"
           printf 'print("lua-stdin-ok")\n' | lua -
-          python3 - <<'PY'
+          python3 -B - <<'PY'
           import pathlib, sys
           sys.path.insert(0, "scripts")
           import docs_keymaps, gen_options, plugin_options
@@ -359,8 +359,10 @@ jobs:
               sort |
               tail -n 1 || true
           )"
+          has_real_report=false
           if [[ -n "$report_src" && -f "$report_src" ]]; then
             cp "$report_src" "$art_dir/acceptance-report.md"
+            has_real_report=true
             if [[ "$ACCEPT_OUTCOME" == "success" ]]; then
               verdict="PASS"
             else
@@ -412,8 +414,10 @@ jobs:
             echo "| run / attempt | ${GITHUB_RUN_ID} / ${GITHUB_RUN_ATTEMPT} |"
             echo "| verdict | ${verdict} |"
             echo "| duration | ${duration} |"
-            echo
-            cat "$art_dir/acceptance-report.md"
+            if [[ "$has_real_report" == "true" ]]; then
+              echo
+              cat "$art_dir/acceptance-report.md"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload acceptance artifacts
