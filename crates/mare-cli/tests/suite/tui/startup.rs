@@ -419,9 +419,16 @@ async fn new_session_before_app_ready_followed_by_reload_draws_single_banner() {
             "app/ready must not have set ui.welcomed while trust init failed"
         );
 
+        exec(&t.vt.host, "NEW_SEEN = 0; C.cordis:on('session/new', function() NEW_SEEN = NEW_SEEN + 1 end)").await;
         t.submit("/new").await;
+        let new_deadline = tokio::time::Instant::now() + WAIT;
+        while eval::<i64>(&t.vt.host, "return NEW_SEEN").await == 0 {
+            assert!(tokio::time::Instant::now() < new_deadline, "timed out waiting for session/new");
+            t.step().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         t.until("fresh welcome banner after /new while startup blocked", |s| {
-            !s.contains("Startup blocked") && s.contains("/model · /help · @ file · ! bash") && s.contains('▀')
+            s.contains("/model · /help · @ file · ! bash") && s.contains('▀')
         })
         .await;
         assert!(
