@@ -366,23 +366,13 @@ fn run_batched_op_inner(
 
     let mut guard = LeaderGuard { batcher: &batcher, my_id, batch: None, finished: false };
 
-    let lock = match acquire_file_lock(
+    let lock = acquire_file_lock(
         p,
         deadline,
         &now,
         #[cfg(test)]
         on_would_block,
-    ) {
-        Ok(lock) => lock,
-        Err(err) => {
-            let mut st = batcher.state.lock().unwrap_or_else(|e| e.into_inner());
-            st.queue.retain(|q| q.id != my_id);
-            st.leader_running = false;
-            guard.finished = true;
-            batcher.cvar.notify_all();
-            return Err(err);
-        }
-    };
+    )?;
 
     let batch = {
         let mut st = batcher.state.lock().unwrap_or_else(|e| e.into_inner());
