@@ -286,8 +286,12 @@ async fn multi_select_keeps_checked_items_by_id_across_updates_and_tabs() {
 async fn an_approval_shows_and_answers_over_the_open_transcript() {
     local(async {
         let write = |p: &str| json!([{ "name": "write", "arguments": { "path": p, "content": "X" } }]);
+        let filler: String = (0..12)
+            .map(|i| format!("UNDERLYING_TRANSCRIPT_ROW_{i:02} {}", "Z".repeat(60)))
+            .collect::<Vec<_>>()
+            .join("\n");
         let script = json!([
-            { "text": "about to write a.txt", "delay_ms": 60, "tool_calls": write("a.txt") },
+            { "text": filler, "delay_ms": 60, "tool_calls": write("a.txt") },
             { "text": "wrote a" },
             { "text": "about to write b.txt", "delay_ms": 60, "tool_calls": write("b.txt") },
             { "text": "stopped" }
@@ -302,6 +306,19 @@ async fn an_approval_shows_and_answers_over_the_open_transcript() {
         t.ctrl('t');
         t.until("the transcript before the approval", |s| in_transcript(s) && !s.contains("Allow once")).await;
         t.until("the approval over the transcript", |s| in_transcript(s) && s.contains("Allow once")).await;
+        let modal_screen = t.screen();
+        let rows: Vec<&str> = modal_screen.lines().collect();
+        let top = rows.iter().position(|r| r.contains("╭─ Allow write?")).expect("modal top border");
+        let bot = rows[top..].iter().rposition(|r| r.contains('╰')).map(|i| top + i).expect("modal bottom border");
+        for row in &rows[top..=bot] {
+            let left_end = row.find(['╭', '│', '╰']).expect("left border");
+            let right_start = row.rfind(['╮', '│', '╯']).expect("right border");
+            let right_after = right_start + row[right_start..].chars().next().unwrap().len_utf8();
+            assert!(
+                row[..left_end].trim().is_empty() && row[right_after..].trim().is_empty(),
+                "full-screen transcript rows behind modal must be blank outside borders:\n{row}\nfull:\n{modal_screen}"
+            );
+        }
         t.key(KeyCode::Char('y'), Modifiers::NONE);
         t.idle().await;
         assert!(cwd.join("a.txt").exists(), "y over the transcript allowed it; screen:\n{}", t.screen());

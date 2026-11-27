@@ -43,6 +43,7 @@ struct Responses(Mutex<OneTimeRegistry<String, Binding, Response>>);
 pub struct Snapshot {
     pub tool: String,
     pub call_id: Option<String>,
+    pub cwd: Option<String>,
     pub arguments: J,
     pub requested_permissions: Option<J>,
     pub unconfined: bool,
@@ -130,6 +131,7 @@ impl Snapshot {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_owned);
+        let cwd = call.and_then(|c| c.get("cwd")).and_then(J::as_str).filter(|s| !s.is_empty()).map(str::to_owned);
         let arguments = call.and_then(|c| c.get("arguments")).cloned().unwrap_or(J::Null);
         let requested_permissions =
             verdict.and_then(|v| v.get("requested_permissions")).filter(|v| v.is_object()).cloned();
@@ -152,6 +154,7 @@ impl Snapshot {
         Ok(Self {
             tool,
             call_id,
+            cwd,
             arguments,
             requested_permissions,
             unconfined,
@@ -440,6 +443,7 @@ mod tests {
         let original = Snapshot {
             tool: "secret_tool".into(),
             call_id: Some("call-1".into()),
+            cwd: None,
             arguments: serde_json::json!({"token": "ref-1"}),
             requested_permissions: None,
             unconfined: true,

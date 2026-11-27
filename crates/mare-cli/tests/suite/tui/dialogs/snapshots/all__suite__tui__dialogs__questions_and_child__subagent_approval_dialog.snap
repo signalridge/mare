@@ -12,8 +12,8 @@ expression: snap
   │ Path: deeply/nested/permission/selector/directory/segment_alpha/segment_beta/segment_gam │
   │ ma/segment_delta/final_target_file.txt                                                   │
   │ Directory: <tmp> │
-  │ Scope: once (y, this call) · this subagent session (a, expires when subagent ends) ·     │
-  │ remember rule (A)                                                                        │
+  │ Scope: once (y, this call) · this subagent session (a, until subagent ends or until the  │
+  │ permission preset changes) · remember rule (A)                                           │
   │                                                                                          │
   │ Allow once (y)                                                                           │
   │ Allow for this session (a)                                                               │

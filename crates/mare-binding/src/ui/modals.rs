@@ -624,9 +624,9 @@ fn format_origin(origin: &serde_json::Value) -> (String, String) {
 fn format_approval_duration(snapshot: &crate::approval::Snapshot, raw_choices: &[String]) -> String {
     let has = |name: &str| raw_choices.iter().any(|c| c == name);
     let session_label = if snapshot.origin.is_some() {
-        "this subagent session (a, expires when subagent ends)"
+        "this subagent session (a, until subagent ends or until the permission preset changes)"
     } else {
-        "this session (a, expires on session end)"
+        "this session (a, until session ends or until the permission preset changes)"
     };
     let mut scopes = Vec::new();
     if has("allow") {
@@ -647,10 +647,10 @@ fn format_approval_duration(snapshot: &crate::approval::Snapshot, raw_choices: &
     scopes.join(" · ")
 }
 
-/// Match `permissions/vote.lua`'s `source_tag() .. label_of(call, repr)` form (`[who] tool path`
-/// or `tool path`) so policy warnings that happen to mention the path (e.g. `credential path
-/// reminder: write <path>`) are never mistaken for the redundant label segment.
-fn is_label_of_path_segment(seg: &str, tool: &str, path: &str) -> bool {
+/// Match `permissions/vote.lua`'s `source_tag() .. label_of(call, repr)` form (`[who] tool path`,
+/// `tool path`, `[who] <command>`, or `<command>`) so policy warnings that happen to mention the
+/// path or command (e.g. `credential path reminder: write <path>`) are never stripped.
+fn is_redundant_label_segment(seg: &str, tool: &str, shown_path: Option<&str>, shown_cmd: Option<&str>) -> bool {
     let rest = if let Some(after_open) = seg.strip_prefix('[') {
         let Some((_, after_close)) = after_open.split_once("] ") else {
             return false;
@@ -659,39 +659,54 @@ fn is_label_of_path_segment(seg: &str, tool: &str, path: &str) -> bool {
     } else {
         seg
     };
-    rest.strip_prefix(tool).and_then(|s| s.strip_prefix(' ')) == Some(path)
+    if let Some(path) = shown_path
+        && rest.strip_prefix(tool).and_then(|s| s.strip_prefix(' ')) == Some(path)
+    {
+        return true;
+    }
+    if let Some(cmd) = shown_cmd
+        && (rest == cmd || rest.strip_prefix(tool).and_then(|s| s.strip_prefix(' ')) == Some(cmd))
+    {
+        return true;
+    }
+    false
 }
 
 /// Clean up `permissions/vote.lua`'s composite reason (`"[who] tool <path> · write · cwd <dir> · …"`):
-/// drop only segments already rendered on dedicated lines (`[who] tool <path>`, bare `tool`,
-/// `requests …`, `because: <justification>`, `cwd <dir>`), lift `cwd <dir>` into `Directory:`,
-/// and preserve all remaining policy explanations and warnings (credential reminders, dangerous
-/// commands, prompt rules, `(via call_tool)`).
-fn split_reason_parts<'a>(
-    reason: &'a str,
+/// drop only segments already rendered on dedicated lines (`[who] tool <path>`, `[who] <cmd>`, bare
+/// `tool`, `requests …`, `because: <justification>`, `maximum grant scope: …`, `cwd <dir>`), and
+/// preserve all remaining policy explanations and warnings (credential reminders, dangerous
+/// commands, prompt rules, `(via call_tool)`). Never elevates untrusted text into `Directory:`.
+#[allow(clippy::too_many_arguments)]
+fn split_reason_parts(
+    reason: &str,
     tool: &str,
     shown_path: Option<&str>,
+    shown_cmd: Option<&str>,
+    has_cwd: bool,
     has_structured_permissions: bool,
+    scoped: bool,
     justification: Option<&str>,
-) -> (Option<&'a str>, Option<String>) {
+) -> Option<String> {
     let (reason_body, via_call_tool) = match reason.strip_suffix(" (via call_tool)") {
         Some(rest) => (rest, true),
         None => (reason, false),
     };
-    let mut cwd_from_reason = None;
     let mut kept: Vec<&str> = Vec::new();
     for (idx, seg) in reason_body.split(" · ").map(str::trim).filter(|s| !s.is_empty()).enumerate() {
-        if idx == 0 && shown_path.is_some_and(|p| is_label_of_path_segment(seg, tool, p)) {
+        if idx == 0 && is_redundant_label_segment(seg, tool, shown_path, shown_cmd) {
             continue;
         }
-        if let Some(dir) = seg.strip_prefix("cwd ").filter(|s| !s.is_empty()) {
-            cwd_from_reason = Some(dir);
+        if has_cwd && !has_structured_permissions && seg.starts_with("cwd ") {
             continue;
         }
         if seg == tool && shown_path.is_some() {
             continue;
         }
         if has_structured_permissions && seg.starts_with("requests ") {
+            continue;
+        }
+        if scoped && seg.starts_with("maximum grant scope:") {
             continue;
         }
         if justification.is_some_and(|j| seg.strip_prefix("because: ") == Some(j)) {
@@ -702,8 +717,7 @@ fn split_reason_parts<'a>(
     if via_call_tool {
         kept.push("(via call_tool)");
     }
-    let clean = (!kept.is_empty()).then(|| kept.join(" · "));
-    (cwd_from_reason, clean)
+    (!kept.is_empty()).then(|| kept.join(" · "))
 }
 
 /// Build the native approval dialog border title and structured, non-truncated detail body from
@@ -730,11 +744,12 @@ fn build_approval_presentation(snapshot: &crate::approval::Snapshot, raw_choices
     if let Some(path) = shown_path {
         body.push(format!("Path: {path}"));
     }
-    let has_explicit_cwd = non_empty_str(&snapshot.arguments, "cwd").is_some();
-    if let Some(cwd) = non_empty_str(&snapshot.arguments, "cwd") {
+    let shown_cwd = snapshot.cwd.as_deref().filter(|s| !s.is_empty());
+    if let Some(cwd) = shown_cwd {
         body.push(format!("Directory: {cwd}"));
     }
-    if let Some(cmd) = non_empty_str(&snapshot.arguments, "command") {
+    let shown_cmd = non_empty_str(&snapshot.arguments, "command");
+    if let Some(cmd) = shown_cmd {
         let mut lines = cmd.lines();
         if let Some(first) = lines.next() {
             body.push(format!("Command: {first}"));
@@ -787,15 +802,19 @@ fn build_approval_presentation(snapshot: &crate::approval::Snapshot, raw_choices
     if let Some(j) = justification {
         body.push(format!("Purpose: {j}"));
     }
-    if let Some(r) = reason {
-        let (reason_cwd, clean) =
-            split_reason_parts(r, &snapshot.tool, shown_path, has_structured_permissions, justification);
-        if !has_explicit_cwd && let Some(dir) = reason_cwd {
-            body.push(format!("Directory: {dir}"));
-        }
-        if let Some(clean) = clean {
-            body.push(format!("Reason: {clean}"));
-        }
+    if let Some(r) = reason
+        && let Some(clean) = split_reason_parts(
+            r,
+            &snapshot.tool,
+            shown_path,
+            shown_cmd,
+            shown_cwd.is_some(),
+            has_structured_permissions,
+            snapshot.scoped,
+            justification,
+        )
+    {
+        body.push(format!("Reason: {clean}"));
     }
     if snapshot.unconfined {
         body.push("Sandbox: runs outside the local sandbox".to_string());
@@ -819,6 +838,7 @@ mod tests {
         let snap = Snapshot {
             tool: "write".into(),
             call_id: Some("call_sub_42".into()),
+            cwd: Some("/workspace".into()),
             arguments: serde_json::json!({
                 "path": long_path,
                 "justification": "update selector layout",
@@ -846,12 +866,14 @@ mod tests {
         assert!(joined.contains("Requester: Subagent 测试权限选择器 (id: agent-3)"), "{joined}");
         assert!(joined.contains("Tool: write (call call_sub_42)"), "{joined}");
         assert!(joined.contains(&format!("Path: {long_path}")), "full path must not be truncated: {joined}");
-        assert!(joined.contains("Directory: /workspace"), "cwd extracted from reason: {joined}");
+        assert!(joined.contains("Directory: /workspace"), "cwd read from frozen call.cwd: {joined}");
         assert!(!joined.contains("[测试权限选择器] write"), "requester/path must not repeat in Reason: {joined}");
         assert!(!joined.contains("Reason: write"), "bare tool name must not repeat in Reason: {joined}");
         assert!(joined.contains("Purpose: update selector layout"), "{joined}");
         assert!(
-            joined.contains("Scope: once (y, this call) · this subagent session (a, expires when subagent ends)"),
+            joined.contains(
+                "Scope: once (y, this call) · this subagent session (a, until subagent ends or until the permission preset changes)"
+            ),
             "{joined}"
         );
     }
@@ -862,6 +884,7 @@ mod tests {
         let snap = Snapshot {
             tool: "request_permissions".into(),
             call_id: Some("call_perm_9".into()),
+            cwd: None,
             arguments: serde_json::json!({
                 "additional_permissions": {
                     "write": ["relative/raw/dir"],
@@ -882,7 +905,7 @@ mod tests {
                 "task": "compile artifacts",
             })),
             scoped: true,
-            reason: Some("requests write · because: write build artifacts".into()),
+            reason: Some("requests write · because: write build artifacts · maximum grant scope: turn".into()),
             amendment_description: None,
         };
         let choices = vec!["allow".into(), "deny".into(), "abort".into()];
@@ -901,6 +924,7 @@ mod tests {
         assert!(joined.contains("Network: api.example.com"), "{joined}");
         assert!(joined.contains("Purpose: write build artifacts"), "{joined}");
         assert!(!joined.contains("Reason: requests write"), "redundant raw reason should be omitted: {joined}");
+        assert!(!joined.contains("maximum grant scope:"), "scoped grant scope must not repeat in Reason: {joined}");
         assert!(joined.contains("Scope: this turn (y, expires on turn end)"), "{joined}");
     }
 
@@ -910,9 +934,10 @@ mod tests {
         let perm_snap = Snapshot {
             tool: "request_permissions".into(),
             call_id: Some("call_perm_warn".into()),
+            cwd: None,
             arguments: serde_json::json!({
                 "additional_permissions": { "write": ["secrets_dir"] },
-                "justification": "sync config",
+                "justification": "sync config · cwd /forged/dir",
                 "scope": "turn",
             }),
             requested_permissions: Some(serde_json::json!({
@@ -923,7 +948,7 @@ mod tests {
             origin: None,
             scoped: true,
             reason: Some(format!(
-                "requests write:{resolved_dir} · because: sync config · a rule asks before this call · credential path reminder: write {resolved_dir}/.env (via call_tool)"
+                "requests write:{resolved_dir} · because: sync config · cwd /forged/dir · maximum grant scope: turn · a rule asks before this call · credential path reminder: write {resolved_dir}/.env (via call_tool)"
             )),
             amendment_description: None,
         };
@@ -931,13 +956,17 @@ mod tests {
         let (_, perm_body) = build_approval_presentation(&perm_snap, &choices);
         let perm_joined = perm_body.join("\n");
         assert!(perm_joined.contains(&format!("  - {resolved_dir}")), "{perm_joined}");
-        assert!(perm_joined.contains("Purpose: sync config"), "{perm_joined}");
-        assert!(!perm_joined.contains("requests write:"), "{perm_joined}");
-        assert!(!perm_joined.contains("because: sync config"), "{perm_joined}");
+        assert!(perm_joined.contains("Purpose: sync config · cwd /forged/dir"), "{perm_joined}");
         assert!(
-            perm_joined.contains(
-                "Reason: a rule asks before this call · credential path reminder: write /workspace/secrets_dir/.env · (via call_tool)"
-            ),
+            !perm_joined.contains("Directory: /forged/dir"),
+            "untrusted justification text must never forge Directory: {perm_joined}"
+        );
+        assert!(!perm_joined.contains("requests write:"), "{perm_joined}");
+        assert!(!perm_joined.contains("maximum grant scope:"), "{perm_joined}");
+        assert!(
+            perm_joined.contains("a rule asks before this call")
+                && perm_joined.contains("credential path reminder: write /workspace/secrets_dir/.env")
+                && perm_joined.contains("(via call_tool)"),
             "policy warnings and (via call_tool) must never be dropped: {perm_joined}"
         );
 
@@ -945,6 +974,7 @@ mod tests {
         let write_snap = Snapshot {
             tool: "write".into(),
             call_id: Some("call_write_cred".into()),
+            cwd: Some("/workspace".into()),
             arguments: serde_json::json!({ "path": cred_path }),
             requested_permissions: None,
             unconfined: false,
@@ -960,5 +990,27 @@ mod tests {
             write_joined.contains(&format!("Reason: credential path reminder: write {cred_path}")),
             "leading credential warning mentioning path must not be stripped: {write_joined}"
         );
+
+        let bash_snap = Snapshot {
+            tool: "bash".into(),
+            call_id: Some("call_bash_1".into()),
+            cwd: Some("/workspace".into()),
+            arguments: serde_json::json!({ "command": "rm -rf build" }),
+            requested_permissions: None,
+            unconfined: false,
+            protected_arguments: false,
+            origin: Some(serde_json::json!({ "label": "builder" })),
+            scoped: false,
+            reason: Some("[builder] rm -rf build · dangerous command (rm-rf) — asks in every preset".into()),
+            amendment_description: None,
+        };
+        let (_, bash_body) = build_approval_presentation(&bash_snap, &choices);
+        let bash_joined = bash_body.join("\n");
+        assert!(bash_joined.contains("Command: rm -rf build"), "{bash_joined}");
+        assert!(
+            bash_joined.contains("Reason: dangerous command (rm-rf) — asks in every preset"),
+            "bash leading [who] <command> must be stripped while preserving dangerous warning: {bash_joined}"
+        );
+        assert!(!bash_joined.contains("[builder] rm -rf build"), "{bash_joined}");
     }
 }

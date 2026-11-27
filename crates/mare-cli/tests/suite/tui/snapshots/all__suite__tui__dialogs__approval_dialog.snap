@@ -8,8 +8,8 @@ expression: t.snap().await
  │ Tool: write (call call_1_1)                                                │
  │ Path: a.txt                                                                │
  │ Directory: <tmp> │
- │ Scope: once (y, this call) · this session (a, expires on session end) ·    │
- │ remember rule (A)                                                          │
+ │ Scope: once (y, this call) · this session (a, until session ends or until  │
+ │ the permission preset changes) · remember rule (A)                         │
  │                                                                            │
  │ Allow once (y)                                                             │
  │ Allow for this session (a)                                                 │

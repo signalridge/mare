@@ -763,7 +763,8 @@ async fn subagent_approval_ui_shows_requester_full_wrapped_path_duration_and_wai
         assert!(screen.contains("Requester: Subagent 测试权限选择器"), "missing requester line:\n{screen}");
         assert!(screen.contains("Tool: write (call call_1_1)"), "missing tool/call ID detail:\n{screen}");
         assert!(
-            screen.contains("Scope: once (y, this call) · this subagent session (a, expires when subagent ends)"),
+            screen.contains("Scope: once (y, this call) · this subagent session (a, until subagent ends or until the")
+                && screen.contains("permission preset changes)"),
             "missing approval grant duration/scope:\n{screen}"
         );
         assert!(
@@ -920,22 +921,28 @@ async fn parallel_subagents_distinguish_running_vs_waiting_and_rejecting_one_onl
         t.idle().await;
 
         assert!(!cwd.join("alpha-denied.txt").exists(), "denied alpha write must not run");
-        let (alpha_denied, beta_status, beta_text): (bool, String, String) = eval(
+        let (alpha_denied, alpha_text_1, beta_status, beta_text): (bool, String, String, String) = eval(
             &t.vt.host,
             r#"
             local r = PARALLEL_RESULTS.deny
             local am = mare.json.encode(r.alpha.messages or {})
             return am:find("denied by the user", 1, true) ~= nil,
+                tostring(r.alpha.text or ""),
                 tostring(r.beta.status),
                 tostring(r.beta.text or "")
             "#,
         )
         .await;
         assert!(alpha_denied, "alpha must receive denial message");
+        assert!(
+            alpha_text_1.contains("alpha saw denial"),
+            "Deny (`n`) should let alpha continue to its next turn: {alpha_text_1}"
+        );
         assert_eq!(beta_status, "completed", "rejecting alpha with Deny must not affect sibling beta");
         assert!(beta_text.contains("beta completed cleanly"), "beta result must stay intact: {beta_text}");
 
-        // Round 2: Reject alpha with `Ctrl+C` (abort turn) — must STILL affect only alpha, not beta.
+        // Round 2: Reject alpha with `Ctrl+C` (abort turn) — must actually stop alpha's turn while
+        // still leaving sibling beta unaffected.
         let _ = std::fs::remove_file(&gate_file);
         t.submit("go parallel abort").await;
         t.until("second round alpha approval open while beta runs", |screen| {
@@ -949,14 +956,21 @@ async fn parallel_subagents_distinguish_running_vs_waiting_and_rejecting_one_onl
         t.idle().await;
 
         assert!(!cwd.join("alpha-denied.txt").exists(), "aborted alpha write must not run");
-        let (beta_status_2, beta_text_2): (String, String) = eval(
+        let (alpha_text_2, alpha_msgs_2, beta_status_2, beta_text_2): (String, String, String, String) = eval(
             &t.vt.host,
             r#"
             local r = PARALLEL_RESULTS.abort
-            return tostring(r.beta.status), tostring(r.beta.text or "")
+            return tostring(r.alpha.text or ""),
+                mare.json.encode(r.alpha.messages or {}),
+                tostring(r.beta.status),
+                tostring(r.beta.text or "")
             "#,
         )
         .await;
+        assert!(
+            !alpha_text_2.contains("alpha saw denial") && !alpha_msgs_2.contains("alpha saw denial"),
+            "Ctrl+C abort must stop alpha's turn instead of letting its next scripted step run: text={alpha_text_2:?} msgs={alpha_msgs_2}"
+        );
         assert_eq!(beta_status_2, "completed", "aborting alpha's approval with Ctrl+C must not cancel sibling beta");
         assert!(beta_text_2.contains("beta completed cleanly"), "beta result must stay intact after alpha abort: {beta_text_2}");
 
