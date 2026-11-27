@@ -34,6 +34,7 @@ mod overlays;
 mod questions_native;
 mod resume;
 mod screen;
+mod side;
 mod startup;
 mod state_transitions;
 mod statusline;

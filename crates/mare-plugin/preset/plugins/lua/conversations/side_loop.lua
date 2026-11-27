@@ -212,6 +212,9 @@ function M.run(ctx, side, text, images, draw, turn_cancel)
 		end
 		local projected_resp = project_value(response)
 		side.messages[#side.messages + 1] = projected_resp
+		-- Streamed deltas are now committed in `side.messages`; clear `side.partial`
+		-- so `M.visible` does not render the assistant reply twice.
+		side.partial = ""
 		added[#added + 1] = projected_resp
 		final_message = projected_resp
 		local t = extract_text(projected_resp)

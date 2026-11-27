@@ -461,13 +461,7 @@ return {
 					error = lib.structured_error(res.error, res.error == "cancelled" and "cancelled" or "error"),
 				})
 				settle_side_turn(side, item.turn_id, res, item.started_at_ms)
-				if current == side then
-					side.text = res.text or side.text
-					if res.error then
-						side.text = side.text .. "\n\n" .. tostring(res.error)
-					end
-					render(side)
-				end
+				render(side)
 				if res.error ~= nil or side.cancel:is_cancelled() then
 					local reason = (res.error == "cancelled" or side.cancel:is_cancelled()) and "cancelled"
 						or ("previous side turn failed: " .. tostring(res.error))
