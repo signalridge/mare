@@ -39,11 +39,12 @@ mare.plugin("permissions", {
   preset = "auto",
   writable = { "~/.cache/pip", "/data/scratch" },   -- extra writable directories (must exist; use physical paths, not symlinks)
   deny_read = { "/home/alice/.ssh" },               -- literal absolute paths the sandbox hides from reads
+  accept_partial = { "fs_deny_read" },              -- required for deny_read; merges with default partial acceptances
   network = { default = "deny", allow = { "github.com", "*.npmjs.org" } },
 })
 ```
 
-Relative extra writable directories are resolved against the working directory. A directory that does not exist, or is not a directory, is skipped with a notice and flagged by `mare doctor`. A directory that exists but is a symlink, or lies behind one, is refused by the sandbox policy instead of being skipped; use its physical path. `network` is `true` (open), `false` (blocked) or a table with `allow`, `deny`, `default` and `allow_local`. A table is enforced through a local filtering proxy; see network policy below.
+Relative extra writable directories are resolved against the working directory. A directory that does not exist, or is not a directory, is skipped with a notice and flagged by `mare doctor`. A directory that exists but is a symlink, or lies behind one, is refused by the sandbox policy instead of being skipped; use its physical path. Setting `deny_read` requires `accept_partial = { "fs_deny_read" }` because backends do not yet verify path changes, aliases, or special mounts for per-policy deny rules (and on Windows, run `mare sandbox setup` to enforce `plugins.permissions.deny_read` via enhanced-tier ACLs). `network` is `true` (open), `false` (blocked) or a table with `allow`, `deny`, `default` and `allow_local`. A table is enforced through a local filtering proxy; see network policy below.
 
 ## Approvals
 
@@ -145,7 +146,7 @@ mare probes each backend on demand and caches which capabilities actually work (
 mare.plugin("permissions", { accept_partial = { "network" } })
 ```
 
-An explicit `accept_partial = {}` means strict refusal. Run `mare doctor` to see the backend and capabilities for your machine, or `/permission caps` in a session.
+An explicit `accept_partial = {}` means strict refusal; any non-empty `accept_partial` list merges with the implicit defaults above. Run `mare doctor` to see the backend and capabilities for your machine, or `/permission caps` in a session.
 
 ### Network policy
 
@@ -158,6 +159,6 @@ In `auto`, `network = true` leaves the network open for sandboxed commands (the 
 - `full-access` and approved unconfined tool calls run without a sandbox. Under `auto`, tools outside the local sandbox (such as MCP tools) ask before running.
 - Landlock and the Windows default tier do not protect `.git` or `.mare`; the Windows default tier does not control reads or network.
 - The sandbox is not a VM: it shares your kernel, user, and home directory. Approving `write:.git` lets a command edit git hooks that execute outside the sandbox.
-- Direct `!cmd` shell commands bypass approval prompts.
+- Direct `!cmd` (and `!!cmd`) shell commands run unsandboxed and bypass approval prompts.
 - Prompt injection is not solved by sandboxing: read approval prompts before pressing `y`.
 - Shell side effects cannot be reverted with `/rewind`; see [Sessions](sessions.md).

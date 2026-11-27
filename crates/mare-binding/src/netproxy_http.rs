@@ -289,11 +289,12 @@ pub(super) async fn http(
             return forbid(r.get_mut(), denied, &host_header, &reason).await;
         }
     };
-    let (host, port, scheme) = match &req {
-        Request::Connect { host, port } => (host.clone(), *port, if *port == 80 { "http" } else { "https" }),
-        Request::Forward { host, port, .. } => (host.clone(), *port, "http"),
+    let (host, port, via) = match &req {
+        Request::Connect { host, port } => (host.clone(), *port, upstream.and_then(|u| u.for_tunnel(host, *port))),
+        Request::Forward { host, port, .. } => {
+            (host.clone(), *port, upstream.and_then(|u| u.for_target("http", host, *port)))
+        }
     };
-    let via = upstream.and_then(|u| u.for_target(scheme, &host, port));
     let route = Upstream::route_for_via(via.as_ref());
     let target = match policy.authorize_target(&host, port, approver, route, policy.fake_ip).await {
         Ok(t) => t,

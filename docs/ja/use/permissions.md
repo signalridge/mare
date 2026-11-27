@@ -39,11 +39,12 @@ mare.plugin("permissions", {
   preset = "auto",
   writable = { "~/.cache/pip", "/data/scratch" },   -- extra writable directories (must exist; use physical paths, not symlinks)
   deny_read = { "/home/alice/.ssh" },               -- literal absolute paths the sandbox hides from reads
+  accept_partial = { "fs_deny_read" },              -- required for deny_read; merges with default partial acceptances
   network = { default = "deny", allow = { "github.com", "*.npmjs.org" } },
 })
 ```
 
-追加の書き込み可能ディレクトリの相対パスは、作業ディレクトリを基準に解決されます。存在しないディレクトリやディレクトリでないものは通知付きでスキップされ、`mare doctor` が警告します。存在してもシンボリックリンクであるもの、またはシンボリックリンクの先にあるものは、スキップされずにサンドボックスのポリシーによって拒否されます。その物理パスを使ってください。`network` は `true` (開放)、`false` (ブロック)、または `allow`、`deny`、`default`、`allow_local` を持つテーブルです。テーブルはローカルのフィルタリングプロキシを通じて強制されます。後述のネットワークポリシーを参照してください。
+追加の書き込み可能ディレクトリの相対パスは、作業ディレクトリを基準に解決されます。存在しないディレクトリやディレクトリでないものは通知付きでスキップされ、`mare doctor` が警告します。存在してもシンボリックリンクであるもの、またはシンボリックリンクの先にあるものは、スキップされずにサンドボックスのポリシーによって拒否されます。その物理パスを使ってください。`deny_read` を設定する場合は、バックエンドがパスのエイリアスや特殊マウントを完全には検証しないため、`accept_partial = { "fs_deny_read" }` が必要です (Windows では `mare sandbox setup` を実行して拡張層 ACL にも反映してください)。`network` は `true` (開放)、`false` (ブロック)、または `allow`、`deny`、`default`、`allow_local` を持つテーブルです。テーブルはローカルのフィルタリングプロキシを通じて強制されます。後述のネットワークポリシーを参照してください。
 
 ## 承認
 
@@ -145,7 +146,7 @@ mare は各バックエンドを必要に応じてプローブし、実際に動
 mare.plugin("permissions", { accept_partial = { "network" } })
 ```
 
-明示的な `accept_partial = {}` は、厳格な拒否を意味します。`mare doctor` で、お使いのマシンのバックエンドと機能を確認できます。セッション内では `/permission caps` です。
+明示的な `accept_partial = {}` は、厳格な拒否を意味します。空でない `accept_partial` リストは上記の既定の例外にマージされます。`mare doctor` で、お使いのマシンのバックエンドと機能を確認できます。セッション内では `/permission caps` です。
 
 ### ネットワークポリシー
 
@@ -158,6 +159,6 @@ mare.plugin("permissions", { accept_partial = { "network" } })
 - `full-access` と承認済みの非制限ツール呼び出しはサンドボックス外で実行されます。`auto` ではローカルサンドボックス外のツール (MCP など) は実行前に確認します。
 - Landlock と Windows 既定層は `.git`・`.mare` を保護しません。Windows 既定層は読み取りとネットワークも制御しません。
 - サンドボックスは仮想マシンではありません。カーネル・ユーザー・ホームディレクトリを共有するため、`write:.git` の許可はサンドボックス外で実行される git フック変更を可能にします。
-- 直接入力した `!cmd` コマンドは承認プロンプトを通過しません。
+- 直接入力した `!cmd` (および `!!cmd`) コマンドはサンドボックス外で実行され、承認プロンプトも通過しません。
 - プロンプトインジェクション自体は防げないため、`y` を押す前に承認内容を確認してください。
 - シェルコマンドによる変更は `/rewind` で戻せません。[セッション](sessions.md) を参照してください。

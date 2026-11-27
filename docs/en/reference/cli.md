@@ -1267,7 +1267,7 @@ Usage: mare sandbox setup [OPTIONS]
 
 Options:
       --remove                       Undo everything setup installed
-      --deny-read <PATH>             Extra path that sandboxed commands must not read (repeatable; also `sandbox.deny_read`)
+      --deny-read <PATH>             Extra path that sandboxed commands must not read (repeatable; also `plugins.permissions.deny_read`)
       --no-default-deny-read         Don't apply the built-in deny-read list (credentials, browser profiles)
   -m, --model <MODEL>                Model, e.g. openai/gpt-6.1-terra
       --agent <NAME>                 Use a registered agent type for the initial session

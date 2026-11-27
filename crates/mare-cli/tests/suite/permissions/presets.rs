@@ -1305,3 +1305,55 @@ async fn enforce_sandbox_ceiling_fails_closed_when_intersect_errors() {
     })
     .await
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn documented_deny_read_config_merges_accept_partial_defaults_and_runs_commands() {
+    local(async {
+        for (caps, expect_net_accept) in [
+            // Landlock-like (no fs_protect, no net_proxy)
+            ("fs_read,fs_write,net_block,unix_socket", false),
+            // Windows default tier-like (no fs_protect, no network control)
+            ("fs_write,unix_socket", true),
+        ] {
+            let mut env = TestEnv::new().await;
+            let secret = env.cwd.join("secret.txt");
+            std::fs::write(&secret, "top-secret-ssh-key").unwrap();
+            env.set_var("MARE_SANDBOX_CAPS", caps);
+            let h = host(
+                &env,
+                true,
+                json!({
+                    "preset": "auto",
+                    "deny_read": [secret.to_string_lossy()],
+                    "accept_partial": ["fs_deny_read"],
+                    "network": true
+                }),
+                json!({ "no_session": true }),
+            )
+            .await;
+            global(&h, "SECRET", secret.to_string_lossy().to_string());
+            let (denied_ok, denied_err, cmd_ok, cmd_out, accepted): (bool, String, bool, String, Vec<String>) = eval(
+                &h,
+                r#"
+                local cur = mare.proc.sandbox.current()
+                local r_secret = T:execute({ id = "read-secret", name = "read", arguments = { path = SECRET } }, {})
+                local r_cmd = T:execute({ id = "unrelated", name = "bash", arguments = { command = "echo unrelated-ok" } }, {})
+                return r_secret.is_error ~= true, tostring(r_secret.content), r_cmd.is_error ~= true, tostring(r_cmd.content), cur.accept_partial or {}
+                "#,
+            )
+            .await;
+            h.shutdown().await;
+            assert!(!denied_ok && denied_err.contains("denied"), "reading denied path must fail ({caps}): {denied_err}");
+            assert!(accepted.iter().any(|c| c == "fs_protect"), "defaults must be merged ({caps}): {accepted:?}");
+            if expect_net_accept {
+                assert!(
+                    accepted.iter().any(|c| c == "net_block") && accepted.iter().any(|c| c == "net_proxy"),
+                    "Windows default tier network acceptance must stay merged ({caps}): {accepted:?}"
+                );
+            }
+            assert!(cmd_ok && cmd_out.contains("unrelated-ok"), "unrelated command must succeed ({caps}): {cmd_out}");
+        }
+    })
+    .await
+}

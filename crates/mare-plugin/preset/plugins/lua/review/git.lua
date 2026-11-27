@@ -19,7 +19,13 @@ function M.run(args, ok_codes)
 		end
 		args = a2
 	end
-	local r = mare.proc.run({ cmd = "git", args = args, max_output = 8 * 1024 * 1024, timeout_ms = 10000 })
+	local r = mare.proc.run({
+		cmd = "git",
+		args = args,
+		sandbox = "current",
+		max_output = 8 * 1024 * 1024,
+		timeout_ms = 10000,
+	})
 	if r.code ~= 0 and not (ok_codes and ok_codes[r.code]) then
 		return nil, (r.stderr ~= "" and r.stderr or r.stdout)
 	end

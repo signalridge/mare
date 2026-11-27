@@ -54,8 +54,9 @@ return {
 			default = {},
 			desc = "Extra readable roots for the `auto` preset.",
 		},
-		-- Literal deny-read paths, empty by default. Unresolved paths require explicit partial
-		-- acceptance and are not masked, even if created later during that policy's lifetime.
+		-- Literal deny-read paths, empty by default. Backends do not verify path aliases or special
+		-- mounts for per-call deny_read (and unresolved paths are not masked), so enabling it
+		-- requires `accept_partial = { "fs_deny_read" }` unless strict refusal is desired.
 		deny_read = { type = "list", items = { type = "string" }, default = {}, desc = "Literal deny-read paths." },
 		-- `auto` network: true (open) | false | { default = "deny", allow = {...}, allow_local = false }
 		network = {
@@ -65,10 +66,10 @@ return {
 		},
 		-- sandbox dimensions you accept as unenforced when this platform's backend can't provide
 		-- them, e.g.
-		-- { "network" }; names: fs_read, fs_deny_read, fs_write, fs_protect, net_block, net_proxy, unix_socket, network.
+		-- { "fs_deny_read" }; names: fs_read, fs_deny_read, fs_write, fs_protect, net_block, net_proxy, unix_socket, network.
 		-- nil (default): implicitly accepts a missing fs_protect and reports PARTIAL; on Windows'
 		-- default tier (no `mare sandbox setup`) also accepts its uncontrolled network as PARTIAL.
-		-- An explicit {} always means strict refusal.
+		-- A non-empty list is merged with those defaults; an explicit {} always means strict refusal.
 		accept_partial = {
 			type = "list",
 			items = { type = "string" },

@@ -134,8 +134,11 @@ return function(D)
 	local function no_net_control()
 		return caps().mechanism ~= "none" and not has_cap("net_block") and not has_cap("net_proxy")
 	end
+	local function explicit_empty_accept_partial()
+		return type(cfg.accept_partial) == "table" and #cfg.accept_partial == 0
+	end
 	local function win_default()
-		if cfg.accept_partial ~= nil then
+		if explicit_empty_accept_partial() then
 			return false
 		end
 		-- Only the default Windows tier has implicit acceptance. An enhanced tier whose
@@ -147,12 +150,24 @@ return function(D)
 		return (mare.env("MARE_SANDBOX_CAPS") or "") ~= "" and no_net_control()
 	end
 	local function accepted()
-		if cfg.accept_partial ~= nil then
-			return cfg.accept_partial
+		if explicit_empty_accept_partial() then
+			return {}
 		end
-		local defaults = win_default() and { "network" } or {}
-		defaults[#defaults + 1] = "fs_protect"
-		return defaults
+		local merged = win_default() and { "network" } or {}
+		merged[#merged + 1] = "fs_protect"
+		if type(cfg.accept_partial) == "table" then
+			local seen = {}
+			for _, cap in ipairs(merged) do
+				seen[cap] = true
+			end
+			for _, cap in ipairs(cfg.accept_partial) do
+				if not seen[cap] then
+					seen[cap] = true
+					merged[#merged + 1] = cap
+				end
+			end
+		end
+		return merged
 	end
 	local function accepts_network()
 		for _, n in ipairs(accepted()) do

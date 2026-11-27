@@ -106,12 +106,13 @@ pub(crate) async fn dispatch(cmd: &Cmd, cli: &Cli, cwd: &Path) -> Result<Option<
             Ok(Some(0))
         }
         Cmd::Sandbox { action } => {
-            let cfg = mare_plugin::config_load::load(cwd, false).await?;
+            let mut cfg = mare_plugin::config_load::load(cwd, false).await?;
+            apply_set_overrides(&mut cfg, &cli.set);
             let code = match action {
                 SandboxCmd::Setup { remove, deny_read, no_default_deny_read } => {
-                    crate::sandbox_cmd::setup(&cfg.value, *remove, deny_read, *no_default_deny_read)
+                    crate::sandbox_cmd::setup(cwd, &cfg.value, *remove, deny_read, *no_default_deny_read)
                 }
-                SandboxCmd::Status { require_full } => crate::sandbox_cmd::status(*require_full),
+                SandboxCmd::Status { require_full } => crate::sandbox_cmd::status(cwd, &cfg.value, *require_full),
             };
             Ok(Some(code))
         }
