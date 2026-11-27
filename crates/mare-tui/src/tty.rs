@@ -511,6 +511,40 @@ impl Events {
             let mut decoder = crate::live_input::LiveDecoder::default();
             let mut decoded = Vec::new();
             let mut buf = [0u8; 1024];
+            let flush_pending_esc = |decoder: &mut crate::live_input::LiveDecoder,
+                                     decoded: &mut Vec<Event>,
+                                     batch: &mut Vec<io::Result<TimedEvent>>| {
+                decoded.clear();
+                if let Some(at) = decoder.flush_esc(decoded) {
+                    for ev in decoded.drain(..) {
+                        batch.push(Ok(TimedEvent { event: normalize_platform_event(ev), at }));
+                    }
+                }
+            };
+            let feed_read = |decoder: &mut crate::live_input::LiveDecoder,
+                             bytes: &[u8],
+                             more: bool,
+                             at: std::time::Instant,
+                             decoded: &mut Vec<Event>,
+                             batch: &mut Vec<io::Result<TimedEvent>>| {
+                decoded.clear();
+                if let Some(esc_at) = decoder.flush_expired_esc(at, decoded) {
+                    for ev in decoded.drain(..) {
+                        batch.push(Ok(TimedEvent { event: normalize_platform_event(ev), at: esc_at }));
+                    }
+                }
+                decoder.feed_at(bytes, more, at, decoded);
+                for ev in decoded.drain(..) {
+                    batch.push(Ok(TimedEvent { event: normalize_platform_event(ev), at }));
+                }
+            };
+            let remaining_esc_timeout = |decoder: &crate::live_input::LiveDecoder| {
+                decoder.esc_deadline().map(|deadline| {
+                    let rem = deadline.saturating_duration_since(std::time::Instant::now());
+                    // Round up sub-millisecond remainders so `poll(2)` does not wake early and spin.
+                    Duration::from_millis(rem.as_nanos().div_ceil(1_000_000) as u64)
+                })
+            };
             while requests.recv().is_ok() {
                 {
                     let mut active = s.active_poll.lock().unwrap_or_else(|e| e.into_inner());
@@ -537,7 +571,7 @@ impl Events {
                         if s.paused.load(Ordering::SeqCst) {
                             break;
                         }
-                        match poll_unix_fds(tty_fd, wake_fd, None) {
+                        match poll_unix_fds(tty_fd, wake_fd, remaining_esc_timeout(&decoder)) {
                             Ok((tty_ready, wake_ready)) => {
                                 if wake_ready {
                                     drain_wake_pipe(&mut wake_read);
@@ -549,10 +583,17 @@ impl Events {
                                     break;
                                 }
                                 if !tty_ready {
+                                    if !wake_ready {
+                                        flush_pending_esc(&mut decoder, &mut decoded, &mut batch);
+                                        if !batch.is_empty() {
+                                            break;
+                                        }
+                                    }
                                     continue;
                                 }
                                 match read_fd_once(tty_fd, &mut buf) {
                                     Ok(0) => {
+                                        flush_pending_esc(&mut decoder, &mut decoded, &mut batch);
                                         s.push_batch(&mut batch);
                                         s.push(Err(io::Error::new(
                                             io::ErrorKind::UnexpectedEof,
@@ -562,16 +603,20 @@ impl Events {
                                     }
                                     Ok(n) => {
                                         let at = std::time::Instant::now();
-                                        decoded.clear();
-                                        decoder.feed(&buf[..n], n == buf.len(), &mut decoded);
-                                        for ev in decoded.drain(..) {
-                                            batch.push(Ok(TimedEvent { event: normalize_platform_event(ev), at }));
-                                        }
-                                        if !batch.is_empty() {
+                                        feed_read(
+                                            &mut decoder,
+                                            &buf[..n],
+                                            n == buf.len(),
+                                            at,
+                                            &mut decoded,
+                                            &mut batch,
+                                        );
+                                        if !batch.is_empty() && decoder.esc_deadline().is_none() {
                                             break;
                                         }
                                     }
                                     Err(e) => {
+                                        flush_pending_esc(&mut decoder, &mut decoded, &mut batch);
                                         s.push_batch(&mut batch);
                                         s.push(Err(e));
                                         return;
@@ -584,6 +629,7 @@ impl Events {
                                 }
                             }
                             Err(e) => {
+                                flush_pending_esc(&mut decoder, &mut decoded, &mut batch);
                                 s.push_batch(&mut batch);
                                 s.push(Err(e));
                                 return;
@@ -595,16 +641,28 @@ impl Events {
                         // strictly FIFO on this thread and reaches the queue as one batch without
                         // exposing a half-drained prefix to `try_next`.
                         while !s.shutdown.load(Ordering::SeqCst) && !s.paused.load(Ordering::SeqCst) {
-                            match poll_unix_fds(tty_fd, wake_fd, Some(Duration::ZERO)) {
+                            let drain_timeout = remaining_esc_timeout(&decoder).unwrap_or(Duration::ZERO);
+                            match poll_unix_fds(tty_fd, wake_fd, Some(drain_timeout)) {
                                 Ok((tty_ready, wake_ready)) => {
                                     if wake_ready {
                                         drain_wake_pipe(&mut wake_read);
                                     }
-                                    if !tty_ready || s.paused.load(Ordering::SeqCst) {
+                                    if s.paused.load(Ordering::SeqCst) {
                                         break;
+                                    }
+                                    if !tty_ready {
+                                        if !wake_ready {
+                                            flush_pending_esc(&mut decoder, &mut decoded, &mut batch);
+                                            break;
+                                        }
+                                        if decoder.esc_deadline().is_none() {
+                                            break;
+                                        }
+                                        continue;
                                     }
                                     match read_fd_once(tty_fd, &mut buf) {
                                         Ok(0) => {
+                                            flush_pending_esc(&mut decoder, &mut decoded, &mut batch);
                                             s.push_batch(&mut batch);
                                             s.push(Err(io::Error::new(
                                                 io::ErrorKind::UnexpectedEof,
@@ -614,13 +672,17 @@ impl Events {
                                         }
                                         Ok(n) => {
                                             let at = std::time::Instant::now();
-                                            decoded.clear();
-                                            decoder.feed(&buf[..n], n == buf.len(), &mut decoded);
-                                            for ev in decoded.drain(..) {
-                                                batch.push(Ok(TimedEvent { event: normalize_platform_event(ev), at }));
-                                            }
+                                            feed_read(
+                                                &mut decoder,
+                                                &buf[..n],
+                                                n == buf.len(),
+                                                at,
+                                                &mut decoded,
+                                                &mut batch,
+                                            );
                                         }
                                         Err(e) => {
+                                            flush_pending_esc(&mut decoder, &mut decoded, &mut batch);
                                             s.push_batch(&mut batch);
                                             s.push(Err(e));
                                             return;
@@ -629,6 +691,7 @@ impl Events {
                                 }
                                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                                 Err(e) => {
+                                    flush_pending_esc(&mut decoder, &mut decoded, &mut batch);
                                     s.push_batch(&mut batch);
                                     s.push(Err(e));
                                     return;
@@ -1007,6 +1070,22 @@ mod tests {
         assert_eq!(k.modifiers, Modifiers::CONTROL);
         assert_eq!(k.base_layout_key, Some('c'));
         assert!(crate::keys::is_ctrl_c(&k));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_reader_flushes_lone_esc_after_timeout_over_pty() {
+        use std::io::Write as _;
+        let (mut master, slave) = open_test_pty();
+        let mut events = Events::from_unix_read_fd(UnixReadFd::Owned(slave)).unwrap();
+        master.write_all(b"\x1b").unwrap();
+        master.flush().unwrap();
+        let ev = tokio::time::timeout(Duration::from_secs(3), events.next())
+            .await
+            .expect("timed out waiting for lone ESC after timeout")
+            .expect("stream ended")
+            .expect("read error");
+        assert!(matches!(ev.event, Event::Key(k) if k.code == KeyCode::Escape), "expected Esc, got {:?}", ev.event);
     }
 
     #[cfg(unix)]
