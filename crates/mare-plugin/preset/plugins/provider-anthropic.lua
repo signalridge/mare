@@ -71,6 +71,240 @@ return {
 				return errs and errs[k] or nil
 			end,
 		})
+		local function anthropic_v1_url(base, leaf)
+			local trimmed = tostring(base or ""):gsub("/+$", "")
+			if trimmed:sub(-3) == "/v1" then
+				return trimmed .. "/" .. leaf
+			end
+			return trimmed .. "/v1/" .. leaf
+		end
+
+		local function decode_anthropic_models(label)
+			return function(raw)
+				local items, _, decoded = require("mare_lib").decode_models_envelope(raw, "data", "id", label)
+				if type(decoded) == "table" and decoded.type == "error" then
+					error(label .. ": invalid response")
+				end
+				local out = {}
+				for _, m in ipairs(items) do
+					out[#out + 1] = {
+						id = m.id,
+						name = type(m.display_name) == "string" and m.display_name or nil,
+						context_window = tonumber(m.max_input_tokens),
+						max_output = tonumber(m.max_tokens),
+					}
+				end
+				return out
+			end
+		end
+
+		local function build_anthropic_param_rules(provider_scope, budgets_cfg, display_cfg, headroom)
+			local display = (display_cfg == "summarized" or display_cfg == "omitted") and display_cfg or nil
+			local adaptive = { { value = "off", wire = { anthropic = {} } } }
+			for _, e in ipairs({ "minimal", "low", "medium", "high", "xhigh" }) do
+				local wire = { ["thinking.type"] = "adaptive", ["output_config.effort"] = ADAPTIVE[e] }
+				if display then
+					wire["thinking.display"] = display
+				end
+				adaptive[#adaptive + 1] = {
+					value = e,
+					wire = { anthropic = wire },
+				}
+			end
+			local default_adaptive = { ["thinking.type"] = "adaptive", ["output_config.effort"] = "high" }
+			if display then
+				default_adaptive["thinking.display"] = display
+			end
+			return {
+				{
+					provider = provider_scope,
+					route = "anthropic",
+					when = function(m)
+						return (m --[[@as table]]).adaptive
+					end,
+					define = {
+						effort = {
+							options = adaptive,
+							wire = { anthropic = default_adaptive },
+						},
+					},
+				},
+				{
+					provider = provider_scope,
+					route = "anthropic",
+					when = function(m)
+						return not (m --[[@as table]]).adaptive
+					end,
+					define = {
+						effort = {
+							options = { { value = "off", wire = { anthropic = {} } } },
+							wire = {
+								anthropic = function(req, c)
+									local budgets = budgets_cfg or BUDGETS
+									local budget = budgets[c.value] or budgets.medium or BUDGETS.medium
+									local max_out = c.model and c.model.max_output
+									if max_out and req.body.max_tokens > max_out then
+										req.body.max_tokens = max_out
+									end
+									if req.body.max_tokens <= budget then
+										local desired = budget + headroom
+										if max_out and desired > max_out then
+											desired = max_out
+										end
+										req.body.max_tokens = desired
+									end
+									if max_out and req.body.max_tokens > max_out then
+										req.body.max_tokens = max_out
+									end
+									if req.body.max_tokens <= 1024 then
+										req.body.thinking = nil
+										return
+									end
+									if budget >= req.body.max_tokens then
+										budget = math.max(1024, req.body.max_tokens - math.min(headroom or 1024, 1024))
+										if budget >= req.body.max_tokens then
+											budget = req.body.max_tokens - 1
+										end
+									end
+									local th = { type = "enabled", budget_tokens = budget }
+									if display then
+										th.display = display
+									end
+									req.body.thinking = th
+								end,
+							},
+						},
+					},
+				},
+			}
+		end
+
+		local function anthropic_provider_factory(name, entry)
+			local envs = (type(entry.api_key_env) == "string" and entry.api_key_env ~= "") and { entry.api_key_env }
+				or {}
+			local cfg_has_key = type(((mare.config.providers or {})[name] or {}).api_key) ~= "nil"
+			local raw_key = not cfg_has_key
+					and type(entry.api_key) == "string"
+					and entry.api_key ~= ""
+					and entry.api_key
+				or nil
+
+			local function live_entry()
+				local eff = llm:provider_config(name)
+				if type(eff) == "table" and next(eff) ~= nil then
+					return eff
+				end
+				return entry
+			end
+
+			local function live_base_url(eff)
+				return llm:base_url(name, (eff and eff.base_url) or entry.base_url)
+			end
+
+			local function custom_api_key()
+				return raw_key or llm:api_key(name, envs)
+			end
+
+			local function custom_endpoint(_req)
+				local eff = live_entry()
+				local key = custom_api_key()
+				if not key and not eff.no_key then
+					error({
+						message = ("%s is not configured: run /login %s or set %s"):format(
+							name,
+							name,
+							eff.api_key_env or "an API key"
+						),
+						retryable = false,
+					})
+				end
+				local merged_headers = {}
+				for k, v in pairs(eff.headers or {}) do
+					merged_headers[k] = v
+				end
+				local base = live_base_url(eff)
+				return {
+					provider = name,
+					label = eff.label or name,
+					dialect = eff.dialect,
+					base_url = base,
+					url = anthropic_v1_url(base, "messages"),
+					auth = "x-api-key",
+					key = key,
+					headers = merged_headers,
+					drop_fields = eff.drop_fields,
+					transport = eff.transport,
+					endpoint_config = eff,
+				}
+			end
+
+			local param_rules
+			if entry.reasoning_budgets ~= nil or entry.reasoning_display ~= nil then
+				param_rules = build_anthropic_param_rules(
+					name,
+					entry.reasoning_budgets or cfg.reasoning_budgets or BUDGETS,
+					entry.reasoning_display ~= nil and entry.reasoning_display or cfg.reasoning_display,
+					cfg.answer_headroom
+				)
+			end
+
+			return {
+				route = "anthropic",
+				wire = "anthropic-messages",
+				endpoint = custom_endpoint,
+				warm_url = function()
+					return live_base_url(live_entry())
+				end,
+				stream = function(req, sink)
+					return wire_stream(custom_endpoint, req, sink)
+				end,
+				no_key = entry.no_key or nil,
+				login = not entry.no_key and {
+					methods = { "api_key" },
+					run = function(lio)
+						llm:login_api_key(name, nil, lio)
+					end,
+				} or nil,
+				login_label = "API key",
+				default_context = 200000,
+				default_max_output = cfg.default_max_output,
+				default_reasoning = entry.reasoning ~= false,
+				tool_id_policy = { max = 64 },
+				is_configured = function()
+					return entry.no_key or raw_key ~= nil or llm:has_api_key(name, envs)
+				end,
+				errors = wire_errors,
+				params = param_rules,
+				catalog_target = entry.list_models ~= false and function()
+					local eff = live_entry()
+					return {
+						url = mare.http.build_url(anthropic_v1_url(live_base_url(eff), "models"), { limit = "1000" }),
+						headers = eff.headers,
+					}
+				end or nil,
+				catalog_scope = (entry.list_models ~= false and raw_key ~= nil) and function()
+					return "api_key:" .. mare.crypto.sha256(raw_key)
+				end or nil,
+				catalog = entry.list_models ~= false and function(for_fetch)
+					local eff = live_entry()
+					local headers = { ["anthropic-version"] = ensure_wire().VERSION }
+					for k, v in pairs(eff.headers or {}) do
+						headers[k] = v
+					end
+					local label = ("%s GET /v1/models"):format(name)
+					return {
+						label = label,
+						url = anthropic_v1_url(live_base_url(eff), "models") .. "?limit=1000",
+						headers = headers,
+						auth = "x-api-key",
+						key = for_fetch and custom_api_key() or nil,
+						no_key = eff.no_key,
+						decode = decode_anthropic_models(label),
+					}
+				end or nil,
+			}
+		end
+
 		llm:register_wire({
 			name = "anthropic-messages",
 			config = cfg,
@@ -90,6 +324,7 @@ return {
 				return ensure_spec().retry(wire, err)
 			end,
 			errors = wire_errors,
+			provider = anthropic_provider_factory,
 			provider_fields = {
 				supports_long_cache_retention = "boolean",
 				reasoning_budgets = "table",
@@ -134,86 +369,21 @@ return {
 		-- the Anthropic route's effort mappings, today's
 		-- constants as data. Adaptive models: thinking.type adaptive + output_config.effort
 		-- (minimal → low, xhigh → max, any other level → high); off sends no thinking.
-		local display = (cfg.reasoning_display == "summarized" or cfg.reasoning_display == "omitted")
-				and cfg.reasoning_display
-			or nil
-		local adaptive = { { value = "off", wire = { anthropic = {} } } }
-		for _, e in ipairs({ "minimal", "low", "medium", "high", "xhigh" }) do
-			local wire = { ["thinking.type"] = "adaptive", ["output_config.effort"] = ADAPTIVE[e] }
-			if display then
-				wire["thinking.display"] = display
-			end
-			adaptive[#adaptive + 1] = {
-				value = e,
-				wire = { anthropic = wire },
-			}
-		end
-		local default_adaptive = { ["thinking.type"] = "adaptive", ["output_config.effort"] = "high" }
-		if display then
-			default_adaptive["thinking.display"] = display
-		end
-		llm:define_params({
-			route = "anthropic",
-			when = function(m)
-				return (m --[[@as table]]).adaptive
-			end,
-			define = {
-				effort = {
-					options = adaptive,
-					wire = { anthropic = default_adaptive },
-				},
-			},
-		})
-		-- budget models: thinking.type enabled + budget_tokens from `reasoning_budgets` (unknown
+		-- Budget models: thinking.type enabled + budget_tokens from `reasoning_budgets` (unknown
 		-- level → medium's), max_tokens raised to budget + answer_headroom when it doesn't exceed
-		-- the budget
-		llm:define_params({
-			route = "anthropic",
-			when = function(m)
-				return not (m --[[@as table]]).adaptive
-			end,
-			define = {
-				effort = {
-					options = { { value = "off", wire = { anthropic = {} } } },
-					wire = {
-						anthropic = function(req, c)
-							local budgets = cfg.reasoning_budgets or BUDGETS
-							local budget = budgets[c.value] or budgets.medium
-							local max_out = c.model and c.model.max_output
-							if max_out and req.body.max_tokens > max_out then
-								req.body.max_tokens = max_out
-							end
-							if req.body.max_tokens <= budget then
-								local desired = budget + cfg.answer_headroom
-								if max_out and desired > max_out then
-									desired = max_out
-								end
-								req.body.max_tokens = desired
-							end
-							if max_out and req.body.max_tokens > max_out then
-								req.body.max_tokens = max_out
-							end
-							if req.body.max_tokens <= 1024 then
-								req.body.thinking = nil
-								return
-							end
-							if budget >= req.body.max_tokens then
-								budget =
-									math.max(1024, req.body.max_tokens - math.min(cfg.answer_headroom or 1024, 1024))
-								if budget >= req.body.max_tokens then
-									budget = req.body.max_tokens - 1
-								end
-							end
-							local th = { type = "enabled", budget_tokens = budget }
-							if display then
-								th.display = display
-							end
-							req.body.thinking = th
-						end,
-					},
-				},
-			},
-		})
+		-- the budget.
+		for _, rule in
+			ipairs(
+				build_anthropic_param_rules(
+					nil,
+					cfg.reasoning_budgets or BUDGETS,
+					cfg.reasoning_display,
+					cfg.answer_headroom
+				)
+			)
+		do
+			llm:define_params(rule)
+		end
 
 		local efforts = { "off", "low", "medium", "high", "xhigh" }
 		llm:register_provider({
@@ -247,23 +417,7 @@ return {
 					headers = { ["anthropic-version"] = ensure_wire().VERSION },
 					auth = "x-api-key",
 					key = for_fetch and api_key() or nil,
-					decode = function(raw)
-						local items, _, decoded =
-							require("mare_lib").decode_models_envelope(raw, "data", "id", "Anthropic GET /v1/models")
-						if type(decoded) == "table" and decoded.type == "error" then
-							error("Anthropic GET /v1/models: invalid response")
-						end
-						local out = {}
-						for _, m in ipairs(items) do
-							out[#out + 1] = {
-								id = m.id,
-								name = type(m.display_name) == "string" and m.display_name or nil,
-								context_window = tonumber(m.max_input_tokens),
-								max_output = tonumber(m.max_tokens),
-							}
-						end
-						return out
-					end,
+					decode = decode_anthropic_models("Anthropic GET /v1/models"),
 				}
 			end,
 			login_label = "API key (console.anthropic.com)",

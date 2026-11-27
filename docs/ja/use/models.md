@@ -1,6 +1,6 @@
 # モデルとプロバイダー
 
-プロバイダーへのサインイン、モデルと推論の強度の選択、モデルのメタデータの上書き、OpenAI 互換エンドポイントの追加の方法を扱います。
+プロバイダーへのサインイン、モデルと推論の強度の選択、モデルのメタデータの上書き、カスタムプロバイダーの追加の方法を扱います。
 
 モデルは `provider/id` の形で指定します。例: `openai/gpt-6.1-terra`。プロバイダーは組み込みのプラグインで、それぞれが自分のモデルを登録します。サインイン後に、ライブのモデル一覧を取得するものもあります。
 
@@ -132,14 +132,25 @@ mare.setup {
 
 よく使うフィールドは、`name`、`context_window`、`max_output`、`reasoning`、`efforts`、`input` (`{ "text", "image" }` のようなリスト)、`cost` (`input`、`output`、`cache_read`。100 万トークンあたり) です。それ以外で情報のないモデルには、設定するまで 128,000 トークンのコンテキストウィンドウと 16,384 の最大出力が割り当てられます。コンテキストウィンドウは重要です。[自動コンパクション](sessions.md) はこれを基準に発動します。
 
-## OpenAI 互換プロバイダーを追加する
+## カスタムプロバイダーを追加する
 
-Chat Completions API に対応するサーバーは、`mare.provider` で追加できます。組み込みでない名前と `base_url` を指定すると、新しいプロバイダーが定義されます。同じサービスの 2 つのアカウントは、2 つの名前になります。
+mare の組み込みワイヤープロトコルのいずれかに対応するサーバーは、`mare.provider` で追加できます。組み込みでない名前と `base_url` を指定すると、新しいプロバイダーが定義されます。同じサービスの 2 つのアカウントは、2 つの名前になります。
+
+プロトコルは `wire_api` で指定します (既定は `"chat"`):
+
+| `wire_api` | ワイヤー名 (`wire`) | リクエストエンドポイント | ネイティブ認証ヘッダー |
+| --- | --- | --- | --- |
+| `"chat"` (既定) | `openai-chat` | `<base_url>/chat/completions` | `Authorization: Bearer <key>` |
+| `"responses"` | `openai-responses` | `<base_url>/responses` | `Authorization: Bearer <key>` |
+| `"anthropic"` | `anthropic-messages` | `<base_url>/v1/messages` (`base_url` がすでに `/v1` で終わる場合は `<base_url>/messages`) | `x-api-key: <key>` + `anthropic-version` |
+| `"google"` | `google-generate` | `<base_url>/models/<model>:streamGenerateContent?alt=sse` | `x-goog-api-key: <key>` |
+
+例 — OpenAI Chat Completions エンドポイント (既定の `wire_api = "chat"`):
 
 ```lua
 mare.provider("lab", {
   base_url = "http://10.0.0.5:8080/v1",
-  api_key = "LAB_API_KEY",            -- an environment variable name, a { cmd = {...} } helper, or a literal
+  api_key = "LAB_API_KEY",            -- 環境変数名、{ cmd = {...} } ヘルパー、またはリテラル
   default_model = "qwen3",
   default_context = 131072,
   models = {
@@ -148,11 +159,27 @@ mare.provider("lab", {
 })
 ```
 
-```sh
-mare -m lab/qwen3
+例 — Anthropic Messages エンドポイント (`wire_api = "anthropic"`):
+
+```lua
+mare.provider("claude-proxy", {
+  wire_api = "anthropic",
+  base_url = "https://gateway.example.com/anthropic",
+  api_key = "CLAUDE_PROXY_API_KEY",
+  headers = { ["x-team"] = "infra" },
+  default_model = "claude-sonnet-5-5",
+  models = {
+    { model_id = "claude-sonnet-5-5", context_window = 200000, max_output = 32000, reasoning = true, adaptive = true },
+  },
+})
 ```
 
-便利なフィールドは次のとおりです。認証のないサーバーには `no_key = true`、サーバーのモデル一覧を読み取るには `list_models`、プロバイダー名ではなく明示指定で方言を選ぶ `dialect` (`"deepseek"`、`"openrouter"`、`"kimi"`、`"cerebras"`、`"zai"`、`"together"`、`"qwen"` など)、effort の送り方を指定する `effort_param` (`"reasoning_effort"` または `"openrouter"`)、`reasoning_format`、`needs_reasoning_placeholder`、`key_prefixes`、`models_dev` (models.dev のプロバイダー ID、または補完を無効化する `false`)、`headers`、`query_params`、`retries`、`stream_idle_timeout_ms`、`connect_timeout_ms`、`drop_fields`、`transport`、`proxy` があります。より具体的なフィールド (`reasoning_format`、`effort_param`、`cache_control_format`、`needs_reasoning_placeholder`) が `dialect` に優先し、その次にホストやモデル ID からの自動判定が適用されます。`wire_api = "responses"` (または `wire = "openai-responses"`) は、データエントリを OpenAI Responses ワイヤーへ切り替えます。
+```sh
+mare -m lab/qwen3
+mare -m claude-proxy/claude-sonnet-5-5
+```
+
+4 つのワイヤー共通の主なフィールド: 認証のないサーバー向けの `no_key = true`、モデル一覧取得 (`GET /models` や `GET /v1/models`) を無効化する `list_models = false`、`api_key`、`api_key_env`、`default_model`、`default_context`、`default_max_output`、`default_reasoning`、`key_prefixes`、`models_dev` (models.dev のプロバイダー ID、または補完を無効化する `false`)、`headers`、`query_params`、`retries`、`stream_idle_timeout_ms`、`connect_timeout_ms`、`drop_fields`、`transport`、`proxy`。`chat` (`openai-chat`) エンドポイントではさらに、`dialect` (`"deepseek"`、`"openrouter"`、`"kimi"`、`"cerebras"`、`"zai"`、`"together"`、`"qwen"` など)、`effort_param` (`"reasoning_effort"` または `"openrouter"`)、`reasoning_format`、`cache_control_format`、`needs_reasoning_placeholder` によりプロバイダー名に依存せずプロトコル固有の挙動を指定できます。より具体的なフィールドが `dialect` に優先し、その次にホストやモデル ID からの自動判定が適用されます。
 
 ### オーバーレイと地域エンドポイント
 

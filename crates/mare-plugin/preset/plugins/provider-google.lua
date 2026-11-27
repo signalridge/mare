@@ -50,12 +50,166 @@ return {
 				return errs and errs[k] or nil
 			end,
 		})
+		local function decode_google_models(label)
+			return function(raw)
+				local items, lossless_items = require("mare_lib").decode_models_envelope(raw, "models", "name", label)
+				local out = {}
+				for i, m in ipairs(items) do
+					local id = m.name:gsub("^models/", "")
+					if id == "" then
+						error(label .. ": invalid response", 0)
+					end
+					local gen = false
+					local lossless_m = lossless_items and lossless_items[i]
+					local lossless_methods = lossless_m and lossless_m.supportedGenerationMethods
+					if lossless_methods ~= nil then
+						if type(lossless_methods) ~= "table" or not mare.json.is_array(lossless_methods) then
+							error(label .. ": invalid response", 0)
+						end
+						for j = 1, #lossless_methods do
+							local meth = lossless_methods[j]
+							if type(meth) ~= "string" or meth == "" then
+								error(label .. ": invalid response", 0)
+							end
+							gen = gen or meth == "generateContent"
+						end
+					end
+					if gen then
+						out[#out + 1] = {
+							id = id,
+							name = type(m.displayName) == "string" and m.displayName or nil,
+							context_window = tonumber(m.inputTokenLimit),
+							max_output = tonumber(m.outputTokenLimit),
+							reasoning = m.thinking == true or nil,
+						}
+					end
+				end
+				return out
+			end
+		end
+
+		local function google_provider_factory(name, entry)
+			local envs = (type(entry.api_key_env) == "string" and entry.api_key_env ~= "") and { entry.api_key_env }
+				or {}
+			local cfg_has_key = type(((mare.config.providers or {})[name] or {}).api_key) ~= "nil"
+			local raw_key = not cfg_has_key
+					and type(entry.api_key) == "string"
+					and entry.api_key ~= ""
+					and entry.api_key
+				or nil
+
+			local function live_entry()
+				local eff = llm:provider_config(name)
+				if type(eff) == "table" and next(eff) ~= nil then
+					return eff
+				end
+				return entry
+			end
+
+			local function live_base_url(eff)
+				return llm:base_url(name, (eff and eff.base_url) or entry.base_url)
+			end
+
+			local function custom_api_key()
+				return raw_key or llm:api_key(name, envs)
+			end
+
+			local function custom_endpoint(_req)
+				local eff = live_entry()
+				local key = custom_api_key()
+				if not key and not eff.no_key then
+					error({
+						message = ("%s is not configured: run /login %s or set %s"):format(
+							name,
+							name,
+							eff.api_key_env or "an API key"
+						),
+						retryable = false,
+					})
+				end
+				local merged_headers = {}
+				for k, v in pairs(eff.headers or {}) do
+					merged_headers[k] = v
+				end
+				local base = live_base_url(eff)
+				return {
+					provider = name,
+					label = eff.label or name,
+					dialect = eff.dialect,
+					base_url = base,
+					auth = "x-goog-api-key",
+					key = key,
+					headers = merged_headers,
+					drop_fields = eff.drop_fields,
+					transport = eff.transport,
+					endpoint_config = eff,
+				}
+			end
+
+			return {
+				route = "google",
+				wire = "google-generate",
+				endpoint = custom_endpoint,
+				warm_url = function()
+					return live_base_url(live_entry())
+				end,
+				stream = function(req, sink)
+					return wire_stream(custom_endpoint, req, sink)
+				end,
+				no_key = entry.no_key or nil,
+				login = not entry.no_key and {
+					methods = { "api_key" },
+					run = function(lio)
+						llm:login_api_key(name, nil, lio)
+					end,
+				} or nil,
+				login_label = "API key",
+				default_context = 1048576,
+				default_max_output = 65536,
+				default_reasoning = entry.reasoning ~= false,
+				is_configured = function()
+					return entry.no_key or raw_key ~= nil or llm:has_api_key(name, envs)
+				end,
+				errors = wire_errors,
+				catalog_target = entry.list_models ~= false and function()
+					local eff = live_entry()
+					local base = tostring(live_base_url(eff) or ""):gsub("/+$", "")
+					return {
+						url = mare.http.build_url(base .. "/models", { pageSize = "1000" }),
+						headers = eff.headers,
+					}
+				end or nil,
+				catalog_scope = (entry.list_models ~= false and raw_key ~= nil) and function()
+					return "api_key:" .. mare.crypto.sha256(raw_key)
+				end or nil,
+				catalog = entry.list_models ~= false and function(for_fetch)
+					local eff = live_entry()
+					local headers = {}
+					for k, v in pairs(eff.headers or {}) do
+						headers[k] = v
+					end
+					local base = tostring(live_base_url(eff) or ""):gsub("/+$", "")
+					local label = ("%s GET /models"):format(name)
+					return {
+						label = label,
+						url = base .. "/models?pageSize=1000",
+						headers = headers,
+						auth = "x-goog-api-key",
+						key = for_fetch and custom_api_key() or nil,
+						no_key = eff.no_key,
+						decode = decode_google_models(label),
+					}
+				end or nil,
+			}
+		end
+
 		llm:register_wire({
 			name = "google-generate",
 			route = "google",
 			path = "",
 			auth = { "x-goog-api-key", "bearer" },
 			errors = wire_errors,
+			provider = google_provider_factory,
 			model_fields = {
 				reasoning_level = "boolean",
 			},
@@ -162,42 +316,7 @@ return {
 					url = llm:base_url("google", cfg.base_url) .. "/models?pageSize=1000",
 					auth = "x-goog-api-key",
 					key = for_fetch and api_key() or nil,
-					decode = function(raw)
-						local items, lossless_items =
-							require("mare_lib").decode_models_envelope(raw, "models", "name", "Google GET /models")
-						local out = {}
-						for i, m in ipairs(items) do
-							local id = m.name:gsub("^models/", "")
-							if id == "" then
-								error("Google GET /models: invalid response", 0)
-							end
-							local gen = false
-							local lossless_m = lossless_items and lossless_items[i]
-							local lossless_methods = lossless_m and lossless_m.supportedGenerationMethods
-							if lossless_methods ~= nil then
-								if type(lossless_methods) ~= "table" or not mare.json.is_array(lossless_methods) then
-									error("Google GET /models: invalid response", 0)
-								end
-								for j = 1, #lossless_methods do
-									local meth = lossless_methods[j]
-									if type(meth) ~= "string" or meth == "" then
-										error("Google GET /models: invalid response", 0)
-									end
-									gen = gen or meth == "generateContent"
-								end
-							end
-							if gen then
-								out[#out + 1] = {
-									id = id,
-									name = type(m.displayName) == "string" and m.displayName or nil,
-									context_window = tonumber(m.inputTokenLimit),
-									max_output = tonumber(m.outputTokenLimit),
-									reasoning = m.thinking == true or nil,
-								}
-							end
-						end
-						return out
-					end,
+					decode = decode_google_models("Google GET /models"),
 				}
 			end,
 			login_label = "API key (aistudio.google.com)",

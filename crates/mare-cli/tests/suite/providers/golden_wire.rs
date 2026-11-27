@@ -338,3 +338,285 @@ async fn wire_bodies_for_kimi_code_and_lmstudio_presets() {
     })
     .await
 }
+
+fn anthropic_text_sse(text: &str) -> String {
+    format!(
+        "event: message_start\n\
+         data: {{\"type\":\"message_start\",\"message\":{{\"id\":\"msg_txt\",\"role\":\"assistant\",\"content\":[],\"usage\":{{\"input_tokens\":12,\"output_tokens\":1}}}}}}\n\n\
+         event: content_block_start\n\
+         data: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{{\"type\":\"text\",\"text\":\"\"}}}}\n\n\
+         event: content_block_delta\n\
+         data: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":{}}}}}\n\n\
+         event: content_block_stop\n\
+         data: {{\"type\":\"content_block_stop\",\"index\":0}}\n\n\
+         event: message_delta\n\
+         data: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\"}},\"usage\":{{\"output_tokens\":5}}}}\n\n\
+         event: message_stop\n\
+         data: {{\"type\":\"message_stop\"}}\n\n",
+        serde_json::to_string(text).unwrap()
+    )
+}
+
+/// Pure-config `mare.provider(..., { wire_api = "anthropic" })` executes a full streaming agent
+/// turn with a tool call, native `x-api-key` + `anthropic-version` headers (no dependency on
+/// built-in `provider-anthropic` credentials), `/v1` base URL normalization, `no_key`, and model
+/// catalog discovery.
+#[tokio::test]
+async fn custom_anthropic_data_provider_end_to_end_streaming_with_tool_call() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        env.set_var("ANTHROPIC_API_KEY", "");
+        std::fs::write(env.cwd.join("note.txt"), "hello from custom anthropic\n").unwrap();
+
+        let server = MockServer::start().await;
+        let base = &server.base;
+        server.route(
+            "/my-ant/v1/messages",
+            vec![
+                Resp::sse(request_shape::anthropic_tool_use_sse(
+                    "toolu_custom_1",
+                    "read",
+                    r#"{"path":"note.txt"}"#,
+                )),
+                Resp::sse(anthropic_text_sse("The file says: hello from custom anthropic.")),
+            ],
+        );
+        server.route(
+            "/my-ant/v1/models",
+            vec![Resp::status(
+                200,
+                r#"{"data":[{"id":"claude-listed","display_name":"Claude Listed","max_input_tokens":200000,"max_tokens":16000}]}"#,
+            )],
+        );
+        server.route("/my-ant-v1/v1/messages", vec![Resp::sse(anthropic_text_sse("local-ant-ok"))]);
+
+        std::fs::create_dir_all(env.config_dir()).unwrap();
+        std::fs::write(
+            env.config_dir().join("init.lua"),
+            format!(
+                r#"
+mare.setup {{ model = "my-claude/claude-custom" }}
+mare.provider("my-claude", {{
+  wire_api = "anthropic",
+  base_url = "{base}/my-ant",
+  api_key = "test-ant-custom-key",
+  headers = {{ ["x-custom-tenant"] = "acme" }},
+  default_model = "claude-custom",
+  models = {{
+    {{
+      model_id = "claude-custom",
+      name = "Claude Custom",
+      context_window = 200000,
+      max_output = 8192,
+      reasoning = true,
+      adaptive = true,
+      efforts = {{ "off", "low", "medium", "high" }},
+    }},
+  }},
+}})
+mare.provider("my-claude-v1", {{
+  wire_api = "anthropic",
+  base_url = "{base}/my-ant-v1/v1/",
+  no_key = true,
+  list_models = false,
+  models = {{
+    {{ model_id = "claude-local", context_window = 64000, max_output = 4096 }},
+  }},
+}})
+"#
+            ),
+        )
+        .unwrap();
+
+        let h = env.host().user_config(false).no_session().build().await;
+        global(&h, "LLM", h.service_table("llm").unwrap());
+        expose(&h);
+
+        exec(
+            &h,
+            r#"
+            DELTAS = {}
+            C.cordis:on("item/delta", function(e)
+              if e.kind == "text" then table.insert(DELTAS, e.delta) end
+            end)
+            "#,
+        )
+        .await;
+
+        let res = h.prompt("Read note.txt and report what it says.", json!({})).await.unwrap();
+        assert!(res["error"].is_null(), "custom anthropic turn failed: {res}");
+        assert_eq!(res["text"], "The file says: hello from custom anthropic.", "{res}");
+        let streamed: String = eval(&h, "return table.concat(DELTAS)").await;
+        assert_eq!(streamed, "The file says: hello from custom anthropic.");
+
+        // Verify /v1 suffix normalization and no_key on the second custom Anthropic endpoint.
+        let local_msg = ask(&h, "my-claude-v1/claude-local").await;
+        assert_eq!(text_of(&local_msg), "local-ant-ok");
+
+        // Verify live catalog fetch over GET /v1/models with native x-api-key + anthropic-version.
+        let listed_ok: bool = eval(
+            &h,
+            r#"
+            LLM:refresh_models("my-claude")
+            local m = LLM:resolve("my-claude/claude-listed")
+            return m ~= nil and m.name == "Claude Listed"
+            "#,
+        )
+        .await;
+        assert!(listed_ok, "GET /v1/models must populate custom anthropic provider catalog");
+
+        h.shutdown().await;
+
+        let reqs = server.requests();
+        let msg_reqs: Vec<_> = reqs.iter().filter(|r| r.path == "/my-ant/v1/messages").collect();
+        assert_eq!(msg_reqs.len(), 2, "expected tool-call + final-answer requests: {reqs:#?}");
+        for r in &msg_reqs {
+            assert_eq!(r.header("x-api-key"), Some("test-ant-custom-key"));
+            assert_eq!(r.header("anthropic-version"), Some("2023-06-01"));
+            assert_eq!(r.header("x-custom-tenant"), Some("acme"));
+            assert_eq!(r.header("authorization"), None, "anthropic wire must not send Bearer auth by default");
+            assert_eq!(r.json()["model"], "claude-custom");
+        }
+        let body2 = msg_reqs[1].json().to_string();
+        assert!(body2.contains("toolu_custom_1"), "second request must carry tool_use_id: {body2}");
+        assert!(
+            body2.contains("hello from custom anthropic"),
+            "second request must carry read tool_result output: {body2}"
+        );
+
+        let local_req = reqs
+            .iter()
+            .find(|r| r.path == "/my-ant-v1/v1/messages")
+            .expect("base_url ending in /v1/ must normalize to /v1/messages without duplicating /v1");
+        assert_eq!(local_req.header("x-api-key"), None, "no_key=true must omit x-api-key");
+        assert_eq!(local_req.header("authorization"), None, "no_key=true must omit authorization");
+        assert_eq!(local_req.header("anthropic-version"), Some("2023-06-01"));
+
+        let models_req = reqs
+            .iter()
+            .find(|r| r.path.starts_with("/my-ant/v1/models"))
+            .expect("catalog refresh must hit /my-ant/v1/models");
+        assert_eq!(models_req.header("x-api-key"), Some("test-ant-custom-key"));
+        assert_eq!(models_req.header("anthropic-version"), Some("2023-06-01"));
+    })
+    .await
+}
+
+/// Pure-config `mare.provider` works end-to-end on `wire_api = "responses"` and
+/// `wire_api = "google"` with each protocol's native auth header, custom headers, trailing-slash
+/// base URL normalization, and `no_key = true`.
+#[tokio::test]
+async fn custom_responses_and_google_data_providers_end_to_end() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        env.set_var("OPENAI_API_KEY", "");
+        env.set_var("GEMINI_API_KEY", "");
+        env.set_var("GOOGLE_API_KEY", "");
+
+        let server = MockServer::start().await;
+        let base = &server.base;
+        server.route("/my-resp/responses", vec![Resp::sse(responses_text("custom-resp-ok"))]);
+        server.route(
+            "/my-goog/v1beta/models/gem-m1:streamGenerateContent",
+            vec![Resp::sse(fixture("google.sse"))],
+        );
+        server.route(
+            "/my-goog/v1beta/models",
+            vec![Resp::status(
+                200,
+                r#"{"models":[{"name":"models/gem-listed","displayName":"Gemini Listed","inputTokenLimit":100000,"outputTokenLimit":8192,"supportedGenerationMethods":["generateContent"]}]}"#,
+            )],
+        );
+        server.route(
+            "/my-goog-nk/v1beta/models/gem-local:streamGenerateContent",
+            vec![Resp::sse(fixture("google.sse"))],
+        );
+
+        std::fs::create_dir_all(env.config_dir()).unwrap();
+        std::fs::write(
+            env.config_dir().join("init.lua"),
+            format!(
+                r#"
+mare.provider("my-resp", {{
+  wire_api = "responses",
+  base_url = "{base}/my-resp/",
+  api_key = "test-resp-custom-key",
+  headers = {{ ["x-resp-hdr"] = "r1" }},
+  models = {{ {{ model_id = "resp-m1", context_window = 128000, max_output = 8192 }} }},
+}})
+mare.provider("my-gemini", {{
+  wire_api = "google",
+  base_url = "{base}/my-goog/v1beta/",
+  api_key = "test-goog-custom-key",
+  headers = {{ ["x-goog-hdr"] = "g1" }},
+  models = {{ {{ model_id = "gem-m1", context_window = 1048576, max_output = 65536, reasoning = true }} }},
+}})
+mare.provider("my-gemini-nk", {{
+  wire_api = "google",
+  base_url = "{base}/my-goog-nk/v1beta",
+  no_key = true,
+  list_models = false,
+  models = {{ {{ model_id = "gem-local", context_window = 128000, max_output = 8192 }} }},
+}})
+"#
+            ),
+        )
+        .unwrap();
+
+        let h = env.host().user_config(false).no_session().build().await;
+        global(&h, "LLM", h.service_table("llm").unwrap());
+
+        let resp_msg = ask(&h, "my-resp/resp-m1").await;
+        assert_eq!(text_of(&resp_msg), "custom-resp-ok");
+
+        let goog_msg = stream(&h, "my-gemini/gem-m1").await;
+        assert_fixture_message("my-gemini/gem-m1", &goog_msg, 0);
+
+        let goog_nk_msg = stream(&h, "my-gemini-nk/gem-local").await;
+        assert_fixture_message("my-gemini-nk/gem-local", &goog_nk_msg, 0);
+
+        let listed_ok: bool = eval(
+            &h,
+            r#"
+            LLM:refresh_models("my-gemini")
+            local m = LLM:resolve("my-gemini/gem-listed")
+            return m ~= nil and m.name == "Gemini Listed"
+            "#,
+        )
+        .await;
+        assert!(listed_ok, "GET /models must populate custom google provider catalog");
+
+        h.shutdown().await;
+
+        let reqs = server.requests();
+        let resp_req = reqs
+            .iter()
+            .find(|r| r.path == "/my-resp/responses")
+            .expect("trailing slash on responses base_url must normalize to /my-resp/responses");
+        assert_eq!(resp_req.header("authorization"), Some("Bearer test-resp-custom-key"));
+        assert_eq!(resp_req.header("x-resp-hdr"), Some("r1"));
+        assert_eq!(resp_req.header("chatgpt-account-id"), None, "custom responses provider must not send Codex headers");
+
+        let goog_req = reqs
+            .iter()
+            .find(|r| r.path == "/my-goog/v1beta/models/gem-m1:streamGenerateContent?alt=sse")
+            .expect("google custom provider must hit streamGenerateContent?alt=sse");
+        assert_eq!(goog_req.header("x-goog-api-key"), Some("test-goog-custom-key"));
+        assert_eq!(goog_req.header("x-goog-hdr"), Some("g1"));
+        assert_eq!(goog_req.header("authorization"), None);
+
+        let goog_nk_req = reqs
+            .iter()
+            .find(|r| r.path == "/my-goog-nk/v1beta/models/gem-local:streamGenerateContent?alt=sse")
+            .expect("keyless google custom provider must hit streamGenerateContent?alt=sse");
+        assert_eq!(goog_nk_req.header("x-goog-api-key"), None, "no_key=true must omit x-goog-api-key");
+        assert_eq!(goog_nk_req.header("authorization"), None);
+
+        let goog_models_req = reqs
+            .iter()
+            .find(|r| r.path.starts_with("/my-goog/v1beta/models?"))
+            .expect("catalog refresh must hit /my-goog/v1beta/models");
+        assert_eq!(goog_models_req.header("x-goog-api-key"), Some("test-goog-custom-key"));
+    })
+    .await
+}
