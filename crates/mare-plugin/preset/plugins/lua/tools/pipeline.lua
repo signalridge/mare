@@ -148,10 +148,16 @@ return function(D)
 		end
 		local approved_id, approved_name, approved_cwd = frozen.id, frozen.name, frozen.cwd
 		local approved_access = def.access
+		local approved_command = def.command
 		local function approval_current()
 			local access_ok, current_access =
 				pcall(guard.access.evaluate, def, frozen.arguments, call_cwd(def, frozen.arguments))
 			if not access_ok then
+				return false
+			end
+			local cmd_ok, current_command =
+				pcall(guard.command.evaluate, def, frozen.arguments, call_cwd(def, frozen.arguments))
+			if not cmd_ok then
 				return false
 			end
 			local current_policy_version = policy_version()
@@ -160,6 +166,7 @@ return function(D)
 			end
 			return registry[call.name] == def
 				and def.access == approved_access
+				and def.command == approved_command
 				and mare.json.encode_strict(frozen.access) == mare.json.encode_strict(current_access)
 				and frozen.id == approved_id
 				and call.id == approved_id
@@ -181,6 +188,7 @@ return function(D)
 						projection_version = mare.projection.revision(),
 						input_policy = def.sensitive_inputs or {},
 						access = current_access,
+						command = current_command,
 					})
 					== approved_hash
 		end
