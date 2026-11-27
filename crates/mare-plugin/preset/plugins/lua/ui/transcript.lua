@@ -449,13 +449,14 @@ return function(D)
 	end
 
 	local function refresh_working()
+		if not cur.base_working then
+			return
+		end
 		if asking_approval then
 			apply_working(asking_approval.name .. " · Waiting for approval", false, subagent_counts_detail())
 			return
 		end
-		if cur.base_working then
-			apply_working(cur.base_working.label, cur.base_working.background, subagent_counts_detail())
-		end
+		apply_working(cur.base_working.label, cur.base_working.background, subagent_counts_detail())
 	end
 
 	local function working(label, background)
@@ -466,25 +467,17 @@ return function(D)
 	on("subagent/started", function(ev)
 		if type(ev) == "table" and ev.subagent_id and not live_subagents[ev.subagent_id] then
 			live_subagents[ev.subagent_id] = true
-			if cur.base_working or asking_approval then
-				refresh_working()
-			end
+			refresh_working()
 		end
 	end)
 
 	on("subagent/completed", function(ev)
 		if type(ev) == "table" and ev.subagent_id then
 			live_subagents[ev.subagent_id] = nil
-			local cleared_asking = false
 			if asking_approval and asking_approval.subagent_id == ev.subagent_id then
 				asking_approval = nil
-				cleared_asking = true
 			end
-			if cur.base_working or asking_approval then
-				refresh_working()
-			elseif cleared_asking then
-				U.working(nil)
-			end
+			refresh_working()
 		end
 	end)
 
@@ -505,20 +498,14 @@ return function(D)
 		for i, o in ipairs(type(ev) == "table" and ev.pending or {}) do
 			queued_approval_ids[i] = (type(o) == "table" and o.subagent_id) or false
 		end
-		if cur.base_working or asking_approval then
-			refresh_working()
-		end
+		refresh_working()
 	end)
 
 	on("pipeline/approval-decided", function(ev)
 		local req_id = type(ev) == "table" and ev.child_approval_id or nil
 		if asking_approval and asking_approval.request_id ~= nil and req_id == asking_approval.request_id then
 			asking_approval = nil
-			if cur.base_working then
-				refresh_working()
-			else
-				U.working(nil)
-			end
+			refresh_working()
 		end
 	end)
 
@@ -885,11 +872,7 @@ return function(D)
 		end
 		close_group()
 		cur.base_working = nil
-		if asking_approval then
-			refresh_working()
-		else
-			U.working(nil)
-		end
+		U.working(nil)
 		for _, t in pairs(cur.tools) do
 			cancel_tool_flush(t)
 			U.finish(t.id)

@@ -974,20 +974,42 @@ async fn parallel_subagents_distinguish_running_vs_waiting_and_rejecting_one_onl
         assert_eq!(beta_status_2, "completed", "aborting alpha's approval with Ctrl+C must not cancel sibling beta");
         assert!(beta_text_2.contains("beta completed cleanly"), "beta result must stay intact after alpha abort: {beta_text_2}");
 
-        // Background subagent completion between turns must NOT wipe another feature's working line.
+        // Background subagent approvals and completion between turns must NOT overwrite or wipe
+        // another feature's working line (e.g. `/compact`).
         exec(
             &t.vt.host,
             r#"
             mare.ui.working("Compacting conversation")
-            C.cordis:get("bus"):emit("subagent/started", { subagent_id = "bg-idle-1", label = "bg" })
-            C.cordis:get("bus"):emit("subagent/completed", { subagent_id = "bg-idle-1", status = "completed" })
+            local bus = C.cordis:get("bus")
+            bus:emit("subagent/started", { subagent_id = "bg-idle-1", label = "bg" })
+            bus:emit("agent/child-approval", {
+                request_id = "bg-req-1",
+                origin = { subagent_id = "bg-idle-1", label = "bg" },
+            })
             "#,
         )
         .await;
-        t.until("other feature working line preserved after background subagent completes", |s| {
-            s.contains("Compacting conversation")
-        })
+        t.step().await;
+        assert!(
+            t.screen().contains("Compacting conversation"),
+            "background child-approval must not overwrite another feature's working line:\n{}",
+            t.screen()
+        );
+        exec(
+            &t.vt.host,
+            r#"
+            local bus = C.cordis:get("bus")
+            bus:emit("pipeline/approval-decided", { child_approval_id = "bg-req-1", decision = "deny" })
+            bus:emit("subagent/completed", { subagent_id = "bg-idle-1", status = "completed" })
+            "#,
+        )
         .await;
+        t.step().await;
+        assert!(
+            t.screen().contains("Compacting conversation"),
+            "background approval decision and completion must not clear another feature's working line:\n{}",
+            t.screen()
+        );
     })
     .await
 }
