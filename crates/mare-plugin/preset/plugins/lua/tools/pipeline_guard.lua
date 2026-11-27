@@ -11,6 +11,7 @@ return function(D, projection)
 	local policy_version, snapshot_hash = D.approval.policy_version, D.approval.snapshot_hash
 	local approve, granted, denied_text = D.approval.approve, D.approval.granted, D.approval.denied_text
 	local access = require("tools.access")(D)
+	local command_eval = D.registry.command
 	local function rule_signature(rule)
 		local value = clone(rule)
 		value.description = nil
@@ -121,7 +122,7 @@ return function(D, projection)
 			and info.unconfined == def.unconfined
 			and info.permission_request == (def.permission_request == true)
 			and info.command_tool == (def.command_tool == true)
-			and command_equal(info.command, def.command)
+			and (type(def.command) == "function" or command_equal(info.command, def.command))
 	end
 
 	local function admission_context_for(call, opts)
@@ -159,6 +160,7 @@ return function(D, projection)
 		lock_slot
 	)
 		local access_declaration = def.access
+		local command_declaration = def.command
 		local function release_file_lock()
 			if lock_slot and lock_slot.release then
 				local release = lock_slot.release
@@ -267,6 +269,7 @@ return function(D, projection)
 						frozen_access = access.evaluate(def, rewritten, call_cwd(def, rewritten))
 					end
 				end
+				local frozen_command = command_eval.evaluate(def, rewritten, call_cwd(def, rewritten))
 				local permissions = D.svc.permissions
 				local initial_rules = permissions and permissions.rules and clone(permissions:rules()) or nil
 				local accepted_rule_version
@@ -274,6 +277,7 @@ return function(D, projection)
 				info.access_state = frozen_access.state
 				info.access_version = def._version
 				info.tool_version = def._version
+				info.command = frozen_command and clone(frozen_command) or nil
 				local snap = {
 					id = call.id,
 					name = call.name,
@@ -286,6 +290,7 @@ return function(D, projection)
 					projection_version = mare.projection.revision(),
 					input_policy = clone(def.sensitive_inputs or {}),
 					access = frozen_access,
+					command = frozen_command,
 				}
 				snap.hash = snapshot_hash(snap)
 				local function stable_access_key(acc)
@@ -318,6 +323,7 @@ return function(D, projection)
 					projection_version = snap.projection_version,
 					input_policy = snap.input_policy,
 					access = stable_access_key(snap.access),
+					command = snap.command,
 				})
 				-- the frozen call: one table for the vote, the approval and its result event
 				local frozen = {
@@ -374,6 +380,11 @@ return function(D, projection)
 							current_version = snap.policy_version
 						end
 					end
+					local cmd_ok, current_command =
+						pcall(command_eval.evaluate, def, frozen.arguments, call_cwd(def, frozen.arguments))
+					if not cmd_ok then
+						return false
+					end
 					local cur = {
 						name = call.name,
 						projection_version = mare.projection.revision(),
@@ -385,12 +396,14 @@ return function(D, projection)
 						tool_version = registry[call.name] and registry[call.name]._version,
 						schema = schema_fingerprint,
 						access = access.evaluate(def, frozen.arguments, call_cwd(def, frozen.arguments)),
+						command = current_command,
 					}
 					return snapshot_hash(cur) == snap.hash
 						and registry[call.name] == def
 						and definition_current(def)
 						and metadata_current(def, info)
 						and def.access == access_declaration
+						and def.command == command_declaration
 						and frame_current()
 				end
 				---@type table<string, any>
@@ -409,6 +422,7 @@ return function(D, projection)
 				end
 				local before_info = table.copy(info)
 				before_info.access = info.access and clone(info.access) or nil
+				before_info.command = info.command and clone(info.command) or nil
 				before_info.model = admit_model
 				before_info.step_id = admit_opts.step_id
 				before_info.execution_id = execution_id
@@ -890,6 +904,7 @@ return function(D, projection)
 	return {
 		PROPAGATE = PROPAGATE,
 		access = access,
+		command = command_eval,
 		call_cwd = call_cwd,
 		definition_current = definition_current,
 		metadata_current = metadata_current,

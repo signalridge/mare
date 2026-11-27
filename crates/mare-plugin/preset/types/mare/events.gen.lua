@@ -630,6 +630,7 @@
 --- Tighten a parsed shell command AST before rule matching.
 --- `permission/parse` (`mode = waterfall`, `delivery = required`, `scope = session`, `ignorable = false`, `retain = false`, `on_error = continue`)
 ---@class mare.event.permission__parse
+---@field arguments? table<string, any>
 ---@field command? string
 ---@field parsed table<string, any>
 ---@field shell? string

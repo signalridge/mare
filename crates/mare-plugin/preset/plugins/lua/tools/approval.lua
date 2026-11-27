@@ -88,6 +88,7 @@ return function(D)
 			projection = snap.projection_version,
 			inputs = snap.input_policy,
 			access = snap.access,
+			command = snap.command,
 		}, {})))
 	end
 

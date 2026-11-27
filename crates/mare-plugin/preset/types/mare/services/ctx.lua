@@ -167,7 +167,7 @@ function Ctx:get(name) end
 ---@field readonly? boolean no side effects: consecutive read-only calls run in parallel
 ---@field side_effect? "read"|"write"|"external" (default: "read" when readonly, else "external"); write = local files only, external = anything beyond them (shell, network, git push)
 ---@field command_tool? boolean executes an external OS command/shell; permissions derive dangerous-command checks, rules and "always allow" prefixes from `command` (unanalyzable command tools are never auto-allowed)
----@field command? {shell: string, arg: string}|{argv: string[], defaults?: table<string, string|number|boolean>} analyzable command representation (either shell kind + string argument name, or argv template + parameter defaults)
+---@field command? {shell: string, arg: string}|{argv: string[], defaults?: table<string, string|number|boolean>}|fun(args: table, ctx: {cwd: string}): ({shell: string, arg: string}|{argv: string[]}|nil) analyzable command representation (shell kind + string argument name, static argv template + optional parameter defaults, or per-call resolver returning a shell spec, a literal argv list, or nil; defaults apply only to static declarations)
 ---@field permission_request? boolean generic structured permission-request tool; arguments.additional_permissions + justification + scope use the ordinary policy pipeline
 ---@field access? fun(args: table, ctx: {cwd: string}): {kind: 'file', op: 'read'|'write'|'create'|'delete', path: string, recursive: boolean}[] complete file accesses; omission means unknown
 ---@field idempotent? boolean safe to run twice (default: true only for read); a side-effecting non-idempotent call that crashed mid-way resumes as outcome_unknown, never replayed
