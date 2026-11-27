@@ -1332,3 +1332,186 @@ async fn ancestor_tightening_after_tool_freeze_before_child_reserve_reaches_new_
     })
     .await
 }
+
+/// Under `full-access` + `approvals.policy = "untrusted"`, a `general` subagent's write must still
+/// prompt the parent (matching the main session) rather than being auto-allowed by the parent preset.
+#[tokio::test]
+async fn full_access_with_untrusted_approval_policy_prompts_for_general_subagent_write() {
+    local(async {
+        let env = TestEnv::new().await;
+        let tests_dir = env.cwd.join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+        let target = tests_dir.join("untrusted-write.txt");
+
+        let child_script = json!([
+            { "tool_calls": [{ "name": "write", "arguments": { "path": target, "content": "should-not-write" } }] },
+            { "text": "done" }
+        ]);
+        let mut b = env
+            .host()
+            .builtins(SUBAGENT_BUILTINS)
+            .faux(child_script)
+            .config(json!({
+                "plugins": {
+                    "permissions": { "enabled": true, "preset": "full-access" },
+                    "approvals": { "policy": "untrusted" }
+                }
+            }))
+            .args(json!({ "no_session": true }));
+        b.opts.project_trusted = true;
+        let h = b.build().await;
+        expose(&h);
+
+        let dialogs_raw: String = eval(
+            &h,
+            r#"
+            local dialogs = {}
+            mare.ui.connected = function() return true end
+            mare.ui.approve = function(o)
+                dialogs[#dialogs + 1] = tostring(o.wait_title or "")
+                return "deny"
+            end
+            mare.ui.input = function() return nil end
+
+            local svc = C.cordis:get("subagent")
+            local c = svc:start({ type = "general", prompt = "write under untrusted" })
+            local done = svc:wait(c.subagent_id, { timeout_ms = 15000 })
+            assert(done.status == "completed", mare.json.encode(done))
+            return mare.json.encode(dialogs)
+            "#,
+        )
+        .await;
+
+        let dialogs: Vec<String> = serde_json::from_str(&dialogs_raw).unwrap();
+        assert_eq!(dialogs.len(), 1, "FULL + untrusted must prompt once for general subagent write: {dialogs:?}");
+        assert!(dialogs[0].contains("Allow write?"), "expected write approval dialog: {dialogs:?}");
+        assert!(!target.exists(), "denied write under untrusted policy must not create file");
+        h.shutdown().await;
+    })
+    .await
+}
+
+/// Nested forwarding: FULL root -> unpinned `general` child -> pinned `permission = "read-only"`
+/// grandchild must preserve the grandchild's pinned status all the way to the root so writes still
+/// prompt the root instead of being auto-allowed by the root's `full-access` preset.
+#[tokio::test]
+async fn nested_pinned_read_only_grandchild_through_general_child_prompts_full_root() {
+    local(async {
+        let env = TestEnv::new().await;
+        let tests_dir = env.cwd.join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+        let target = tests_dir.join("grandchild-ro.txt");
+        let plugins = env.config_dir().join("plugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        std::fs::write(
+            plugins.join("nested-pinned-ro-probe.lua"),
+            r#"
+            return {
+                name = "nested-pinned-ro-probe",
+                inject = { "bus" },
+                contracts = {
+                    probe = {
+                        owner = "nested-pinned-ro-probe",
+                        events = {
+                            ["nested-pinned"] = {
+                                doc = "probe",
+                                mode = "emit",
+                                expose = "both",
+                                delivery = "required",
+                                ignorable = false,
+                                data = { type = "object", additionalProperties = true },
+                                example = {},
+                            },
+                        },
+                    },
+                },
+                apply = function(ctx)
+                    if mare.mode ~= "child" or mare.config.pinned_probe_depth ~= 1 then return end
+                    ctx:on("turn/started", function()
+                        local gc = mare.subagent.start({
+                            permission = "read-only",
+                            no_session = true,
+                            prompt = "grandchild write attempt",
+                            config = {
+                                pinned_probe_depth = 2,
+                                plugins = { ["provider-faux"] = { script_json = mare.config.grandchild_script_json } },
+                            },
+                        })
+                        local res = gc:wait()
+                        ctx.bus:emit("probe/nested-pinned", { ok = res.ok, status = res.status })
+                    end)
+                end,
+            }
+            "#,
+        )
+        .unwrap();
+
+        let middle_script = json!([{ "text": "middle-done" }]);
+        let grandchild_script = json!([
+            { "tool_calls": [{ "name": "write", "arguments": { "path": target, "content": "escaped" } }] },
+            { "text": "grandchild-done" }
+        ]);
+        let mut b = env
+            .host()
+            .builtins(SUBAGENT_BUILTINS)
+            .user_plugins()
+            .faux(middle_script)
+            .config(json!({
+                "agents": { "max_depth": 4 },
+                "plugins": { "permissions": { "enabled": true, "preset": "full-access" } }
+            }))
+            .args(json!({ "no_session": true }));
+        b.opts.project_trusted = true;
+        let h = b.build().await;
+        expose(&h);
+        global(&h, "GC_SCRIPT", serde_json::to_string(&grandchild_script).unwrap());
+
+        let (dialogs_raw, nested_status): (String, String) = eval(
+            &h,
+            r#"
+            local dialogs = {}
+            mare.ui.connected = function() return true end
+            mare.ui.approve = function(o)
+                dialogs[#dialogs + 1] = tostring(o.wait_title or "")
+                return "deny"
+            end
+            mare.ui.input = function() return nil end
+
+            local svc, raw_start, handle = C.cordis:get("subagent"), mare.subagent.start, nil
+            mare.subagent.start = function(opts) handle = raw_start(opts); return handle end
+            local mid = svc:start({
+                type = "general",
+                prompt = "spawn read-only grandchild",
+                config = { pinned_probe_depth = 1, grandchild_script_json = GC_SCRIPT },
+            })
+            mare.subagent.start = raw_start
+
+            local nested_status = "missing"
+            while handle do
+                local ev = handle:next_event()
+                if not ev then break end
+                if ev.name == "probe/nested-pinned" then
+                    nested_status = tostring(ev.payload.status or ev.payload.ok)
+                    break
+                end
+            end
+            local done = svc:wait(mid.subagent_id, { timeout_ms = 15000 })
+            assert(done.status == "completed", mare.json.encode(done))
+            return mare.json.encode(dialogs), nested_status
+            "#,
+        )
+        .await;
+
+        let dialogs: Vec<String> = serde_json::from_str(&dialogs_raw).unwrap();
+        assert_eq!(nested_status, "completed", "grandchild run should finish: {nested_status}");
+        assert_eq!(
+            dialogs.len(),
+            1,
+            "pinned read-only grandchild write through general child must prompt FULL root: {dialogs:?}"
+        );
+        assert!(dialogs[0].contains("Allow write?"), "expected write approval dialog: {dialogs:?}");
+        assert!(!target.exists(), "denied grandchild write must not create file");
+        h.shutdown().await;
+    })
+    .await
+}

@@ -59,15 +59,14 @@ impl PolicyNode {
     }
 
     fn resync(&self, parent_policy: Option<&mare_binding::ossandbox::Policy>, expected_tighten_seq: u64) -> bool {
-        let mut st = self.state.lock().unwrap();
+        let st = self.state.lock().unwrap();
         if st.tighten_seq != expected_tighten_seq {
             return false;
         }
-        if let Some(handle) = st.handle.as_ref() {
-            handle.resync_ceiling(parent_policy.cloned());
-        } else {
-            st.pending_tighten = None;
-        }
+        let Some(handle) = st.handle.as_ref() else {
+            return false;
+        };
+        handle.resync_ceiling(parent_policy.cloned());
         true
     }
 

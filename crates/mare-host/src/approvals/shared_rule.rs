@@ -145,10 +145,32 @@ fn has_non_empty_increment(v: &J) -> bool {
         || inc.get("network").and_then(J::as_array).is_some_and(|a| !a.is_empty())
 }
 
+/// Returns true when the host's live or inherited approval policy is `"untrusted"` and applies
+/// to this tool call (matching `approvals.lua`: non-read or unconfined operations require review).
+/// Fails closed (`true`) if the `approvals` service cannot report its inheritance list.
+pub(crate) fn untrusted_requires_review(approvals: &Table, info: &J) -> bool {
+    let untrusted_applies =
+        info.get("side_effect").and_then(J::as_str) != Some("read") || info.get("unconfined") == Some(&J::Bool(true));
+    if !untrusted_applies {
+        return false;
+    }
+    let Ok(f) = approvals.get::<Function>("inheritance") else {
+        return true;
+    };
+    let Ok(list) = f.call::<Table>(approvals.clone()) else {
+        return true;
+    };
+    list.sequence_values::<Value>().any(|v| match v {
+        Ok(Value::String(s)) => s.as_bytes() == b"untrusted",
+        Err(_) => true,
+        _ => false,
+    })
+}
+
 /// Parent side: check whether the parent's current live permission preset already allows an
 /// unpinned child's request (without prompting). Dangerous commands, explicit `prompt` rules,
-/// sensitive credential paths, and parent-local session caches/grants still return `Ok(None)` so
-/// they ask normally; `forbidden` rules still return `deny`.
+/// and parent-local session caches/grants still return `Ok(None)` so they ask normally;
+/// `forbidden` rules still return `deny`.
 pub(crate) async fn resolve_parent_preset(host: &Host, call: &J, info: &J) -> Result<Option<J>, String> {
     let Some(v) = call_permissions(host, "check", call, info).await? else {
         return Ok(None);

@@ -537,6 +537,8 @@ impl Host {
             Err(_) => true,
         };
         let effective_review_required = child_review_required || parent_review_required;
+        let can_inherit_parent_preset =
+            inherits_parent_preset && !shared_rule::untrusted_requires_review(&service, info);
         let policy = std::rc::Rc::new(std::cell::RefCell::new(None));
         let (policy_host, captured_policy) = (self.clone(), policy.clone());
         let (policy_call, policy_info, policy_verdict) = (call.clone(), info.clone(), verdict.clone());
@@ -587,7 +589,7 @@ impl Host {
                 };
                 if !effective_review_required
                     && c["protected_arguments"] != true
-                    && inherits_parent_preset
+                    && can_inherit_parent_preset
                     && maybe_rule_allow.is_none()
                 {
                     match shared_rule::resolve_parent_preset(&host, &c, &i).await {
@@ -616,8 +618,16 @@ impl Host {
                     }
                     return mare_shared::lua::json_to_lua(&lua, &vote);
                 }
-                let (mut vote, source) =
-                    host.decide_child_approval(&c, &i, &v, maybe_rule_allow, effective_review_required).await?;
+                let (mut vote, source) = host
+                    .decide_child_approval(
+                        &c,
+                        &i,
+                        &v,
+                        maybe_rule_allow,
+                        effective_review_required,
+                        can_inherit_parent_preset,
+                    )
+                    .await?;
                 // The shared gate preserves the answerer's provenance unless it replaces
                 // that answer with a policy, cancellation or reviewer decision.
                 vote["source"] = source.into();
@@ -766,14 +776,20 @@ impl Host {
         verdict: &serde_json::Value,
         maybe_rule_allow: Option<serde_json::Value>,
         review_required: bool,
+        inherits_parent_preset: bool,
     ) -> mlua::Result<(serde_json::Value, &'static str)> {
         let lua = self.lua();
         let mut forwarded_verdict = verdict.clone();
-        if review_required {
+        if review_required || !inherits_parent_preset {
             if !forwarded_verdict.is_object() {
                 forwarded_verdict = serde_json::json!({});
             }
-            forwarded_verdict["review_required"] = true.into();
+            if review_required {
+                forwarded_verdict["review_required"] = true.into();
+            }
+            if !inherits_parent_preset {
+                forwarded_verdict["preset_pinned"] = true.into();
+            }
         }
         if let Some(mut vote) = self.child_policy_vote("tool/approval-host", call, info, &forwarded_verdict).await?
             && vote["decision"] != "ask"
@@ -980,7 +996,7 @@ mod tests {
                     host.child_policy_vote("tool/approval", &call, &info, &verdict).await.unwrap().unwrap();
                 assert_eq!(policy_vote["decision"], "allow", "child_policy_vote dropped null: {policy_vote}");
 
-                let (vote, _) = host.decide_child_approval(&call, &info, &verdict, None, false).await.unwrap();
+                let (vote, _) = host.decide_child_approval(&call, &info, &verdict, None, false, true).await.unwrap();
                 assert_eq!(vote["decision"], "allow", "decide_child_approval dropped null: {vote}");
 
                 let rule = shared_rule::evaluate(&host, &call, &info).await.unwrap().unwrap();
