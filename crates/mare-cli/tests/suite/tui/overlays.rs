@@ -212,31 +212,120 @@ async fn trust_overlay_esc_from_search_and_expanded_always_dismisses_as_not_now(
     .await
 }
 
-/// Ctrl+O on a tool call that is already in the scrollback (which an inline UI can't
-/// redraw) opens the transcript, expanded and scrolled to that call, saying why.
+/// Ctrl+O toggles committed tool output and reasoning in place between compact and expanded views
+/// across repeated toggles, pre-turn activation, and `mare.ui.flag("expand_all", ...)`.
 #[tokio::test]
-async fn ctrl_o_on_committed_tool_output_opens_the_transcript_at_it() {
+async fn ctrl_o_toggles_committed_tool_and_reasoning_between_compact_and_expanded() {
     local(async {
         let script = json!([
             { "tool_calls": [{ "name": "read", "arguments": { "path": "notes.txt" } }] },
-            { "text": "read it" }
+            { "text": "read it" },
+            { "tool_calls": [{ "name": "read", "arguments": { "path": "notes.txt" } }] },
+            { "text": "read again" }
         ]);
-        let mut t = Term::new(script, 80, 20).await;
+        let mut t = Term::new(script, 80, 24).await;
         t.vt.dismiss_notices();
         let body: String = (1..=30).map(|i| format!("note line {i}\n")).collect();
         std::fs::write(t._env.cwd.join("notes.txt"), body).unwrap();
         t.submit("read the notes").await;
         t.idle().await;
         t.until("the answer", |s| s.contains("read it")).await;
+        // Also commit a markdown reasoning block so both tool and reasoning compact/expanded
+        // paths (including the `(Ctrl+O to expand)` hint on reflow) are covered.
+        exec(
+            &t.vt.host,
+            r#"
+            local id = mare.ui.push("reasoning", { markdown = "REASONING_DETAIL_BODY" })
+            mare.ui.finish(id)
+            "#,
+        )
+        .await;
+        t.until_vt("reasoning committed", |t| t.history().contains("Thought for")).await;
+        assert!(
+            t.history().contains("Read 1 file") && !t.history().contains("Read 30 lines"),
+            "tool starts compact:\n{}",
+            t.history()
+        );
+        assert!(
+            t.history().contains("Ctrl+O to expand") && !t.history().contains("REASONING_DETAIL_BODY"),
+            "reasoning starts compact:\n{}",
+            t.history()
+        );
+
+        // 1. Toggle Ctrl+O repeatedly (compact -> expanded -> compact -> expanded -> compact).
+        tokio::time::pause();
+        t.vt.reset_loop_state();
+        for cycle in 0..2 {
+            // Expand
+            t.vt.send_tty_event(mare_tui::tty::Event::Key(KeyEvent::new(KeyCode::Char('o'), Modifiers::CONTROL)));
+            t.owned.vt.run_production_loop_for(Duration::from_millis(300)).await;
+            let out = t.vt.output();
+            t.parser.process(&out);
+            let s = t.screen();
+            let h = t.history();
+            assert!(!s.contains("Transcript"), "cycle {cycle} expand must stay on main screen:\n{s}");
+            assert!(
+                h.contains("Read 30 lines") && !h.contains("Read 1 file"),
+                "cycle {cycle} expand must show expanded tool:\n{h}"
+            );
+            assert!(h.contains("REASONING_DETAIL_BODY"), "cycle {cycle} expand must show reasoning:\n{h}");
+
+            // Collapse back to compact
+            t.vt.send_tty_event(mare_tui::tty::Event::Key(KeyEvent::new(KeyCode::Char('o'), Modifiers::CONTROL)));
+            t.owned.vt.run_production_loop_for(Duration::from_millis(300)).await;
+            let out = t.vt.output();
+            t.parser.process(&out);
+            let s = t.screen();
+            let h = t.history();
+            assert!(!s.contains("Transcript"), "cycle {cycle} collapse must stay on main screen:\n{s}");
+            assert!(
+                h.contains("Read 1 file") && !h.contains("Read 30 lines"),
+                "cycle {cycle} collapse must restore compact tool:\n{h}"
+            );
+            assert!(!h.contains("REASONING_DETAIL_BODY"), "cycle {cycle} collapse must hide reasoning body:\n{h}");
+            assert!(h.contains("Ctrl+O to expand"), "cycle {cycle} collapse must keep expand hint:\n{h}");
+        }
+
+        // 2. `mare.ui.flag("expand_all", true/false)` also reflows committed scrollback in place.
+        exec(&t.vt.host, r#"mare.ui.flag("expand_all", true)"#).await;
+        t.owned.vt.run_production_loop_for(Duration::from_millis(300)).await;
+        let out = t.vt.output();
+        t.parser.process(&out);
+        assert!(t.history().contains("Read 30 lines"), "expand_all=true must reflow scrollback:\n{}", t.history());
+
+        exec(&t.vt.host, r#"mare.ui.flag("expand_all", false)"#).await;
+        t.owned.vt.run_production_loop_for(Duration::from_millis(300)).await;
+        let out = t.vt.output();
+        t.parser.process(&out);
+        assert!(
+            t.history().contains("Read 1 file") && !t.history().contains("Read 30 lines"),
+            "expand_all=false must restore compact:\n{}",
+            t.history()
+        );
+        tokio::time::resume();
+
+        // 3. Turning Ctrl+O ON before a turn and pressing Ctrl+O again after the turn commits
+        // must return to compact view instead of trapping expand_all = true.
         t.key(KeyCode::Char('o'), Modifiers::CONTROL);
-        t.until("the transcript", |s| s.contains("Transcript")).await;
-        let s = t.screen();
-        assert!(s.contains("already in the scrollback"), "the header says why it opened:\n{s}");
-        assert!(!s.contains("Tool output: expanded"), "no claim that the scrollback was expanded:\n{s}");
-        assert!(s.contains("notes.txt"), "scrolled to the tool call:\n{s}");
-        // Esc returns to the main screen
-        t.key(KeyCode::Escape, Modifiers::NONE);
-        t.until("the main screen", |s| s.contains("Ask mare")).await;
+        t.until("expanded notice before turn", |s| s.contains("Tool output: expanded")).await;
+        t.submit("read the notes again").await;
+        t.idle().await;
+        t.until("second answer", |s| s.contains("read again")).await;
+        assert!(t.history().contains("Read 30 lines"), "turn committed while expanded:\n{}", t.history());
+
+        tokio::time::pause();
+        t.vt.reset_loop_state();
+        t.vt.send_tty_event(mare_tui::tty::Event::Key(KeyEvent::new(KeyCode::Char('o'), Modifiers::CONTROL)));
+        t.owned.vt.run_production_loop_for(Duration::from_millis(300)).await;
+        let out = t.vt.output();
+        t.parser.process(&out);
+        assert!(!t.screen().contains("Transcript"), "second Ctrl+O must not open transcript:\n{}", t.screen());
+        assert!(
+            t.history().contains("Read 1 file") && !t.history().contains("Read 30 lines"),
+            "second Ctrl+O must collapse back to compact:\n{}",
+            t.history()
+        );
+        tokio::time::resume();
     })
     .await
 }

@@ -124,6 +124,7 @@ impl App {
         }
         let cap = self.reflow_cap;
         let show_reasoning = self.show_reasoning;
+        let expand_key = self.editor_action_key("toggle-expand");
         let tail_partial = if replay_committed == self.committed
             && self.committed < self.blocks.len()
             && self.blocks[self.committed].partial > 0
@@ -133,7 +134,8 @@ impl App {
                 self.held.iter().filter_map(|h| h.partial_before).filter(|(bi, _)| *bi == idx).map(|(_, p)| p).min();
             let p = held_partial.map_or(self.blocks[idx].partial, |hp| hp.min(self.blocks[idx].partial));
             if p > 0 {
-                let mut r = self.blocks[idx].render(w, &theme, 0, false, show_reasoning, None);
+                let mut r =
+                    self.blocks[idx].render(w, &theme, 0, self.expand_all, show_reasoning, expand_key.as_deref());
                 r.truncate(p);
                 Some((idx, r))
             } else {
@@ -151,18 +153,18 @@ impl App {
             // Historical image payloads are materialized only for the current visible tail.
             // Ctrl+T has its own observable viewport for older rows.
             let r = if !self.blocks[idx].has_images(self.expand_all, show_reasoning) {
-                self.blocks[idx].render(w, &theme, 0, self.expand_all, show_reasoning, None)
+                self.blocks[idx].render(w, &theme, 0, self.expand_all, show_reasoning, expand_key.as_deref())
             } else {
                 let measured = {
                     let _measure = mare_tui::image::measure_only();
-                    self.blocks[idx].render(w, &theme, 0, self.expand_all, show_reasoning, None)
+                    self.blocks[idx].render(w, &theme, 0, self.expand_all, show_reasoning, expand_key.as_deref())
                 };
                 if total_rows < self.height {
                     let _window = mare_tui::image::window(
                         measured.len().saturating_sub(self.height - total_rows),
                         measured.len(),
                     );
-                    self.blocks[idx].render(w, &theme, 0, self.expand_all, show_reasoning, None)
+                    self.blocks[idx].render(w, &theme, 0, self.expand_all, show_reasoning, expand_key.as_deref())
                 } else {
                     measured
                 }

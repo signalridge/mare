@@ -35,15 +35,6 @@ impl TranscriptLines {
         matches
     }
 
-    fn range_get(&self, i: usize) -> Option<(usize, usize, usize)> {
-        let cached_len = self.cached_ranges.as_ref().map_or(0, |r| r.len());
-        if i < cached_len {
-            self.cached_ranges.as_ref().and_then(|r| r.get(i).copied())
-        } else {
-            self.ranges.get(i - cached_len).copied()
-        }
-    }
-
     fn first_intersecting(&self, top: usize) -> Vec<(usize, usize, usize)> {
         let mut out = Vec::new();
         if let Some(cr) = &self.cached_ranges {
@@ -88,8 +79,6 @@ pub(in crate::app) struct TranscriptSearch {
 pub(in crate::app) struct TranscriptView {
     /// open: its top line index
     pub(in crate::app) top: Option<usize>,
-    /// why the transcript opened, when Ctrl+O opened it (its header line)
-    hint: Option<String>,
     /// the last drawn rows (diffed against the next frame) and their width
     pub(in crate::app) frame: Vec<String>,
     frame_width: usize,
@@ -140,7 +129,6 @@ impl TranscriptView {
     /// Closed: everything but the last frame's width cleared. True when the overlay showed the
     /// terminal cursor (to hide again).
     fn reset(&mut self) -> bool {
-        self.hint = None;
         self.keys.clear();
         self.frame.clear();
         self.top = None;
@@ -204,10 +192,7 @@ impl App {
                 blocks: 0,
                 ranges: Default::default(),
                 prefix: std::sync::Arc::new(vec![
-                    match &self.transcript.hint {
-                        Some(h) => Line::styled(format!(" Transcript · {h} — {help}"), theme.fg("dim")),
-                        None => Line::styled(format!(" Transcript (expanded) — {help}"), theme.fg("dim")),
-                    },
+                    Line::styled(format!(" Transcript (expanded) — {help}"), theme.fg("dim")),
                     Line::empty(),
                 ]),
             });
@@ -261,24 +246,6 @@ impl App {
         mare_tui::modes::set_alt_screen(true);
         let n = self.transcript_lines().len();
         self.transcript.top = Some(n.saturating_sub(self.height.saturating_sub(1)));
-    }
-
-    /// Ctrl+O on output already in the scrollback: the transcript, scrolled to block `i`, with a
-    /// header that says why it opened (it doesn't claim the scrollback was expanded).
-    pub(in crate::app) fn transcript_at(&mut self, i: usize) {
-        if self.select.active() {
-            self.leave_select_mode();
-        }
-        self.pending_prefix = None;
-        self.transcript.hint = Some("already in the scrollback, which can't be redrawn — full output here".into());
-        self.transcript.cache = None;
-        self.transcript.frame.clear();
-        mare_tui::modes::set_alt_screen(true);
-        let lines = self.transcript_lines();
-        let n = lines.len();
-        let line = lines.range_get(i).map_or(n, |(_, start, _)| start);
-        let max_top = n.saturating_sub(self.height.saturating_sub(1));
-        self.transcript.top = Some(line.min(max_top));
     }
 
     /// A plugin view's header help from its own keys (`ui.transcript(t, node, { keys })`): the
@@ -773,9 +740,6 @@ mod tests {
             ranges: live,
             cached_ranges: Some(cached),
         };
-        assert_eq!(lines.range_get(0), Some((0, 2, 3)));
-        assert_eq!(lines.range_get(3), Some((3, 14, 5)));
-        assert_eq!(lines.range_get(5), None);
         // Viewport top=7 should skip block 0 (ends at 5) and start at block 1 (6..10).
         let intersecting = lines.first_intersecting(7);
         assert_eq!(intersecting, vec![(1, 6, 4), (2, 11, 2), (3, 14, 5), (4, 20, 3)]);
