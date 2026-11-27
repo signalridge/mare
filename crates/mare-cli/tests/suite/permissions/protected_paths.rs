@@ -1492,3 +1492,155 @@ async fn approved_git_grants_reach_real_sandbox_git_fetch_across_repos_workdir_s
     })
     .await
 }
+
+/// Regression tests for the three Lua permission-grant boundaries kept from review:
+/// 1. Baseline `/tmp` (`wider == false`) is never promoted into an explicit host bind mount when
+///    another grant is active.
+/// 2. Session cache does not bypass `needs == true` when a symlinked scope is retargeted to a
+///    different physical repo.
+/// 3. Partial approval excluding `.git` never resurrects `R/.git` via ancestor grant `R`.
+#[cfg(unix)]
+#[tokio::test]
+async fn permission_grant_boundaries_tmp_symlink_cache_and_partial_approval() {
+    local(async {
+        use std::process::Command;
+
+        let base = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+        let root = dunce::canonicalize(base.path()).unwrap();
+        let init_repo = |dir: &std::path::Path| {
+            std::fs::create_dir_all(dir).unwrap();
+            let out = Command::new("git")
+                .args(["-C", dir.to_str().unwrap(), "init", "-q", "-b", "main"])
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .output()
+                .expect("git installed");
+            assert!(out.status.success(), "git init: {}", String::from_utf8_lossy(&out.stderr));
+        };
+
+        let ws = root.join("ws");
+        let repo_a = root.join("repo-a");
+        let repo_b = root.join("repo-b");
+        let other_dir = root.join("other");
+        let link_repo = root.join("repo-link");
+        init_repo(&ws);
+        init_repo(&repo_a);
+        init_repo(&repo_b);
+        std::fs::create_dir_all(&other_dir).unwrap();
+        std::os::unix::fs::symlink(&repo_a, &link_repo).unwrap();
+
+        let mut env = TestEnv::new().await;
+        env.cwd = ws.clone();
+        let h = host(&env, true, json!({ "network": true }), json!({ "no_session": true })).await;
+        if !require_backend(&h, "permission_grant_boundaries_tmp_symlink_cache_and_partial_approval", &["bwrap", "seatbelt"]).await {
+            return h.shutdown().await;
+        }
+        exec(&h, VOTE).await;
+        global(&h, "REPO_B", repo_b.to_string_lossy().to_string());
+        global(&h, "OTHER", other_dir.to_string_lossy().to_string());
+        global(&h, "LINK_REPO", link_repo.to_string_lossy().to_string());
+
+        // 1. Baseline `/tmp` (`wider == false`) must not be promoted into explicit writable roots.
+        let host_tmp_probe = std::path::PathBuf::from("/tmp").join(format!("mare-tmp-probe-{}", std::process::id()));
+        let _ = std::fs::remove_file(&host_tmp_probe);
+        global(&h, "TMP_PROBE", host_tmp_probe.to_string_lossy().to_string());
+        let (tmp_not_promoted, mech): (bool, String) = eval(
+            &h,
+            r#"
+            local ra = P:request({ write = { OTHER } }, {
+                justification = "active grant", scope = "turn",
+                approve = function() return { decision = "allow", scope = "turn" } end,
+            })
+            assert(ra.refused ~= true)
+            local v = VOTE(BASH("touch " .. TMP_PROBE, "write:/tmp", "use temp"))
+            local has_tmp = false
+            for _, w in ipairs((type(v.sandbox_grant) == "table" and (v.sandbox_grant.writable or v.sandbox_grant.write)) or {}) do
+                if w == "/tmp" or w == "/private/tmp" then has_tmp = true end
+            end
+            local r = T:execute({
+                id = "tmp-no-promote", name = "bash",
+                arguments = { command = "touch " .. TMP_PROBE, sandbox_permissions = "write:/tmp", justification = "temp" },
+            }, {})
+            assert(r.is_error ~= true, tostring(r.content))
+            C.cordis:emit("turn/completed", {})
+            return not has_tmp, mare.proc.sandbox.capabilities().mechanism
+            "#,
+        )
+        .await;
+        assert!(tmp_not_promoted, "baseline /tmp must not be promoted into explicit writable roots");
+        if mech == "bwrap" {
+            assert!(!host_tmp_probe.exists(), "bwrap must keep /tmp on private tmpfs, not host /tmp");
+        }
+        let _ = std::fs::remove_file(&host_tmp_probe);
+
+        // 2. Session cache must not bypass `needs == true` when symlink ancestor retargets A -> B.
+        let first_ok: bool = eval(
+            &h,
+            r#"
+            local r = T:execute({
+                id = "sym-cache-1", name = "bash",
+                arguments = {
+                    command = string.format("touch %q", LINK_REPO .. "/.git/cache-ok"),
+                    sandbox_permissions = "write:" .. LINK_REPO .. "/.git",
+                    justification = "write repo-a git",
+                },
+            }, { approve = function() return { decision = "allow_session" } end })
+            return r.is_error ~= true
+            "#,
+        )
+        .await;
+        assert!(first_ok && repo_a.join(".git/cache-ok").exists());
+        std::fs::remove_file(&link_repo).unwrap();
+        std::os::unix::fs::symlink(&repo_b, &link_repo).unwrap();
+        let (reprompted, refused_b): (bool, bool) = eval(
+            &h,
+            r#"
+            local asked = false
+            local r = T:execute({
+                id = "sym-cache-2", name = "bash",
+                arguments = {
+                    command = string.format("touch %q", LINK_REPO .. "/.git/cache-ok"),
+                    sandbox_permissions = "write:" .. LINK_REPO .. "/.git",
+                    justification = "write repo-a git",
+                },
+            }, { approve = function() asked = true; return { decision = "deny" } end })
+            return asked, r.refused == true
+            "#,
+        )
+        .await;
+        assert!(reprompted && refused_b, "retargeted symlink must not hit session cache when needs == true");
+        assert!(!repo_b.join(".git/cache-ok").exists());
+
+        // 3. Partial approval excluding `.git` must not resurrect `R/.git` via stored ancestor `R`.
+        let (partial_json, other_ok, git_blocked): (String, bool, bool) = eval(
+            &h,
+            r#"
+            C.cordis:emit("permission/changed", {})
+            local r_anc = P:request({ write = { REPO_B } }, {
+                justification = "repo-b root", scope = "turn",
+                approve = function() return { decision = "allow", scope = "turn" } end,
+            })
+            assert(r_anc.refused ~= true)
+            local r_part = P:request({ write = { REPO_B .. "/.git", OTHER } }, {
+                justification = "git and other", scope = "turn",
+                approve = function()
+                    return { decision = "allow", scope = "turn", permissions = { write = { OTHER } } }
+                end,
+            })
+            assert(r_part.refused ~= true)
+            local r_other = T:execute({ id = "part-other", name = "bash", arguments = { command = string.format("touch %q", OTHER .. "/partial-ok") } }, {})
+            local r_git = T:execute({ id = "part-git", name = "bash", arguments = { command = string.format("touch %q", REPO_B .. "/.git/partial-escape") } }, {})
+            C.cordis:emit("turn/completed", {})
+            return tostring(r_part.content), r_other.is_error ~= true, r_git.is_error == true
+            "#,
+        )
+        .await;
+        assert!(!partial_json.contains(".git"), "partial approval must not resurrect excluded .git: {partial_json}");
+        assert!(other_ok && other_dir.join("partial-ok").exists());
+        assert!(git_blocked && !repo_b.join(".git/partial-escape").exists());
+
+        h.shutdown().await;
+    })
+    .await
+}

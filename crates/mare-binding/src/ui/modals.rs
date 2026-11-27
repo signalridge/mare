@@ -322,30 +322,9 @@ pub(super) fn install(lua: &Lua, ui: &Table, shared: &Arc<UiShared>) -> mlua::Re
                         "this turn (expires when this turn ends)"
                     };
                     body.push(format!("Grant scope: {expiry}"));
-                    if let Some(add) = arguments.get("additional_permissions").and_then(|v| v.as_object()) {
-                        for key in ["write", "read"] {
-                            if let Some(arr) = add.get(key).and_then(|v| v.as_array())
-                                && !arr.is_empty()
-                            {
-                                let paths: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
-                                if !paths.is_empty() {
-                                    body.push(format!("Requested {key}: {}", paths.join(", ")));
-                                }
-                            }
-                        }
-                        if let Some(net) = add.get("network") {
-                            if net.as_bool() == Some(true) {
-                                body.push("Requested network: open".to_string());
-                            } else if let Some(hosts) = net.as_array() {
-                                let hs: Vec<&str> = hosts.iter().filter_map(|v| v.as_str()).collect();
-                                if !hs.is_empty() {
-                                    body.push(format!("Requested network: {}", hs.join(", ")));
-                                }
-                            }
-                        }
-                    }
-                } else if let Some(sp) = sandbox_scope {
-                    body.push(format!("Grant scope: {sp}"));
+                }
+                if has_grant_scope && let Some(r) = reason.as_deref().filter(|s| !s.trim().is_empty()) {
+                    body.push(r.to_string());
                 }
                 let theme = s.theme.read().unwrap().clone();
                 let preview = match t.get::<Value>("preview")? {

@@ -278,13 +278,15 @@ return function(D)
 					if not needs then
 						reused_scope = scope
 					end
-				end
-				if not E.inc_empty(granted) then
-					sandbox = E.apply_inc(base, inc_union(granted, inc))
-				else
+					if not E.inc_empty(granted) then
+						sandbox = E.apply_inc(base, inc_union(granted, inc))
+					else
+						sandbox = s
+					end
+				elseif E.inc_empty(granted) then
 					sandbox = s
 				end
-			elseif s ~= nil then
+			elseif s ~= nil and E.inc_empty(granted) then
 				sandbox = s
 			end
 		end
@@ -516,10 +518,14 @@ return function(D)
 			and rule_covers_needs()
 		then
 			if not needs and rule.scope then
-				local s, _, _, rinc = widen(rule.scope, cwd)
-				if rinc and not E.inc_empty(granted) then
-					sandbox = E.apply_inc(base, inc_union(granted, rinc))
-				elseif s ~= nil then
+				local s, _, wider_r, rinc = widen(rule.scope, cwd)
+				if wider_r then
+					if rinc and not E.inc_empty(granted) then
+						sandbox = E.apply_inc(base, inc_union(granted, rinc))
+					elseif s ~= nil then
+						sandbox = s
+					end
+				elseif E.inc_empty(granted) and s ~= nil then
 					sandbox = s
 				end
 			end
@@ -536,7 +542,7 @@ return function(D)
 			end
 			return v
 		end
-		if P.session_cache[key] and not net_note then
+		if P.session_cache[key] and not net_note and (not needs or approved_all) then
 			return auto_allow("session approval", sandbox)
 		end
 		if rule and rule.decision == "prompt" then

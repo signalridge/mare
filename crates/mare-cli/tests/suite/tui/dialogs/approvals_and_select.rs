@@ -826,41 +826,68 @@ async fn permission_streak_offer_switches_to_wider_preset_when_accepted() {
 async fn permission_approval_dialog_shows_grant_scope_and_expiry() {
     local(async {
         let ext = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
-        let ext_git = dunce::canonicalize(ext.path()).unwrap().join(".git");
-        std::fs::create_dir_all(&ext_git).unwrap();
-        let ext_git2 = dunce::canonicalize(ext.path()).unwrap().join("repo2/.git");
-        std::fs::create_dir_all(&ext_git2).unwrap();
+        let ext_root = dunce::canonicalize(ext.path()).unwrap();
+        let main_repo = ext_root.join("main");
+        let linked_wt = ext_root.join("wt");
+        let run_git = |dir: &std::path::Path, args: &[&str]| {
+            let out = std::process::Command::new("git").args(args).current_dir(dir).output().unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        std::fs::create_dir_all(&main_repo).unwrap();
+        run_git(&main_repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(main_repo.join("f.txt"), "v1\n").unwrap();
+        run_git(&main_repo, &["add", "f.txt"]);
+        run_git(&main_repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init"]);
+        run_git(&main_repo, &["worktree", "add", "-q", linked_wt.to_str().unwrap(), "-b", "wt-branch"]);
+        let wt_gitdir = dunce::canonicalize(main_repo.join(".git/worktrees/wt")).unwrap();
+        let main_git = dunce::canonicalize(main_repo.join(".git")).unwrap();
+        let file_parent = ext_root.join("out-dir");
+        std::fs::create_dir_all(&file_parent).unwrap();
+        let file_target = file_parent.join("target.txt");
+        let long_cmd = format!("echo {} && true", "x".repeat(140));
         let script = json!([
             { "tool_calls": [{ "name": "request_permissions", "arguments": {
-                "additional_permissions": { "write": [ext_git] },
+                "additional_permissions": { "write": [linked_wt.join(".git")] },
                 "scope": "session",
-                "justification": "fetch external repo"
+                "justification": "fetch linked worktree"
             } }] },
             { "tool_calls": [{ "name": "bash", "arguments": {
-                "command": "true",
-                "sandbox_permissions": format!("write:{}", ext_git2.display()),
-                "justification": "fetch second repo"
+                "command": long_cmd,
+                "sandbox_permissions": format!("write:{}", file_target.display()),
+                "justification": "write file in external dir"
             } }] },
             { "text": "done" }
         ]);
         let cfg = json!({ "plugins": { "permissions": { "enabled": true, "preset": "auto" } } });
-        let mut t = Term::with(script, cfg, 100, 28).await;
+        let mut t = Term::with(script, cfg, 120, 32).await;
         t.submit("fetch").await;
-        t.until("scoped permission dialog shows scope and expiry", |s| {
+        // Body wraps the resolved `reason`, so physical worktree roots remain visible without raw argument echo.
+        let wt_gd_tail = wt_gitdir.file_name().unwrap().to_string_lossy().to_string();
+        let main_git_s = format!("write:{}", main_git.display());
+        let file_parent_s = format!("write:{}", file_parent.display());
+        t.until("scoped permission dialog shows scope, expiry, and resolved physical worktree roots in body", |s| {
+            let flat: String = s.lines().map(|l| l.trim().trim_matches('│').trim()).collect::<Vec<_>>().join("");
             s.contains("Grant scope:")
                 && s.contains("expires when session ends")
                 && s.contains("Allow requested access for this turn (y)")
                 && s.contains("Allow requested access for this session (a)")
-                && s.contains("Requested write:")
+                && !s.contains("Requested write:")
+                && flat.contains(&wt_gd_tail)
+                && flat.contains(&main_git_s)
         })
         .await;
         t.key(KeyCode::Char('a'), Modifiers::NONE);
-        t.until("sandbox_permissions dialog shows grant scope and expiry", |s| {
-            s.contains("Grant scope: write:")
-                && s.contains("this call only; later commands return to baseline")
-                && s.contains("Allow once (y)")
-                && s.contains("Allow for this session (a)")
-        })
+        t.until(
+            "sandbox_permissions dialog shows resolved physical parent dir in body even with a long command",
+            |s| {
+                let flat: String = s.lines().map(|l| l.trim().trim_matches('│').trim()).collect::<Vec<_>>().join("");
+                !s.contains("Grant scope: write:")
+                    && flat.contains(&file_parent_s)
+                    && s.contains("this call only; later commands return to baseline")
+                    && s.contains("Allow once (y)")
+                    && s.contains("Allow for this session (a)")
+            },
+        )
         .await;
         t.key(KeyCode::Char('y'), Modifiers::NONE);
         t.idle().await;

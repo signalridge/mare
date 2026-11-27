@@ -160,11 +160,15 @@ return function(D)
 		end
 		for _, kind in ipairs({ "read", "write" }) do
 			for _, path in ipairs(req[kind] or {}) do
-				if S.within(path, appr[kind] or {}, { stable_roots = true }) then
+				local covered = kind == "write" and write_covered(path, appr.write)
+					or kind == "read" and S.within(path, appr.read or {}, { stable_roots = true })
+				if covered then
 					table.insert(out[kind], path)
 				end
 				for _, allowed in ipairs(appr[kind] or {}) do
-					if S.within(allowed, { path }, { stable_roots = true }) then
+					local rev = kind == "write" and write_covered(allowed, { path })
+						or kind == "read" and S.within(allowed, { path }, { stable_roots = true })
+					if rev then
 						table.insert(out[kind], allowed)
 					end
 				end
