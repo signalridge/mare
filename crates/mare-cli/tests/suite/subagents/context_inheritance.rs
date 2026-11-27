@@ -391,3 +391,156 @@ async fn trusted_parent_does_not_trust_foreign_untrusted_subagent_cwd() {
     })
     .await;
 }
+
+/// Security boundary: CLI `--no-trust` (`trust_source = "cli"`, `project_trusted = false`) must
+/// override saved trust for a foreign `cwd` across both direct subagents and grandchildren —
+/// blocking project hooks, project stdio MCP servers, and project skills.
+#[tokio::test]
+async fn no_trust_blocks_saved_trusted_foreign_cwd_subagent_hooks_mcp_and_skills() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let foreign = tempfile::tempdir().unwrap();
+        let foreign_cwd = dunce::canonicalize(foreign.path()).unwrap();
+        // Save the foreign directory as trusted in trust.json; `--no-trust` must still win.
+        mare_config::trust::set(&foreign_cwd, true).unwrap();
+
+        let hook_marker = env.home.path().join("no-trust-foreign-hook.marker");
+        let mcp_log = env.home.path().join("no-trust-foreign-mcp.log");
+        write_file(
+            &foreign_cwd.join(".mare/hooks.json"),
+            &json!({ "marker": hook_marker.to_string_lossy() }).to_string(),
+        );
+        write_file(
+            &env.config_dir().join("plugins/foreign-hooks-probe.lua"),
+            r#"
+return {
+    name = "foreign-hooks-probe",
+    apply = function()
+        if mare.trusted ~= true then return end
+        local raw = mare.fs.read(mare.cwd .. "/.mare/hooks.json")
+        if not raw then return end
+        local cfg = mare.json.decode(raw)
+        local f = assert(io.open(cfg.marker, "a"))
+        f:write(tostring(mare.mode) .. "\n")
+        f:close()
+    end,
+}
+"#,
+        );
+        write_file(
+            &foreign_cwd.join(".mare/skills/foreign-saved-skill/SKILL.md"),
+            "---\nname: foreign-saved-skill\ndescription: saved-trusted foreign skill\n---\nbody\n",
+        );
+        write_file(
+            &foreign_cwd.join(".mcp.json"),
+            &json!({
+                "mcpServers": {
+                    "proj": {
+                        "command": fake_mcp_bin(),
+                        "args": ["scripted", json!({ "log": mcp_log }).to_string()],
+                        "tier": "direct"
+                    }
+                }
+            })
+            .to_string(),
+        );
+        // Pre-approve the foreign project MCP server once in a trusted host so that only
+        // `--no-trust` stands between the foreign subagent and launching `proj`.
+        {
+            let mut approve_b = env
+                .host()
+                .builtins(&["mcp"])
+                .args(json!({ "no_session": true, "trust": "trusted", "approve_mcps": true }));
+            approve_b.opts.cwd = foreign_cwd.clone();
+            approve_b.opts.project_trusted = true;
+            let approve_h = approve_b.build().await;
+            expose(&approve_h);
+            wait_until(15, "foreign MCP server pre-approved", || {
+                let hc = approve_h.clone();
+                async move { eval::<bool>(&hc, "return T:get('mcp__proj__echo') ~= nil").await }
+            })
+            .await;
+            approve_h.shutdown().await;
+            let _ = std::fs::remove_file(&mcp_log);
+        }
+        write_file(&foreign_cwd.join("AGENTS.md"), "FOREIGN-NO-TRUST-DOC");
+
+        let foreign_str = foreign_cwd.to_string_lossy().to_string();
+        let model = ScriptedModel::start(
+            Wire::Responses,
+            vec![
+                Step::Reply(vec![Part::ToolCall {
+                    id: "call_nested".into(),
+                    name: "subagent".into(),
+                    args: json!({
+                        "prompt": "grandchild inspect foreign dir",
+                        "cwd": foreign_str,
+                        "wait": true
+                    }),
+                }]),
+                Step::Reply(vec![Part::Text("grandchild-ok".into())]),
+                Step::Reply(vec![Part::Text("child-ok".into())]),
+            ],
+        )
+        .await;
+        env.set_var("OPENAI_API_KEY", "test-openai");
+
+        let mut cfg = model.host_config();
+        cfg["agents"] = json!({ "max_depth": 2 });
+        let mut b = env.host().builtins(&["subagent", "agents", "mcp"]).user_plugins().config(cfg).args(json!({
+            "no_session": true,
+            "trust": "untrusted",
+            "trust_source": "cli",
+            "approve_mcps": true
+        }));
+        b.opts.project_trusted = false;
+        let h = b.build().await;
+        expose(&h);
+        global(&h, "FOREIGN_CWD", foreign_cwd.to_string_lossy().to_string());
+
+        let done: String = eval(
+            &h,
+            r#"
+            local svc = C.cordis:get("subagent")
+            local child = svc:start({ prompt = "inspect foreign dir under --no-trust", cwd = FOREIGN_CWD })
+            local res = svc:wait(child.subagent_id, { timeout_ms = 20000 })
+            return mare.json.encode(res)
+            "#,
+        )
+        .await;
+        let done: Value = serde_json::from_str(&done).unwrap();
+        assert_eq!(done["status"], "completed", "{done}");
+
+        assert!(
+            !hook_marker.exists(),
+            "--no-trust must prevent project hooks in saved-trusted foreign subagent/grandchild"
+        );
+        assert!(
+            !mcp_log.exists(),
+            "--no-trust must prevent project stdio MCP startup in saved-trusted foreign subagent/grandchild"
+        );
+
+        let reqs = model.requests();
+        assert_eq!(reqs.len(), 3, "expected child(2) + grandchild(1) requests, got {}", reqs.len());
+        for (idx, req) in reqs.iter().enumerate() {
+            assert!(
+                !req.body.contains("foreign-saved-skill"),
+                "request {idx}: --no-trust must block foreign project skills: {}",
+                req.body
+            );
+            assert!(
+                !req.body.contains("mcp__proj__echo"),
+                "request {idx}: --no-trust must block foreign project MCP tools: {}",
+                req.body
+            );
+            assert!(
+                req.body.contains("FOREIGN-NO-TRUST-DOC") && req.body.contains("from an untrusted project"),
+                "request {idx}: foreign AGENTS.md must stay annotated as untrusted under --no-trust: {}",
+                req.body
+            );
+        }
+        model.finish();
+        h.shutdown().await;
+    })
+    .await;
+}

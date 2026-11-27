@@ -252,8 +252,22 @@ fn resolve_child_trust(lua: &Lua, child_cwd: &std::path::Path) -> ChildTrust {
     let rr = mare_shared::project::resource_root(child_cwd);
     let subject = mare_shared::project::trust_subject(&rr);
     let child_root = dunce::canonicalize(subject).unwrap_or_else(|_| subject.to_path_buf());
-    if child_root == host.workspace_root() {
-        let project_trusted = host.is_project_trusted();
+    let same_ws = child_root == host.workspace_root();
+    let cli_trust = host.startup_cli_trust();
+    let project_trusted = if same_ws {
+        cli_trust != Some(false) && host.is_project_trusted()
+    } else {
+        crate::resolve_workspace_trust(child_cwd, false, host.is_project_trusted(), cli_trust, host.no_user_plugins())
+    };
+    if cli_trust == Some(false) {
+        return ChildTrust {
+            project_trusted,
+            trust_arg: Some("untrusted".into()),
+            trust_source: Some("cli".into()),
+            approve_mcps: false,
+        };
+    }
+    if same_ws {
         let trust_arg = if project_trusted {
             parent_trust_arg.as_ref().map(|_| "trusted".to_owned())
         } else {
@@ -262,27 +276,18 @@ fn resolve_child_trust(lua: &Lua, child_cwd: &std::path::Path) -> ChildTrust {
                 _ => "untrusted".to_owned(),
             })
         };
-        ChildTrust { project_trusted, trust_arg, trust_source: parent_trust_source, approve_mcps: parent_approve_mcps }
+        ChildTrust {
+            project_trusted,
+            trust_arg,
+            trust_source: parent_trust_source,
+            approve_mcps: project_trusted && parent_approve_mcps,
+        }
     } else {
-        match mare_config::trust::decision(child_cwd) {
-            Some(true) => ChildTrust {
-                project_trusted: true,
-                trust_arg: Some("trusted".into()),
-                trust_source: Some("saved".into()),
-                approve_mcps: false,
-            },
-            Some(false) => ChildTrust {
-                project_trusted: false,
-                trust_arg: Some("untrusted".into()),
-                trust_source: Some("saved".into()),
-                approve_mcps: false,
-            },
-            None => ChildTrust {
-                project_trusted: false,
-                trust_arg: Some("undecided".into()),
-                trust_source: None,
-                approve_mcps: false,
-            },
+        ChildTrust {
+            project_trusted,
+            trust_arg: Some(if project_trusted { "trusted" } else { "untrusted" }.into()),
+            trust_source: project_trusted.then(|| "saved".into()),
+            approve_mcps: false,
         }
     }
 }
