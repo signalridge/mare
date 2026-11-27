@@ -308,12 +308,7 @@ def check_companion_workflows_and_files(root: pathlib.Path) -> list[str]:
                 if needle not in t:
                     errors.append(f"ci-deps-update.yaml missing {needle!r}")
 
-    df = root / "Dockerfile.release"
-    if not df.is_file():
-        errors.append("missing Dockerfile.release")
-    else:
-        if not re.search(r"(?m)^FROM\s+ubuntu:24\.04@sha256:[0-9a-f]{64}\s*$", df.read_text(encoding="utf-8")):
-            errors.append("Dockerfile.release must pin ubuntu:24.04 by @sha256 digest")
+    errors.extend(check_dockerfile_release(root))
 
     contrib = root / "CONTRIBUTING.md"
     if not contrib.is_file():
@@ -327,6 +322,40 @@ def check_companion_workflows_and_files(root: pathlib.Path) -> list[str]:
     if not (root / "scripts" / "release_manifests.py").is_file():
         errors.append("missing scripts/release_manifests.py")
 
+    return errors
+
+
+def check_dockerfile_release(root: pathlib.Path) -> list[str]:
+    df = root / "Dockerfile.release"
+    if not df.is_file():
+        return ["missing Dockerfile.release"]
+
+    errors: list[str] = []
+    stages: set[str] = set()
+    from_count = 0
+    for line in df.read_text(encoding="utf-8").splitlines():
+        m = re.match(r"^\s*FROM\s+(.+?)\s*$", line, re.IGNORECASE)
+        if not m:
+            continue
+        from_count += 1
+        tokens = m.group(1).split()
+        while tokens and tokens[0].startswith("--"):
+            tokens.pop(0)
+        if not tokens:
+            errors.append(f"Dockerfile.release has malformed FROM line: {line.strip()!r}")
+            continue
+        image = tokens[0]
+        stage = tokens[2].lower() if len(tokens) >= 3 and tokens[1].lower() == "as" else None
+        if image.lower() != "scratch" and image.lower() not in stages:
+            if not re.fullmatch(r"[^\s@]+@sha256:[0-9a-f]{64}", image):
+                errors.append(
+                    f"Dockerfile.release base image must be pinned by @sha256 digest: {image!r}"
+                )
+        if stage:
+            stages.add(stage)
+
+    if from_count == 0:
+        errors.append("Dockerfile.release must declare a base image pinned by @sha256 digest")
     return errors
 
 
@@ -685,6 +714,32 @@ class ReleasePolicySelfTests(unittest.TestCase):
                     self.assertIn(f"tag_name={tag}", out.read_text(encoding="utf-8"))
                 else:
                     self.assertNotEqual(res.returncode, 0, f"tag {tag!r} should be rejected")
+
+    def test_dockerfile_release_requires_digest_not_specific_version(self):
+        digest = "a" * 64
+        for body in (
+            f"FROM ubuntu:24.04@sha256:{digest}\n",
+            f"FROM ubuntu:26.04@sha256:{digest}\n",
+            f"FROM --platform=$BUILDPLATFORM ubuntu:26.04@sha256:{digest} AS runtime\n",
+        ):
+            with self.subTest(valid=body.strip()), tempfile.TemporaryDirectory() as tmp:
+                root = pathlib.Path(tmp)
+                (root / "Dockerfile.release").write_text(body, encoding="utf-8")
+                self.assertEqual(check_dockerfile_release(root), [])
+
+        for body in (
+            "FROM ubuntu:24.04\n",
+            "FROM ubuntu:26.04\n",
+            "FROM ubuntu:latest\n",
+            "FROM ubuntu:26.04@sha256:deadbeef\n",
+            f"FROM ubuntu:26.04@sha256:{'A' * 64}\n",
+            "RUN echo no-from\n",
+        ):
+            with self.subTest(invalid=body.strip()), tempfile.TemporaryDirectory() as tmp:
+                root = pathlib.Path(tmp)
+                (root / "Dockerfile.release").write_text(body, encoding="utf-8")
+                errs = check_dockerfile_release(root)
+                self.assertTrue(errs, f"expected failure for {body!r}")
 
 
 def main() -> int:
