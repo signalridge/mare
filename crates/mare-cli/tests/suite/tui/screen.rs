@@ -916,13 +916,19 @@ async fn diff_fold_covers_edit_write_and_multifile_apply_patch() {
             patch_body("p2.txt", "beta", 20),
             patch_body("p3.txt", "gamma", 20),
         );
-        let small_patch = "*** Begin Patch\n*** Add File: s1.txt\n+one\n*** Add File: s2.txt\n+two\n*** End Patch\n";
+        // Uneven 2-file small patch: 6 rendered rows (stats + 5 lines) + 2 rendered rows
+        // (stats + 1 line) = 8 total rows, which fits within the default 8-row shared budget.
+        let uneven_small_patch = format!(
+            "*** Begin Patch\n{}{}*** End Patch\n",
+            patch_body("s1.txt", "s1", 5),
+            patch_body("s2.txt", "s2", 1),
+        );
 
-        // Session 2: apply_patch mode (3-file large patch + 2-file small patch).
+        // Session 2: apply_patch mode (3-file large patch + uneven 2-file small patch).
         let patch_script = json!([
             { "tool_calls": [{ "name": "apply_patch", "arguments": { "input": big_patch } }] },
             { "text": "patch done" },
-            { "tool_calls": [{ "name": "apply_patch", "arguments": { "input": small_patch } }] },
+            { "tool_calls": [{ "name": "apply_patch", "arguments": { "input": uneven_small_patch } }] },
             { "text": "small patch done" }
         ]);
         let mut t = Term::build(
@@ -943,11 +949,37 @@ async fn diff_fold_covers_edit_write_and_multifile_apply_patch() {
         t.idle().await;
         t.until("patch done", |s| s.contains("patch done")).await;
         let h1 = t.history();
+        let patch_lines: Vec<&str> = h1.lines().collect();
+        let head_idx = patch_lines
+            .iter()
+            .position(|l| l.contains("Patched p1.txt, p2.txt, p3.txt"))
+            .unwrap_or_else(|| panic!("missing top-level Patched header:\n{h1}"));
+        let end_idx = patch_lines[head_idx + 1..]
+            .iter()
+            .position(|l| l.contains("patch done"))
+            .map(|rel| head_idx + 1 + rel)
+            .unwrap_or_else(|| panic!("missing assistant reply after patch:\n{h1}"));
+        let body_lines: Vec<&str> =
+            patch_lines[head_idx + 1..end_idx].iter().copied().filter(|l| !l.trim().is_empty()).collect();
+        let big_hints = body_lines.iter().filter(|l| l.contains("more line")).count();
+        assert!(big_hints >= 1, "3-file patch compact view must fold:\n{h1}");
+        assert!(
+            body_lines.len() <= 8 + 3 + big_hints,
+            "3-file patch compact body ({} lines) must stay within limit(8) + 3 headers + {big_hints} hints:\n{h1}",
+            body_lines.len()
+        );
         for header in ["p1.txt", "p2.txt", "p3.txt"] {
-            assert!(h1.contains(header), "3-file patch compact view missing {header}:\n{h1}");
+            assert_eq!(
+                h1.matches(header).count(),
+                2,
+                "3-file patch must show {header} in both summary and per-file header:\n{h1}"
+            );
+            assert!(
+                body_lines.iter().any(|l| l.trim().ends_with(header)),
+                "3-file patch result body missing per-file header {header}:\n{h1}"
+            );
         }
         assert_eq!(h1.matches("+20").count(), 3, "each of the 3 files must show its +20 stats row once:\n{h1}");
-        assert_eq!(h1.matches("more line").count(), 3, "each of the 3 files must fold individually:\n{h1}");
         for tail in ["alpha_20", "beta_20", "gamma_20"] {
             assert!(!h1.contains(tail), "3-file patch compact view must elide {tail}:\n{h1}");
         }
@@ -956,12 +988,27 @@ async fn diff_fold_covers_edit_write_and_multifile_apply_patch() {
         t.key(KeyCode::Escape, Modifiers::NONE);
         t.until("back to main after patch", |s| !s.contains("Transcript") && s.contains("Ask mare")).await;
 
+        let hints_before_small = t.history().matches("more line").count();
         t.submit("small patch").await;
         t.idle().await;
         t.until("small patch done", |s| s.contains("small patch done")).await;
         let h2 = t.history();
-        assert!(h2.contains("s1.txt") && h2.contains("s2.txt"), "small patch headers:\n{h2}");
-        assert_eq!(h2.matches("more line").count(), 3, "small multi-file patch must not emit fold hint:\n{h2}");
+        for header in ["s1.txt", "s2.txt"] {
+            assert_eq!(
+                h2.matches(header).count(),
+                2,
+                "uneven small patch must show {header} in both summary and per-file header:\n{h2}"
+            );
+        }
+        assert!(
+            h2.contains("s1_05") && h2.contains("s2_01"),
+            "uneven 6+2 small patch must show every diff line without clipping:\n{h2}"
+        );
+        assert_eq!(
+            h2.matches("more line").count(),
+            hints_before_small,
+            "uneven 6+2 small multi-file patch must not emit fold hint:\n{h2}"
+        );
     })
     .await;
 }
