@@ -377,17 +377,23 @@ async fn family_alias_picks_newest_dated_snapshot_after_catalog_update() {
     .await;
 }
 
-/// Criterion 5: effort is either sent in the request body (`kimi` -> `thinking`) or NOT offered
-/// for unmapped routed providers (`groq`), and invalid `reasoning_format` / `effort_param` values
-/// are rejected at load time.
+/// Criterion 5: effort is either sent in the request body (`kimi-k3` -> top-level `reasoning_effort`)
+/// or NOT offered for unmapped routed providers (`groq`) and non-K3 Kimi models (`kimi-k2-thinking`,
+/// `kimi-code/kimi-for-coding`), and invalid `reasoning_format` / `effort_param` values are rejected
+/// at load time.
 #[tokio::test]
 async fn effort_sent_for_kimi_hidden_for_unmapped_provider_and_invalid_format_rejected_at_load() {
     local(async {
         let mut env = TestEnv::new().await;
         env.set_var("MOONSHOT_API_KEY", "test-kimi");
+        env.set_var("KIMI_API_KEY", "test-kimi-code");
         let server = MockServer::start().await;
         let ok_sse = compat_events(&[compat_text("ok"), compat_stop()]);
-        server.route("/kimi/chat/completions", vec![Resp::sse(ok_sse.clone()), Resp::sse(ok_sse)]);
+        server.route(
+            "/kimi/chat/completions",
+            vec![Resp::sse(ok_sse.clone()), Resp::sse(ok_sse.clone()), Resp::sse(ok_sse.clone())],
+        );
+        server.route("/kimi-code/chat/completions", vec![Resp::sse(ok_sse)]);
 
         let h = provider_host(
             &mut env,
@@ -395,6 +401,7 @@ async fn effort_sent_for_kimi_hidden_for_unmapped_provider_and_invalid_format_re
             json!({
                 "providers": {
                     "kimi": { "base_url": format!("{}/kimi", server.base) },
+                    "kimi-code": { "base_url": format!("{}/kimi-code", server.base) },
                     "groq": {
                         "wire": "openai-chat",
                         "base_url": format!("{}/groq", server.base),
@@ -420,8 +427,9 @@ async fn effort_sent_for_kimi_hidden_for_unmapped_provider_and_invalid_format_re
         .await;
         expose(&h);
 
-        // 1. kimi/kimi-k3 + /effort low -> thinking = { type = "enabled", effort = "low" }
-        //    and /effort off -> thinking = { type = "disabled" }
+        // 1. kimi/kimi-k3 + /effort low -> top-level reasoning_effort = "low" (no `thinking` key);
+        //    max -> top-level reasoning_effort = "max".
+        //    kimi/kimi-k2-thinking and kimi-code/kimi-for-coding must send neither field.
         exec(
             &h,
             r#"
@@ -431,8 +439,16 @@ async fn effort_sent_for_kimi_hidden_for_unmapped_provider_and_invalid_format_re
             local r1 = LLM:stream({ model = m, system = "S", messages = { { role = "user", content = { { type = "text", text = "hi" } } } } }, function() end)
             assert(not r1.error, tostring(r1.error))
 
-            local r2 = LLM:stream({ model = m, effort = "off", system = "S", messages = { { role = "user", content = { { type = "text", text = "hi" } } } } }, function() end)
+            local r2 = LLM:stream({ model = m, effort = "max", system = "S", messages = { { role = "user", content = { { type = "text", text = "hi" } } } } }, function() end)
             assert(not r2.error, tostring(r2.error))
+
+            local k2 = assert(LLM:resolve("kimi/kimi-k2-thinking"))
+            local r3 = LLM:stream({ model = k2, system = "S", messages = { { role = "user", content = { { type = "text", text = "hi" } } } } }, function() end)
+            assert(not r3.error, tostring(r3.error))
+
+            local kc = assert(LLM:resolve("kimi-code/kimi-for-coding"))
+            local r4 = LLM:stream({ model = kc, system = "S", messages = { { role = "user", content = { { type = "text", text = "hi" } } } } }, function() end)
+            assert(not r4.error, tostring(r4.error))
             "#,
         )
         .await;
@@ -442,39 +458,68 @@ async fn effort_sent_for_kimi_hidden_for_unmapped_provider_and_invalid_format_re
             .filter(|r| r.path == "/kimi/chat/completions")
             .map(|r| r.json())
             .collect();
-        assert_eq!(kimi_reqs.len(), 2);
+        assert_eq!(kimi_reqs.len(), 3);
         assert_eq!(
-            kimi_reqs[0]["thinking"],
-            json!({ "type": "enabled", "effort": "low" }),
-            "kimi low effort must send thinking payload: {}",
+            kimi_reqs[0]["reasoning_effort"], "low",
+            "kimi-k3 low effort must send top-level reasoning_effort: {}",
             kimi_reqs[0]
         );
+        assert!(kimi_reqs[0].get("thinking").is_none(), "kimi-k3 must not send thinking object: {}", kimi_reqs[0]);
         assert_eq!(
-            kimi_reqs[1]["thinking"],
-            json!({ "type": "disabled" }),
-            "kimi off effort must disable thinking: {}",
+            kimi_reqs[1]["reasoning_effort"], "max",
+            "kimi-k3 max effort must send top-level reasoning_effort: {}",
             kimi_reqs[1]
         );
+        assert!(kimi_reqs[1].get("thinking").is_none(), "kimi-k3 must not send thinking object: {}", kimi_reqs[1]);
+        assert!(
+            kimi_reqs[2].get("thinking").is_none() && kimi_reqs[2].get("reasoning_effort").is_none(),
+            "kimi-k2-thinking must not receive K3 reasoning fields: {}",
+            kimi_reqs[2]
+        );
+        let kc_req = server
+            .requests()
+            .into_iter()
+            .find(|r| r.path == "/kimi-code/chat/completions")
+            .expect("kimi-code request sent")
+            .json();
+        assert!(
+            kc_req.get("thinking").is_none() && kc_req.get("reasoning_effort").is_none(),
+            "kimi-code/kimi-for-coding must not receive K3 reasoning fields: {kc_req}"
+        );
 
-        // 2. Unmapped custom provider (groq) offers NO effort parameter; invalid reasoning_format /
-        //    effort_param are rejected at load time (not registered / reported in list_providers).
-        let (groq_has_effort, badfmt_state, badparam_state): (bool, String, String) = eval(
+        // 2. Unmapped custom provider (groq) and non-K3 kimi models offer NO effort parameter;
+        //    invalid reasoning_format / effort_param are rejected at load time.
+        let (groq_has_effort, k2_has_effort, kc_has_effort, badfmt_state, badparam_state): (
+            bool,
+            bool,
+            bool,
+            String,
+            String,
+        ) = eval(
             &h,
             r#"
-            local cap = LLM:capabilities("groq/r1")
-            local has_eff = false
-            for _, p in ipairs(cap.parameters or {}) do
-              if p.parameter_id == "effort" then has_eff = true end
+            local function has_effort(ref)
+              local cap = LLM:capabilities(ref)
+              for _, p in ipairs(cap.parameters or {}) do
+                if p.parameter_id == "effort" then return true end
+              end
+              return false
             end
             local states = {}
             for _, row in ipairs(LLM:list_providers().data) do
               states[row.provider] = tostring(row.state) .. ":" .. tostring(row.reason or "")
             end
-            return has_eff, states.badfmt or "missing", states.badparam or "missing"
+            return has_effort("groq/r1"),
+              has_effort("kimi/kimi-k2-thinking"),
+              has_effort("kimi-code/kimi-for-coding"),
+              states.badfmt or "missing",
+              states.badparam or "missing"
             "#,
         )
         .await;
         assert!(!groq_has_effort, "unmapped openai-chat provider must not offer effort parameter");
+        assert!(!k2_has_effort, "kimi-k2-thinking must not offer unmapped effort parameter");
+        assert!(!kc_has_effort, "kimi-code/kimi-for-coding must not offer unmapped effort parameter");
         assert!(
             badfmt_state.starts_with("unresolved:") && badfmt_state.contains("reasoning_format"),
             "invalid reasoning_format must be rejected at load time: {badfmt_state}"
@@ -553,7 +598,7 @@ async fn open_model_picker_updates_live_and_next_request_uses_newly_selected_mod
                     return nil
                   end)
                   open = false
-                  return chosen, items[chosen] and items[chosen].label or nil, nil
+                  return chosen, 1, nil, "", items[chosen] and items[chosen].item_id or nil
                 end
                 C.cordis:get("commands"):run("/model")
                 "#,
@@ -589,6 +634,191 @@ async fn open_model_picker_updates_live_and_next_request_uses_newly_selected_mod
             .expect("chat request sent");
         assert_eq!(chat_req.json()["model"], "deepseek-live-picked");
         h.shutdown().await;
+    })
+    .await;
+}
+
+/// Regression: if a live `sel:update` reorders items while a non-updating frontend (e.g. plain mode)
+/// or an in-flight confirmation still returns the old index with the old item's `item_id`, `/model`
+/// resolves by `item_id` rather than picking whatever shifted into that index; if the `item_id` is
+/// no longer present, `/model` warns and keeps the current selection unchanged.
+#[tokio::test]
+async fn stale_picker_reply_after_live_update_resolves_by_item_id() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let server = MockServer::start().await;
+        let release = Arc::new(tokio::sync::Notify::new());
+        // `deepseek-000-inserted` sorts before `deepseek-chat`, shifting `deepseek-chat`'s index.
+        server.route(
+            "/compat/models",
+            vec![Resp::status(
+                200,
+                r#"{"object":"list","data":[{"id":"deepseek-000-inserted","name":"Inserted First"}]}"#,
+            )],
+        );
+        server.set_hold("/compat/models", 0, release.clone());
+
+        let h = provider_host(
+            &mut env,
+            &server,
+            json!({
+                "model": "anthropic/claude-sonnet-5-5",
+                "plugins": { "llm": { "catalog_open_refresh_ms": 0 } }
+            }),
+        )
+        .await;
+        expose(&h);
+
+        let h_pick = h.clone();
+        let picker_task = tokio::task::spawn_local(async move {
+            exec(
+                &h_pick,
+                r#"
+                _G.__stale_opened = false
+                _G.__stale_tx, _G.__stale_rx = mare.task.channel()
+                mare.ui.notify = function() end
+                mare.ui.select = function(opts)
+                  local orig_items = opts.items
+                  local orig_idx
+                  for idx, it in ipairs(orig_items) do
+                    if it.item_id == "deepseek/deepseek-chat" then
+                      orig_idx = idx
+                      break
+                    end
+                  end
+                  assert(orig_idx, "expected deepseek/deepseek-chat in initial items")
+                  local open = true
+                  local handle = {
+                    is_open = function() return open end,
+                    update = function(_, next_items)
+                      -- Confirm the new model actually shifted orig_idx to a different item.
+                      if next_items[orig_idx] and next_items[orig_idx].item_id == "deepseek/deepseek-000-inserted" then
+                        _G.__stale_tx:send(true)
+                      end
+                      return true
+                    end,
+                  }
+                  if opts.on_open then opts.on_open(handle) end
+                  _G.__stale_opened = true
+                  local _, shifted = mare.task.select(function()
+                    return _G.__stale_rx:recv()
+                  end, function()
+                    mare.task.sleep(5000)
+                    return false
+                  end)
+                  assert(shifted == true, "expected live update to shift orig_idx")
+                  open = false
+                  -- Simulate plain frontend ignoring SelectUpdate: returns OLD index AND OLD item_id.
+                  return orig_idx, 1, nil, "", orig_items[orig_idx].item_id
+                end
+                C.cordis:get("commands"):run("/model")
+                "#,
+            )
+            .await;
+        });
+
+        wait_until(5, "stale picker opened", || {
+            let h = h.clone();
+            async move { eval::<bool>(&h, "return _G.__stale_opened == true").await }
+        })
+        .await;
+        release.notify_one();
+        picker_task.await.unwrap();
+
+        let cur: String = eval(&h, "return assert(LLM:current()).ref").await;
+        assert_eq!(
+            cur, "deepseek/deepseek-chat",
+            "stale index must resolve via item_id to deepseek/deepseek-chat, not deepseek-000-inserted"
+        );
+
+        // Missing item_id must warn and leave current selection untouched.
+        let (after, notes): (String, String) = eval(
+            &h,
+            r#"
+            local notes = {}
+            mare.ui.notify = function(msg, lvl)
+              notes[#notes + 1] = tostring(lvl) .. ":" .. tostring(msg)
+            end
+            mare.ui.select = function()
+              return 1, 1, nil, "", "deepseek/no-longer-present"
+            end
+            C.cordis:get("commands"):run("/model")
+            return assert(LLM:current()).ref, table.concat(notes, "\n")
+            "#,
+        )
+        .await;
+        assert_eq!(after, "deepseek/deepseek-chat");
+        assert!(notes.contains("no-longer-present"), "missing item_id must warn: {notes}");
+        h.shutdown().await;
+    })
+    .await;
+}
+
+/// Regressions for explicit default preservation in `reset_session_model` and declared `default_model`
+/// precedence on catalog-less providers with a user model override.
+#[tokio::test]
+async fn reset_session_model_keeps_unresolvable_default_and_catalogless_default_wins_over_override() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let server = MockServer::start().await;
+
+        // 1. Explicit unresolvable default model: reset_session_model must keep it unresolved and
+        //    never silently fall back to another configured provider.
+        let h1 = provider_host(
+            &mut env,
+            &server,
+            json!({ "model": "typo-provider/missing-model" }),
+        )
+        .await;
+        let (reset_nil, cur_nil, ready_ok, ready_reason): (bool, bool, bool, String) = eval(
+            &h1,
+            r#"
+            local r = LLM:reset_session_model()
+            local c = LLM:current()
+            local ok, reason = LLM:ready()
+            return r == nil, c == nil, ok == true, tostring(reason or "")
+            "#,
+        )
+        .await;
+        assert!(reset_nil, "reset_session_model must return nil for unresolvable explicit default");
+        assert!(cur_nil, "current() must remain nil rather than falling back to another provider");
+        assert!(!ready_ok, "readiness must deny unresolvable explicit default");
+        assert!(
+            ready_reason.contains("typo-provider/missing-model"),
+            "readiness must report exact unresolved ref: {ready_reason}"
+        );
+        h1.shutdown().await;
+        drop(env);
+
+        // 2. Catalog-less provider with declared default_model + user override on an alphabetically
+        //    earlier model id: auto-selection must still pick the declared default_model.
+        let mut env2 = TestEnv::new().await;
+        env2.set_var("GW_KEY", "test-gw");
+        let h2 = env2
+            .host()
+            .config(json!({
+                "model": "",
+                "plugins": { "preset": "minimal", "permissions": { "enabled": false }, "provider-faux": { "enabled": false } },
+                "providers": {
+                    "gw": {
+                        "wire": "openai-chat",
+                        "base_url": format!("{}/gw", server.base),
+                        "api_key_env": "GW_KEY",
+                        "list_models": false,
+                        "default_model": "z-default"
+                    }
+                },
+                "models": {
+                    "gw/a-override": { "context_window": 64000 }
+                }
+            }))
+            .no_session()
+            .build()
+            .await;
+        global(&h2, "LLM", h2.service_table("llm").unwrap());
+        let picked: String = eval(&h2, "return assert(LLM:current()).ref").await;
+        assert_eq!(picked, "gw/z-default", "declared default_model must win over alphabetical override");
+        h2.shutdown().await;
     })
     .await;
 }

@@ -67,6 +67,10 @@ local function resolve_reasoning_format(entry, base_url)
 	return nil
 end
 
+local function is_kimi_k3(id)
+	return type(id) == "string" and (id == "kimi-k3" or id:match("^kimi%-k3[%.%-]") ~= nil)
+end
+
 local function build_param_rules(name, entry, live_entry, live_base_url)
 	local tf = resolve_reasoning_format(entry, live_base_url(entry))
 	local budget_field = entry.reasoning_budget_field
@@ -114,7 +118,13 @@ local function build_param_rules(name, entry, live_entry, live_base_url)
 				provider = name,
 				route = "chat",
 				when = function(m)
-					return m.reasoning == true
+					if m.reasoning ~= true then
+						return false
+					end
+					if tf == "kimi" and not budget_field then
+						return is_kimi_k3(m.id)
+					end
+					return true
 				end,
 				define = {
 					effort = {
@@ -129,10 +139,12 @@ local function build_param_rules(name, entry, live_entry, live_base_url)
 										req.body.reasoning_effort = c.value
 									end
 								elseif cur_tf == "kimi" then
-									-- Official MoonshotAI/kimi-code OpenAI-compat thinking encoding:
-									-- { thinking = { type = "disabled" } } or { type = "enabled", effort = <level> }.
-									req.body.thinking = on and { type = "enabled", effort = c.value }
-										or { type = "disabled" }
+									-- Moonshot Kimi K3 OpenAI-compat API takes top-level reasoning_effort
+									-- (low | high | max; always-on thinking). Leave kimi-k2-thinking and
+									-- kimi-for-coding untouched.
+									if on and is_kimi_k3(req.body and req.body.model) then
+										req.body.reasoning_effort = c.value
+									end
 								elseif cur_tf == "zai" then
 									req.body.thinking = on and { type = "enabled", clear_thinking = false }
 										or { type = "disabled" }

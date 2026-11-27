@@ -66,7 +66,8 @@ local PRESETS = {
 				context_window = 262144,
 				max_output = 131072,
 				reasoning = true,
-				efforts = EFFORTS,
+				-- Moonshot Kimi K3 docs: always-on thinking, top-level reasoning_effort = low | high | max.
+				efforts = { "low", "high", "max" },
 				tool_update = "addition_only",
 				cost = { input = 3, output = 15, cache_read = 0.3 },
 			},
