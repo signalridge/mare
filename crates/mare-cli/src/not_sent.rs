@@ -14,6 +14,7 @@ pub(crate) fn notice(theme: &Theme, reason: &str) -> Node {
     Node::Paragraph {
         line: Line::new(vec![Span::styled("● ", style), Span::styled(format!("not sent: {reason}"), style)]),
         indent: vec![Span::raw("  ")],
+        hard_wrap: false,
     }
 }
 

@@ -63,11 +63,56 @@ fn first_line_preview(text: &str, max_chars: usize) -> String {
 }
 
 fn resolve_abs_path(cwd: &str, raw: &str) -> PathBuf {
-    let p = Path::new(raw);
-    if p.is_absolute() { p.to_path_buf() } else { Path::new(cwd).join(p) }
+    mare_binding::fs::resolve_path(Path::new(cwd), raw)
 }
 
-fn build_tool_call_update(kind: &str, a: &[J], host_cwd: &Path) -> ToolCallUpdate {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WriteTargetState {
+    NewFile,
+    ExistingText(String),
+    ExistingUnreadable,
+}
+
+/// Inspect an existing `write` target through `mare.fs` with the active sandbox policy so
+/// `deny_read` rules are honored. Returns `NewFile` only when the path does not exist,
+/// `ExistingText` when the old file is readable text within `MAX_DIFF_BYTES`, and
+/// `ExistingUnreadable` otherwise (so we never misreport an overwrite as a new file).
+fn inspect_write_target(lua: &mlua::Lua, abs: &Path) -> WriteTargetState {
+    const MAX_DIFF_BYTES: usize = 512 * 1024;
+    let path_str = abs.to_string_lossy();
+    let script = r#"
+        local path, max_bytes = ...
+        local policy = mare and mare.proc and mare.proc.sandbox and mare.proc.sandbox.current and mare.proc.sandbox.current()
+        local policies = policy and { policy } or nil
+        local st = mare.fs.stat(path, { policies = policies })
+        if not st then
+            if mare.fs.exists(path) then
+                return "unreadable", nil
+            end
+            return "new", nil
+        end
+        if st.kind ~= "file" or (st.size and st.size > max_bytes) then
+            return "unreadable", nil
+        end
+        local ok, text = pcall(mare.fs.read, path, { policies = policies, max_bytes = max_bytes })
+        if ok and type(text) == "string" then
+            return "existing", text
+        end
+        return "unreadable", nil
+    "#;
+    match lua.load(script).call::<(String, Option<String>)>((path_str.as_ref(), MAX_DIFF_BYTES)) {
+        Ok((tag, Some(old))) if tag == "existing" => WriteTargetState::ExistingText(old),
+        Ok((tag, _)) if tag == "new" => WriteTargetState::NewFile,
+        _ => WriteTargetState::ExistingUnreadable,
+    }
+}
+
+fn build_tool_call_update(
+    kind: &str,
+    a: &[J],
+    host_cwd: &Path,
+    write_state: Option<WriteTargetState>,
+) -> ToolCallUpdate {
     if kind == "tool" {
         let call = &a[0];
         let info = a.get(1).unwrap_or(&J::Null);
@@ -109,7 +154,21 @@ fn build_tool_call_update(kind: &str, a: &[J], host_cwd: &Path) -> ToolCallUpdat
             {
                 content.push(ToolCallContent::from(Diff::new(abs, new_s).old_text(old_s)));
             } else if let Some(new_s) = args.get("content").and_then(J::as_str) {
-                content.push(ToolCallContent::from(Diff::new(abs, new_s)));
+                match write_state.unwrap_or(WriteTargetState::ExistingUnreadable) {
+                    WriteTargetState::NewFile => {
+                        content.push(ToolCallContent::from(Diff::new(abs, new_s)));
+                    }
+                    WriteTargetState::ExistingText(old_s) => {
+                        content.push(ToolCallContent::from(Diff::new(abs, new_s).old_text(old_s)));
+                    }
+                    WriteTargetState::ExistingUnreadable => {
+                        content.push(ToolCallContent::from(format!(
+                            "Overwrite {} ({} bytes):\n{new_s}",
+                            abs.display(),
+                            new_s.len()
+                        )));
+                    }
+                }
             }
         }
         let diff_text = non_empty_str(&args, "patch")
@@ -138,9 +197,6 @@ fn build_tool_call_update(kind: &str, a: &[J], host_cwd: &Path) -> ToolCallUpdat
         }
         if let Some(se) = non_empty_str(info, "side_effect") {
             meta.insert("side_effect".into(), J::String(se.to_string()));
-        }
-        if let Some(diff) = diff_text {
-            meta.insert("diff".into(), J::String(diff.to_string()));
         }
 
         let mut fields = ToolCallUpdateFields::new()
@@ -245,7 +301,21 @@ pub(super) fn install(
                 let cancel = projected.cancel_token;
                 let mut a = projected.json_args;
                 a.resize(3, J::Null);
-                let tool_call = build_tool_call_update(kind, &a, &host_cwd);
+                let write_state = if kind == "tool"
+                    && let Some(args) = a[0].get("arguments")
+                    && args.get("content").and_then(J::as_str).is_some()
+                    && (args.get("old_string").is_none() || args.get("new_string").is_none())
+                    && let Some(p) = non_empty_str(args, "path").or_else(|| non_empty_str(args, "file_path"))
+                {
+                    let cwd = non_empty_str(&a[0], "cwd")
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| host_cwd.to_string_lossy().into_owned());
+                    let abs = resolve_abs_path(&cwd, p);
+                    Some(inspect_write_target(&lua, &abs))
+                } else {
+                    None
+                };
+                let tool_call = build_tool_call_update(kind, &a, &host_cwd, write_state);
                 let (options, allow_always_offered) = permission_options(kind, &a);
                 let req = RequestPermissionRequest::new(sid, tool_call, options);
                 let fut = super::wire::request_permission(&conn, req, projector.as_slice());
@@ -343,15 +413,16 @@ mod tests {
         assert_eq!(always.name, "Allow for this session");
         assert_eq!(always.kind, PermissionOptionKind::AllowAlways);
 
-        let update = build_tool_call_update("tool", &args, Path::new("/fallback"));
+        let update = build_tool_call_update("tool", &args, Path::new("/fallback"), None);
         let serialized = serde_json::to_value(&update).unwrap();
-        let text = serialized.to_string();
-        assert!(text.contains("TAIL_END"), "full command must appear in ACP content: {serialized}");
-        assert!(text.contains("Working directory: /repo/work"), "{serialized}");
-        assert!(text.contains("Reason: runs outside sandbox"), "{serialized}");
-        assert!(text.contains("Runs outside the local sandbox"), "{serialized}");
+        let content_str = serialized["content"].to_string();
+        assert!(content_str.contains("TAIL_END"), "full command must appear in ACP content: {serialized}");
+        assert!(content_str.contains("Working directory: /repo/work"), "{serialized}");
+        assert!(content_str.contains("Reason: runs outside sandbox"), "{serialized}");
+        assert!(content_str.contains("Runs outside the local sandbox"), "{serialized}");
         assert_eq!(serialized["_meta"]["unconfined"], json!(true));
         assert_eq!(serialized["_meta"]["reason"], json!("runs outside sandbox"));
+        assert!(serialized["_meta"].get("diff").is_none(), "_meta.diff must not duplicate patch content: {serialized}");
 
         let edit_args = [
             json!({
@@ -363,10 +434,57 @@ mod tests {
             json!({ "side_effect": "write" }),
             json!({ "reason": "edit file" }),
         ];
-        let edit_json = serde_json::to_value(build_tool_call_update("tool", &edit_args, Path::new("/repo"))).unwrap();
+        let edit_json =
+            serde_json::to_value(build_tool_call_update("tool", &edit_args, Path::new("/repo"), None)).unwrap();
         assert!(
             edit_json["content"].as_array().unwrap().iter().any(|c| c["type"] == "diff" && c["newText"] == "new"),
             "edit approval must include ACP diff content: {edit_json}"
+        );
+
+        // `write` onto existing readable file includes `oldText`; unreadable existing file falls back
+        // to text content instead of misreporting a new-file Diff; `~` expands instead of joining cwd.
+        let write_args = [
+            json!({
+                "id": "call-3",
+                "name": "write",
+                "cwd": "/repo",
+                "arguments": { "path": "~/notes.txt", "content": "updated" }
+            }),
+            json!({ "side_effect": "write" }),
+            json!({ "reason": "write file" }),
+        ];
+        let overwrite_json = serde_json::to_value(build_tool_call_update(
+            "tool",
+            &write_args,
+            Path::new("/repo"),
+            Some(WriteTargetState::ExistingText("previous".into())),
+        ))
+        .unwrap();
+        let loc_path = overwrite_json["locations"][0]["path"].as_str().unwrap_or("");
+        assert!(!loc_path.contains("/~/"), "tilde path must expand instead of joining cwd: {overwrite_json}");
+        assert!(
+            overwrite_json["content"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c["type"] == "diff" && c["oldText"] == "previous" && c["newText"] == "updated"),
+            "overwrite diff must include oldText: {overwrite_json}"
+        );
+
+        let unreadable_json = serde_json::to_value(build_tool_call_update(
+            "tool",
+            &write_args,
+            Path::new("/repo"),
+            Some(WriteTargetState::ExistingUnreadable),
+        ))
+        .unwrap();
+        assert!(
+            unreadable_json["content"].as_array().unwrap().iter().all(|c| c["type"] != "diff"),
+            "unreadable overwrite must not emit a misleading new-file Diff: {unreadable_json}"
+        );
+        assert!(
+            unreadable_json["content"].to_string().contains("Overwrite"),
+            "unreadable overwrite must emit text content: {unreadable_json}"
         );
     }
 }

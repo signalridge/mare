@@ -40,10 +40,12 @@ impl Mode {
 pub enum Node {
     Empty,
     Line(Line),
-    /// A line that is word-wrapped; continuation lines are prefixed with `indent`.
+    /// A line that is wrapped; continuation lines are prefixed with `indent`.
+    /// When `hard_wrap` is true, wide unbreakable tokens (e.g. long URLs) split at width.
     Paragraph {
         line: Line,
         indent: Vec<Span>,
+        hard_wrap: bool,
     },
     Lines(Vec<Self>),
     Markdown(String),

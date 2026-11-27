@@ -839,6 +839,7 @@ async fn permission_streak_offer_switches_to_wider_preset_when_accepted() {
     .await
 }
 
+<<<<<<< HEAD
 #[tokio::test]
 async fn permission_approval_dialog_shows_grant_scope_and_expiry() {
     local(async {
@@ -920,16 +921,17 @@ async fn permission_approval_dialog_shows_grant_scope_and_expiry() {
     .await
 }
 
-/// Approval dialogs show the full 300-character command (including its tail marker) and working
-/// directory before approval, show only the first line in the title, clarify that the session
-/// option applies to this exact command/call, and display argument summaries for tools without
-/// `command`/`path`.
+/// Approval dialogs show the full 300-character command (including a tail marker embedded inside
+/// an unbreakable `https://` URL token) and working directory before approval without duplicating
+/// `Directory:`, show only the first line in the title, distinguish exact-command vs reusable
+/// `sandbox_permissions` session labels, and display argument summaries for non-`web_fetch` tools
+/// even when they include a `url` argument.
 #[tokio::test]
 async fn long_bash_approval_shows_tail_marker_cwd_exact_scope_and_generic_tool_args() {
     local(async {
-        let padding = "segment_value_".repeat(20);
+        let url_segments = "segment_part/".repeat(22);
         let long_cmd = format!(
-            "echo first_line_head && echo {padding} && echo TAIL_MARKER_300_END\necho second_line_hidden_in_title"
+            "echo first_line_head && curl https://example.invalid/{url_segments}TAIL_MARKER_300_END\necho second_line_hidden_in_title"
         );
         assert!(long_cmd.len() > 300);
         let script = json!([
@@ -945,8 +947,20 @@ async fn long_bash_approval_shows_tail_marker_cwd_exact_scope_and_generic_tool_a
             { "text": "bash denied" },
             {
                 "tool_calls": [{
+                    "name": "bash",
+                    "arguments": {
+                        "command": "touch work-sub/out.txt",
+                        "sandbox_permissions": "write:work-sub",
+                        "justification": "write build output"
+                    }
+                }]
+            },
+            { "text": "scoped bash denied" },
+            {
+                "tool_calls": [{
                     "name": "mcp__demo__query",
                     "arguments": {
+                        "url": "https://api.example.invalid/query",
                         "table": "orders",
                         "limit": 7
                     }
@@ -957,7 +971,11 @@ async fn long_bash_approval_shows_tail_marker_cwd_exact_scope_and_generic_tool_a
         let cfg = json!({
             "reduce_motion": true,
             "plugins": {
-                "permissions": { "enabled": true, "preset": "read-only" }
+                "permissions": {
+                    "enabled": true,
+                    "preset": "read-only",
+                    "rules": [{ "argv": ["echo"], "decision": "prompt" }]
+                }
             }
         });
         let mut t = Term::with(script, cfg, 110, 30).await;
@@ -990,6 +1008,10 @@ async fn long_bash_approval_shows_tail_marker_cwd_exact_scope_and_generic_tool_a
             !title_line.contains("second_line_hidden_in_title") && !title_line.contains("TAIL_MARKER_300_END"),
             "dialog title must show only the first line:\n{title_line}"
         );
+        assert!(
+            !screen.contains("Directory:"),
+            "shell preview already shows cwd; body must not duplicate Directory:\n{screen}"
+        );
         let compact: String = screen
             .lines()
             .filter(|l| l.contains('│'))
@@ -998,27 +1020,51 @@ async fn long_bash_approval_shows_tail_marker_cwd_exact_scope_and_generic_tool_a
             .join("");
         assert!(
             compact.contains("TAIL_MARKER_300_END"),
-            "300-char command tail marker must be visible before approval:\n{screen}"
+            "300-char URL command tail marker must be hard-wrapped and visible before approval:\n{screen}"
         );
         assert!(compact.contains("work-sub"), "working directory must be visible before approval:\n{screen}");
 
-        // Deny bash, then verify non-command/path MCP tool shows its arguments.
+        // Deny bash, then verify bash with reusable `sandbox_permissions` does not claim "exact command".
         t.key(KeyCode::Char('n'), Modifiers::NONE);
         t.until("why prompt", |s| s.contains("Tell the model why")).await;
         t.key(KeyCode::Enter, Modifiers::NONE);
         t.idle().await;
 
+        t.submit("run scoped bash").await;
+        t.until("scoped bash approval dialog", |screen| {
+            screen.contains("Requested access: write:work-sub")
+                && screen.contains("Allow command & requested access for this session (a)")
+        })
+        .await;
+        assert!(
+            !t.screen().contains("Allow this exact command for this session"),
+            "reusable sandbox_permissions must not understate scope as exact command:\n{}",
+            t.screen()
+        );
+        t.key(KeyCode::Char('n'), Modifiers::NONE);
+        t.until("why prompt scoped", |s| s.contains("Tell the model why")).await;
+        t.key(KeyCode::Enter, Modifiers::NONE);
+        t.idle().await;
+
+        // Verify non-web_fetch MCP tool with `url` still displays full Arguments JSON.
         t.submit("run mcp tool").await;
         t.until("mcp tool approval dialog with arguments", |screen| {
             screen.contains("Allow mcp__demo__query?")
                 && screen.contains("Allow this exact call for this session (a)")
+                && screen.contains("URL: https://api.example.invalid/query")
                 && screen.contains("Arguments:")
         })
         .await;
         let mcp_screen = t.screen();
+        let mcp_compact: String = mcp_screen
+            .lines()
+            .filter(|l| l.contains('│'))
+            .map(|l| l.trim_matches(|c: char| c == ' ' || c == '│').trim())
+            .collect::<Vec<_>>()
+            .join("");
         assert!(
-            mcp_screen.contains("\"table\":\"orders\"") && mcp_screen.contains("\"limit\":7"),
-            "non-command/path tool must display argument summary:\n{mcp_screen}"
+            mcp_compact.contains("\"table\":\"orders\"") && mcp_compact.contains("\"limit\":7"),
+            "MCP tool with url must still display full argument summary:\n{mcp_screen}"
         );
         t.key(KeyCode::Char('n'), Modifiers::NONE);
         t.until("why prompt 2", |s| s.contains("Tell the model why")).await;
