@@ -265,6 +265,10 @@ async fn ctrl_o_toggles_committed_tool_and_reasoning_between_compact_and_expande
             let h = t.history();
             assert!(!s.contains("Transcript"), "cycle {cycle} expand must stay on main screen:\n{s}");
             assert!(
+                s.contains("Tool output: expanded") && !s.contains("Tool output: compact"),
+                "cycle {cycle} expand notice must replace previous notice:\n{s}"
+            );
+            assert!(
                 h.contains("Read 30 lines") && !h.contains("Read 1 file"),
                 "cycle {cycle} expand must show expanded tool:\n{h}"
             );
@@ -278,6 +282,10 @@ async fn ctrl_o_toggles_committed_tool_and_reasoning_between_compact_and_expande
             let s = t.screen();
             let h = t.history();
             assert!(!s.contains("Transcript"), "cycle {cycle} collapse must stay on main screen:\n{s}");
+            assert!(
+                s.contains("Tool output: compact") && !s.contains("Tool output: expanded"),
+                "cycle {cycle} collapse notice must replace previous notice:\n{s}"
+            );
             assert!(
                 h.contains("Read 1 file") && !h.contains("Read 30 lines"),
                 "cycle {cycle} collapse must restore compact tool:\n{h}"

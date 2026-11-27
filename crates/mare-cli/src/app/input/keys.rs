@@ -41,7 +41,10 @@ impl App {
                 self.transcript.invalidate_cache();
                 self.reflow.invalidated(app_now());
                 let mode = if self.expand_all { "expanded" } else { "compact" };
-                self.push_notice((format!("Tool output: {mode}"), "info".into(), app_now()));
+                self.push_notice_with_id(
+                    (format!("Tool output: {mode}"), "info".into(), app_now()),
+                    Some("toggle-expand".into()),
+                );
             }
             // Ctrl+D: nothing with a menu open (row 7); with a draft the editor
             // deletes the character after the cursor (rows 2, 11); while working it never exits
