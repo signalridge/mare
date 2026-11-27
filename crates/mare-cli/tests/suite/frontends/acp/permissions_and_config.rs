@@ -1456,3 +1456,134 @@ return {{
 
     rpc.kill_and_wait();
 }
+
+/// ACP permission requests forward reason, outside-sandbox marker, working directory, and full
+/// command, label `allow-always` as `"Allow for this session"`, and scope that grant strictly to
+/// the current ACP session (same call in same session skips prompt; new session prompts again).
+#[test]
+fn acp_permission_request_forwards_detail_and_session_grant_resets_on_new_session() {
+    let home = tempfile::tempdir().unwrap();
+    let ws = tempfile::tempdir().unwrap();
+    let long_cmd = format!("echo head && {} && echo ACP_TAIL_MARKER", "a".repeat(160));
+    let faux_path = home.path().join("faux-acp-detail.json");
+    std::fs::write(
+        &faux_path,
+        json!([
+            { "tool_calls": [{ "name": "unconfined_sh", "arguments": { "command": long_cmd } }] },
+            { "text": "s1-turn1" },
+            { "tool_calls": [{ "name": "unconfined_sh", "arguments": { "command": long_cmd } }] },
+            { "text": "s1-turn2" }
+        ])
+        .to_string(),
+    )
+    .unwrap();
+    let cfg_dir = home.path().join("config");
+    let plugins_dir = cfg_dir.join("plugins");
+    std::fs::create_dir_all(&plugins_dir).unwrap();
+    std::fs::write(
+        plugins_dir.join("unconfined-sh.lua"),
+        r#"
+        return {
+            name = "unconfined-sh",
+            inject = { "tools" },
+            apply = function(ctx)
+                ctx.tools:register("unconfined_sh", {
+                    description = "unconfined command test tool",
+                    side_effect = "external",
+                    command_tool = true,
+                    unconfined = true,
+                    parameters = {
+                        type = "object",
+                        properties = { command = { type = "string" } },
+                        required = { "command" },
+                    },
+                    execute = function() return { content = "ran" } end,
+                })
+            end,
+        }
+        "#,
+    )
+    .unwrap();
+    std::fs::write(
+        cfg_dir.join("init.lua"),
+        "mare.setup { plugins = { permissions = { enabled = true, preset = 'read-only' } } }\n",
+    )
+    .unwrap();
+
+    let mut cmd = mare_cmd();
+    cmd.args(["--model", "faux/echo", "acp"])
+        .env("MARE_HOME", home.path())
+        .env("MARE_FAUX_SCRIPT", &faux_path)
+        .stderr(Stdio::piped());
+    let mut rpc = RpcClient::spawn_cmd(&mut cmd);
+    let init = rpc.call_raw("initialize", json!({ "protocolVersion": 1, "clientCapabilities": {} }), |_| json!(null));
+    assert_eq!(init["result"]["protocolVersion"], 1, "{init}");
+    let cwd = dunce::canonicalize(ws.path()).unwrap();
+
+    let s1 = rpc.call_raw("session/new", json!({ "cwd": cwd, "mcpServers": [] }), |_| json!(null));
+    let sid1 = s1["result"]["sessionId"].as_str().unwrap_or_else(|| panic!("{s1}")).to_string();
+
+    let mut reqs_s1_t1 = Vec::new();
+    let r1 = rpc.call_raw(
+        "session/prompt",
+        json!({ "sessionId": sid1, "prompt": [{ "type": "text", "text": "first" }] }),
+        |req| {
+            if req["method"] == "session/request_permission" {
+                reqs_s1_t1.push(req["params"].clone());
+                return json!({ "outcome": { "outcome": "selected", "optionId": "allow-always" } });
+            }
+            json!(null)
+        },
+    );
+    assert_eq!(r1["result"]["stopReason"], "end_turn", "{r1}");
+    assert_eq!(reqs_s1_t1.len(), 1, "expected 1 permission prompt on first call: {reqs_s1_t1:?}");
+    let p = &reqs_s1_t1[0];
+    let always =
+        p["options"].as_array().unwrap().iter().find(|o| o["optionId"] == "allow-always").expect("allow-always option");
+    assert_eq!(always["name"], "Allow for this session", "allow-always label mismatch: {p}");
+    assert_eq!(always["kind"], "allow_always", "allow-always kind must stay unchanged: {p}");
+    let tc_str = p["toolCall"].to_string();
+    assert!(tc_str.contains("ACP_TAIL_MARKER"), "ACP toolCall must include full command: {p}");
+    assert!(tc_str.contains("Working directory:"), "ACP toolCall must include cwd: {p}");
+    assert!(tc_str.contains("Reason:"), "ACP toolCall must include reason: {p}");
+    assert!(
+        tc_str.contains("Runs outside the local sandbox") && p["toolCall"]["_meta"]["unconfined"] == json!(true),
+        "ACP toolCall must include outside-sandbox marker: {p}"
+    );
+
+    // Same call in the SAME session must NOT ask again after "Allow for this session".
+    let mut asks_s1_t2 = 0usize;
+    let r2 = rpc.call_raw(
+        "session/prompt",
+        json!({ "sessionId": sid1, "prompt": [{ "type": "text", "text": "second" }] }),
+        |req| {
+            if req["method"] == "session/request_permission" {
+                asks_s1_t2 += 1;
+                return json!({ "outcome": { "outcome": "selected", "optionId": "allow-once" } });
+            }
+            json!(null)
+        },
+    );
+    assert_eq!(r2["result"]["stopReason"], "end_turn", "{r2}");
+    assert_eq!(asks_s1_t2, 0, "same call in same session should reuse session grant");
+
+    // Same call in a NEW session MUST ask again.
+    let s2 = rpc.call_raw("session/new", json!({ "cwd": cwd, "mcpServers": [] }), |_| json!(null));
+    let sid2 = s2["result"]["sessionId"].as_str().unwrap_or_else(|| panic!("{s2}")).to_string();
+    let mut asks_s2 = 0usize;
+    let r3 = rpc.call_raw(
+        "session/prompt",
+        json!({ "sessionId": sid2, "prompt": [{ "type": "text", "text": "third" }] }),
+        |req| {
+            if req["method"] == "session/request_permission" {
+                asks_s2 += 1;
+                return json!({ "outcome": { "outcome": "selected", "optionId": "allow-once" } });
+            }
+            json!(null)
+        },
+    );
+    assert_eq!(r3["result"]["stopReason"], "end_turn", "{r3}");
+    assert_eq!(asks_s2, 1, "new ACP session must prompt again for session-scoped grant");
+
+    rpc.kill_and_wait();
+}

@@ -919,3 +919,111 @@ async fn permission_approval_dialog_shows_grant_scope_and_expiry() {
     })
     .await
 }
+
+/// Approval dialogs show the full 300-character command (including its tail marker) and working
+/// directory before approval, show only the first line in the title, clarify that the session
+/// option applies to this exact command/call, and display argument summaries for tools without
+/// `command`/`path`.
+#[tokio::test]
+async fn long_bash_approval_shows_tail_marker_cwd_exact_scope_and_generic_tool_args() {
+    local(async {
+        let padding = "segment_value_".repeat(20);
+        let long_cmd = format!(
+            "echo first_line_head && echo {padding} && echo TAIL_MARKER_300_END\necho second_line_hidden_in_title"
+        );
+        assert!(long_cmd.len() > 300);
+        let script = json!([
+            {
+                "tool_calls": [{
+                    "name": "bash",
+                    "arguments": {
+                        "command": long_cmd,
+                        "workdir": "work-sub"
+                    }
+                }]
+            },
+            { "text": "bash denied" },
+            {
+                "tool_calls": [{
+                    "name": "mcp__demo__query",
+                    "arguments": {
+                        "table": "orders",
+                        "limit": 7
+                    }
+                }]
+            },
+            { "text": "mcp denied" }
+        ]);
+        let cfg = json!({
+            "reduce_motion": true,
+            "plugins": {
+                "permissions": { "enabled": true, "preset": "read-only" }
+            }
+        });
+        let mut t = Term::with(script, cfg, 110, 30).await;
+        std::fs::create_dir_all(t._env.cwd.join("work-sub")).unwrap();
+        expose(&t.vt.host);
+        exec(
+            &t.vt.host,
+            r#"
+            C.cordis:get("tools"):register("mcp__demo__query", {
+                description = "demo mcp query",
+                side_effect = "external",
+                unconfined = true,
+                parameters = { type = "object" },
+                execute = function() return { content = "ok" } end,
+            })
+            "#,
+        )
+        .await;
+
+        t.submit("run long bash").await;
+        t.until("long bash approval dialog with preview", |screen| {
+            screen.contains("Allow bash: echo first_line_head")
+                && screen.contains("Allow this exact command for this session (a)")
+        })
+        .await;
+
+        let screen = t.screen();
+        let title_line = screen.lines().find(|l| l.contains("Allow bash:")).unwrap_or("");
+        assert!(
+            !title_line.contains("second_line_hidden_in_title") && !title_line.contains("TAIL_MARKER_300_END"),
+            "dialog title must show only the first line:\n{title_line}"
+        );
+        let compact: String = screen
+            .lines()
+            .filter(|l| l.contains('│'))
+            .map(|l| l.trim_matches(|c: char| c == ' ' || c == '│').trim())
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(
+            compact.contains("TAIL_MARKER_300_END"),
+            "300-char command tail marker must be visible before approval:\n{screen}"
+        );
+        assert!(compact.contains("work-sub"), "working directory must be visible before approval:\n{screen}");
+
+        // Deny bash, then verify non-command/path MCP tool shows its arguments.
+        t.key(KeyCode::Char('n'), Modifiers::NONE);
+        t.until("why prompt", |s| s.contains("Tell the model why")).await;
+        t.key(KeyCode::Enter, Modifiers::NONE);
+        t.idle().await;
+
+        t.submit("run mcp tool").await;
+        t.until("mcp tool approval dialog with arguments", |screen| {
+            screen.contains("Allow mcp__demo__query?")
+                && screen.contains("Allow this exact call for this session (a)")
+                && screen.contains("Arguments:")
+        })
+        .await;
+        let mcp_screen = t.screen();
+        assert!(
+            mcp_screen.contains("\"table\":\"orders\"") && mcp_screen.contains("\"limit\":7"),
+            "non-command/path tool must display argument summary:\n{mcp_screen}"
+        );
+        t.key(KeyCode::Char('n'), Modifiers::NONE);
+        t.until("why prompt 2", |s| s.contains("Tell the model why")).await;
+        t.key(KeyCode::Enter, Modifiers::NONE);
+        t.idle().await;
+    })
+    .await
+}
