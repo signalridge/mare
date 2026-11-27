@@ -809,7 +809,11 @@ return {
 			if not started then
 				notify_ui(err or "Could not start side conversation", "warning")
 				if mare.ui and lib.callable(mare.ui.set_editor) and ui_connected() then
-					pcall(mare.ui.set_editor, "/" .. cmd_name .. (trimmed ~= "" and (" " .. trimmed) or ""))
+					pcall(
+						mare.ui.set_editor,
+						"/" .. cmd_name .. (trimmed ~= "" and (" " .. trimmed) or ""),
+						{ prepend = true }
+					)
 				end
 				return
 			end
