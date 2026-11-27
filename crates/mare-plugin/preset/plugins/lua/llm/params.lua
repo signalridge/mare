@@ -442,6 +442,18 @@ return function(D)
 		return list
 	end
 
+	local function has_wire_mapping(d, route)
+		if d.wire[route] ~= nil then
+			return true
+		end
+		for _, o in ipairs(d.options) do
+			if o.wire and o.wire[route] ~= nil then
+				return true
+			end
+		end
+		return false
+	end
+
 	--- the merged parameter definitions for `model` on `route` (cached per model table)
 	function P.defs(model, route)
 		route = route or route_of(model)
@@ -470,7 +482,7 @@ return function(D)
 			apply_rule(defs, r, counter)
 		end
 		for name, d in pairs(defs) do
-			if not d.type then
+			if not d.type or (name == "effort" and route ~= nil and not has_wire_mapping(d, route)) then
 				defs[name] = nil
 			else
 				-- rank: the position in the full option list (the nearest-level rule); `only` keeps

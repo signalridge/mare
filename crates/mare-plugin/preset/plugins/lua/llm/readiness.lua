@@ -47,6 +47,21 @@ function M.new(env)
 			return
 		end
 		local m = (type(event) == "table" and event.model) or env.current()
+		if not m and env.ensure_loaded and env.selected_model then
+			local sel = env.selected_model()
+			if type(sel) == "string" and sel ~= "" then
+				local prov = string.match(sel, "^([^/]+)/")
+				local changed
+				if prov then
+					changed = env.ensure_loaded(prov)
+				else
+					changed = env.ensure_loaded()
+				end
+				if changed then
+					m = env.current()
+				end
+			end
+		end
 		if not m or not m.ref then
 			return
 		end
@@ -80,7 +95,8 @@ function M.new(env)
 		end
 		local m = (type(req) == "table" and req.model) or env.current()
 		if not m then
-			return { decision = "deny", reason = M.no_model() }
+			local unresolved = env.unresolved_model and env.unresolved_model() or nil
+			return { decision = "deny", reason = unresolved or M.no_model() }
 		end
 		local p = env.provider(m.provider)
 		local why = m.unavailable

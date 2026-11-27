@@ -477,6 +477,12 @@ return {
 					current = function()
 						return llm.current(llm, ctx)
 					end,
+					selected_model = function()
+						return state.model
+					end,
+					unresolved_model = function()
+						return D.models.unresolved_model()
+					end,
 					resolve = function(ref)
 						return llm.resolve(llm, ctx, ref)
 					end,

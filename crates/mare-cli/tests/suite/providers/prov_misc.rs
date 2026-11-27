@@ -295,7 +295,7 @@ mare.image.to_png = function(data)
     return orig_to_png(data)
 end
 
-local m = assert(LLM:resolve("google/gemini-3-flash-preview"))
+local m = assert(LLM:resolve("google/gemini-3-pro-preview"))
 local msg = LLM:stream({{
     model = m,
     messages = {{
