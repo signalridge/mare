@@ -12,10 +12,10 @@ use rmcp::model::Root;
 use rmcp::service::{Peer, RoleClient};
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::auth::AuthClient;
+use rmcp::transport::common::client_side_sse::BoxedSseResponse;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::streamable_http_client::{
-    AuthRequiredError, InsufficientScopeError, SseError, StreamableHttpClient, StreamableHttpError,
-    StreamableHttpPostResponse,
+    AuthRequiredError, InsufficientScopeError, StreamableHttpClient, StreamableHttpError, StreamableHttpPostResponse,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -268,10 +268,7 @@ impl StreamableHttpClient for ReplyGuard {
         last_event_id: Option<String>,
         auth: Option<String>,
         headers: HashMap<reqwest::header::HeaderName, reqwest::header::HeaderValue>,
-    ) -> Result<
-        futures_util::stream::BoxStream<'static, Result<sse_stream::Sse, SseError>>,
-        StreamableHttpError<Self::Error>,
-    > {
+    ) -> Result<BoxedSseResponse, StreamableHttpError<Self::Error>> {
         self.client.get_stream(uri, session_id, last_event_id, auth, headers).await.map_err(reclassify_forbidden)
     }
 
@@ -283,10 +280,7 @@ impl StreamableHttpClient for ReplyGuard {
         auth: Option<String>,
         headers: HashMap<reqwest::header::HeaderName, reqwest::header::HeaderValue>,
         max_size: usize,
-    ) -> Result<
-        futures_util::stream::BoxStream<'static, Result<sse_stream::Sse, SseError>>,
-        StreamableHttpError<Self::Error>,
-    > {
+    ) -> Result<BoxedSseResponse, StreamableHttpError<Self::Error>> {
         self.client
             .get_stream_with_max_sse_event_size(uri, session_id, last_event_id, auth, headers, max_size)
             .await

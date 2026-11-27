@@ -30,7 +30,6 @@ mlua.workspace = true
 tokio.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
 futures-util.workspace = true
-sse-stream.workspace = true
 reqwest.workspace = true
 # MCP client: the official Rust SDK — client features only
 rmcp = { workspace = true, features = [

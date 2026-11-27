@@ -132,7 +132,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 mimalloc = "0.1"
 libmimalloc-sys = { version = "0.1", features = ["extended"] }
 futures-util = "0.3"
-sse-stream = "0.2"
 rrule = "0.14"
 open = "5.4"
 uuid = { version = "1.29", features = ["v4", "v7"] }

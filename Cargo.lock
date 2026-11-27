@@ -2141,7 +2141,6 @@ dependencies = [
  "sha2 0.11.1",
  "shlex",
  "similar 3.2.1",
- "sse-stream",
  "subtle",
  "syntect",
  "tempfile",
