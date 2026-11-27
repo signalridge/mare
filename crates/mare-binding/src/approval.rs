@@ -44,6 +44,7 @@ pub struct Snapshot {
     pub tool: String,
     pub call_id: Option<String>,
     pub arguments: J,
+    pub requested_permissions: Option<J>,
     pub unconfined: bool,
     pub protected_arguments: bool,
     pub origin: Option<J>,
@@ -130,6 +131,8 @@ impl Snapshot {
             .filter(|s| !s.is_empty())
             .map(str::to_owned);
         let arguments = call.and_then(|c| c.get("arguments")).cloned().unwrap_or(J::Null);
+        let requested_permissions =
+            verdict.and_then(|v| v.get("requested_permissions")).filter(|v| v.is_object()).cloned();
         let protected_arguments = call.and_then(|c| c.get("protected_arguments")).and_then(J::as_bool).unwrap_or(false);
         let origin = call.and_then(|c| c.get("origin")).filter(|v| !v.is_null()).cloned();
         let unconfined = info.and_then(|i| i.get("unconfined")).and_then(J::as_bool).unwrap_or(false);
@@ -150,6 +153,7 @@ impl Snapshot {
             tool,
             call_id,
             arguments,
+            requested_permissions,
             unconfined,
             protected_arguments,
             origin,
@@ -437,6 +441,7 @@ mod tests {
             tool: "secret_tool".into(),
             call_id: Some("call-1".into()),
             arguments: serde_json::json!({"token": "ref-1"}),
+            requested_permissions: None,
             unconfined: true,
             protected_arguments: true,
             origin: None,

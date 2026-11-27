@@ -204,12 +204,21 @@ return function(ctx, cfg, store, peers, svc)
 		for _, p in ipairs(peer_list) do
 			held = held + (p.held or 0)
 		end
-		-- header counts aligned with SPEC (`N agents · M waiting · K sessions · J held`)
+		local running = 0
+		for _, m in ipairs(snap.members) do
+			if m.state == "running" and m.waiting == nil then
+				running = running + 1
+			end
+		end
+		-- header counts aligned with SPEC (`N agents · M waiting · R running · K sessions · J held`)
 		local parts = {
 			("%d agent%s"):format(#snap.members, #snap.members == 1 and "" or "s"),
 		}
 		if snap.waiting > 0 then
 			parts[#parts + 1] = ("%d waiting"):format(snap.waiting)
+		end
+		if running > 0 then
+			parts[#parts + 1] = ("%d running"):format(running)
 		end
 		parts[#parts + 1] = ("%d session%s"):format(#peer_list, #peer_list == 1 and "" or "s")
 		if held > 0 then

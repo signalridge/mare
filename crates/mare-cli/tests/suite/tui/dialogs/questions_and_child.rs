@@ -1106,13 +1106,47 @@ async fn subagent_request_permissions_dialog_renders_full_paths_purpose_expirati
             .map(|l| l.trim_matches(|c: char| c == ' ' || c == '│').trim())
             .collect::<Vec<_>>()
             .join("");
+        let expected_abs = dunce::canonicalize(&target_dir).unwrap().to_string_lossy().into_owned();
         assert!(
-            compact.contains(long_rel_dir),
-            "full request_permissions write directory must not be truncated:\nscreen:\n{screen}\ncompact:\n{compact}"
+            compact.contains(&expected_abs),
+            "full resolved request_permissions write directory must appear untruncated:\nexpected: {expected_abs}\nscreen:\n{screen}\ncompact:\n{compact}"
         );
 
-        // 80-col snapshot of the request_permissions dialog.
-        let snap = stabilize_subagent_snap(t.snap().await);
+        // 80-col snapshot of the request_permissions dialog. Because the resolved absolute path
+        // begins with the platform/env-dependent temp root, collapse wrapped lines under
+        // `Write paths:` back onto the canonical `<tmp>/…` representation wrapped at the modal's
+        // fixed 72-column inner width so the snapshot stays stable across TMPDIR lengths and OSes
+        // (while the assertion above verified the unmodified screen contains `expected_abs`).
+        let canonical_cwd = dunce::canonicalize(&t._env.cwd).unwrap().to_string_lossy().into_owned();
+        t.vt.dismiss_notices();
+        t.step().await;
+        let mut raw_lines: Vec<String> = t.screen().lines().map(str::to_string).collect();
+        if let Some(wp_idx) = raw_lines.iter().position(|l| l.contains("Write paths:"))
+            && let Some(purpose_rel) = raw_lines[wp_idx + 1..].iter().position(|l| l.contains("Purpose:"))
+        {
+            let end_idx = wp_idx + 1 + purpose_rel;
+            let joined_path: String = raw_lines[wp_idx + 1..end_idx]
+                .iter()
+                .map(|l| {
+                    let s = l.trim_end();
+                    let s = s.strip_prefix("  │ ").unwrap_or(s);
+                    s.strip_suffix(" │").unwrap_or(s).trim_end()
+                })
+                .collect::<Vec<_>>()
+                .join("");
+            let normalized = joined_path.replace(&canonical_cwd, "<tmp>").replace('\\', "/");
+            let inner_w = 72usize;
+            let mut rebuilt = Vec::new();
+            let mut rem = normalized.as_str();
+            while !rem.is_empty() {
+                let take = rem.char_indices().nth(inner_w).map_or(rem.len(), |(i, _)| i);
+                let chunk = &rem[..take];
+                rebuilt.push(format!("  │ {:<width$} │", chunk, width = inner_w));
+                rem = &rem[take..];
+            }
+            raw_lines.splice(wp_idx + 1..end_idx, rebuilt);
+        }
+        let snap = stabilize_subagent_snap(trimmed(&raw_lines.join("\n")));
         insta::assert_snapshot!("subagent_request_permissions_80col", snap);
 
         // Deny and verify subagent continues without crashing the parent turn.

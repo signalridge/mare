@@ -7,9 +7,10 @@ expression: snap
   │ Requester: Subagent 测试权限选择器 (id: agent-<id>)                         │
   │ Tool: request_permissions (call call_1_1)                                │
   │ Write paths:                                                             │
-  │   - deeply/nested/request_permissions/segment_one/segment_two/segment_th │
-  │ ree/segment_four/artifacts_dir                                           │
+  │   - <tmp>/deeply/nested/request_permissions/segment_one/segment_two/segm │
+  │ ent_three/segment_four/artifacts_dir                                     │
   │ Purpose: write selector artifacts                                        │
+  │ Reason: maximum grant scope: turn                                        │
   │ Scope: this turn (y, expires on turn end)                                │
   │                                                                          │
   │ Allow requested access for this turn (y)                                 │

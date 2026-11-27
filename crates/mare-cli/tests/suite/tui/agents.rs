@@ -172,7 +172,8 @@ async fn agents_preview_threshold_and_ctrl_g_jump_to_sessions() {
     .await
 }
 
-/// `/agents` header right-hand counts match `N agents · M waiting · K sessions · J held`.
+/// `/agents` header right-hand counts distinguish waiting vs running members alongside total
+/// agents, peer sessions, and held approvals (`N agents · M waiting · R running · K sessions · J held`).
 #[tokio::test]
 async fn agents_header_shows_spec_counts_format() {
     local(async {
@@ -191,8 +192,29 @@ async fn agents_header_shows_spec_counts_format() {
         t.until("the agents header", |s| s.contains("Agents") && s.contains("explorer") && s.contains("2 held")).await;
         let screen = t.screen();
         assert!(
-            screen.contains("1 agent · 1 session · 2 held"),
-            "expected SPEC header counts `1 agent · 1 session · 2 held`, got:\n{screen}"
+            screen.contains("1 agent · 1 running · 1 session · 2 held"),
+            "expected SPEC header counts `1 agent · 1 running · 1 session · 2 held`, got:\n{screen}"
+        );
+        t.key(KeyCode::Escape, Modifiers::NONE);
+        t.until("agents modal closed", |s| !s.contains("sessions (/resume)")).await;
+
+        // Add a finished sub-agent (excluded from running/waiting) and one waiting for approval.
+        exec(
+            &t.vt.host,
+            r#"local done_ch = S:child({ run_id = "r1", seq = 2, label = "finished-worker" })
+               done_ch.append({ type = "state", state = "closed", ok = true })"#,
+        )
+        .await;
+        t.vt.host.emit_json("agent/approval-queue", json!({ "pending": [{ "label": "blocked-worker" }] })).await;
+        t.submit("/agents").await;
+        t.until("waiting + running header", |s| {
+            s.contains("Agents") && s.contains("blocked-worker") && s.contains("finished-worker")
+        })
+        .await;
+        let screen = t.screen();
+        assert!(
+            screen.contains("3 agents · 1 waiting · 1 running"),
+            "expected header counts distinguishing waiting vs running (`3 agents · 1 waiting · 1 running`), got:\n{screen}"
         );
     })
     .await
