@@ -243,7 +243,7 @@ impl App {
         }
         self.pending_prefix = None;
         self.transcript.frame.clear();
-        if !self.transcript.is_open() {
+        if !self.transcript.is_open() && !mare_tui::modes::handed_off() {
             self.renderer.erase();
         }
         mare_tui::modes::set_alt_screen(true);
