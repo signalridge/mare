@@ -1,0 +1,28 @@
+---
+source: crates/mare-cli/tests/suite/tui/dialogs/questions_and_child.rs
+expression: snap
+---
+❯ run selector test
+
+● Subagent(测试权限选择器)
+  ⎿  Started subagent <uuid> (测试权限选择器) (status: running).
+  ╭─ Subagent · 测试权限选择器 — Allow write? ───────────────────────────────────────────────╮
+  │ Requester: Subagent 测试权限选择器 (id: agent-<id>)                                         │
+  │ Tool: write (call call_1_1)                                                              │
+  │ Path: deeply/nested/permission/selector/directory/segment_alpha/segment_beta/segment_gam │
+  │ ma/segment_delta/final_target_file.txt                                                   │
+  │ Directory: <tmp> │
+  │ Scope: once (y, this call) · this subagent session (a, expires when subagent ends) ·     │
+  │ remember rule (A)                                                                        │
+  │                                                                                          │
+  │ Allow once (y)                                                                           │
+  │ Allow for this session (a)                                                               │
+  │ Allow and remember (A): don't ask again for `write` calls, for this sub-agent's session  │
+  │ Deny, and tell the model why (n) — affects only this subagent                            │
+  │ Deny and stop this turn (ctrl+c) — stops only this subagent                              │
+  ╰───────────────────────────────────────────────────────────────────────────────── 1 of 5 ─╯
+▂▃▅▃ 测试权限选择器 · Waiting for approval… (Ns · Esc to interrupt)
+╭──────────────────────────────────────────────────────────────────────────────────────────────╮
+│ ❯ Queue a message… (Ctrl+S steer now · Esc interrupt)                                        │
+╰──────────────────────────────────────────────────────────────────────────────────────────────╯
+Enter confirm ↑↓ move y allow once a this session A remember n deny Ctrl+C interrupt Esc cancel…

@@ -8,7 +8,17 @@ pub fn wrap_line(line: &Line, width: usize) -> Vec<Line> {
     wrap_line_indent(line, width, &[])
 }
 
+/// Like [`wrap_line`], but also breaks URL tokens that exceed `width` so bounded overlays
+/// (modals, approval details) never clip a long URL.
+pub fn wrap_line_hard(line: &Line, width: usize) -> Vec<Line> {
+    wrap_line_inner(line, width, &[], true)
+}
+
 pub fn wrap_line_indent(line: &Line, width: usize, indent: &[Span]) -> Vec<Line> {
+    wrap_line_inner(line, width, indent, false)
+}
+
+fn wrap_line_inner(line: &Line, width: usize, indent: &[Span], break_urls: bool) -> Vec<Line> {
     let width = width.max(1);
     if line.width() <= width {
         return vec![line.clone()];
@@ -72,7 +82,7 @@ pub fn wrap_line_indent(line: &Line, width: usize, indent: &[Span]) -> Vec<Line>
         // a URL is never broken:
         // it gets a row of its own and may run past the width — scrollback commits write it
         // whole and the terminal soft-wraps it; the live area cuts it with `…`
-        if is_url_like(&toks[i..j].iter().map(|t| t.g).collect::<String>()) {
+        if !break_urls && is_url_like(&toks[i..j].iter().map(|t| t.g).collect::<String>()) {
             if cur_w > 0 {
                 lines.push(std::mem::replace(&mut cur, Line { spans: vec![], fill_bg: line.fill_bg, raw: None }));
                 first = false;

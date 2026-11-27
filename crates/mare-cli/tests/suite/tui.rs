@@ -313,11 +313,26 @@ impl Term {
     }
 }
 
-/// Screen text without trailing blank lines, temp paths masked (stable snapshots).
+/// Screen text without trailing blank lines, temp paths and elapsed timers masked (stable snapshots).
 fn trimmed(s: &str) -> String {
-    let lines: Vec<String> = s.lines().map(|l| mask_turn_end(&mask_tmp(l.trim_end()))).collect();
+    let lines: Vec<String> = s.lines().map(|l| mask_working_elapsed(&mask_turn_end(&mask_tmp(l.trim_end())))).collect();
     let end = lines.iter().rposition(|l| !l.is_empty()).map(|i| i + 1).unwrap_or(0);
     lines[..end].join("\n")
+}
+
+/// Mask wall-clock elapsed seconds (and delayed tips) on the working row (`… (0s · Esc to interrupt)` → `… (Ns · Esc to interrupt)`).
+fn mask_working_elapsed(l: &str) -> String {
+    let suffix = "s · Esc to interrupt)";
+    if let Some(end) = l.find(suffix)
+        && let Some(open) = l[..end].rfind('(')
+        && open + 1 < end
+        && l[open + 1..end].bytes().all(|b| b.is_ascii_digit())
+    {
+        let after = &l[end + suffix.len()..];
+        let tail = after.split("  · Tip:").next().unwrap_or(after);
+        return format!("{}N{suffix}{tail}", &l[..open + 1]);
+    }
+    l.to_string()
 }
 
 /// The closing line of a turn ("worked 4s · 28 tokens · 02:46"): duration and clock masked.

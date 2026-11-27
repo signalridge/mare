@@ -661,3 +661,466 @@ async fn child_remember_rule_tui_shows_parent_generated_description_and_persists
     })
     .await
 }
+
+/// A subagent requesting approval via `subagent` + `subagent_wait` must:
+/// - Show `<subagent> · Waiting for approval` in the main UI (never raw `Running subagent_wait…`),
+/// - Never duplicate identical label/task names (`测试权限选择器 · 测试权限选择器`),
+/// - Render requester, tool + call ID, full non-truncated wrapped path, and grant scope/duration
+///   in the approval dialog, while keeping approval enforcement intact.
+#[tokio::test]
+async fn subagent_approval_ui_shows_requester_full_wrapped_path_duration_and_waiting_status() {
+    local(async {
+        let long_rel =
+            "deeply/nested/permission/selector/directory/segment_alpha/segment_beta/segment_gamma/segment_delta/final_target_file.txt";
+        let child_turns = json!([
+            {
+                "tool_calls": [{
+                    "id": "call_sub_write_1",
+                    "name": "write",
+                    "arguments": {
+                        "path": long_rel,
+                        "content": "approved-by-user"
+                    }
+                }]
+            },
+            { "text": "subagent finished writing" }
+        ]);
+        let parent_script = json!([
+            {
+                "tool_calls": [{
+                    "id": "call_spawn_1",
+                    "name": "subagent",
+                    "arguments": {
+                        "name": "测试权限选择器",
+                        "description": "测试权限选择器",
+                        "prompt": "write target file",
+                        "wait": false
+                    }
+                }]
+            },
+            {
+                "tool_calls": [{
+                    "id": "call_wait_1",
+                    "name": "subagent_wait",
+                    "arguments": {
+                        "id": "测试权限选择器"
+                    }
+                }]
+            },
+            { "text": "all done" }
+        ]);
+        let cfg = json!({
+            "reduce_motion": true,
+            "plugins": {
+                "permissions": { "enabled": true, "preset": "read-only" },
+                "provider-faux": { "script_json": parent_script.to_string() }
+            }
+        });
+        let mut t = Term::with(parent_script, cfg, 96, 30).await;
+        // Ensure nested parent directories exist for the child write once approved.
+        let target = t._env.cwd.join(long_rel);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        expose(&t.vt.host);
+        exec(
+            &t.vt.host,
+            &format!(
+                r#"
+                local orig_start = mare.subagent.start
+                local child_script = {child_script}
+                mare.subagent.start = function(opts)
+                    opts = opts or {{}}
+                    opts.no_session = true
+                    opts.permission = "read-only"
+                    opts.config = {{
+                        model = "faux/echo",
+                        plugins = {{ ["provider-faux"] = {{ script_json = child_script }} }},
+                    }}
+                    return orig_start(opts)
+                end
+                "#,
+                child_script = serde_json::to_string(&child_turns.to_string()).unwrap(),
+            ),
+        )
+        .await;
+
+        t.submit("run selector test").await;
+        t.until("subagent approval dialog open with waiting status", |screen| {
+            screen.contains("Subagent · 测试权限选择器 — Allow write?")
+                && screen.contains("测试权限选择器 · Waiting for approval")
+                && screen.contains("Allow once (y)")
+        })
+        .await;
+
+        let screen = t.screen();
+        assert!(
+            !screen.contains("Running subagent_wait"),
+            "main UI must not show raw 'Running subagent_wait' while subagent waits for approval:\n{screen}"
+        );
+        assert!(
+            !screen.contains("测试权限选择器 · 测试权限选择器"),
+            "subagent title/requester must never duplicate identical label and task:\n{screen}"
+        );
+        assert!(screen.contains("Requester: Subagent 测试权限选择器"), "missing requester line:\n{screen}");
+        assert!(screen.contains("Tool: write (call call_1_1)"), "missing tool/call ID detail:\n{screen}");
+        assert!(
+            screen.contains("Scope: once (y, this call) · this subagent session (a, expires when subagent ends)"),
+            "missing approval grant duration/scope:\n{screen}"
+        );
+        assert!(
+            screen.contains("affects only this subagent") && screen.contains("stops only this subagent"),
+            "subagent deny/abort choices must state subagent-only consequence:\n{screen}"
+        );
+        // Full long path must wrap cleanly with zero truncation (every segment visible).
+        let compact: String = screen
+            .lines()
+            .filter(|l| l.contains('│'))
+            .map(|l| l.trim_matches(|c: char| c == ' ' || c == '│').trim())
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(
+            compact.contains(long_rel),
+            "full long path must be visible across wrapped modal lines without truncation:\nscreen:\n{screen}\ncompact:\n{compact}"
+        );
+
+        // Snapshot the rendered TUI frame (stabilize random subagent UUID, child id, and elapsed seconds).
+        let snap = stabilize_subagent_snap(t.snap().await);
+        insta::assert_snapshot!("subagent_approval_dialog", snap);
+
+        // Approval itself remains enforced: file does not exist until user approves (`y`).
+        assert!(!target.exists(), "file must not be written before user approval");
+        t.key(KeyCode::Char('y'), Modifiers::NONE);
+        t.idle().await;
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "approved-by-user");
+    })
+    .await
+}
+
+/// With two subagents running in parallel (one requesting approval, one still running):
+/// - The main UI clearly distinguishes `waiting for approval` vs `running`,
+/// - Rejecting the waiting subagent's request (via Deny or Ctrl+C abort) affects ONLY that
+///   subagent while the sibling continues and finishes normally.
+#[tokio::test]
+async fn parallel_subagents_distinguish_running_vs_waiting_and_rejecting_one_only_affects_it() {
+    local(async {
+        let script = json!([
+            { "tool_calls": [{ "name": "run_parallel_subagents", "arguments": { "mode": "deny" } }] },
+            { "text": "parallel deny complete" },
+            { "tool_calls": [{ "name": "run_parallel_subagents", "arguments": { "mode": "abort" } }] },
+            { "text": "parallel abort complete" }
+        ]);
+        let cfg = json!({
+            "reduce_motion": true,
+            "plugins": {
+                "permissions": { "enabled": true, "preset": "read-only" }
+            }
+        });
+        let mut t = Term::with(script, cfg, 110, 30).await;
+        let cwd = t._env.cwd.clone();
+        let plugins = t._env.config_dir().join("plugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        let gate_file = cwd.join("beta-release.flag");
+        // Child-side barrier plugin: holds `beta_hold` tool until the test creates `beta-release.flag`.
+        std::fs::write(
+            plugins.join("beta-barrier.lua"),
+            format!(
+                r#"
+                return {{
+                    name = "beta-barrier",
+                    inject = {{ "tools" }},
+                    apply = function(ctx)
+                        ctx.tools:register("beta_hold", {{
+                            description = "hold until release file appears",
+                            side_effect = "read",
+                            parameters = {{ type = "object" }},
+                            execute = function()
+                                local deadline = mare.task.now() + 25000
+                                while not mare.fs.exists({gate}) and mare.task.now() < deadline do
+                                    mare.task.sleep(20)
+                                end
+                                return {{ content = "beta-barrier-released" }}
+                            end,
+                        }})
+                    end,
+                }}
+                "#,
+                gate = serde_json::to_string(&gate_file.to_string_lossy().as_ref()).unwrap(),
+            ),
+        )
+        .unwrap();
+        expose(&t.vt.host);
+        exec(
+            &t.vt.host,
+            r#"
+            PARALLEL_RESULTS = {}
+            C.cordis:get("tools"):register("run_parallel_subagents", {
+                description = "spawn alpha (asks approval) and beta (keeps running)",
+                side_effect = "read",
+                parameters = { type = "object", properties = { mode = { type = "string" } } },
+                execute = function(a)
+                    local alpha_turns = {
+                        { tool_calls = {{ id = "call_alpha_w", name = "write", arguments = { path = "alpha-denied.txt", content = "nope" } }} },
+                        { text = "alpha saw denial" },
+                    }
+                    local beta_turns = {
+                        { tool_calls = {{ id = "call_beta_hold", name = "beta_hold", arguments = {} }} },
+                        { text = "beta completed cleanly" },
+                    }
+                    local alpha = mare.subagent.start({
+                        prompt = "write alpha",
+                        label = "alpha-agent",
+                        task = "write alpha file",
+                        no_session = true,
+                        permission = "read-only",
+                        config = {
+                            model = "faux/echo",
+                            plugins = { ["provider-faux"] = { script_json = mare.json.encode(alpha_turns) } },
+                        },
+                    })
+                    local beta = mare.subagent.start({
+                        prompt = "hold beta",
+                        label = "beta-agent",
+                        task = "inspect beta file",
+                        no_session = true,
+                        permission = "read-only",
+                        config = {
+                            model = "faux/echo",
+                            plugins = { ["provider-faux"] = { script_json = mare.json.encode(beta_turns) } },
+                        },
+                    })
+                    local a_res = alpha:wait()
+                    local b_res = beta:wait()
+                    PARALLEL_RESULTS[a.mode or "deny"] = { alpha = a_res, beta = b_res }
+                    return mare.json.encode({ alpha = a_res.status, beta = b_res.status })
+                end,
+            })
+            "#,
+        )
+        .await;
+
+        // Round 1: Reject alpha with `n` (Deny) while beta is actively running.
+        t.submit("go parallel deny").await;
+        t.until("alpha approval open while beta is still running", |screen| {
+            screen.contains("Subagent · alpha-agent — Allow write?")
+                && screen.contains("alpha-agent · Waiting for approval")
+                && screen.contains("1 waiting · 1 running")
+        })
+        .await;
+
+        let screen = t.screen();
+        assert!(
+            screen.contains("Requester: Subagent alpha-agent · write alpha file"),
+            "approval modal must identify alpha-agent and its task:\n{screen}"
+        );
+
+        // Reject ONLY alpha (`n` -> Enter to skip optional reason), then release beta's barrier.
+        t.key(KeyCode::Char('n'), Modifiers::NONE);
+        t.until("why prompt for alpha", |screen| screen.contains("Tell the sub-agent why")).await;
+        t.key(KeyCode::Enter, Modifiers::NONE);
+        std::fs::write(&gate_file, "go").unwrap();
+        t.idle().await;
+
+        assert!(!cwd.join("alpha-denied.txt").exists(), "denied alpha write must not run");
+        let (alpha_denied, beta_status, beta_text): (bool, String, String) = eval(
+            &t.vt.host,
+            r#"
+            local r = PARALLEL_RESULTS.deny
+            local am = mare.json.encode(r.alpha.messages or {})
+            return am:find("denied by the user", 1, true) ~= nil,
+                tostring(r.beta.status),
+                tostring(r.beta.text or "")
+            "#,
+        )
+        .await;
+        assert!(alpha_denied, "alpha must receive denial message");
+        assert_eq!(beta_status, "completed", "rejecting alpha with Deny must not affect sibling beta");
+        assert!(beta_text.contains("beta completed cleanly"), "beta result must stay intact: {beta_text}");
+
+        // Round 2: Reject alpha with `Ctrl+C` (abort turn) — must STILL affect only alpha, not beta.
+        let _ = std::fs::remove_file(&gate_file);
+        t.submit("go parallel abort").await;
+        t.until("second round alpha approval open while beta runs", |screen| {
+            screen.contains("Subagent · alpha-agent — Allow write?")
+                && screen.contains("alpha-agent · Waiting for approval")
+                && screen.contains("1 waiting · 1 running")
+        })
+        .await;
+        t.ctrl('c');
+        std::fs::write(&gate_file, "go").unwrap();
+        t.idle().await;
+
+        assert!(!cwd.join("alpha-denied.txt").exists(), "aborted alpha write must not run");
+        let (beta_status_2, beta_text_2): (String, String) = eval(
+            &t.vt.host,
+            r#"
+            local r = PARALLEL_RESULTS.abort
+            return tostring(r.beta.status), tostring(r.beta.text or "")
+            "#,
+        )
+        .await;
+        assert_eq!(beta_status_2, "completed", "aborting alpha's approval with Ctrl+C must not cancel sibling beta");
+        assert!(beta_text_2.contains("beta completed cleanly"), "beta result must stay intact after alpha abort: {beta_text_2}");
+
+        // Background subagent completion between turns must NOT wipe another feature's working line.
+        exec(
+            &t.vt.host,
+            r#"
+            mare.ui.working("Compacting conversation")
+            C.cordis:get("bus"):emit("subagent/started", { subagent_id = "bg-idle-1", label = "bg" })
+            C.cordis:get("bus"):emit("subagent/completed", { subagent_id = "bg-idle-1", status = "completed" })
+            "#,
+        )
+        .await;
+        t.until("other feature working line preserved after background subagent completes", |s| {
+            s.contains("Compacting conversation")
+        })
+        .await;
+    })
+    .await
+}
+
+fn stabilize_subagent_snap(snap: String) -> String {
+    snap.lines()
+        .map(|line| {
+            let mut s = line.to_string();
+            if let Some(pos) = s.find("Started subagent ") {
+                let rest = &s[pos + "Started subagent ".len()..];
+                if let Some(sp) = rest.find(' ') {
+                    s.replace_range(pos + "Started subagent ".len()..pos + "Started subagent ".len() + sp, "<uuid>");
+                }
+            }
+            if let Some(start) = s.find("(id: agent-")
+                && let Some(end) = s[start..].find(')')
+            {
+                let num_start = start + "(id: agent-".len();
+                s.replace_range(num_start..start + end, "<id>");
+            }
+            s
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A description-only subagent calling `request_permissions` (which has no `path`/`command`
+/// argument, only `additional_permissions.write`) must render the full wrapped directory path,
+/// purpose, scope expiration, and subagent-only deny consequence at 80 cols without duplicating
+/// its name (including Lua `dialog.lua` wait_title deduplication).
+#[tokio::test]
+async fn subagent_request_permissions_dialog_renders_full_paths_purpose_expiration_and_deny_scope() {
+    local(async {
+        let long_rel_dir =
+            "deeply/nested/request_permissions/segment_one/segment_two/segment_three/segment_four/artifacts_dir";
+        let parent_script = json!([
+            {
+                "tool_calls": [{
+                    "name": "subagent",
+                    "arguments": {
+                        "description": "测试权限选择器",
+                        "prompt": "request write permission",
+                        "wait": true
+                    }
+                }]
+            },
+            { "text": "parent finished" }
+        ]);
+        let cfg = json!({
+            "reduce_motion": true,
+            "plugins": {
+                "permissions": { "enabled": true, "preset": "read-only" },
+                "status": { "enabled": true },
+                "provider-faux": { "script_json": parent_script.to_string() }
+            }
+        });
+        let mut t = Term::with(parent_script, cfg, 80, 30).await;
+        let target_dir = t._env.cwd.join(long_rel_dir);
+        std::fs::create_dir_all(&target_dir).unwrap();
+        let child_turns = json!([
+            {
+                "tool_calls": [{
+                    "name": "request_permissions",
+                    "arguments": {
+                        "additional_permissions": {
+                            "write": [long_rel_dir]
+                        },
+                        "justification": "write selector artifacts",
+                        "scope": "turn"
+                    }
+                }]
+            },
+            { "text": "subagent continued without write permission" }
+        ]);
+        expose(&t.vt.host);
+        exec(
+            &t.vt.host,
+            &format!(
+                r#"
+                local orig_start = mare.subagent.start
+                local child_script = {child_script}
+                mare.subagent.start = function(opts)
+                    opts = opts or {{}}
+                    opts.no_session = true
+                    opts.permission = "read-only"
+                    opts.config = {{
+                        model = "faux/echo",
+                        plugins = {{ ["provider-faux"] = {{ script_json = child_script }} }},
+                    }}
+                    return orig_start(opts)
+                end
+                "#,
+                child_script = serde_json::to_string(&child_turns.to_string()).unwrap(),
+            ),
+        )
+        .await;
+
+        t.submit("ask permissions").await;
+        t.until("request_permissions dialog open", |screen| {
+            screen.contains("Subagent · 测试权限选择器 — Allow request_permissions?")
+                && screen.contains("测试权限选择器 · Waiting for approval")
+                && screen.contains("Allow requested access for this turn (y)")
+        })
+        .await;
+
+        // Verify Lua `agent-approvals/dialog.lua` deduplicated `wait_title` as well.
+        let status_msg: String =
+            eval(&t.vt.host, "return tostring((C.cordis:get('status'):get() or {}).message or '')").await;
+        assert!(
+            status_msg.contains("[测试权限选择器] Allow request_permissions?")
+                && !status_msg.contains("测试权限选择器 · 测试权限选择器"),
+            "Lua dialog wait_title must deduplicate identical label and task: {status_msg}"
+        );
+
+        let screen = t.screen();
+        assert!(
+            !screen.contains("测试权限选择器 · 测试权限选择器"),
+            "description-only subagent must never duplicate label and task:\n{screen}"
+        );
+        assert!(screen.contains("Write paths:"), "structured Write paths heading missing:\n{screen}");
+        assert!(screen.contains("Purpose: write selector artifacts"), "purpose missing:\n{screen}");
+        assert!(screen.contains("Scope: this turn (y, expires on turn end)"), "scope expiration missing:\n{screen}");
+        assert!(
+            screen.contains("affects only this subagent") && screen.contains("stops only this subagent"),
+            "subagent-only deny/abort consequences missing:\n{screen}"
+        );
+        let compact: String = screen
+            .lines()
+            .filter(|l| l.contains('│'))
+            .map(|l| l.trim_matches(|c: char| c == ' ' || c == '│').trim())
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(
+            compact.contains(long_rel_dir),
+            "full request_permissions write directory must not be truncated:\nscreen:\n{screen}\ncompact:\n{compact}"
+        );
+
+        // 80-col snapshot of the request_permissions dialog.
+        let snap = stabilize_subagent_snap(t.snap().await);
+        insta::assert_snapshot!("subagent_request_permissions_80col", snap);
+
+        // Deny and verify subagent continues without crashing the parent turn.
+        t.key(KeyCode::Char('n'), Modifiers::NONE);
+        t.until("why prompt", |screen| screen.contains("Tell the sub-agent why")).await;
+        t.key(KeyCode::Enter, Modifiers::NONE);
+        t.idle().await;
+        assert!(t.screen().contains("parent finished"), "parent turn should finish cleanly:\n{}", t.screen());
+    })
+    .await
+}

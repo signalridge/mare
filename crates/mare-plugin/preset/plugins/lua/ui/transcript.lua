@@ -41,7 +41,70 @@ return function(D)
 		out_chars = 0,
 		last_working = 0,
 		last_working_label = nil,
+		base_working = nil,
 	}
+	-- Active subagents and child approval state for the main-screen working line.
+	local live_subagents = {} -- subagent_id -> true
+	local asking_approval = nil -- { subagent_id?, name, request_id }
+	local queued_approval_ids = {} -- list of subagent_id|false
+	local function trim_non_empty(v)
+		local s = type(v) == "string" and v:match("^%s*(.-)%s*$") or ""
+		return s ~= "" and s or nil
+	end
+	local function subagent_name_of(o)
+		return type(o) == "table"
+				and (
+					trim_non_empty(o.label)
+					or trim_non_empty(o.name)
+					or trim_non_empty(o.agent_id)
+					or trim_non_empty(o.subagent_id)
+				)
+			or "subagent"
+	end
+	local function resolve_subagent_name(id_or_name)
+		local key = trim_non_empty(id_or_name)
+		if not key then
+			return nil
+		end
+		if mare.subagent and mare.subagent.get then
+			local ok, info = pcall(mare.subagent.get, key)
+			if ok and type(info) == "table" then
+				return subagent_name_of(info)
+			end
+		end
+		return key
+	end
+	local function subagent_counts_detail()
+		local waiting_ids, waiting_n = {}, 0
+		if asking_approval then
+			waiting_n = 1
+			if asking_approval.subagent_id then
+				waiting_ids[asking_approval.subagent_id] = true
+			end
+		end
+		for _, sid in ipairs(queued_approval_ids) do
+			if not (sid and waiting_ids[sid]) then
+				waiting_n = waiting_n + 1
+				if sid then
+					waiting_ids[sid] = true
+				end
+			end
+		end
+		local running_n = 0
+		for id in pairs(live_subagents) do
+			if not waiting_ids[id] then
+				running_n = running_n + 1
+			end
+		end
+		if waiting_n > 0 and running_n > 0 then
+			return ("%d waiting · %d running"):format(waiting_n, running_n)
+		elseif waiting_n > 1 then
+			return ("%d waiting for approval"):format(waiting_n)
+		elseif running_n > 1 then
+			return ("%d subagents running"):format(running_n)
+		end
+		return nil
+	end
 
 	-- Bounded live preview window: collapsed live tool previews only display `preview_lines`
 	-- rows, so copying/sanitizing/wrapping multi-MB output every 100ms stalls the UI thread.
@@ -370,18 +433,94 @@ return function(D)
 		cur.text = nil
 	end
 
-	local function working(label, background)
+	local function apply_working(label, background, extra_detail)
 		local tokens = cur.out_chars // 4
-		U.working(
-			label,
-			tokens > 0
-					and ("↓ ~%s tokens"):format(
-						tokens >= 1000 and ("%.1fk"):format(tokens / 1000) or tostring(tokens)
-					)
-				or nil,
-			background and { background = true } or nil
-		)
+		local detail_parts = {}
+		if extra_detail and extra_detail ~= "" then
+			detail_parts[#detail_parts + 1] = extra_detail
+		end
+		if tokens > 0 then
+			detail_parts[#detail_parts + 1] = ("↓ ~%s tokens"):format(
+				tokens >= 1000 and ("%.1fk"):format(tokens / 1000) or tostring(tokens)
+			)
+		end
+		local detail = #detail_parts > 0 and table.concat(detail_parts, " · ") or nil
+		U.working(label, detail, background and { background = true } or nil)
 	end
+
+	local function refresh_working()
+		if asking_approval then
+			apply_working(asking_approval.name .. " · Waiting for approval", false, subagent_counts_detail())
+			return
+		end
+		if cur.base_working then
+			apply_working(cur.base_working.label, cur.base_working.background, subagent_counts_detail())
+		end
+	end
+
+	local function working(label, background)
+		cur.base_working = { label = label, background = background }
+		refresh_working()
+	end
+
+	on("subagent/started", function(ev)
+		if type(ev) == "table" and ev.subagent_id and not live_subagents[ev.subagent_id] then
+			live_subagents[ev.subagent_id] = true
+			if cur.base_working or asking_approval then
+				refresh_working()
+			end
+		end
+	end)
+
+	on("subagent/completed", function(ev)
+		if type(ev) == "table" and ev.subagent_id then
+			live_subagents[ev.subagent_id] = nil
+			local cleared_asking = false
+			if asking_approval and asking_approval.subagent_id == ev.subagent_id then
+				asking_approval = nil
+				cleared_asking = true
+			end
+			if cur.base_working or asking_approval then
+				refresh_working()
+			elseif cleared_asking then
+				U.working(nil)
+			end
+		end
+	end)
+
+	on("agent/child-approval", function(ev)
+		if type(ev) == "table" then
+			local o = type(ev.origin) == "table" and ev.origin or {}
+			asking_approval = {
+				subagent_id = o.subagent_id,
+				name = subagent_name_of(o),
+				request_id = ev.request_id,
+			}
+			refresh_working()
+		end
+	end)
+
+	on("agent/approval-queue", function(ev)
+		queued_approval_ids = {}
+		for i, o in ipairs(type(ev) == "table" and ev.pending or {}) do
+			queued_approval_ids[i] = (type(o) == "table" and o.subagent_id) or false
+		end
+		if cur.base_working or asking_approval then
+			refresh_working()
+		end
+	end)
+
+	on("pipeline/approval-decided", function(ev)
+		local req_id = type(ev) == "table" and ev.child_approval_id or nil
+		if asking_approval and asking_approval.request_id ~= nil and req_id == asking_approval.request_id then
+			asking_approval = nil
+			if cur.base_working then
+				refresh_working()
+			else
+				U.working(nil)
+			end
+		end
+	end)
 
 	--- an error for the screen: no mlua "runtime error: " prefix and no stack traceback (a
 	--- dozen lines of plugin internals for an unreachable proxy)
@@ -720,14 +859,20 @@ return function(D)
 		-- whatever `verbs.shell` words the label
 		local display_call = unwrap_call_tool(call)
 		local display_name = display_call and display_call.name or call.name
+		local display_args = display_call and display_call.arguments or call.arguments
 		local shell = display_name == "bash" or display_name == "powershell"
-		working(
-			W.verb(
-				shell and "shell" or "tool",
-				U.ToolCall:verb(display_name, "running") or ("Running " .. display_name)
-			),
-			shell
-		)
+		local default_label
+		if display_name == "subagent_wait" then
+			local target = resolve_subagent_name(display_args and display_args.id)
+			default_label = target and (target .. " · Running") or "Waiting for subagent"
+		elseif display_name == "subagent" then
+			local target = trim_non_empty(display_args and display_args.name)
+				or trim_non_empty(display_args and display_args.description)
+			default_label = target and (target .. " · Running") or "Running subagent"
+		else
+			default_label = U.ToolCall:verb(display_name, "running") or ("Running " .. display_name)
+		end
+		working(W.verb(shell and "shell" or "tool", default_label), shell)
 	end)
 
 	on("turn/completed", function(res)
@@ -739,7 +884,12 @@ return function(D)
 			end
 		end
 		close_group()
-		U.working(nil)
+		cur.base_working = nil
+		if asking_approval then
+			refresh_working()
+		else
+			U.working(nil)
+		end
 		for _, t in pairs(cur.tools) do
 			cancel_tool_flush(t)
 			U.finish(t.id)

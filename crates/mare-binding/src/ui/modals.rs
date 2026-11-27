@@ -248,8 +248,6 @@ pub(super) fn install(lua: &Lua, ui: &Table, shared: &Arc<UiShared>) -> mlua::Re
                 {
                     return Err(mlua::Error::runtime("approval origin does not match immutable approval snapshot"));
                 }
-                let arguments = snapshot.arguments;
-                let tool = snapshot.tool;
                 let raw_choices =
                     t.get::<Table>("choices")?.sequence_values::<String>().collect::<mlua::Result<Vec<_>>>()?;
                 if raw_choices.is_empty() {
@@ -263,63 +261,10 @@ pub(super) fn install(lua: &Lua, ui: &Table, shared: &Arc<UiShared>) -> mlua::Re
                     ));
                 }
                 let scoped = snapshot.scoped;
-                let unconfined = snapshot.unconfined;
-                let protected_arguments = snapshot.protected_arguments;
-                let amendment_desc = snapshot.amendment_description;
-                let reason = snapshot.reason;
-                let who = if let Some(origin) = snapshot.origin {
-                    let mut parts = vec![
-                        origin
-                            .get("label")
-                            .and_then(|v| v.as_str())
-                            .or_else(|| origin.get("agent_id").and_then(|v| v.as_str()))
-                            .unwrap_or("sub-agent")
-                            .to_string(),
-                    ];
-                    if let Some(run_id) = origin.get("run_id").and_then(|v| v.as_str()) {
-                        parts.push(format!("run {run_id}"));
-                    }
-                    if let Some(phase) = origin.get("phase").and_then(|v| v.as_str()) {
-                        parts.push(phase.to_string());
-                    }
-                    if let Some(task) = origin.get("task").and_then(|v| v.as_str()) {
-                        parts.push(task.to_string());
-                    }
-                    format!("[{}] ", parts.join(" · "))
-                } else {
-                    String::new()
-                };
-                let arg_preview = arguments
-                    .get("command")
-                    .or_else(|| arguments.get("path"))
-                    .and_then(|v| v.as_str())
-                    .map(|raw| {
-                        let mut s = format!(": {raw}");
-                        if s.chars().count() > 120 {
-                            s = format!("{}…", s.chars().take(119).collect::<String>());
-                        }
-                        s
-                    })
-                    .unwrap_or_default();
-                let mut what = arg_preview;
-                if unconfined {
-                    what.push_str(" (runs outside the local sandbox)");
-                }
-                if protected_arguments {
-                    what.push_str(" (hidden registered values restored at execution; approve once)");
-                }
-                let sandbox_scope =
-                    arguments.get("sandbox_permissions").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
-                let body_reason = (scoped || sandbox_scope.is_some())
-                    .then(|| reason.as_deref().filter(|s| !s.trim().is_empty()))
-                    .flatten();
-                let reason_suffix = if body_reason.is_some() {
-                    String::new()
-                } else {
-                    reason.as_deref().map(|r| format!("  {r}")).unwrap_or_default()
-                };
-                let title = format!("{who}Allow {tool}{what}?{reason_suffix}");
-                let body = body_reason.map(|r| vec![r.to_string()]).unwrap_or_default();
+                let amendment_desc = snapshot.amendment_description.clone();
+                let is_subagent = snapshot.origin.is_some();
+                let (title, body) = build_approval_presentation(&snapshot, &raw_choices);
+                let arguments = snapshot.arguments;
                 let theme = s.theme.read().unwrap().clone();
                 let preview = match t.get::<Value>("preview")? {
                     Value::Nil => None,
@@ -344,7 +289,11 @@ pub(super) fn install(lua: &Lua, ui: &Table, shared: &Arc<UiShared>) -> mlua::Re
                         ),
                         "allow_session" => (
                             if scoped {
-                                "Allow requested access for this session (a)"
+                                if is_subagent {
+                                    "Allow requested access for this subagent session (a)"
+                                } else {
+                                    "Allow requested access for this session (a)"
+                                }
                             } else {
                                 "Allow for this session (a)"
                             }
@@ -363,10 +312,28 @@ pub(super) fn install(lua: &Lua, ui: &Table, shared: &Arc<UiShared>) -> mlua::Re
                             Some('A'),
                             "remember".to_string(),
                         ),
-                        "deny" => ("Deny, and tell the model why (n)".to_string(), None, Some('n'), "deny".to_string()),
-                        "abort" => {
-                            ("Deny and stop this turn (ctrl+c)".to_string(), None, None, "deny and stop".to_string())
-                        }
+                        "deny" => (
+                            if is_subagent {
+                                "Deny, and tell the model why (n) — affects only this subagent"
+                            } else {
+                                "Deny, and tell the model why (n)"
+                            }
+                            .to_string(),
+                            None,
+                            Some('n'),
+                            "deny".to_string(),
+                        ),
+                        "abort" => (
+                            if is_subagent {
+                                "Deny and stop this turn (ctrl+c) — stops only this subagent"
+                            } else {
+                                "Deny and stop this turn (ctrl+c)"
+                            }
+                            .to_string(),
+                            None,
+                            None,
+                            "deny and stop".to_string(),
+                        ),
                         other => return Err(mlua::Error::runtime(format!("invalid approval choice: {other}"))),
                     };
                     choices.push(choice.clone());
@@ -614,4 +581,278 @@ async fn run_input_modal(
         Ok(Err(reason)) => (None, Some(reason.as_str().to_string())),
         Err(()) => (None, Some("cancelled".to_string())),
     })
+}
+
+fn non_empty_str<'a>(obj: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    obj.get(key).and_then(serde_json::Value::as_str).map(str::trim).filter(|s| !s.is_empty())
+}
+
+/// Format subagent origin into `(primary_name, requester_detail)` without repeating identical
+/// label/phase/task segments (e.g. when a subagent has only a description).
+fn format_origin(origin: &serde_json::Value) -> (String, String) {
+    let primary = non_empty_str(origin, "label")
+        .or_else(|| non_empty_str(origin, "name"))
+        .or_else(|| non_empty_str(origin, "agent_id"))
+        .or_else(|| non_empty_str(origin, "subagent_id"))
+        .unwrap_or("sub-agent")
+        .to_string();
+    let mut parts = vec![primary.clone()];
+    let mut push_unique = |part: String| {
+        if !part.is_empty() && !parts.iter().any(|existing| existing == &part) {
+            parts.push(part);
+        }
+    };
+    if let Some(run_id) = non_empty_str(origin, "run_id") {
+        push_unique(format!("run {run_id}"));
+    }
+    if let Some(phase) = non_empty_str(origin, "phase") {
+        push_unique(phase.to_string());
+    }
+    if let Some(task) = non_empty_str(origin, "task") {
+        push_unique(task.to_string());
+    }
+    let mut detail = parts.join(" · ");
+    if let Some(agent_id) = non_empty_str(origin, "agent_id")
+        && !parts.iter().any(|p| p == agent_id)
+    {
+        use std::fmt::Write as _;
+        let _ = write!(detail, " (id: {agent_id})");
+    }
+    (primary, detail)
+}
+
+fn format_approval_duration(snapshot: &crate::approval::Snapshot, raw_choices: &[String]) -> String {
+    let has = |name: &str| raw_choices.iter().any(|c| c == name);
+    let session_label = if snapshot.origin.is_some() {
+        "this subagent session (a, expires when subagent ends)"
+    } else {
+        "this session (a, expires on session end)"
+    };
+    let mut scopes = Vec::new();
+    if has("allow") {
+        scopes.push(if snapshot.scoped { "this turn (y, expires on turn end)" } else { "once (y, this call)" });
+    }
+    if has("allow_session") {
+        scopes.push(session_label);
+    }
+    if has("allow_amend") {
+        scopes.push("remember rule (A)");
+    }
+    if scopes.is_empty() {
+        return "none".to_string();
+    }
+    if snapshot.protected_arguments {
+        return format!("{} (protected arguments: once only)", scopes.join(" · "));
+    }
+    scopes.join(" · ")
+}
+
+/// Clean up `permissions/vote.lua`'s composite reason (`"[who] tool <path> · write · cwd <dir> · …"`):
+/// drop leading segments that repeat `Requester:` / `Path:` / `Tool:`, lift `cwd <dir>` into the
+/// dedicated `Directory:` line (if none was already shown), and keep any remaining explanation.
+fn split_reason_parts<'a>(reason: &'a str, tool: &str, shown_path: Option<&str>) -> (Option<&'a str>, Option<String>) {
+    let mut cwd_from_reason = None;
+    let mut kept = Vec::new();
+    for (idx, seg) in reason.split(" · ").map(str::trim).filter(|s| !s.is_empty()).enumerate() {
+        if idx == 0 && shown_path.is_some_and(|p| seg.contains(p)) {
+            continue;
+        }
+        if let Some(dir) = seg.strip_prefix("cwd ").map(str::trim).filter(|s| !s.is_empty()) {
+            cwd_from_reason = Some(dir);
+            continue;
+        }
+        if seg == tool && shown_path.is_some() {
+            continue;
+        }
+        kept.push(seg);
+    }
+    let clean = (!kept.is_empty()).then(|| kept.join(" · "));
+    (cwd_from_reason, clean)
+}
+
+/// Build the native approval dialog border title and structured, non-truncated detail body from
+/// the immutable approval snapshot (compact title + full wrapped detail lines).
+fn build_approval_presentation(snapshot: &crate::approval::Snapshot, raw_choices: &[String]) -> (String, Vec<String>) {
+    let mut body = Vec::new();
+    let title = if let Some(origin) = snapshot.origin.as_ref() {
+        let (primary, requester_detail) = format_origin(origin);
+        body.push(format!("Requester: Subagent {requester_detail}"));
+        format!("Subagent · {primary} — Allow {}?", snapshot.tool)
+    } else {
+        body.push("Requester: Main session".to_string());
+        format!("Allow {}?", snapshot.tool)
+    };
+
+    let tool_line = match snapshot.call_id.as_deref() {
+        Some(id) => format!("Tool: {} (call {id})", snapshot.tool),
+        None => format!("Tool: {}", snapshot.tool),
+    };
+    body.push(tool_line);
+
+    let shown_path =
+        non_empty_str(&snapshot.arguments, "path").or_else(|| non_empty_str(&snapshot.arguments, "file_path"));
+    if let Some(path) = shown_path {
+        body.push(format!("Path: {path}"));
+    }
+    let has_explicit_cwd = non_empty_str(&snapshot.arguments, "cwd").is_some();
+    if let Some(cwd) = non_empty_str(&snapshot.arguments, "cwd") {
+        body.push(format!("Directory: {cwd}"));
+    }
+    if let Some(cmd) = non_empty_str(&snapshot.arguments, "command") {
+        let mut lines = cmd.lines();
+        if let Some(first) = lines.next() {
+            body.push(format!("Command: {first}"));
+            for cont in lines {
+                body.push(format!("  {cont}"));
+            }
+        }
+    }
+    if let Some(url) = non_empty_str(&snapshot.arguments, "url") {
+        body.push(format!("URL: {url}"));
+    }
+    let mut has_structured_permissions = false;
+    if let Some(additional) = snapshot.arguments.get("additional_permissions").and_then(serde_json::Value::as_object) {
+        for (field, heading) in [("read", "Read paths:"), ("write", "Write paths:")] {
+            if let Some(paths) = additional.get(field).and_then(serde_json::Value::as_array)
+                && !paths.is_empty()
+            {
+                has_structured_permissions = true;
+                body.push(heading.to_string());
+                for item in paths {
+                    if let Some(p) = item.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                        body.push(format!("  - {p}"));
+                    }
+                }
+            }
+        }
+        match additional.get("network") {
+            Some(serde_json::Value::Bool(true)) => {
+                has_structured_permissions = true;
+                body.push("Network: all hosts".to_string());
+            }
+            Some(serde_json::Value::Array(hosts)) if !hosts.is_empty() => {
+                let list: Vec<&str> = hosts.iter().filter_map(serde_json::Value::as_str).collect();
+                if !list.is_empty() {
+                    has_structured_permissions = true;
+                    body.push(format!("Network: {}", list.join(", ")));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let justification = non_empty_str(&snapshot.arguments, "justification");
+    let reason = snapshot.reason.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let redundant_request_reason =
+        has_structured_permissions && justification.is_some() && reason.is_some_and(|r| r.starts_with("requests "));
+    if let Some(j) = justification
+        && (redundant_request_reason || reason.is_none_or(|r| !r.contains(j)))
+    {
+        body.push(format!("Purpose: {j}"));
+    }
+    if let Some(r) = reason
+        && !redundant_request_reason
+    {
+        let (reason_cwd, clean) = split_reason_parts(r, &snapshot.tool, shown_path);
+        if !has_explicit_cwd && let Some(dir) = reason_cwd {
+            body.push(format!("Directory: {dir}"));
+        }
+        if let Some(clean) = clean {
+            body.push(format!("Reason: {clean}"));
+        }
+    }
+    if snapshot.unconfined {
+        body.push("Sandbox: runs outside the local sandbox".to_string());
+    }
+    if snapshot.protected_arguments {
+        body.push("Protected: hidden registered values restored at execution (approve once)".to_string());
+    }
+    body.push(format!("Scope: {}", format_approval_duration(snapshot, raw_choices)));
+
+    (title, body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::approval::Snapshot;
+
+    #[test]
+    fn subagent_approval_deduplicates_origin_and_preserves_full_long_paths() {
+        let long_path = format!("/workspace/{}/target_permission_selector.rs", "nested_segment/".repeat(12));
+        let snap = Snapshot {
+            tool: "write".into(),
+            call_id: Some("call_sub_42".into()),
+            arguments: serde_json::json!({
+                "path": long_path,
+                "justification": "update selector layout",
+            }),
+            unconfined: false,
+            protected_arguments: false,
+            origin: Some(serde_json::json!({
+                "agent_id": "agent-3",
+                "label": "测试权限选择器",
+                "task": "测试权限选择器",
+            })),
+            scoped: false,
+            reason: Some(format!("[测试权限选择器] write {long_path} · write · cwd /workspace")),
+            amendment_description: None,
+        };
+        let choices = vec!["allow".into(), "allow_session".into(), "deny".into(), "abort".into()];
+        let (title, body) = build_approval_presentation(&snap, &choices);
+        assert_eq!(title, "Subagent · 测试权限选择器 — Allow write?");
+        let joined = body.join("\n");
+        assert!(
+            !joined.contains("测试权限选择器 · 测试权限选择器"),
+            "identical label and task must not duplicate: {joined}"
+        );
+        assert!(joined.contains("Requester: Subagent 测试权限选择器 (id: agent-3)"), "{joined}");
+        assert!(joined.contains("Tool: write (call call_sub_42)"), "{joined}");
+        assert!(joined.contains(&format!("Path: {long_path}")), "full path must not be truncated: {joined}");
+        assert!(joined.contains("Directory: /workspace"), "cwd extracted from reason: {joined}");
+        assert!(!joined.contains("[测试权限选择器] write"), "requester/path must not repeat in Reason: {joined}");
+        assert!(!joined.contains("Reason: write"), "bare tool name must not repeat in Reason: {joined}");
+        assert!(joined.contains("Purpose: update selector layout"), "{joined}");
+        assert!(
+            joined.contains("Scope: once (y, this call) · this subagent session (a, expires when subagent ends)"),
+            "{joined}"
+        );
+    }
+
+    #[test]
+    fn request_permissions_lists_all_full_paths_and_turn_only_scope() {
+        let long_dir = format!("/home/user/projects/{}/output", "deep_component/".repeat(10));
+        let snap = Snapshot {
+            tool: "request_permissions".into(),
+            call_id: Some("call_perm_9".into()),
+            arguments: serde_json::json!({
+                "additional_permissions": {
+                    "write": [long_dir],
+                    "network": ["api.example.com"],
+                },
+                "justification": "write build artifacts",
+                "scope": "turn",
+            }),
+            unconfined: false,
+            protected_arguments: false,
+            origin: Some(serde_json::json!({
+                "agent_id": "agent-7",
+                "label": "builder",
+                "task": "compile artifacts",
+            })),
+            scoped: true,
+            reason: Some("requests write · because: write build artifacts".into()),
+            amendment_description: None,
+        };
+        let choices = vec!["allow".into(), "deny".into(), "abort".into()];
+        let (title, body) = build_approval_presentation(&snap, &choices);
+        assert_eq!(title, "Subagent · builder — Allow request_permissions?");
+        let joined = body.join("\n");
+        assert!(joined.contains("Requester: Subagent builder · compile artifacts (id: agent-7)"), "{joined}");
+        assert!(joined.contains(&format!("  - {long_dir}")), "full write path must appear untruncated: {joined}");
+        assert!(joined.contains("Network: api.example.com"), "{joined}");
+        assert!(joined.contains("Purpose: write build artifacts"), "{joined}");
+        assert!(!joined.contains("Reason: requests write"), "redundant raw reason should be omitted: {joined}");
+        assert!(joined.contains("Scope: this turn (y, expires on turn end)"), "{joined}");
+    }
 }

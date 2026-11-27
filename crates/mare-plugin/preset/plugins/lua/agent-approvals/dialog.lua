@@ -72,18 +72,31 @@ function M.ask(ev)
 	local call, info, verdict = ev.call or {}, ev.info, ev.verdict
 	local rule = ev.rule and M.describe(ev.rule)
 	local o = call.origin or {}
-	-- the source agent: label, the run it
-	-- belongs to (a workflow's run / phase) and its task
-	local who = tostring(o.label or o.agent_id or "sub-agent")
-	if o.run_id then
-		who = who .. " · run " .. tostring(o.run_id)
+	-- the source agent: primary label, run/phase/task deduplicated so identical label & task
+	-- (e.g. when a subagent has description only) never repeat as `X · X`
+	local function non_empty(v)
+		if type(v) ~= "string" then
+			return nil
+		end
+		local trimmed = v:match("^%s*(.-)%s*$")
+		return trimmed ~= "" and trimmed or nil
 	end
-	if o.phase then
-		who = who .. " · " .. tostring(o.phase)
+	local primary = non_empty(o.label) or non_empty(o.name) or non_empty(o.agent_id) or non_empty(o.subagent_id) or "sub-agent"
+	local parts = { primary }
+	local seen = { [primary] = true }
+	local function add_part(v)
+		v = non_empty(v)
+		if v and not seen[v] then
+			seen[v] = true
+			parts[#parts + 1] = v
+		end
 	end
-	if o.task then
-		who = who .. " · " .. tostring(o.task)
+	if non_empty(o.run_id) then
+		add_part("run " .. non_empty(o.run_id))
 	end
+	add_part(o.phase)
+	add_part(o.task)
+	local who = table.concat(parts, " · ")
 	local scoped = (info and info.permission_request) or (verdict and verdict.permission_scope ~= nil)
 	local session_allowed = not call.protected_arguments
 		and (not scoped or (verdict and verdict.permission_scope == "session"))

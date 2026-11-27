@@ -39,7 +39,7 @@ return function(ctx, cfg, store, peers, svc)
 		local sym, hl, word = st[1], st[2], st[3]
 		if m.waiting then
 			sym, hl = "!", "MareError"
-			word = m.waiting == 0 and "approval open" or ("approval #" .. m.waiting)
+			word = m.waiting == 0 and "waiting for approval" or ("waiting for approval #" .. m.waiting)
 		end
 		-- the row: `● name [type] state · what it did last · 42s`
 		local name = m.label .. (m.type and (" [" .. m.type .. "]") or "")

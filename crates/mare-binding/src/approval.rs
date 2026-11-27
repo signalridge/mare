@@ -42,6 +42,7 @@ struct Responses(Mutex<OneTimeRegistry<String, Binding, Response>>);
 #[derive(Clone)]
 pub struct Snapshot {
     pub tool: String,
+    pub call_id: Option<String>,
     pub arguments: J,
     pub unconfined: bool,
     pub protected_arguments: bool,
@@ -122,6 +123,12 @@ impl Snapshot {
             .and_then(J::as_str)
             .map(str::to_owned)
             .unwrap_or_else(|| "tool".to_string());
+        let call_id = call
+            .and_then(|c| c.get("id"))
+            .and_then(J::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
         let arguments = call.and_then(|c| c.get("arguments")).cloned().unwrap_or(J::Null);
         let protected_arguments = call.and_then(|c| c.get("protected_arguments")).and_then(J::as_bool).unwrap_or(false);
         let origin = call.and_then(|c| c.get("origin")).filter(|v| !v.is_null()).cloned();
@@ -139,7 +146,17 @@ impl Snapshot {
                     .or_else(|| a.is_object().then(|| describe_rule(a)))
             }
         });
-        Ok(Self { tool, arguments, unconfined, protected_arguments, origin, scoped, reason, amendment_description })
+        Ok(Self {
+            tool,
+            call_id,
+            arguments,
+            unconfined,
+            protected_arguments,
+            origin,
+            scoped,
+            reason,
+            amendment_description,
+        })
     }
 }
 
@@ -418,6 +435,7 @@ mod tests {
         let binding = Binding::from_json(&json).unwrap();
         let original = Snapshot {
             tool: "secret_tool".into(),
+            call_id: Some("call-1".into()),
             arguments: serde_json::json!({"token": "ref-1"}),
             unconfined: true,
             protected_arguments: true,
