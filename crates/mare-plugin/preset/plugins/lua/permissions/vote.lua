@@ -286,8 +286,6 @@ return function(D)
 				elseif E.inc_empty(granted) then
 					sandbox = s
 				end
-			elseif s ~= nil and E.inc_empty(granted) then
-				sandbox = s
 			end
 		end
 

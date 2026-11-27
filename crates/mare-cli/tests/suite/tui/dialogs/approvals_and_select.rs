@@ -830,7 +830,7 @@ async fn permission_approval_dialog_shows_grant_scope_and_expiry() {
         let main_repo = ext_root.join("main");
         let linked_wt = ext_root.join("wt");
         let run_git = |dir: &std::path::Path, args: &[&str]| {
-            let out = std::process::Command::new("git").args(args).current_dir(dir).output().unwrap();
+            let out = fixture_git(dir).args(args).output().unwrap();
             assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
         };
         std::fs::create_dir_all(&main_repo).unwrap();
@@ -866,24 +866,32 @@ async fn permission_approval_dialog_shows_grant_scope_and_expiry() {
         let main_git_s = format!("write:{}", main_git.display());
         let file_parent_s = format!("write:{}", file_parent.display());
         t.until("scoped permission dialog shows scope, expiry, and resolved physical worktree roots in body", |s| {
-            let flat: String = s.lines().map(|l| l.trim().trim_matches('│').trim()).collect::<Vec<_>>().join("");
-            s.contains("Grant scope:")
-                && s.contains("expires when session ends")
+            let trimmed: Vec<&str> = s.lines().map(|l| l.trim().trim_matches('│').trim()).collect();
+            let flat_paths = trimmed.join("");
+            let flat_words = trimmed.join(" ");
+            flat_words.contains("maximum grant scope: session")
+                && flat_words.contains("expires when this session ends")
+                && flat_words.matches("maximum grant scope: session").count() == 1
                 && s.contains("Allow requested access for this turn (y)")
                 && s.contains("Allow requested access for this session (a)")
+                && !s.contains("Grant scope:")
                 && !s.contains("Requested write:")
-                && flat.contains(&wt_gd_tail)
-                && flat.contains(&main_git_s)
+                && flat_paths.contains(&wt_gd_tail)
+                && flat_paths.contains(&main_git_s)
         })
         .await;
         t.key(KeyCode::Char('a'), Modifiers::NONE);
         t.until(
             "sandbox_permissions dialog shows resolved physical parent dir in body even with a long command",
             |s| {
-                let flat: String = s.lines().map(|l| l.trim().trim_matches('│').trim()).collect::<Vec<_>>().join("");
-                !s.contains("Grant scope: write:")
-                    && flat.contains(&file_parent_s)
-                    && s.contains("this call only; later commands return to baseline")
+                let trimmed: Vec<&str> = s.lines().map(|l| l.trim().trim_matches('│').trim()).collect();
+                let flat_paths = trimmed.join("");
+                let flat_words = trimmed.join(" ");
+                !s.contains("Grant scope:")
+                    && !s.contains("later commands return to baseline")
+                    && flat_paths.contains(&file_parent_s)
+                    && flat_words.contains("Allow once = this call only")
+                    && flat_words.matches("Allow once = this call only").count() == 1
                     && s.contains("Allow once (y)")
                     && s.contains("Allow for this session (a)")
             },

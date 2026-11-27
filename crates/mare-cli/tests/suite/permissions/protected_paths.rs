@@ -949,19 +949,13 @@ async fn linked_worktree_write_git_grants_commondir_for_real_sandbox_commit_and_
 #[cfg(unix)]
 #[tokio::test]
 async fn approved_git_grants_reach_real_sandbox_git_fetch_across_repos_workdir_symlinks_and_worktrees() {
-    use std::process::Command;
-
     local(async {
         let base = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
         let root = dunce::canonicalize(base.path()).unwrap();
 
         let git_ok = |dir: &std::path::Path, args: &[&str]| {
-            let out = Command::new("git")
-                .args(["-C", dir.to_str().unwrap()])
+            let out = fixture_git(dir)
                 .args(args)
-                .env_remove("GIT_DIR")
-                .env_remove("GIT_WORK_TREE")
-                .env_remove("GIT_INDEX_FILE")
                 .env("GIT_AUTHOR_NAME", "Mare Test")
                 .env("GIT_AUTHOR_EMAIL", "mare@example.test")
                 .env("GIT_COMMITTER_NAME", "Mare Test")
@@ -991,11 +985,8 @@ async fn approved_git_grants_reach_real_sandbox_git_fetch_across_repos_workdir_s
             git_ok(&seed, &["add", "f.txt"]);
             git_ok(&seed, &["commit", "-q", "-m", "v1"]);
             git_ok(&seed, &["push", "-q", remote.to_str().unwrap(), "HEAD:refs/heads/main"]);
-            let out = Command::new("git")
+            let out = fixture_git(&root)
                 .args(["clone", "-q", remote.to_str().unwrap(), clone.to_str().unwrap()])
-                .env_remove("GIT_DIR")
-                .env_remove("GIT_WORK_TREE")
-                .env_remove("GIT_INDEX_FILE")
                 .output()
                 .expect("git clone");
             assert!(out.status.success(), "git clone failed: {}", String::from_utf8_lossy(&out.stderr));
@@ -1351,7 +1342,7 @@ async fn approved_git_grants_reach_real_sandbox_git_fetch_across_repos_workdir_s
         git_ok(&seed_a, &["push", "-q", remote_a.to_str().unwrap(), "HEAD:refs/heads/main"]);
         let head_a_v4 = git_ok(&seed_a, &["rev-parse", "HEAD"]).trim().to_string();
 
-        let (sub_res, sibling_probe_failed): (String, bool) = eval(
+        let sub_res: String = eval(
             &h,
             r#"
             C.cordis:get("policy"):voter("tool/approval", function(call)
@@ -1383,11 +1374,10 @@ async fn approved_git_grants_reach_real_sandbox_git_fetch_across_repos_workdir_s
                 },
             })
             local r1 = child:wait()
-            return mare.json.encode(r1), true
+            return mare.json.encode(r1)
             "#,
         )
         .await;
-        assert!(sibling_probe_failed);
         assert!(
             !ref_b.join(".git/sibling-denied-probe").exists(),
             "unapproved sibling repo .git must remain non-writable during subagent turn"
@@ -1503,19 +1493,11 @@ async fn approved_git_grants_reach_real_sandbox_git_fetch_across_repos_workdir_s
 #[tokio::test]
 async fn permission_grant_boundaries_tmp_symlink_cache_and_partial_approval() {
     local(async {
-        use std::process::Command;
-
         let base = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
         let root = dunce::canonicalize(base.path()).unwrap();
         let init_repo = |dir: &std::path::Path| {
             std::fs::create_dir_all(dir).unwrap();
-            let out = Command::new("git")
-                .args(["-C", dir.to_str().unwrap(), "init", "-q", "-b", "main"])
-                .env_remove("GIT_DIR")
-                .env_remove("GIT_WORK_TREE")
-                .env_remove("GIT_INDEX_FILE")
-                .output()
-                .expect("git installed");
+            let out = fixture_git(dir).args(["init", "-q", "-b", "main"]).output().expect("git installed");
             assert!(out.status.success(), "git init: {}", String::from_utf8_lossy(&out.stderr));
         };
 

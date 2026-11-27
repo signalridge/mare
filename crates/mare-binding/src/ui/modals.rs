@@ -308,24 +308,18 @@ pub(super) fn install(lua: &Lua, ui: &Table, shared: &Arc<UiShared>) -> mlua::Re
                 if protected_arguments {
                     what.push_str(" (hidden registered values restored at execution; approve once)");
                 }
-                let reason_suffix = reason.as_deref().map(|r| format!("  {r}")).unwrap_or_default();
-                let title = format!("{who}Allow {tool}{what}?{reason_suffix}");
                 let sandbox_scope =
                     arguments.get("sandbox_permissions").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
-                let has_grant_scope = scoped || sandbox_scope.is_some();
-                let mut body = Vec::new();
-                if scoped {
-                    let max_scope = arguments.get("scope").and_then(|v| v.as_str()).unwrap_or("turn");
-                    let expiry = if max_scope == "session" {
-                        "up to this session (expires when session ends or permissions/sandbox change)"
-                    } else {
-                        "this turn (expires when this turn ends)"
-                    };
-                    body.push(format!("Grant scope: {expiry}"));
-                }
-                if has_grant_scope && let Some(r) = reason.as_deref().filter(|s| !s.trim().is_empty()) {
-                    body.push(r.to_string());
-                }
+                let body_reason = (scoped || sandbox_scope.is_some())
+                    .then(|| reason.as_deref().filter(|s| !s.trim().is_empty()))
+                    .flatten();
+                let reason_suffix = if body_reason.is_some() {
+                    String::new()
+                } else {
+                    reason.as_deref().map(|r| format!("  {r}")).unwrap_or_default()
+                };
+                let title = format!("{who}Allow {tool}{what}?{reason_suffix}");
+                let body = body_reason.map(|r| vec![r.to_string()]).unwrap_or_default();
                 let theme = s.theme.read().unwrap().clone();
                 let preview = match t.get::<Value>("preview")? {
                     Value::Nil => None,
@@ -342,8 +336,6 @@ pub(super) fn install(lua: &Lua, ui: &Table, shared: &Arc<UiShared>) -> mlua::Re
                                 .to_string(),
                             if scoped {
                                 Some("reused by later commands until this turn ends".to_string())
-                            } else if sandbox_scope.is_some() {
-                                Some("this call only; later commands return to baseline".to_string())
                             } else {
                                 None
                             },
@@ -357,7 +349,7 @@ pub(super) fn install(lua: &Lua, ui: &Table, shared: &Arc<UiShared>) -> mlua::Re
                                 "Allow for this session (a)"
                             }
                             .to_string(),
-                            if has_grant_scope {
+                            if scoped {
                                 Some("reused by later commands until session ends or permissions change".to_string())
                             } else {
                                 None
