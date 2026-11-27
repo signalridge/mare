@@ -1043,7 +1043,7 @@ async fn diff_command_and_ctrl_r_open_and_close_change_viewers() {
             .config(json!({ "logo": false, "plugins": { "permissions": { "enabled": false } } }));
         b.opts.mode = Mode::Tui;
         let owned = OwnedVt::new(env, b.opts, 90, 24).await;
-        let mut t = Term { owned, parser: vt100::Parser::new(nz(24), nz(90), 2000), ended: 0 };
+        let mut t = Term::from_vt(owned, vt100::Parser::new(nz(24), nz(90), 2000));
         t.step().await;
         t.submit("create demo.txt").await;
         t.idle().await;

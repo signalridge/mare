@@ -20,7 +20,7 @@ async fn start_with(env: TestEnv, load_init: bool, config: Value, args: Value) -
     b.opts.load_init = load_init;
     b.opts.mode = Mode::Tui;
     let owned = Box::pin(OwnedVt::new(env, b.opts, 110, 32)).await;
-    let mut t = Term { owned, parser: vt100::Parser::new(nz(32), nz(110), 2000), ended: 0 };
+    let mut t = Term::from_vt(owned, vt100::Parser::new(nz(32), nz(110), 2000));
     t.step().await;
     t
 }
@@ -915,7 +915,7 @@ async fn config_watch_notifies_reload_on_content_change_and_ignores_same_content
         let mut b = env.host().user_config(true).faux(json!([])).no_session();
         b.opts.mode = Mode::Tui;
         let vt = OwnedVt::new(env, b.opts, 120, 20).await;
-        let mut t = Term { owned: vt, parser: vt100::Parser::new(nz(20), nz(120), 2000), ended: 0 };
+        let mut t = Term::from_vt(vt, vt100::Parser::new(nz(20), nz(120), 2000));
         t.until_vt("startup", |t| !t.vt.starting()).await;
 
         // Re-writing identical content should not trigger a reload notice.
@@ -961,7 +961,7 @@ end
         b.opts.load_init = true;
         b.opts.mode = Mode::Tui;
         let owned = OwnedVt::new(env, b.opts, 110, 32).await;
-        let mut t = Term { owned, parser: vt100::Parser::new(nz(32), nz(110), 2000), ended: 0 };
+        let mut t = Term::from_vt(owned, vt100::Parser::new(nz(32), nz(110), 2000));
         t.until_vt("catalog fetch started", |t| {
             t.vt.host.lua().load("return mare._catalog_fetch_started == true").eval::<bool>().unwrap_or(false)
         })

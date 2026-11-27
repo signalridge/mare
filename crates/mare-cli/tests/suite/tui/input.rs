@@ -755,7 +755,7 @@ async fn notify_suppressed_while_focused_does_not_poison_dedupe_window() {
         }));
         b.opts.mode = Mode::Tui;
         let owned = OwnedVt::new(env, b.opts, 80, 16).await;
-        let mut t = Term { owned, parser: vt100::Parser::new(nz(16), nz(80), 2000), ended: 0 };
+        let mut t = Term::from_vt(owned, vt100::Parser::new(nz(16), nz(80), 2000));
         t.step().await;
         t.until_vt("startup settled", |t| t.vt.startup_finished()).await;
         expose(&t.vt.host);

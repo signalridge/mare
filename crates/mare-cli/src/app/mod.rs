@@ -176,6 +176,8 @@ struct App {
     external_editor: Option<input::external_editor::ExternalEditorSession>,
     /// Deferred screen clear requested while the terminal was handed off to another program
     deferred_clear: bool,
+    /// Number of `UiCmd::Clear` commands processed by the app.
+    clear_count: usize,
     /// Deferred OSC 2 window title requested while the terminal was handed off
     deferred_title: Option<String>,
     /// In-flight in-band Cursor Position Report (`CSI 6n`) used to re-anchor `renderer.top`
