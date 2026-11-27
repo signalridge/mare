@@ -5,7 +5,7 @@
 //! 3. CLI, `/model`, ACP, and Lua share one deterministic bare-id disambiguator independent of
 //!    provider registration order.
 //! 4. Family aliases pick the newest dated snapshot (and prefer undated alias over dated).
-//! 5. Effort is either sent in the request body (`kimi` -> `thinking`) or omitted for unmapped
+//! 5. Effort is either sent in the request body (`kimi-k3` -> `reasoning_effort`) or omitted for unmapped
 //!    routes, and `reasoning_format` / `effort_param` are validated at load time.
 //! 6. An open `/model` picker refreshes live when a background catalog fetch completes, and
 //!    selecting the newly added model sends the next request with it.
@@ -819,6 +819,143 @@ async fn reset_session_model_keeps_unresolvable_default_and_catalogless_default_
         let picked: String = eval(&h2, "return assert(LLM:current()).ref").await;
         assert_eq!(picked, "gw/z-default", "declared default_model must win over alphabetical override");
         h2.shutdown().await;
+    })
+    .await;
+}
+
+/// Regression: pending disk caches are hydrated before resolving non-exact refs so that
+/// (1) a bare id present statically on `alpha` and only in `beta`'s disk cache reports ambiguity
+/// identically across Lua `set_model`, `/model`, and headless `-p --model` with zero generation
+/// requests, and (2) `beta/typo` is rejected against `beta`'s pending disk-cached catalog.
+#[tokio::test]
+async fn pending_disk_cache_hydrates_before_bare_id_and_catalog_typo_resolution() {
+    local(async {
+        let server = MockServer::start().await;
+        let ok_sse = compat_events(&[compat_text("ok"), compat_stop()]);
+        server.route("/alpha/chat/completions", vec![Resp::sse(ok_sse.clone())]);
+        server.route("/beta/chat/completions", vec![Resp::sse(ok_sse)]);
+
+        let home = tempfile::tempdir().unwrap();
+        let cfg_dir = home.path().join("config");
+        let cache_dir = home.path().join("state/models-cache");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let cache_json = r#"{"fetched_at": 9999999999, "models": [{"id": "shared-cached", "context_window": 128000}]}"#;
+        std::fs::write(cache_dir.join("beta.json"), cache_json).unwrap();
+        let init_lua = format!(
+            r#"
+mare.provider("alpha", {{
+  wire = "openai-chat",
+  base_url = "{base}/alpha",
+  api_key = "k-alpha",
+  list_models = false,
+  models = {{ {{ model_id = "shared-cached", context_window = 128000, max_output = 4096 }} }},
+}})
+mare.provider("beta", {{
+  wire = "openai-chat",
+  base_url = "{base}/beta",
+  api_key = "k-beta",
+}})
+"#,
+            base = server.base,
+        );
+        std::fs::write(cfg_dir.join("init.lua"), &init_lua).unwrap();
+
+        // 1. In-process host (disk cache pending, ui/ready not emitted):
+        //    set_model("shared-cached") must report ambiguity, and set_model("beta/typo") must fail.
+        let env = TestEnv::new().await;
+        std::fs::create_dir_all(env.config_dir()).unwrap();
+        std::fs::write(env.config_dir().join("init.lua"), &init_lua).unwrap();
+        let env_cache_dir = env.home.path().join("state/models-cache");
+        std::fs::create_dir_all(&env_cache_dir).unwrap();
+        std::fs::write(env_cache_dir.join("beta.json"), cache_json).unwrap();
+        let h = env
+            .host()
+            .user_config(false)
+            .config(json!({ "plugins": { "provider-faux": { "enabled": false } } }))
+            .no_session()
+            .build()
+            .await;
+        global(&h, "LLM", h.service_table("llm").unwrap());
+
+        let (bare_ok, bare_err, typo_ok, typo_err): (bool, String, bool, String) = eval(
+            &h,
+            r#"
+            local ok1, e1 = pcall(function() return LLM:set_model("shared-cached", { save = false }) end)
+            local ok2, e2 = pcall(function() return LLM:set_model("beta/typo", { save = false }) end)
+            return ok1, tostring(type(e1) == "table" and e1.message or e1),
+              ok2, tostring(type(e2) == "table" and e2.message or e2)
+            "#,
+        )
+        .await;
+        assert!(!bare_ok, "bare id across static + pending disk cache must be rejected as ambiguous");
+        assert!(
+            bare_err.contains("alpha/shared-cached, beta/shared-cached"),
+            "bare id error must list both static and disk-cached candidates: {bare_err}"
+        );
+        assert!(!typo_ok, "typo on provider with pending disk cache must be rejected");
+        assert!(
+            typo_err.contains("unknown model: beta/typo") && typo_err.contains("not in beta catalog"),
+            "typo error must name beta/typo and beta catalog: {typo_err}"
+        );
+        h.shutdown().await;
+        drop(env);
+
+        // 2. Headless CLI `-p --model shared-cached` (cold start, no ui/ready):
+        //    must fail with sorted candidates and send 0 generation requests.
+        let home_path = home.path().to_path_buf();
+        let cfg_dir_cli = cfg_dir.clone();
+        let cli_bare = tokio::task::spawn_blocking(move || {
+            mare_cmd()
+                .env("MARE_HOME", &home_path)
+                .env("MARE_CONFIG_DIR", &cfg_dir_cli)
+                .env("MARE_STATE_DIR", home_path.join("state"))
+                .env("MARE_DATA_DIR", home_path.join("data"))
+                .env_remove("MARE_MODEL")
+                .current_dir(&home_path)
+                .stdin(Stdio::null())
+                .args(["-p", "--set", "plugins.provider-faux.enabled=false", "--model", "shared-cached", "hi"])
+                .output()
+                .unwrap()
+        })
+        .await
+        .unwrap();
+        let cli_bare_out =
+            format!("{}\n{}", String::from_utf8_lossy(&cli_bare.stdout), String::from_utf8_lossy(&cli_bare.stderr));
+        assert!(!cli_bare.status.success(), "headless bare id must fail as ambiguous: {cli_bare_out}");
+        assert!(
+            cli_bare_out.contains("alpha/shared-cached, beta/shared-cached"),
+            "headless bare id must list sorted candidates: {cli_bare_out}"
+        );
+
+        // 3. Headless CLI `-p --model beta/typo`: must fail against beta's pending disk cache.
+        let home_path2 = home.path().to_path_buf();
+        let cfg_dir_cli2 = cfg_dir.clone();
+        let cli_typo = tokio::task::spawn_blocking(move || {
+            mare_cmd()
+                .env("MARE_HOME", &home_path2)
+                .env("MARE_CONFIG_DIR", &cfg_dir_cli2)
+                .env("MARE_STATE_DIR", home_path2.join("state"))
+                .env("MARE_DATA_DIR", home_path2.join("data"))
+                .env_remove("MARE_MODEL")
+                .current_dir(&home_path2)
+                .stdin(Stdio::null())
+                .args(["-p", "--set", "plugins.provider-faux.enabled=false", "--model", "beta/typo", "hi"])
+                .output()
+                .unwrap()
+        })
+        .await
+        .unwrap();
+        let cli_typo_out =
+            format!("{}\n{}", String::from_utf8_lossy(&cli_typo.stdout), String::from_utf8_lossy(&cli_typo.stderr));
+        assert!(!cli_typo.status.success(), "headless beta/typo must fail: {cli_typo_out}");
+        assert!(
+            cli_typo_out.contains("unknown model: beta/typo"),
+            "headless beta/typo must report unknown model: {cli_typo_out}"
+        );
+
+        assert_eq!(server.count("/alpha/chat/completions"), 0, "alpha must receive 0 requests");
+        assert_eq!(server.count("/beta/chat/completions"), 0, "beta must receive 0 requests");
     })
     .await;
 }

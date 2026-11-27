@@ -46,22 +46,15 @@ function M.new(env)
 		if not env.active() then
 			return
 		end
-		local m = (type(event) == "table" and event.model) or env.current()
-		if not m and env.ensure_loaded and env.selected_model then
+		local explicit_model = type(event) == "table" and event.model or nil
+		if not explicit_model and env.ensure_loaded and env.selected_model then
 			local sel = env.selected_model()
 			if type(sel) == "string" and sel ~= "" then
 				local prov = string.match(sel, "^([^/]+)/")
-				local changed
-				if prov then
-					changed = env.ensure_loaded(prov)
-				else
-					changed = env.ensure_loaded()
-				end
-				if changed then
-					m = env.current()
-				end
+				env.ensure_loaded(prov and env.provider(prov) and prov or nil)
 			end
 		end
+		local m = explicit_model or env.current()
 		if not m or not m.ref then
 			return
 		end

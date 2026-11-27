@@ -585,7 +585,7 @@ return function(D)
 		end
 		if prov and providers[prov] then
 			if provider_has_catalog(prov) then
-				return nil, ("unknown model %q (not in %s catalog)"):format(ref, prov)
+				return nil, ("unknown model: %s (not in %s catalog)"):format(ref, prov)
 			end
 			local p = providers[prov]
 			local m = {
@@ -623,26 +623,17 @@ return function(D)
 				("ambiguous model %q: matches %s — specify provider/model"):format(ref, table.concat(refs, ", "))
 		end
 		if prov then
-			return nil, ("unknown model %q (unknown provider %q)"):format(ref, prov)
+			return nil, ("unknown model: %s (unknown provider %q)"):format(ref, prov)
 		end
 		return nil, "unknown model: " .. ref
 	end
 
 	local function resolve_ref_hydrated(caller, ref)
-		local m, why = resolve_ref(caller, ref)
-		if not m and type(ref) == "string" and ref ~= "" then
+		if type(ref) == "string" and ref ~= "" and not models[ref] then
 			local prov = string.match(ref, "^([^/]+)/")
-			local changed
-			if prov and providers[prov] then
-				changed = D.catalog.ensure_loaded(prov)
-			else
-				changed = D.catalog.ensure_loaded()
-			end
-			if changed then
-				m, why = resolve_ref(caller, ref)
-			end
+			D.catalog.ensure_loaded(prov and providers[prov] and prov or nil)
 		end
-		return m, why
+		return resolve_ref(caller, ref)
 	end
 
 	function llm.resolve(_, caller, ref)
