@@ -103,7 +103,7 @@ provider 错误和持久化失败会作为 JSON-RPC 内部错误返回，绝不�
 ## 局限
 
 - **没有会话模式。** 服务器不声明 ACP 会话模式，也不实现 `session/set_mode`。
-- **仅 `session/new` 支持额外目录。** `session/new` 支持 `additionalDirectories`（`cwd` 之外实际存在的物理目录，在恢复会话时重新校验）；`session/load` 和 `session/resume` 仍会拒绝非空的 `additionalDirectories`。
+- **额外目录校验。** `session/new` 支持 `additionalDirectories`（`cwd` 之外实际存在的物理目录，在恢复会话时重新校验）；`session/load` 和 `session/resume` 接受已记录且通过重新校验的 `additionalDirectories`，对未记录或失效的目录返回 `Invalid params`。
 - **没有音频提示词。** 音频块和嵌入的二进制资源会被拒绝。
 - **没有客户端的文件或终端方法。** mare 自己读写文件并运行命令。它不会调用编辑器的 `fs/*` 或 `terminal/*` 方法。
 - **不要求认证。** `initialize` 不返回认证方式，收到 `authenticate` 时返回空成功响应。

@@ -103,7 +103,7 @@ ACP クライアントはエージェントをサブプロセスとして起動�
 ## 制限事項
 
 - **セッションモードはありません。** サーバーは ACP のセッションモードを公開せず、`session/set_mode` を実装していません。
-- **追加ディレクトリは `session/new` のみ対応。** `session/new` では `additionalDirectories`（`cwd` 外の実在する物理ディレクトリ、再開時に再検証）を指定できますが、`session/load` と `session/resume` では空でない `additionalDirectories` は拒否されます。
+- **追加ディレクトリの検証。** `session/new` は `additionalDirectories`（`cwd` 外の実在する物理ディレクトリ、再開時に再検証）を受け付けます。`session/load` と `session/resume` は再検証を通った記録済みの `additionalDirectories` を受け付け、未記録または無効なディレクトリには `Invalid params` を返します。
 - **音声プロンプトはありません。** 音声ブロックと埋め込みバイナリリソースは拒否されます。
 - **クライアントのファイル操作やターミナルのメソッドはありません。** mare は自分でファイルを読み書きし、コマンドを実行します。エディターの `fs/*` や `terminal/*` メソッドは呼び出しません。
 - **認証は不要です。** `initialize` は認証方式を返さず、`authenticate` は空の成功応答を返します。

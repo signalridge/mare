@@ -103,7 +103,7 @@ The `kind` of a tool call is derived from kernel tool metadata (`execute` when `
 ## Limitations
 
 - **No session modes.** The server does not advertise ACP session modes and does not implement `session/set_mode`.
-- **Additional directories on `session/new` only.** `session/new` accepts `additionalDirectories` (existing physical directories outside `cwd`, revalidated on resume); a nonempty `additionalDirectories` is refused on `session/load` and `session/resume`.
+- **Additional directories validation.** `session/new` accepts `additionalDirectories` (existing physical directories outside `cwd`, revalidated on resume). `session/load` and `session/resume` accept recorded `additionalDirectories` that pass revalidation and refuse unrecorded or invalid directories with `Invalid params`.
 - **No audio prompts.** Audio blocks and embedded binary resources are refused.
 - **No client file or terminal methods.** mare reads and writes files and runs commands itself. It does not call the editor's `fs/*` or `terminal/*` methods.
 - **No authentication required.** `initialize` returns no auth methods, and `authenticate` returns an empty success response.
