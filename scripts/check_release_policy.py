@@ -255,13 +255,7 @@ def check_companion_workflows_and_files(root: pathlib.Path) -> list[str]:
     if not ci_wf.is_file():
         errors.append("missing .github/workflows/ci.yml")
 
-    nightly_wf = root / ".github" / "workflows" / "accept-nightly.yml"
-    if not nightly_wf.is_file():
-        errors.append("missing .github/workflows/accept-nightly.yml")
-    else:
-        nightly_text = nightly_wf.read_text(encoding="utf-8")
-        if "refs/heads/main:refs/remotes/origin/main" not in nightly_text:
-            errors.append("accept-nightly.yml must explicitly fetch origin/main for detached SHA checkouts")
+    errors.extend(check_release_candidate_workflow(root))
 
     nfpm_action = root / ".github" / "actions" / "setup-nfpm" / "action.yml"
     if not nfpm_action.is_file():
@@ -330,6 +324,41 @@ def check_companion_workflows_and_files(root: pathlib.Path) -> list[str]:
     return errors
 
 
+def check_release_candidate_workflow(root: pathlib.Path) -> list[str]:
+    errors: list[str] = []
+    rc_wf = root / ".github" / "workflows" / "release-candidate.yml"
+    if not rc_wf.is_file():
+        return ["missing .github/workflows/release-candidate.yml"]
+    rc_text = rc_wf.read_text(encoding="utf-8")
+    for forbidden, reason in (
+        ("schedule:", "must not have a scheduled trigger"),
+        ("cron:", "must not have a cron schedule"),
+        ("workflow_call:", "must be workflow_dispatch only"),
+        ("--allow-missing-tools", "must not pass --allow-missing-tools"),
+        ("--sandbox-degraded", "must not pass --sandbox-degraded"),
+        ("--steps", "must run full accept.sh --release without --steps"),
+    ):
+        if forbidden in rc_text:
+            errors.append(f"release-candidate.yml {reason} ({forbidden!r})")
+    for required, reason in (
+        ("workflow_dispatch:", "must trigger via workflow_dispatch"),
+        ("group: rc-${{ inputs.sha }}", "must group runs by rc-${{ inputs.sha }}"),
+        ("cancel-in-progress: false", "must not cancel in-progress runs for the same SHA"),
+        ("refs/heads/main:refs/remotes/origin/main", "must explicitly fetch origin/main for detached SHA checkouts"),
+        ("scripts/accept.sh --release", "must run scripts/accept.sh --release"),
+        ("if: always()", "must upload report/JUnit artifacts on always()"),
+        ("actions/upload-artifact@", "must upload per-platform acceptance artifacts"),
+    ):
+        if required not in rc_text:
+            errors.append(f"release-candidate.yml {reason} (missing {required!r})")
+    accept_block = extract_job_block(rc_text, "accept")
+    if not accept_block:
+        errors.append("release-candidate.yml missing accept job")
+    elif "timeout-minutes:" not in accept_block:
+        errors.append("release-candidate.yml accept job must set explicit timeout-minutes")
+    return errors
+
+
 def check_ci_version_files(root: pathlib.Path) -> list[str]:
     errors: list[str] = []
 
@@ -365,8 +394,11 @@ def check_ci_version_files(root: pathlib.Path) -> list[str]:
             if not re.fullmatch(r"[0-9a-f]{64}", nfpm_sha):
                 errors.append(f".github/ci-tools.json: invalid sha256 for 'nfpm.sha256': {nfpm_sha!r}")
         lua_val = str(tools.get("lua", ""))
-        if not re.fullmatch(r"\d+\.\d+(?:\.\d+)?", lua_val):
-            errors.append(f".github/ci-tools.json: invalid lua version: {lua_val!r}")
+        if not re.fullmatch(r"\d+\.\d+\.\d+", lua_val):
+            errors.append(f".github/ci-tools.json: lua must pin exact X.Y.Z version, got {lua_val!r}")
+        lua_sha = str(tools.get("lua_sha256", ""))
+        if not re.fullmatch(r"[0-9a-f]{64}", lua_sha):
+            errors.append(f".github/ci-tools.json: invalid sha256 for 'lua_sha256': {lua_sha!r}")
 
     wf_dir = root / ".github" / "workflows"
     forbidden_patterns = (
@@ -685,6 +717,26 @@ class ReleasePolicySelfTests(unittest.TestCase):
                     self.assertIn(f"tag_name={tag}", out.read_text(encoding="utf-8"))
                 else:
                     self.assertNotEqual(res.returncode, 0, f"tag {tag!r} should be rejected")
+
+    def test_release_candidate_workflow_policy(self):
+        real_rc = (self._repo_root() / ".github" / "workflows" / "release-candidate.yml").read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            wf = root / ".github" / "workflows"
+            wf.mkdir(parents=True)
+            rc_path = wf / "release-candidate.yml"
+            rc_path.write_text(real_rc, encoding="utf-8")
+            self.assertEqual(check_release_candidate_workflow(root), [])
+
+            for needle, snippet in (
+                ("schedule:", real_rc.replace("workflow_dispatch:", "schedule:\n    - cron: '0 19 * * *'\n  workflow_dispatch:")),
+                ("timeout-minutes", real_rc.replace("    timeout-minutes: 330\n", "")),
+                ("--sandbox-degraded", real_rc.replace("sh scripts/accept.sh --release", "sh scripts/accept.sh --release --sandbox-degraded")),
+            ):
+                with self.subTest(case=needle):
+                    rc_path.write_text(snippet, encoding="utf-8")
+                    errs = check_release_candidate_workflow(root)
+                    self.assertTrue(any(needle in e for e in errs), errs)
 
 
 def main() -> int:

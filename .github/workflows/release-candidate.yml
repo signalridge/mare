@@ -1,0 +1,426 @@
+name: Release Candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Expected full 40-character commit SHA (release PR head or frozen main commit)"
+        required: true
+        type: string
+      pr:
+        description: "Release PR number (optional; omit when validating a frozen main commit directly)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: rc-${{ inputs.sha }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  accept:
+    name: accept (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    steps:
+      - name: Validate candidate SHA and optional release PR
+        id: candidate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_SHA: ${{ inputs.sha }}
+          INPUT_PR: ${{ inputs.pr }}
+        run: |
+          set -euo pipefail
+          start_epoch="$(date +%s)"
+          echo "start_epoch=${start_epoch}" >> "$GITHUB_OUTPUT"
+          if [[ ! "$INPUT_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            printf '::error::inputs.sha must be a full 40-character lowercase hex SHA, got %q\n' "$INPUT_SHA"
+            exit 1
+          fi
+          pr_num="${INPUT_PR#\#}"
+          if [[ -n "$pr_num" ]]; then
+            if [[ ! "$pr_num" =~ ^[1-9][0-9]*$ ]]; then
+              printf '::error::inputs.pr must be a positive integer PR number, got %q\n' "$INPUT_PR"
+              exit 1
+            fi
+            pr_json="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${pr_num}")"
+            pr_state="$(jq -er '.state' <<<"$pr_json")"
+            pr_head_sha="$(jq -er '.head.sha' <<<"$pr_json")"
+            pr_head_ref="$(jq -er '.head.ref' <<<"$pr_json")"
+            pr_base_ref="$(jq -er '.base.ref' <<<"$pr_json")"
+            pr_base_sha="$(jq -er '.base.sha' <<<"$pr_json")"
+            if [[ "$pr_state" != "open" ]]; then
+              printf '::error::Release PR #%s is %s (expected open)\n' "$pr_num" "$pr_state"
+              exit 1
+            fi
+            if [[ "$pr_base_ref" != "main" ]]; then
+              printf '::error::Release PR #%s base is %s (expected main)\n' "$pr_num" "$pr_base_ref"
+              exit 1
+            fi
+            if [[ "$pr_head_sha" != "$INPUT_SHA" ]]; then
+              printf '::error::Release PR #%s head is %s, expected %s\n' "$pr_num" "$pr_head_sha" "$INPUT_SHA"
+              exit 1
+            fi
+            {
+              echo "pr=${pr_num}"
+              echo "pr_head_ref=${pr_head_ref}"
+              echo "pr_base_sha=${pr_base_sha}"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify candidate commit and fetch origin/main
+        id: git_info
+        shell: bash
+        env:
+          INPUT_SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          head_sha="$(git rev-parse --verify 'HEAD^{commit}')"
+          if [[ "$head_sha" != "$INPUT_SHA" ]]; then
+            printf '::error::Checked-out commit %s differs from expected %s\n' "$head_sha" "$INPUT_SHA"
+            exit 1
+          fi
+          tree_sha="$(git rev-parse --verify 'HEAD^{tree}')"
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          {
+            echo "sha=${head_sha}"
+            echo "tree=${tree_sha}"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: ./.github/actions/setup-rust
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+
+      - name: Load pinned CI tool versions
+        id: tools
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib
+          data = json.loads(pathlib.Path(".github/ci-tools.json").read_text(encoding="utf-8"))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              for key in ("stylua", "luals", "ast_grep", "lua", "lua_sha256"):
+                  fh.write(f"{key}={data[key]}\n")
+          PY
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2
+        with:
+          tool: nextest
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2
+        with:
+          tool: cargo-deny
+
+      - name: Install stylua and ast-grep
+        shell: bash
+        env:
+          STYLUA_VER: ${{ steps.tools.outputs.stylua }}
+          AST_GREP_VER: ${{ steps.tools.outputs.ast_grep }}
+        run: |
+          set -euo pipefail
+          case "${{ runner.os }}-${{ runner.arch }}" in
+            Linux-X64)   stylua_asset="stylua-linux-x86_64.zip";   sg_asset="app-x86_64-unknown-linux-gnu.zip" ;;
+            Linux-ARM64) stylua_asset="stylua-linux-aarch64.zip";  sg_asset="app-aarch64-unknown-linux-gnu.zip" ;;
+            macOS-ARM64) stylua_asset="stylua-macos-aarch64.zip";  sg_asset="app-aarch64-apple-darwin.zip" ;;
+            macOS-X64)   stylua_asset="stylua-macos-x86_64.zip";   sg_asset="app-x86_64-apple-darwin.zip" ;;
+            Windows-X64) stylua_asset="stylua-windows-x86_64.zip"; sg_asset="app-x86_64-pc-windows-msvc.zip" ;;
+            *) echo "unsupported runner: ${{ runner.os }}-${{ runner.arch }}" >&2; exit 1 ;;
+          esac
+          dest="${RUNNER_TOOL_CACHE}/lua-tools/bin"
+          mkdir -p "$dest"
+          curl -fsSL -o "${RUNNER_TEMP}/stylua.zip" \
+            "https://github.com/JohnnyMorganz/StyLua/releases/download/v${STYLUA_VER}/${stylua_asset}"
+          python3 -m zipfile -e "${RUNNER_TEMP}/stylua.zip" "$dest"
+          curl -fsSL -o "${RUNNER_TEMP}/ast-grep.zip" \
+            "https://github.com/ast-grep/ast-grep/releases/download/${AST_GREP_VER}/${sg_asset}"
+          python3 -m zipfile -e "${RUNNER_TEMP}/ast-grep.zip" "$dest"
+          rm -f "${RUNNER_TEMP}/stylua.zip" "${RUNNER_TEMP}/ast-grep.zip"
+          if [ "${{ runner.os }}" != "Windows" ]; then
+            chmod +x "$dest"/stylua "$dest"/ast-grep "$dest"/sg 2>/dev/null || chmod +x "$dest"/*
+          fi
+          echo "$dest" >> "$GITHUB_PATH"
+
+      - if: runner.os == 'Linux'
+        name: Install system dependencies (lua, bubblewrap)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends lua5.4 bubblewrap
+          if ! command -v lua >/dev/null 2>&1; then
+            sudo ln -sf "$(command -v lua5.4)" /usr/local/bin/lua
+          fi
+
+      - if: runner.os == 'macOS'
+        name: Install lua (macOS)
+        run: brew install lua
+
+      - if: runner.os == 'Windows'
+        name: Install lua (Windows)
+        shell: pwsh
+        env:
+          LUA_VER: ${{ steps.tools.outputs.lua }}
+          LUA_SHA256: ${{ steps.tools.outputs.lua_sha256 }}
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $ver = $env:LUA_VER
+          $expectedSha = $env:LUA_SHA256.ToLowerInvariant()
+          $tarPath = Join-Path $env:RUNNER_TEMP "lua-$ver.tar.gz"
+          $buildRoot = Join-Path $env:RUNNER_TEMP "lua-build-$ver"
+          $dest = Join-Path $env:RUNNER_TOOL_CACHE "lua\$ver\bin"
+          if (Test-Path $buildRoot) { Remove-Item -Recurse -Force $buildRoot }
+          New-Item -ItemType Directory -Force -Path $buildRoot, $dest | Out-Null
+          $url = "https://www.lua.org/ftp/lua-$ver.tar.gz"
+          Invoke-WebRequest -Uri $url -OutFile $tarPath
+          $actualSha = (Get-FileHash -LiteralPath $tarPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualSha -ne $expectedSha) {
+            throw "SHA256 mismatch for ${url}: expected $expectedSha, got $actualSha"
+          }
+          tar.exe -xzf $tarPath -C $buildRoot
+          if ($LASTEXITCODE -ne 0) { throw "Failed to extract $tarPath" }
+          $srcDir = Join-Path $buildRoot "lua-$ver\src"
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path $vswhere)) { throw "vswhere.exe not found at $vswhere" }
+          $vsPath = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath | Select-Object -First 1
+          if (-not $vsPath) { throw 'Visual Studio C++ tools not found' }
+          $vsPath = $vsPath.Trim()
+          $vsDevCmd = Join-Path $vsPath 'Common7\Tools\VsDevCmd.bat'
+          if (-not (Test-Path $vsDevCmd)) { throw "VsDevCmd.bat not found at $vsDevCmd" }
+          $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'amd64' }
+          $sources = (
+            Get-ChildItem -LiteralPath $srcDir -Filter '*.c' |
+              Where-Object { $_.Name -notin @('luac.c', 'onelua.c') } |
+              Sort-Object Name |
+              ForEach-Object { $_.Name }
+          ) -join ' '
+          $outExe = Join-Path $dest 'lua.exe'
+          $cmdLine = "call `"$vsDevCmd`" -arch=$arch -host_arch=amd64 -no_logo >nul && " +
+            "cl /nologo /MD /O2 /W3 /D_CRT_SECURE_NO_DEPRECATE /Fe:`"$outExe`" $sources"
+          Push-Location $srcDir
+          try {
+            cmd.exe /d /c $cmdLine
+            if ($LASTEXITCODE -ne 0) { throw "cl.exe failed compiling lua $ver" }
+          } finally {
+            Pop-Location
+            Remove-Item -LiteralPath $tarPath -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $buildRoot -Recurse -Force -ErrorAction SilentlyContinue
+          }
+          $dest | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Verify lua for doc generator
+        shell: bash
+        env:
+          EXPECTED_LUA_VER: ${{ steps.tools.outputs.lua }}
+          RUNNER_OS_NAME: ${{ runner.os }}
+        run: |
+          set -euo pipefail
+          lua_v="$(lua -v 2>&1)"
+          echo "$lua_v"
+          if [[ "$RUNNER_OS_NAME" == "Windows" ]] && [[ "$lua_v" != "Lua ${EXPECTED_LUA_VER}"* ]]; then
+            printf '::error::Expected Lua %s on Windows, got %q\n' "$EXPECTED_LUA_VER" "$lua_v"
+            exit 1
+          fi
+          lua -e "print(_VERSION)"
+          printf 'print("lua-stdin-ok")\n' | lua -
+          python3 - <<'PY'
+          import pathlib, sys
+          sys.path.insert(0, "scripts")
+          import docs_keymaps, gen_options, plugin_options
+          opts = gen_options.load_options("lua")
+          assert opts, "gen_options.load_options returned empty"
+          schemas = plugin_options.load_plugin_schemas("lua")
+          assert schemas, "plugin_options.load_plugin_schemas returned empty"
+          linux_map, windows_map = docs_keymaps._read_default_os_bindings(
+              pathlib.Path("crates/mare-plugin/preset"), "lua"
+          )
+          assert linux_map and windows_map, "docs_keymaps._read_default_os_bindings returned empty"
+          print(f"lua doc probes ok: {len(opts)} core options, {len(schemas)} plugins")
+          PY
+
+      - name: Install lua-language-server
+        shell: bash
+        env:
+          LUALS_VER: ${{ steps.tools.outputs.luals }}
+        run: |
+          set -euo pipefail
+          case "${{ runner.os }}-${{ runner.arch }}" in
+            Linux-X64)   asset="lua-language-server-${LUALS_VER}-linux-x64.tar.gz" ;;
+            Linux-ARM64) asset="lua-language-server-${LUALS_VER}-linux-arm64.tar.gz" ;;
+            macOS-ARM64) asset="lua-language-server-${LUALS_VER}-darwin-arm64.tar.gz" ;;
+            macOS-X64)   asset="lua-language-server-${LUALS_VER}-darwin-x64.tar.gz" ;;
+            Windows-X64) asset="lua-language-server-${LUALS_VER}-win32-x64.zip" ;;
+            *) echo "unsupported runner: ${{ runner.os }}-${{ runner.arch }}" >&2; exit 1 ;;
+          esac
+          dest="${RUNNER_TOOL_CACHE}/luals/${LUALS_VER}"
+          mkdir -p "$dest"
+          url="https://github.com/LuaLS/lua-language-server/releases/download/${LUALS_VER}/${asset}"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            curl -fsSL "$url" -o "$dest/$asset"
+            unzip -q "$dest/$asset" -d "$dest"
+          else
+            curl -fsSL "$url" | tar -xz -C "$dest"
+          fi
+          echo "$dest/bin" >> "$GITHUB_PATH"
+
+      - name: Checkout cordis-lua for vendor check
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="$(sed -n 's/^repo //p' crates/mare-kernel/lua/cordis/VENDOR)"
+          ref="$(sed -n 's/^ref //p' crates/mare-kernel/lua/cordis/VENDOR)"
+          commit="$(sed -n 's/^commit //p' crates/mare-kernel/lua/cordis/VENDOR)"
+          dest="${{ runner.temp }}/cordis-lua"
+          rm -rf "$dest"
+          git init "$dest"
+          git -C "$dest" remote add origin "$repo"
+          git -C "$dest" fetch --depth 1 origin "$commit"
+          git -C "$dest" checkout --detach FETCH_HEAD
+          if [ "$ref" != "$commit" ]; then
+            git -C "$dest" fetch --depth 1 origin "$ref:refs/remotes/origin/$ref" || true
+          fi
+          echo "CORDIS_LUA_REPO=$dest" >> "$GITHUB_ENV"
+
+      - name: Provision private tmpfs root (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          tmp_root="$(mktemp -d /tmp/mare-accept-XXXXXX)"
+          sudo mount -t tmpfs -o size=2G,mode=0700,uid="$(id -u)",gid="$(id -g)" tmpfs "$tmp_root"
+          echo "MARE_ACCEPT_TMPDIR=$tmp_root" >> "$GITHUB_ENV"
+
+      - name: Run release acceptance
+        id: run_accept
+        shell: bash
+        run: |
+          export XDG_CACHE_HOME="${RUNNER_TEMP}/xdg-cache"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            git config --global core.longpaths true
+          fi
+          sh scripts/accept.sh --release
+
+      - name: Clean up private tmpfs root (Linux)
+        if: always() && runner.os == 'Linux'
+        shell: bash
+        run: |
+          if [ -n "${MARE_ACCEPT_TMPDIR:-}" ] && [ -d "$MARE_ACCEPT_TMPDIR" ]; then
+            sudo umount "$MARE_ACCEPT_TMPDIR" || true
+            rmdir "$MARE_ACCEPT_TMPDIR" || true
+          fi
+
+      - name: Prepare acceptance artifacts and summary
+        if: always()
+        shell: bash
+        env:
+          CANDIDATE_SHA: ${{ steps.git_info.outputs.sha || inputs.sha }}
+          CANDIDATE_TREE: ${{ steps.git_info.outputs.tree || 'unknown' }}
+          PR_NUM: ${{ steps.candidate.outputs.pr || inputs.pr }}
+          PR_HEAD_REF: ${{ steps.candidate.outputs.pr_head_ref }}
+          PR_BASE_SHA: ${{ steps.candidate.outputs.pr_base_sha }}
+          MATRIX_OS: ${{ matrix.os }}
+          START_EPOCH: ${{ steps.candidate.outputs.start_epoch }}
+          ACCEPT_OUTCOME: ${{ steps.run_accept.outcome }}
+        run: |
+          set -euo pipefail
+          end_epoch="$(date +%s)"
+          if [[ "$START_EPOCH" =~ ^[0-9]+$ ]]; then
+            duration="$((end_epoch - START_EPOCH))s"
+          else
+            duration="unknown"
+          fi
+
+          art_dir="${RUNNER_TEMP}/rc-artifacts"
+          rm -rf "$art_dir"
+          mkdir -p "$art_dir"
+
+          report_dir="${RUNNER_TEMP}/xdg-cache/mare/acceptance"
+          report_src="$(
+            find "$report_dir" -maxdepth 1 -type f -name '*.md' 2>/dev/null |
+              sort |
+              tail -n 1 || true
+          )"
+          if [[ -n "$report_src" && -f "$report_src" ]]; then
+            cp "$report_src" "$art_dir/acceptance-report.md"
+            if [[ "$ACCEPT_OUTCOME" == "success" ]]; then
+              verdict="PASS"
+            else
+              verdict="FAIL"
+            fi
+          else
+            if [[ "$ACCEPT_OUTCOME" == "skipped" || "$ACCEPT_OUTCOME" == "cancelled" ]]; then
+              verdict="acceptance not started"
+            else
+              verdict="FAIL (acceptance report missing)"
+            fi
+            {
+              echo "## ${MATRIX_OS}: ${verdict}"
+              echo
+              echo "- sha: \`${CANDIDATE_SHA}\`"
+              echo "- tree: \`${CANDIDATE_TREE}\`"
+              if [[ -n "$PR_NUM" ]]; then
+                echo "- pr: #${PR_NUM} (${PR_HEAD_REF:-unknown}, base \`${PR_BASE_SHA:-unknown}\`)"
+              fi
+              echo "- run: ${GITHUB_RUN_ID} (attempt ${GITHUB_RUN_ATTEMPT})"
+              echo "- duration: ${duration}"
+              echo "- accept step outcome: ${ACCEPT_OUTCOME}"
+            } > "$art_dir/acceptance-report.md"
+          fi
+
+          junit_src="target/nextest/gate/junit.xml"
+          if [[ -f "$junit_src" ]]; then
+            cp "$junit_src" "$art_dir/junit.xml"
+          fi
+
+          while IFS= read -r line; do
+            step_name="$(printf '%s' "$line" | sed -n 's/^| \([^|]*\) | FAIL.*/\1/p')"
+            if [[ -n "$step_name" ]]; then
+              printf '::error::Release acceptance failed at sub-step: %s\n' "$step_name"
+            fi
+          done < "$art_dir/acceptance-report.md"
+
+          {
+            echo "### Release Candidate (${MATRIX_OS}): ${verdict}"
+            echo
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| sha | \`${CANDIDATE_SHA}\` |"
+            echo "| tree | \`${CANDIDATE_TREE}\` |"
+            if [[ -n "$PR_NUM" ]]; then
+              echo "| pr | #${PR_NUM} |"
+            fi
+            echo "| os | \`${MATRIX_OS}\` (${{ runner.os }} / ${{ runner.arch }}) |"
+            echo "| run / attempt | ${GITHUB_RUN_ID} / ${GITHUB_RUN_ATTEMPT} |"
+            echo "| verdict | ${verdict} |"
+            echo "| duration | ${duration} |"
+            echo
+            cat "$art_dir/acceptance-report.md"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload acceptance artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: rc-acceptance-${{ matrix.os }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rc-artifacts/
+          if-no-files-found: error
+          retention-days: 30

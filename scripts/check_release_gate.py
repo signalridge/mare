@@ -85,13 +85,39 @@ def evaluate_jobs(jobs: list[dict]) -> list[str]:
     return errors
 
 
-def check_runs(runs: list[dict], fetch_jobs) -> tuple[bool, list[str]]:
+def check_runs(
+    runs: list[dict],
+    fetch_jobs,
+    *,
+    expected_commit: str | None = None,
+    required_event: str = "push",
+    required_branch: str = "main",
+) -> tuple[bool, list[str]]:
     if not runs:
         return False, ["no ci.yml workflow runs found for commit"]
 
     last_errors: list[str] = []
+    matching_runs: list[dict] = []
+    for run in runs:
+        run_id = run.get("databaseId")
+        if expected_commit is not None:
+            event = run.get("event")
+            branch = run.get("headBranch")
+            head_sha = run.get("headSha")
+            if event != required_event or branch != required_branch or head_sha != expected_commit:
+                last_errors = [
+                    f"ci.yml run {run_id} does not match event={required_event!r}, "
+                    f"branch={required_branch!r}, head_sha={expected_commit!r} "
+                    f"(got event={event!r}, branch={branch!r}, head_sha={head_sha!r})"
+                ]
+                continue
+        matching_runs.append(run)
+
+    if not matching_runs:
+        return False, last_errors
+
     # Prefer the most recent runs first
-    sorted_runs = sorted(runs, key=lambda r: r.get("createdAt", ""), reverse=True)
+    sorted_runs = sorted(matching_runs, key=lambda r: r.get("createdAt", ""), reverse=True)
     for run in sorted_runs:
         run_id = run.get("databaseId")
         if run.get("status") != "completed":
@@ -112,6 +138,7 @@ def wait_for_runs(
     list_runs,
     fetch_jobs,
     *,
+    expected_commit: str | None = None,
     wait_minutes: float = 0.0,
     poll_interval: float = 30.0,
     monotonic=time.monotonic,
@@ -120,11 +147,23 @@ def wait_for_runs(
     deadline = monotonic() + max(0.0, wait_minutes) * 60.0
     while True:
         runs = list_runs()
-        ok, msgs = check_runs(runs, fetch_jobs)
+        ok, msgs = check_runs(runs, fetch_jobs, expected_commit=expected_commit)
         if ok:
             return True, msgs
 
-        pending = [r for r in runs if r.get("status") != "completed"]
+        pending = [
+            r
+            for r in runs
+            if r.get("status") != "completed"
+            and (
+                expected_commit is None
+                or (
+                    r.get("event") == "push"
+                    and r.get("headBranch") == "main"
+                    and r.get("headSha") == expected_commit
+                )
+            )
+        ]
         if not runs or pending:
             remaining = deadline - monotonic()
             if remaining <= 0:
@@ -163,21 +202,6 @@ def _extract_job_block(ci_text: str, job_key: str) -> str:
             end = idx
             break
     return "\n".join(lines[start:end])
-
-
-def check_ci_workflow_accept_tools(ci_text: str) -> list[str]:
-    accept_block = _extract_job_block(ci_text, "accept")
-    if not accept_block:
-        return ["accept-nightly.yml is missing 'accept' job"]
-    errors: list[str] = []
-    for tool in ("stylua", "ast-grep", "lua-language-server"):
-        if tool not in accept_block:
-            errors.append(f"accept-nightly.yml accept job must install {tool} so accept.sh --release never skips it")
-    if "--allow-missing-tools" in accept_block:
-        errors.append("accept-nightly.yml accept job must not pass --allow-missing-tools")
-    if "scripts/accept.sh --release" not in accept_block:
-        errors.append("accept-nightly.yml accept job must run scripts/accept.sh --release")
-    return errors
 
 
 def gh_json(args: list[str]) -> object:
@@ -372,28 +396,30 @@ class ReleaseGateSelfTests(unittest.TestCase):
             disp_out = run_classifier(repo, {"EVENT_NAME": "workflow_dispatch"})
             self.assertTrue(all(v == "true" for v in disp_out.values()), disp_out)
 
-    def test_accept_job_requires_lua_tools_and_no_allow_missing_tools(self):
-        accept_path = pathlib.Path(__file__).resolve().parent.parent / ".github" / "workflows" / "accept-nightly.yml"
-        if not accept_path.is_file():
-            self.skipTest("accept-nightly.yml not present")
-        ci_text = accept_path.read_text(encoding="utf-8")
-        self.assertEqual(check_ci_workflow_accept_tools(ci_text), [])
-        for tool in ("stylua", "ast-grep", "lua-language-server"):
-            broken = ci_text.replace(tool, "removed-tool")
-            errs = check_ci_workflow_accept_tools(broken)
-            self.assertTrue(
-                any(tool in e for e in errs),
-                f"expected error mentioning missing {tool}, got: {errs}",
-            )
-        with_allow = ci_text.replace(
-            "sh scripts/accept.sh --release",
-            "sh scripts/accept.sh --release --allow-missing-tools",
-        )
-        errs = check_ci_workflow_accept_tools(with_allow)
-        self.assertTrue(
-            any("--allow-missing-tools" in e for e in errs),
-            f"expected error mentioning --allow-missing-tools, got: {errs}",
-        )
+    def test_runtime_gate_requires_push_main_matching_commit(self):
+        commit = "a" * 40
+        other_sha = "b" * 40
+        jobs = self._all_ok_jobs()
+        for label, bad_run in (
+            ("pull_request_event", {"databaseId": 301, "status": "completed", "createdAt": "2026-11-27T10:00:00Z", "event": "pull_request", "headBranch": "main", "headSha": commit}),
+            ("non_main_branch", {"databaseId": 302, "status": "completed", "createdAt": "2026-11-27T10:00:00Z", "event": "push", "headBranch": "feat/other", "headSha": commit}),
+            ("wrong_head_sha", {"databaseId": 303, "status": "completed", "createdAt": "2026-11-27T10:00:00Z", "event": "push", "headBranch": "main", "headSha": other_sha}),
+        ):
+            with self.subTest(case=label):
+                ok, errs = check_runs([bad_run], lambda _id: jobs, expected_commit=commit)
+                self.assertFalse(ok)
+                self.assertTrue(any("does not match event='push'" in e for e in errs), errs)
+
+        good_run = {
+            "databaseId": 304,
+            "status": "completed",
+            "createdAt": "2026-11-27T10:01:00Z",
+            "event": "push",
+            "headBranch": "main",
+            "headSha": commit,
+        }
+        ok, msgs = check_runs([good_run], lambda _id: jobs, expected_commit=commit)
+        self.assertTrue(ok, msgs)
 
     def test_required_jobs_includes_workflow_linters(self):
         self.assertIn("actionlint", REQUIRED_JOBS)
@@ -518,22 +544,16 @@ def main() -> int:
         print("--commit is required", file=sys.stderr)
         return 2
 
-    accept_path = pathlib.Path(__file__).resolve().parent.parent / ".github" / "workflows" / "accept-nightly.yml"
-    if accept_path.is_file():
-        wf_errors = check_ci_workflow_accept_tools(accept_path.read_text(encoding="utf-8"))
-        if wf_errors:
-            for err in wf_errors:
-                print(f"release gate error: {err}", file=sys.stderr)
-            return 1
-
     repo_args = ["--repo", args.repo] if args.repo else []
     try:
         ok, msgs = wait_for_runs(
             lambda: gh_json([
                 "run", "list",
                 "--workflow", "ci.yml",
+                "--event", "push",
+                "--branch", "main",
                 "--commit", args.commit,
-                "--json", "databaseId,status,conclusion,createdAt",
+                "--json", "databaseId,status,conclusion,createdAt,event,headBranch,headSha",
                 *repo_args,
             ]),
             lambda run_id: gh_json([
@@ -541,6 +561,7 @@ def main() -> int:
                 "--json", "jobs",
                 *repo_args,
             ]).get("jobs", []),
+            expected_commit=args.commit,
             wait_minutes=args.wait_minutes,
             poll_interval=args.poll_interval,
         )

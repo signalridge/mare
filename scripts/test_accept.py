@@ -858,83 +858,9 @@ if "--rpc" in sys.argv:
             self.assertIn("(release): PARTIAL", output)
             self.assertNotEqual(result.returncode, 0, output)
 
-    @staticmethod
-    def _extract_accept_job_lines(ci_text: str) -> list[str]:
-        lines = ci_text.splitlines()
-        accept_idx = None
-        for idx, line in enumerate(lines):
-            if line.strip() == "accept:" and line.startswith("  accept:"):
-                accept_idx = idx
-                break
-        if accept_idx is None:
-            raise AssertionError("accept job not found in .github/workflows/accept-nightly.yml")
-        job_lines = []
-        for line in lines[accept_idx + 1 :]:
-            if line and not line.startswith(" ") and not line.startswith("#"):
-                break
-            if line.startswith("  ") and not line.startswith("    ") and line.strip() and not line.strip().startswith("#"):
-                break
-            job_lines.append(line)
-        return job_lines
-
-    def test_ci_accept_checkout_uses_full_history_and_workflow_dispatch_passes(self):
-        ci_path = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "accept-nightly.yml"
-        job_lines = self._extract_accept_job_lines(ci_path.read_text(encoding="utf-8"))
-
-        checkout_block: list[str] = []
-        in_checkout = False
-        for line in job_lines:
-            stripped = line.strip()
-            if line.startswith("      - "):
-                if in_checkout:
-                    break
-                if stripped.startswith("- uses: actions/checkout@"):
-                    in_checkout = True
-                    checkout_block.append(line)
-            elif in_checkout:
-                checkout_block.append(line)
-
-        self.assertTrue(checkout_block, "accept job must have an actions/checkout step")
-        has_fetch_depth_zero = any(
-            line.split("#", 1)[0].strip() == "fetch-depth: 0" for line in checkout_block
-        )
-        self.assertTrue(
-            has_fetch_depth_zero,
-            "accept job actions/checkout must set fetch-depth: 0, got:\n" + "\n".join(checkout_block),
-        )
-
+    def test_release_acceptance_on_git_checkout_uses_merge_base_and_records_full_sha_and_tree(self):
         if WINDOWS:
             return
-
-        run_lines: list[str] = []
-        in_accept_step = False
-        in_run_block = False
-        run_indent = None
-        for line in job_lines:
-            if line.startswith("      - "):
-                if in_accept_step:
-                    break
-                if line.strip() == "- name: Run release acceptance":
-                    in_accept_step = True
-                continue
-            if not in_accept_step:
-                continue
-            if not in_run_block:
-                if line.strip() == "run: |":
-                    in_run_block = True
-                continue
-            if not line.strip():
-                run_lines.append("")
-                continue
-            indent = len(line) - len(line.lstrip(" "))
-            if run_indent is None:
-                run_indent = indent
-            if indent < run_indent:
-                break
-            run_lines.append(line[run_indent:])
-
-        self.assertTrue(run_lines, "accept job must have a `Run release acceptance` run: | block")
-        run_script = "\n".join(run_lines).replace("${{ runner.os }}", "Linux") + "\n"
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -965,7 +891,7 @@ if "--rpc" in sys.argv:
                 COMMAND_LOG=shell_path(tmp_path / "commands"),
             )
             result = subprocess.run(
-                ["bash", "-c", run_script],
+                ["sh", "scripts/accept.sh", "--release"],
                 cwd=cloned,
                 check=False,
                 env=env,
@@ -975,8 +901,12 @@ if "--rpc" in sys.argv:
             )
             output = result.stdout + result.stderr
             self.assertEqual(result.returncode, 0, output)
+            head_sha = subprocess.check_output(["git", "-C", str(cloned), "rev-parse", "HEAD"], text=True, encoding="utf-8", errors="replace").strip()
+            tree_sha = subprocess.check_output(["git", "-C", str(cloned), "rev-parse", "HEAD^{tree}"], text=True, encoding="utf-8", errors="replace").strip()
             base_sha = subprocess.check_output(["git", "-C", str(cloned), "rev-parse", "HEAD~1"], text=True, encoding="utf-8", errors="replace").strip()
             self.assertIn(f"scripts/check_lua_public_api.py --base {base_sha}", output)
+            self.assertIn(f"- git: `{head_sha}` (tree `{tree_sha}`) (clean checkout)", output)
+            self.assertIn("- scope: this platform only (", output)
             self.assertIn("(release): PASS", output)
             self.assertNotIn("PARTIAL", output)
 
