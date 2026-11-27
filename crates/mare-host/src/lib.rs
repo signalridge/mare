@@ -50,7 +50,10 @@ pub use startup::session_identity::{RuntimeSet, SessionCallGuard};
 pub use startup::trust::TrustChoice;
 pub use ui_shell::{UiAttachment, UiShellState};
 pub use web_registry::{AssetResolve, WebListenerInfo, WebRegistry, WebRouteRequest, WebRouteResponse};
-pub use workspace::{WorkspaceId, WorkspaceRegistry, WorkspaceSnapshot, WorkspaceState, resolve_workspace_trust};
+pub use workspace::{
+    WorkspaceId, WorkspaceRegistry, WorkspaceSnapshot, WorkspaceState, resolve_workspace_trust,
+    sync_workspace_trust_args,
+};
 
 /// Snapshot entry for one loaded session across a multi-host coordinator (`HostManager`).
 #[derive(Clone, Debug, PartialEq, Eq)]

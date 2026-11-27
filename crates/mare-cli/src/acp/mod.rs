@@ -545,25 +545,31 @@ fn build_session_config(mut base: J, mcp_servers: Map<String, J>) -> J {
     base
 }
 
+fn cli_trust_override(opts: &HostOptions) -> Option<bool> {
+    (opts.args.get("trust_source").and_then(|v| v.as_str()) == Some("cli"))
+        .then(|| opts.args.get("trust").and_then(|v| v.as_str()) == Some("trusted"))
+}
+
 fn session_trust(opts: &HostOptions, cwd: &std::path::Path) -> bool {
     let same_ws = same_directory(&opts.cwd, cwd);
-    let cli_trust = (opts.args.get("trust_source").and_then(|v| v.as_str()) == Some("cli"))
-        .then(|| opts.args.get("trust").and_then(|v| v.as_str()) == Some("trusted"));
-    mare_host::resolve_workspace_trust(cwd, same_ws, opts.project_trusted, cli_trust, opts.no_user_plugins)
+    mare_host::resolve_workspace_trust(
+        cwd,
+        same_ws,
+        opts.project_trusted,
+        cli_trust_override(opts),
+        opts.no_user_plugins,
+    )
 }
 
 fn session_args(opts: &HostOptions, cwd: &std::path::Path, trusted: bool, resume: Option<&str>) -> J {
     let mut args = opts.args.clone();
     let same_ws = same_directory(&opts.cwd, cwd);
-    if let Some(obj) = args.as_object_mut() {
-        obj.insert("trust".into(), J::String(if trusted { "trusted" } else { "untrusted" }.into()));
-        let keep_cli = same_ws && obj.get("trust_source").and_then(|v| v.as_str()) == Some("cli");
-        if !keep_cli {
-            obj.insert("trust_source".into(), J::String(if trusted { "saved" } else { "none" }.into()));
-        }
-        if let Some(r) = resume {
-            obj.insert("resume".into(), J::String(r.to_string()));
-        }
+    let plugins_enabled = opts.load_init && !opts.no_user_plugins;
+    mare_host::sync_workspace_trust_args(&mut args, cwd, same_ws, trusted, cli_trust_override(opts), plugins_enabled);
+    if let Some(r) = resume
+        && let Some(obj) = args.as_object_mut()
+    {
+        obj.insert("resume".into(), J::String(r.to_string()));
     }
     args
 }
@@ -1342,5 +1348,32 @@ mod tests {
         opts.args = json!({ "trust": "untrusted", "trust_source": "cli" });
         assert!(!session_trust(&opts, base_ws.path()));
         assert!(!session_trust(&opts, other_ws.path()));
+    }
+
+    #[test]
+    fn session_args_preserves_undecided_and_pending_trust_sources() {
+        let base_ws = tempfile::tempdir().unwrap();
+        let other_ws = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(other_ws.path().join(".mare/plugins")).unwrap();
+
+        for (source, expect_pending) in [("undecided", false), ("pending", true)] {
+            let opts = HostOptions {
+                cwd: base_ws.path().to_path_buf(),
+                mode: Mode::Acp,
+                config: J::Null,
+                load_init: true,
+                project_trusted: false,
+                args: json!({ "trust": "undecided", "trust_source": source, "trust_pending": expect_pending }),
+                no_user_plugins: false,
+            };
+            let same = session_args(&opts, base_ws.path(), false, None);
+            assert_eq!(same.get("trust_source").and_then(|v| v.as_str()), Some(source));
+            assert_eq!(same.get("trust").and_then(|v| v.as_str()), Some("undecided"));
+            assert_eq!(same.get("trust_pending").and_then(|v| v.as_bool()), Some(expect_pending));
+
+            let other = session_args(&opts, other_ws.path(), false, None);
+            assert_eq!(other.get("trust_source").and_then(|v| v.as_str()), Some("undecided"));
+            assert_eq!(other.get("trust").and_then(|v| v.as_str()), Some("undecided"));
+        }
     }
 }
