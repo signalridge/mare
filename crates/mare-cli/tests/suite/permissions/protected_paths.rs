@@ -979,8 +979,8 @@ async fn approved_git_grants_reach_real_sandbox_git_fetch_across_repos_workdir_s
             let clone = root.join(name);
             std::fs::create_dir_all(&remote).unwrap();
             std::fs::create_dir_all(&seed).unwrap();
-            git_ok(&remote, &["init", "--bare", "-q"]);
-            git_ok(&seed, &["init", "-q"]);
+            git_ok(&remote, &["init", "--bare", "-q", "-b", "main"]);
+            git_ok(&seed, &["init", "-q", "-b", "main"]);
             std::fs::write(seed.join("f.txt"), format!("{name}-v1\n")).unwrap();
             git_ok(&seed, &["add", "f.txt"]);
             git_ok(&seed, &["commit", "-q", "-m", "v1"]);

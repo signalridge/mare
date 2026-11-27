@@ -4,8 +4,7 @@ return function(D)
 	local P, child, record = D.P, D.child, D.record
 	local LIKE, is_network_partial, base_spec = D.presets.LIKE, D.presets.is_network_partial, D.presets.base_spec
 	local E = D.escalation
-	local widen, inc_remainder, inc_union, inc_text, writes_widened =
-		E.widen, E.inc_remainder, E.inc_union, E.inc_text, E.writes_widened
+	local widen, inc_remainder, inc_union, inc_text = E.widen, E.inc_remainder, E.inc_union, E.inc_text
 	local R = D.rules
 	local resolve_command, command_text, shell_verdict, tool_rule, segments_text, prefix_of, DEFAULT_DENY_ARGS =
 		R.resolve_command,
@@ -278,11 +277,7 @@ return function(D)
 					if not needs then
 						reused_scope = scope
 					end
-					if not E.inc_empty(granted) then
-						sandbox = E.apply_inc(base, inc_union(granted, inc))
-					else
-						sandbox = s
-					end
+					sandbox = E.apply_inc(base, inc_union(granted, inc))
 				elseif E.inc_empty(granted) then
 					sandbox = s
 				end
@@ -416,12 +411,7 @@ return function(D)
 				info.side_effect == "write" or (rule and rule.decision == "allow" and rule.path_rule and rule.has_write)
 			)
 		then
-			sandbox = base
-					and (not E.inc_empty(granted) and E.apply_inc(
-						base,
-						inc_union(granted, { write = { E.workspace_root() } })
-					) or writes_widened(base))
-				or nil
+			sandbox = base and E.apply_inc(base, inc_union(granted, { write = { E.workspace_root() } })) or nil
 		end
 
 		if sensitive_reason then
@@ -517,12 +507,8 @@ return function(D)
 		then
 			if not needs and rule.scope then
 				local s, _, wider_r, rinc = widen(rule.scope, cwd)
-				if wider_r then
-					if rinc and not E.inc_empty(granted) then
-						sandbox = E.apply_inc(base, inc_union(granted, rinc))
-					elseif s ~= nil then
-						sandbox = s
-					end
+				if wider_r and rinc then
+					sandbox = E.apply_inc(base, inc_union(granted, rinc))
 				elseif E.inc_empty(granted) and s ~= nil then
 					sandbox = s
 				end

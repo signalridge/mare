@@ -449,11 +449,6 @@ return function(D)
 		end
 		return table.concat(parts, " ")
 	end
-	--- the base policy with only file writes widened to the workspace (an approved write
-	--- under read-only): network, reads and sockets stay as they were
-	local function writes_widened(base)
-		return apply_inc(base, { write = { workspace_root() } })
-	end
 	--- widen the current preset's sandbox by one requested scope.
 	--- -> spec | nil, err ; wider = whether approval is needed ; inc = the increment
 	local function widen(scope, cwd)
@@ -479,7 +474,6 @@ return function(D)
 		inc_remainder = inc_remainder,
 		inc_narrow = inc_narrow,
 		inc_text = inc_text,
-		writes_widened = writes_widened,
 		workspace_root = workspace_root,
 		is_dot_git_path = is_dot_git_path,
 		write_covered = write_covered,
