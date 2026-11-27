@@ -2,9 +2,11 @@
 
 use std::sync::{Arc, OnceLock};
 
+use rustc_hash::{FxHashMap, FxHashSet};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{FontStyle, Theme as SynTheme};
-use syntect::parsing::{SyntaxReference, SyntaxSet};
+use syntect::parsing::syntax_definition::{Context, ContextReference, MatchOperation, MatchPattern, Pattern};
+use syntect::parsing::{Regex as SynRegex, SyntaxDefinition, SyntaxReference, SyntaxSet};
 
 use super::style::*;
 
@@ -67,6 +69,152 @@ fn find_in_full(lang: &str) -> Option<&'static SyntaxReference> {
     }
     let ss = full_syntax_set();
     ss.find_syntax_by_token(token).or_else(|| ss.find_syntax_by_extension(&token.to_ascii_lowercase()))
+}
+
+fn substitute_backrefs(pat: &str, non_empty_mask: u16) -> String {
+    let mut out = String::with_capacity(pat.len());
+    let mut esc = false;
+    for c in pat.chars() {
+        if esc && c.is_ascii_digit() {
+            let d = c.to_digit(10).expect("ascii digit") as u16;
+            if (non_empty_mask & (1 << d)) != 0 {
+                out.push('a');
+            }
+        } else if esc {
+            out.push('\\');
+            out.push(c);
+        } else if c != '\\' {
+            out.push(c);
+        }
+        esc = c == '\\' && !esc;
+    }
+    if esc {
+        out.push('\\');
+    }
+    out
+}
+
+fn pattern_compiles(m: &MatchPattern) -> bool {
+    let raw = m.regex.regex_str();
+    if !m.has_captures {
+        return SynRegex::try_compile(raw).is_none();
+    }
+    let mut digits = Vec::new();
+    let mut esc = false;
+    for c in raw.chars() {
+        if esc && c.is_ascii_digit() {
+            let d = c.to_digit(10).expect("ascii digit") as u16;
+            if !digits.contains(&d) {
+                digits.push(d);
+            }
+        }
+        esc = c == '\\' && !esc;
+    }
+    if digits.len() <= 4 {
+        for bits in 0..(1u32 << digits.len()) {
+            let mut mask = 0u16;
+            for (bit, &d) in digits.iter().enumerate() {
+                if (bits & (1 << bit)) != 0 {
+                    mask |= 1 << d;
+                }
+            }
+            if SynRegex::try_compile(&substitute_backrefs(raw, mask)).is_some() {
+                return false;
+            }
+        }
+        return true;
+    }
+    let all = digits.iter().fold(0u16, |acc, &d| acc | (1 << d));
+    let mut masks = vec![0u16, all];
+    for &d in &digits {
+        masks.push(1 << d);
+        masks.push(all & !(1 << d));
+    }
+    masks.into_iter().all(|mask| SynRegex::try_compile(&substitute_backrefs(raw, mask)).is_none())
+}
+
+fn syntax_patterns_valid<'a>(ss: &'a SyntaxSet, defs: &'a [SyntaxDefinition], idx: usize) -> bool {
+    let Some(def) = defs.get(idx) else {
+        return false;
+    };
+    if let Some(flm) = &def.first_line_match
+        && SynRegex::try_compile(flm).is_some()
+    {
+        return false;
+    }
+    let mut stack: Vec<&'a Context> = def.contexts.values().collect();
+    let mut seen_resolved = FxHashSet::default();
+    fn enqueue<'a>(ss: &'a SyntaxSet, r: &ContextReference, stack: &mut Vec<&'a Context>, seen: &mut FxHashSet<usize>) {
+        if let Ok(ctx) = r.resolve(ss)
+            && seen.insert(ctx as *const Context as usize)
+        {
+            stack.push(ctx);
+        }
+    }
+    while let Some(ctx) = stack.pop() {
+        for pat in &ctx.patterns {
+            match pat {
+                Pattern::Match(m) => {
+                    if !pattern_compiles(m) {
+                        return false;
+                    }
+                    match &m.operation {
+                        MatchOperation::Push(refs) | MatchOperation::Set(refs) => {
+                            for r in refs {
+                                enqueue(ss, r, &mut stack, &mut seen_resolved);
+                            }
+                        }
+                        MatchOperation::Pop | MatchOperation::None => {}
+                    }
+                    if let Some(r) = &m.with_prototype {
+                        enqueue(ss, r, &mut stack, &mut seen_resolved);
+                    }
+                }
+                Pattern::Include(r) => enqueue(ss, r, &mut stack, &mut seen_resolved),
+            }
+        }
+    }
+    true
+}
+
+static VALIDATED_SYNTAXES: std::sync::Mutex<Option<FxHashMap<usize, bool>>> = std::sync::Mutex::new(None);
+#[cfg(test)]
+thread_local! {
+    static TEST_SYNTAX_SET: std::cell::RefCell<Option<&'static SyntaxSet>> = const { std::cell::RefCell::new(None) };
+}
+
+fn is_syntax_valid(ss: &'static SyntaxSet, syntax: &'static SyntaxReference) -> bool {
+    let key = syntax as *const SyntaxReference as usize;
+    if let Some(&ok) = VALIDATED_SYNTAXES.lock().unwrap().as_ref().and_then(|m| m.get(&key)) {
+        return ok;
+    }
+    let Some(idx) = ss.syntaxes().iter().position(|s| std::ptr::eq(s, syntax)) else {
+        return false;
+    };
+    let defs = ss.clone().into_builder();
+    let ok = syntax_patterns_valid(ss, defs.syntaxes(), idx);
+    if !ok {
+        tracing::warn!(
+            syntax = syntax.name,
+            scope = %syntax.scope,
+            "disabling syntax with uncompilable regex; falling back to plain text"
+        );
+    }
+    VALIDATED_SYNTAXES.lock().unwrap().get_or_insert_with(FxHashMap::default).insert(key, ok);
+    ok
+}
+
+fn resolve_syntax(lang: &str) -> Option<(&'static SyntaxSet, &'static SyntaxReference)> {
+    #[cfg(test)]
+    if let Some(ss) = TEST_SYNTAX_SET.with(|slot| *slot.borrow()) {
+        let token = lang.trim().split(|c: char| c.is_whitespace() || c == ',' || c == '{').next().unwrap_or("");
+        if let Some(s) = ss.find_syntax_by_token(token) {
+            return is_syntax_valid(ss, s).then_some((ss, s));
+        }
+    }
+    let (ss, syntax) =
+        find_syntax(lang).map(|s| (syntax_set(), s)).or_else(|| find_in_full(lang).map(|s| (full_syntax_set(), s)))?;
+    is_syntax_valid(ss, syntax).then_some((ss, syntax))
 }
 
 /// Resolve a fence info string / extension / alias to a syntax.
@@ -323,42 +471,39 @@ fn highlight_uncached(code: &str, lang: &str, theme: &Theme, light: bool) -> Vec
         return diff_lines(code, theme);
     }
     // curated set first; rare languages fall back to syntect's full (compressed, embedded) set,
-    // decompressed on first use
-    let (ss, syntax) = match find_syntax(lang) {
-        Some(s) => (syntax_set(), s),
-        None => match find_in_full(lang) {
-            Some(s) => (full_syntax_set(), s),
-            None => return plain_lines(code, theme),
-        },
+    // decompressed on first use; syntaxes with uncompilable patterns degrade to plain text
+    let Some((ss, syntax)) = resolve_syntax(lang) else {
+        return plain_lines(code, theme);
     };
     let selected = selected_theme(theme, light);
     let mut h = HighlightLines::new(syntax, &selected);
-    code.split_inclusive('\n').map(|raw| highlight_one(&mut h, ss, raw)).collect()
+    code.split_inclusive('\n')
+        .map(|raw| {
+            highlight_one(&mut h, ss, raw)
+                .unwrap_or_else(|_| Line::raw(expand_tabs(raw).trim_end_matches(['\n', '\r'])))
+        })
+        .collect()
 }
 
-fn highlight_one(h: &mut HighlightLines<'_>, ss: &SyntaxSet, raw: &str) -> Line {
+fn highlight_one(h: &mut HighlightLines<'_>, ss: &SyntaxSet, raw: &str) -> Result<Line, syntect::Error> {
     let line_src = expand_tabs(raw);
-    match h.highlight_line(&line_src, ss) {
-        Ok(regions) => {
-            let mut line = Line::empty();
-            for (st, text) in regions {
-                let text = text.trim_end_matches(['\n', '\r']);
-                if text.is_empty() {
-                    continue;
-                }
-                let mut s = Style::new().fg(convert_color(st.foreground));
-                if st.font_style.contains(FontStyle::BOLD) {
-                    s = s.bold();
-                }
-                if st.font_style.contains(FontStyle::ITALIC) {
-                    s = s.italic();
-                }
-                line.push(Span::styled(text, s));
-            }
-            line
+    let regions = h.highlight_line(&line_src, ss)?;
+    let mut line = Line::empty();
+    for (st, text) in regions {
+        let text = text.trim_end_matches(['\n', '\r']);
+        if text.is_empty() {
+            continue;
         }
-        Err(_) => Line::raw(line_src.trim_end_matches(['\n', '\r'])),
+        let mut s = Style::new().fg(convert_color(st.foreground));
+        if st.font_style.contains(FontStyle::BOLD) {
+            s = s.bold();
+        }
+        if st.font_style.contains(FontStyle::ITALIC) {
+            s = s.italic();
+        }
+        line.push(Span::styled(text, s));
     }
+    Ok(line)
 }
 
 /// Per-stream highlighter for an append-only, still-open code block.
@@ -413,10 +558,7 @@ impl StreamingHighlight {
             } else if exceeds_highlight_limits(code) {
                 CheckpointKind::Plain(theme.fg("text"))
             } else {
-                match find_syntax(lang)
-                    .map(|s| (syntax_set(), s))
-                    .or_else(|| find_in_full(lang).map(|s| (full_syntax_set(), s)))
-                {
+                match resolve_syntax(lang) {
                     Some((set, syntax)) => {
                         let selected = selected_theme(theme, is_light(theme));
                         let state = HighlightLines::new(syntax, &selected).state();
@@ -460,12 +602,23 @@ impl StreamingHighlight {
         match &mut c.kind {
             CheckpointKind::Syntect { set, state } => {
                 let selected = selected_theme(theme, light);
+                let mut failed = false;
                 if c.completed < end {
                     let mut h = HighlightLines::from_state(&selected, state.0.clone(), state.1.clone());
+                    let plain_st = theme.fg("text");
                     for raw in code[c.completed..end].split_inclusive('\n') {
-                        c.lines.push(highlight_one(&mut h, set, raw));
+                        if failed {
+                            c.lines.push(Line::styled(expand_tabs(raw.trim_end_matches(['\n', '\r'])), plain_st));
+                        } else if let Ok(line) = highlight_one(&mut h, set, raw) {
+                            c.lines.push(line);
+                        } else {
+                            failed = true;
+                            c.lines.push(Line::styled(expand_tabs(raw.trim_end_matches(['\n', '\r'])), plain_st));
+                        }
                     }
-                    *state = h.state();
+                    if !failed {
+                        *state = h.state();
+                    }
                     c.completed = end;
                 }
                 if !known_append {
@@ -473,15 +626,26 @@ impl StreamingHighlight {
                 }
                 let tail = (end < code.len()).then(|| {
                     let raw_tail = &code[end..];
-                    if raw_tail.trim_end_matches(['\n', '\r']).len() > MAX_HIGHLIGHT_LINE_BYTES
+                    let plain = || Line::styled(expand_tabs(raw_tail.trim_end_matches(['\n', '\r'])), theme.fg("text"));
+                    if failed
+                        || raw_tail.trim_end_matches(['\n', '\r']).len() > MAX_HIGHLIGHT_LINE_BYTES
                         || c.lines.len() >= MAX_HIGHLIGHT_LINES
                     {
-                        Line::styled(expand_tabs(raw_tail.trim_end_matches(['\n', '\r'])), theme.fg("text"))
+                        plain()
                     } else {
                         let mut h = HighlightLines::from_state(&selected, state.0.clone(), state.1.clone());
-                        highlight_one(&mut h, set, raw_tail)
+                        match highlight_one(&mut h, set, raw_tail) {
+                            Ok(line) => line,
+                            Err(_) => {
+                                failed = true;
+                                plain()
+                            }
+                        }
                     }
                 });
+                if failed {
+                    c.kind = CheckpointKind::Plain(theme.fg("text"));
+                }
                 (&c.lines, tail)
             }
             CheckpointKind::Plain(st) => {
@@ -518,7 +682,7 @@ impl StreamingHighlight {
     pub(crate) fn highlight(&mut self, code: &str, lang: &str, theme: &Theme) -> Vec<Line> {
         if matches!(lang.trim().to_ascii_lowercase().as_str(), "diff" | "patch" | "udiff")
             || exceeds_highlight_limits(code)
-            || (find_syntax(lang).is_none() && find_in_full(lang).is_none())
+            || resolve_syntax(lang).is_none()
         {
             self.active = None;
             return highlight(code, lang, theme);
@@ -727,5 +891,126 @@ mod tests {
         let (done, tail) = sh.update(&long_line, "rust", &t, false);
         assert!(done.is_empty());
         assert_eq!(tail.unwrap().spans[0].style, t.fg("text"));
+    }
+
+    #[test]
+    fn all_selectable_syntaxes_compile_every_pattern() {
+        for (label, ss) in [("curated", syntax_set()), ("full", full_syntax_set())] {
+            let defs = ss.clone().into_builder();
+            let mut failures = Vec::new();
+            for (idx, syn) in ss.syntaxes().iter().enumerate() {
+                if !syntax_patterns_valid(ss, defs.syntaxes(), idx) {
+                    failures.push(format!("{label}: {} ({})", syn.name, syn.scope));
+                }
+            }
+            assert!(failures.is_empty(), "syntaxes with uncompilable patterns: {failures:#?}");
+        }
+    }
+
+    #[test]
+    fn markdown_fenced_code_block_highlights_on_full_and_streaming_paths() {
+        let t = Theme::default();
+        // Minimal fixtures covering backtick fences, extended closing fences, tilde fences,
+        // and block-quoted fences (all hit Markdown's `fenced_code_block_end` backref rule).
+        let doc = concat!(
+            "# Title\n",
+            "```rust\n",
+            "fn main() {\n",
+            "    let x = 1;\n",
+            "}\n",
+            "````\n",
+            "~~~\n",
+            "plain\n",
+            "~~~~\n",
+            "> ```\n",
+            "> quoted\n",
+            "> ```\n",
+        );
+        let expected: Vec<&str> = doc.lines().collect();
+        let lines = highlight(doc, "md", &t);
+        let actual: Vec<String> = lines.iter().map(Line::plain).collect();
+        assert_eq!(actual, expected, "rendered markdown text must be complete");
+        assert!(lines.iter().any(|l| l.spans.len() > 1), "markdown must still be syntax-highlighted");
+
+        // Streaming path: complete lines + unfinished tail line, followed by a normal code block.
+        let mut sh = StreamingHighlight::default();
+        let partial = "```rust\nfn main() {\n    let x";
+        let (done1, tail1) = sh.update(partial, "md", &t, false);
+        assert_eq!(done1.iter().map(Line::plain).collect::<Vec<_>>(), vec!["```rust", "fn main() {"]);
+        assert_eq!(tail1.as_ref().map(Line::plain).as_deref(), Some("    let x"));
+
+        let complete = format!("{partial} = 1;\n}}\n```\n");
+        let (done2, tail2) = sh.update(&complete, "md", &t, false);
+        assert!(tail2.is_none());
+        assert_eq!(
+            done2.iter().map(Line::plain).collect::<Vec<_>>(),
+            vec!["```rust", "fn main() {", "    let x = 1;", "}", "```"]
+        );
+
+        let next = sh.highlight("fn next() -> u32 { 42 }\n", "rust", &t);
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].plain(), "fn next() -> u32 { 42 }");
+        assert!(next[0].spans.len() > 1, "subsequent normal code block must still be highlighted");
+    }
+
+    #[test]
+    fn broken_syntax_degrades_to_plain_text_without_panicking_or_retrying() {
+        // Mirrors the real Markdown fenced-code-block bug: passes YAML load because `has_captures`
+        // skips syntect's load-time check, then panics with TargetNotRepeatable when `\3` is unset.
+        let yaml = r#"%YAML 1.2
+---
+name: BrokenRegexTest
+file_extensions: [brokenregextest]
+scope: source.brokenregextest
+contexts:
+  main:
+    - match: '((`)``+|(~)~~+)'
+      push: body
+  body:
+    - match: '\1(?:(?:\2)*|(?:\3)*)'
+      pop: true
+"#;
+        let mut b = syntect::parsing::SyntaxSetBuilder::new();
+        b.add_plain_text_syntax();
+        b.add(SyntaxDefinition::load_from_str(yaml, true, None).unwrap());
+        let leaked: &'static SyntaxSet = Box::leak(Box::new(b.build()));
+
+        struct Guard;
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                TEST_SYNTAX_SET.with(|slot| *slot.borrow_mut() = None);
+            }
+        }
+        TEST_SYNTAX_SET.with(|slot| *slot.borrow_mut() = Some(leaked));
+        let _guard = Guard;
+
+        let t = Theme::default();
+        let broken_key = leaked.find_syntax_by_token("brokenregextest").unwrap() as *const SyntaxReference as usize;
+        let code = "```\nline one\n```\n";
+        let lines = highlight(code, "brokenregextest", &t);
+        assert_eq!(lines.iter().map(Line::plain).collect::<Vec<_>>(), vec!["```", "line one", "```"]);
+        assert!(lines.iter().all(|l| l.spans.len() == 1 && l.spans[0].style == t.fg("text")));
+        assert_eq!(
+            VALIDATED_SYNTAXES.lock().unwrap().as_ref().and_then(|m| m.get(&broken_key)),
+            Some(&false),
+            "failed syntax must be marked plain-text-only for the process"
+        );
+
+        // Incremental streaming path: stays Plain across frames without retrying syntect.
+        let mut sh = StreamingHighlight::default();
+        let (d1, tail1) = sh.update("```\nsec", "brokenregextest", &t, false);
+        assert_eq!(d1.iter().map(Line::plain).collect::<Vec<_>>(), vec!["```"]);
+        assert_eq!(tail1.as_ref().map(Line::plain).as_deref(), Some("sec"));
+        assert!(matches!(sh.active.as_ref().unwrap().kind, CheckpointKind::Plain(_)));
+
+        let (d2, tail2) = sh.update("```\nsecond\n```", "brokenregextest", &t, false);
+        assert_eq!(d2.iter().map(Line::plain).collect::<Vec<_>>(), vec!["```", "second"]);
+        assert_eq!(tail2.as_ref().map(Line::plain).as_deref(), Some("```"));
+        assert!(matches!(sh.active.as_ref().unwrap().kind, CheckpointKind::Plain(_)));
+
+        // Next normal block is still syntax-highlighted.
+        let next = sh.highlight("let ok = 1;\n", "rust", &t);
+        assert_eq!(next[0].plain(), "let ok = 1;");
+        assert!(next[0].spans.len() > 1, "normal syntax must stay highlighted after broken syntax fallback");
     }
 }
