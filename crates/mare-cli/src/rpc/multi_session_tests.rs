@@ -6200,9 +6200,15 @@ async fn agent_cancel_sends_cancel_request_for_pending_approval() {
             .await;
             let mut p2 = None;
             let mut approval_req = None;
-            tokio::time::timeout(Duration::from_secs(5), async {
+            let mut received = Vec::new();
+            let got = tokio::time::timeout(Duration::from_secs(5), async {
                 while p2.is_none() || approval_req.is_none() {
                     let msg = rpc_read(&mut cr).await;
+                    received.push(format!(
+                        "method={:?} id={}",
+                        msg.get("method").and_then(J::as_str),
+                        msg.get("id").unwrap_or(&J::Null)
+                    ));
                     if msg.get("method").is_none() && msg["id"] == 2 {
                         assert!(msg["error"].is_null(), "{msg}");
                         p2 = Some(msg);
@@ -6211,8 +6217,14 @@ async fn agent_cancel_sends_cancel_request_for_pending_approval() {
                     }
                 }
             })
-            .await
-            .expect("expected agent.prompt reply and approval.request");
+            .await;
+            if got.is_err() {
+                panic!(
+                    "timed out waiting for agent.prompt reply (got={}) and approval.request (got={}); received={received:?}",
+                    p2.is_some(),
+                    approval_req.is_some(),
+                );
+            }
             let approval_id = approval_req.unwrap()["id"].clone();
 
             // Calling agent.cancel on the session MUST cancel the pending approval.request via $/cancel_request.
