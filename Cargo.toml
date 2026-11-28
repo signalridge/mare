@@ -5,7 +5,7 @@ default-members = [ "crates/mare-cli" ]
 
 [workspace.package]
 edition      = "2024"
-version      = "1.0.0"
+version      = "1.1.0"
 license      = "Apache-2.0"
 authors      = [ "signalridge" ]
 repository   = "https://github.com/signalridge/mare"

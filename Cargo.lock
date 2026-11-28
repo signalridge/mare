@@ -2128,7 +2128,7 @@ dependencies = [
 
 [[package]]
 name = "mare-binding"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2197,7 +2197,7 @@ dependencies = [
 
 [[package]]
 name = "mare-cli"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -2257,7 +2257,7 @@ dependencies = [
 
 [[package]]
 name = "mare-config"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "dunce",
@@ -2269,7 +2269,7 @@ dependencies = [
 
 [[package]]
 name = "mare-edit"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "similar 3.2.1",
  "tempfile",
@@ -2278,7 +2278,7 @@ dependencies = [
 
 [[package]]
 name = "mare-host"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "dunce",
@@ -2302,7 +2302,7 @@ dependencies = [
 
 [[package]]
 name = "mare-kernel"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "dunce",
@@ -2319,11 +2319,11 @@ dependencies = [
 
 [[package]]
 name = "mare-macro"
-version = "1.0.0"
+version = "1.1.0"
 
 [[package]]
 name = "mare-plugin"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -2347,7 +2347,7 @@ dependencies = [
 
 [[package]]
 name = "mare-plugin-manager"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "dunce",
@@ -2365,7 +2365,7 @@ dependencies = [
 
 [[package]]
 name = "mare-protocol"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "mare-shared",
  "schemars 1.2.3",
@@ -2377,7 +2377,7 @@ dependencies = [
 
 [[package]]
 name = "mare-shared"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "dirs",
  "dunce",
@@ -2402,7 +2402,7 @@ dependencies = [
 
 [[package]]
 name = "mare-store"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "dunce",
@@ -2420,7 +2420,7 @@ dependencies = [
 
 [[package]]
 name = "mare-tui"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "base64 0.23.1",
  "image",
