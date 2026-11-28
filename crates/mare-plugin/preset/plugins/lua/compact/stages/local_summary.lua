@@ -225,6 +225,76 @@ return function(D)
 		}
 	end
 
+	local function image_count(m)
+		local n = 0
+		for _, b in ipairs(m and m.content or {}) do
+			if b.type == "image" then
+				n = n + 1
+			end
+		end
+		return n
+	end
+
+	--- When an earlier prune stage fell back to rewriting inside the prompt-cached prefix,
+	--- reuse only the pre-prune messages within `cached_tokens` (leaving messages beyond the
+	--- cached prefix in their pruned form) if the summary runs on the same model (same cache
+	--- domain), no offloaded image would be reintroduced, and the hybrid request fits the
+	--- summary model's input budget.
+	local function reusable_cached_summary_input(st, msgs, start, history_end, instruction)
+		local snap = st.cached_prefix_snapshot
+		local cached_tokens = snap and tonumber(snap.cached_tokens) or 0
+		if not snap or cached_tokens <= 0 or D.S.target_model ~= nil or not snap.model_ref then
+			return nil
+		end
+		local model = Z.summary_model and Z.summary_model() or nil
+		if not model or model.ref ~= snap.model_ref then
+			return nil
+		end
+		local pre_msgs = repair_tool_order(snap.messages)
+		if #pre_msgs ~= #msgs then
+			return nil
+		end
+		for i = 1, #msgs do
+			if pre_msgs[i].role ~= msgs[i].role then
+				return nil
+			end
+		end
+		local hybrid = {}
+		local offset, restored_cached = 0, false
+		for i = 1, history_end do
+			offset = offset + msg_tokens(pre_msgs[i])
+			if offset <= cached_tokens then
+				if image_count(pre_msgs[i]) > image_count(msgs[i]) then
+					return nil
+				end
+				hybrid[i] = pre_msgs[i]
+				if pre_msgs[i] ~= msgs[i] then
+					restored_cached = true
+				end
+			else
+				hybrid[i] = msgs[i]
+			end
+		end
+		if not restored_cached then
+			return nil
+		end
+		local pre_prefix = {}
+		for i = 1, start - 1 do
+			if not hybrid[i].compaction or hybrid[i].remote then
+				pre_prefix[#pre_prefix + 1] = hybrid[i]
+			end
+		end
+		local pre_history = {}
+		for i = start, history_end do
+			pre_history[#pre_history + 1] = hybrid[i]
+		end
+		local pre_units = units_of(pre_history)
+		if #pre_units == 0 or not (Z.fits_budget and Z.fits_budget(model, pre_prefix, pre_units, instruction)) then
+			return nil
+		end
+		return pre_prefix, pre_units, pre_history
+	end
+
 	--- Evaluate one retention tier. The outer loop selects or retries tiers without
 	--- recursively re-entering the stage.
 	local function local_candidate(st)
@@ -302,14 +372,22 @@ return function(D)
 			.. (prev_text and ("<previous-summary>\n" .. prev_text .. "\n</previous-summary>\n\n" .. UPDATE) or SUMMARIZE)
 			.. focus
 		local units = units_of(history)
-		local total_units = #units
+		local summary_prefix, summary_units, summary_history = prefix, units, history
+		if #units > 0 then
+			local cached_prefix, cached_units, cached_history =
+				reusable_cached_summary_input(st, msgs, start, history_end, instruction)
+			if cached_prefix then
+				summary_prefix, summary_units, summary_history = cached_prefix, cached_units, cached_history
+			end
+		end
+		local total_units = #summary_units
 		local summary, dropped, kind
 		-- Matching indices alone is insufficient if a plugin mutates a message in place.
 		-- If the input cannot be encoded, skip caching rather than guessing equality.
 		local hash_ok, input_hash = pcall(function()
 			return mare.crypto.sha256(mare.json.encode({
-				prefix = prefix,
-				history = history,
+				prefix = summary_prefix,
+				history = summary_history,
 				turn = turn,
 				instruction = instruction,
 			}))
@@ -335,10 +413,10 @@ return function(D)
 		if same then
 			summary, dropped = cached.summary, cached.dropped
 		else
-			if #units > 0 or (prev and (prev.remote or not turn)) then
+			if #summary_units > 0 or (prev and (prev.remote or not turn)) then
 				summary, dropped, kind = summarize(
-					prefix,
-					units,
+					summary_prefix,
+					summary_units,
 					instruction,
 					plan.force_portable_remote and { allow_expansion = true } or nil
 				)
