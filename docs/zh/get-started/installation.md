@@ -8,10 +8,10 @@
 
 | 平台 | 目标 | 产物类型 |
 | --- | --- | --- |
-| macOS，Apple silicon | `aarch64-apple-darwin` | `.tar.gz`、Homebrew formula、Nix |
-| macOS，Intel | `x86_64-apple-darwin` | `.tar.gz`、Homebrew formula、Nix |
-| Linux，x86-64（静态 musl） | `x86_64-unknown-linux-musl` | `.tar.gz`、`.deb`、`.rpm`、Homebrew formula、AUR、Nix、GHCR 容器 |
-| Linux，ARM64（静态 musl） | `aarch64-unknown-linux-musl` | `.tar.gz`、`.deb`、`.rpm`、Homebrew formula、AUR、Nix、GHCR 容器 |
+| macOS，Apple silicon | `aarch64-apple-darwin` | `.tar.gz`、Homebrew cask、Nix |
+| macOS，Intel | `x86_64-apple-darwin` | `.tar.gz`、Homebrew cask、Nix |
+| Linux，x86-64（glibc 2.39+） | `x86_64-unknown-linux-gnu` | `.tar.gz`、`.deb`、`.rpm`、Homebrew cask、AUR、Nix、GHCR 容器 |
+| Linux，ARM64（glibc 2.39+） | `aarch64-unknown-linux-gnu` | `.tar.gz`、`.deb`、`.rpm`、Homebrew cask、AUR、Nix、GHCR 容器 |
 | Windows，x86-64 | `x86_64-pc-windows-msvc` | `.zip`、Scoop 清单 |
 | Windows，ARM64 | `aarch64-pc-windows-msvc` | `.zip`、Scoop 清单 |
 
@@ -29,12 +29,12 @@ curl -fsSL https://signalridge.github.io/mare/install.sh | sh
 
 默认安装到 `~/.local/bin`，可通过 `MARE_INSTALL_DIR` 指定安装目录，或通过 `MARE_VERSION=vX.Y.Z` 指定版本。
 
-### Homebrew
+### Homebrew formula
 
 ```sh
 brew tap signalridge/tap
 brew trust signalridge/tap
-brew install signalridge/tap/mare
+brew install mare
 ```
 
 ### Nix（Flake 与 NUR）
@@ -69,13 +69,11 @@ else
 fi
 ```
 
-如果通过浏览器下载压缩包，运行前请先清除 macOS 隔离属性：`xattr -d com.apple.quarantine ./mare`。
-
 ## Linux
 
 ### 一键安装脚本
 
-自动下载最新的 Linux 压缩包（`x86_64-unknown-linux-musl` 或 `aarch64-unknown-linux-musl`，静态链接）并对照 `checksums.txt` 校验 SHA-256：
+自动下载最新的 Linux 压缩包（`x86_64-unknown-linux-gnu` 或 `aarch64-unknown-linux-gnu`，要求 glibc 2.39+）并对照 `checksums.txt` 校验 SHA-256：
 
 ```sh
 curl -fsSL https://signalridge.github.io/mare/install.sh | sh
@@ -113,7 +111,7 @@ yay -S mare-bin
 ```sh
 brew tap signalridge/tap
 brew trust signalridge/tap
-brew install signalridge/tap/mare
+brew install mare
 ```
 
 ### Nix（Flake 与 NUR）
@@ -133,7 +131,7 @@ nix profile install github:signalridge/nur-packages#mare
 
 ```sh
 VERSION=vX.Y.Z
-TARGET=x86_64-unknown-linux-musl   # ARM64 请使用 aarch64-unknown-linux-musl
+TARGET=x86_64-unknown-linux-gnu   # ARM64 请使用 aarch64-unknown-linux-gnu
 ARCHIVE="mare-$VERSION-$TARGET.tar.gz"
 EXPECTED=$(awk 'NR==1 && length($1)==64 && $1 ~ /^[[:xdigit:]]+$/{print tolower($1)}' "$ARCHIVE.sha256")
 ACTUAL=$(sha256sum "$ARCHIVE" | awk 'NR==1{print tolower($1)}')
@@ -279,18 +277,24 @@ mare completion fish > ~/.config/fish/completions/mare.fish
 
 ## 更新
 
-mare 不会替换自己的二进制文件。要更新时：
+使用 `mare update` 统一更新 mare 与已声明的插件，也可以只更新其中之一：
 
-- 如果你通过包管理器安装，请直接使用对应包管理器更新（例如 `brew upgrade mare`、`scoop update mare`、`yay -Syu mare-bin`、`nix profile upgrade mare`）。
-- 否则，重新运行一键安装脚本（`install.sh` / `install.ps1`），或按上文方式下载新压缩包校验后覆盖旧的 `mare` 二进制文件。
+- `mare update` / `mare update --all`：同时更新 mare 与已声明的插件。
+- `mare update --self`：更新 mare 本身（`-y` 跳过确认，`--method` 可覆盖安装方式识别）：
+  - 包管理器安装（`brew upgrade mare`、`scoop update mare`、`yay -S mare-bin` / `paru -S mare-bin`、`nix profile upgrade mare`）会直接调用对应包管理器，绝不自行覆盖二进制文件。
+  - 一键脚本安装（`install.sh` / `install.ps1`）会下载发布压缩包，对照 `checksums.txt` 校验 SHA-256，并在下一次启动时原子替换激活。
+  - 其他手动安装方式会提示手动下载地址。
+- `mare update --plugins`：更新已声明插件（与 `mare plugin update` 一致，遵守 pin 与 commit 锁定），并提示在运行中的会话执行 `/reload`。
 
-发布构建的 TUI 默认每 24 小时检查一次 GitHub 发布版本（`update-check.interval_hours` 可调整间隔；调试构建跳过自动检查），如有新版本就打印一行提示。请求中除 `mare/<version>` 外不带任何标识。可以在 `init.lua` 中关闭检查：
+发布构建的 TUI 默认每 24 小时检查一次 GitHub 发布版本与已声明的 git 插件更新（`update-check.interval_hours` 可调整间隔；调试构建跳过自动检查），并在有新版本或新修订时合并为一条提示（每个版本/修订只提示一次）。请求中除 `mare/<version>` 外不带任何标识。可在 `init.lua` 中设置或关闭检查：
 
 ```lua
-mare.setup { update_check = false }
+mare.setup { update_check = "notify" } -- "notify"（默认）| "auto"（自动暂存脚本安装更新）| false
 ```
 
-版本变化后，mare 会在下次启动时把内置插件和类型重新解压到 `~/.local/share/mare/runtime`。在 `init.lua` 中声明的包用 `mare plugin update` 单独更新。
+设置 `MARE_NO_UPDATE_CHECK=1` 可禁用自动更新检查；`MARE_OFFLINE=1` 会禁用 `mare update`、`mare plugin check`/`update` 与启动时的远端克隆，同时保持本地已安装包可用。
+
+版本变化后，mare 会在下次启动时把内置插件和类型重新解压到 `~/.local/share/mare/runtime`。
 
 ## mare 使用的文件
 

@@ -7,6 +7,7 @@ mod config_origin;
 mod contract_files;
 pub mod engines;
 pub mod flags;
+pub mod install;
 pub mod loader;
 mod lua_cov;
 pub mod pkg_binding;
@@ -14,6 +15,7 @@ pub mod runtime;
 #[cfg(not(debug_assertions))]
 pub(crate) mod runtime_archive;
 mod test_host;
+pub mod update;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -741,6 +743,30 @@ pub fn install(lua: &Lua, env: &Env) -> mlua::Result<Table> {
     exec_ctx::install(lua, &mare)?;
 
     mare.set("version", env!("CARGO_PKG_VERSION"))?;
+    let semver_tbl = lua.create_table()?;
+    semver_tbl.set(
+        "compare",
+        lua.create_function(|_, (a, b): (String, String)| {
+            Ok(mare_shared::version::compare(&a, &b).map(|ord| match ord {
+                std::cmp::Ordering::Less => -1i8,
+                std::cmp::Ordering::Equal => 0i8,
+                std::cmp::Ordering::Greater => 1i8,
+            }))
+        })?,
+    )?;
+    semver_tbl.set(
+        "is_newer",
+        lua.create_function(|_, (candidate, current): (String, String)| {
+            Ok(mare_shared::version::is_newer_semver(&candidate, &current))
+        })?,
+    )?;
+    semver_tbl.set(
+        "is_newer_release",
+        lua.create_function(|_, (candidate, current): (String, String)| {
+            Ok(mare_shared::version::is_newer_release(&candidate, &current))
+        })?,
+    )?;
+    mare.set("semver", semver_tbl)?;
     mare.set("api_version", env!("MARE_API_VERSION"))?;
     // development builds (tests, `cargo run`) — e.g. no automatic update check from them
     mare.set("debug_build", cfg!(debug_assertions))?;
@@ -766,6 +792,74 @@ pub fn install(lua: &Lua, env: &Env) -> mlua::Result<Table> {
     paths.set("log", mare_shared::paths::log_dir().to_string_lossy().into_owned())?;
     paths.set("crashes", mare_shared::paths::crash_dir().to_string_lossy().into_owned())?;
     mare.set("paths", paths)?;
+    let install_tbl = lua.create_table()?;
+    install_tbl.set(
+        "channel",
+        lua.create_function(|_, ()| Ok(crate::install::InstallInfo::detect_current().channel.as_str()))?,
+    )?;
+    install_tbl.set(
+        "info",
+        lua.create_function(|lua, method: Option<String>| {
+            let info = match method.as_deref().and_then(crate::install::InstallChannel::parse_method) {
+                Some(ch) => crate::install::InstallInfo::for_channel(ch),
+                None => crate::install::InstallInfo::detect_current(),
+            };
+            mare_shared::lua::json_to_lua(lua, &serde_json::to_value(&info).map_err(mare_shared::lua::rt_err)?)
+        })?,
+    )?;
+    install_tbl.set(
+        "update_command",
+        lua.create_function(|_, ()| Ok(crate::install::InstallInfo::detect_current().command))?,
+    )?;
+    install_tbl
+        .set("is_managed", lua.create_function(|_, ()| Ok(crate::install::InstallInfo::detect_current().managed))?)?;
+    install_tbl.set(
+        "update_check_disabled",
+        lua.create_function(|_, ()| Ok(mare_shared::env::is_update_check_disabled_env()))?,
+    )?;
+    install_tbl.set(
+        "policy",
+        lua.create_function(|lua, (config_update_check, plugin_enabled): (mlua::Value, Option<bool>)| {
+            let cfg_val = match config_update_check {
+                mlua::Value::Nil => None,
+                v => Some(mare_shared::lua::lua_to_json(lua, v)?),
+            };
+            Ok(crate::install::UpdatePolicy::resolve(
+                cfg_val.as_ref(),
+                plugin_enabled,
+                mare_shared::env::is_update_check_disabled_env(),
+            )
+            .as_str())
+        })?,
+    )?;
+    install_tbl.set(
+        "stage_update",
+        lua.create_async_function(|lua, api_url: Option<String>| async move {
+            let info = crate::install::InstallInfo::detect_current();
+            if info.managed {
+                return mare_shared::lua::json_to_lua(
+                    &lua,
+                    &serde_json::json!({ "ok": false, "error": "managed install channel cannot self-stage" }),
+                );
+            }
+            let url = crate::update::resolve_api_url(api_url.as_deref());
+            let exe = std::env::current_exe().map_err(mare_shared::lua::rt_err)?;
+            let out = match crate::update::check_latest_release(&url, env!("CARGO_PKG_VERSION")).await {
+                Ok(rel) if !rel.newer => serde_json::json!({ "ok": true, "up_to_date": true }),
+                Ok(rel) => {
+                    match crate::update::stage_release(&rel, &url, &crate::update::staging_dir(), &exe, info.channel)
+                        .await
+                    {
+                        Ok(staged) => serde_json::json!({ "ok": true, "staged": staged }),
+                        Err(e) => serde_json::json!({ "ok": false, "error": format!("{e:#}") }),
+                    }
+                }
+                Err(e) => serde_json::json!({ "ok": false, "error": format!("{e:#}") }),
+            };
+            mare_shared::lua::json_to_lua(&lua, &out)
+        })?,
+    )?;
+    mare.set("install", install_tbl)?;
     let rr = mare_shared::project::resource_root(&env.cwd);
     let project = lua.create_table()?;
     project.set("root", rr.root.as_ref().map(|p| p.to_string_lossy().into_owned()))?;

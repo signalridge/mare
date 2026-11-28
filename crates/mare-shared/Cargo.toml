@@ -33,6 +33,7 @@ tracing.workspace = true
 regex.workspace = true
 pulldown-cmark.workspace = true
 jsonschema.workspace = true
+semver.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [

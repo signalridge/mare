@@ -19,6 +19,10 @@ pub(crate) async fn install_packages(
     let job = match mare_binding::blocking::spawn(lua, move || {
         mare_plugin_manager::with_cancel(&token, || {
             let mut n = mare_plugin_manager::migrate_extras_for(&c2);
+            let pending = mare_plugin_manager::apply_pending_updates_with_progress(&c2, &mut |line| {
+                tracing::info!("pending plugin update: {line}");
+            });
+            n.extend(pending);
             let install = mare_plugin_manager::install_missing_with_progress(
                 &c2,
                 &mut |name| tracing::info!("installed package {name}"),

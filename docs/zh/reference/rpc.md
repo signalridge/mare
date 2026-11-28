@@ -1151,7 +1151,7 @@ take it over via the `peer/inbound` event. Never an approval.
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| `data` | `{ behind_count: integer, breaking: boolean, commits: string[], error?: string, name: string, status: "up_to_date" \| "outdated" \| "pinned" \| "local" \| "unreachable" }[]` | 是 |  |
+| `data` | `object[]` | 是 |  |
 
 #### `plugins.install`
 

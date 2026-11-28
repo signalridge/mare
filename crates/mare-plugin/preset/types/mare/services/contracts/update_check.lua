@@ -8,6 +8,12 @@ local check_result = object({
 	latest = string,
 	current = string,
 	newer = boolean,
+	channel = string,
+	managed = boolean,
+	command = string,
+	manual_hint = string,
+	release_url = string,
+	policy = string,
 }, { "latest", "current", "newer" })
 
 return {
@@ -15,12 +21,15 @@ return {
 		doc = "Periodic GitHub release update check.",
 		methods = {
 			check = {
-				doc = "Query the configured release endpoint for a newer mare version; returns `{latest, current, newer}` or `nil, reason`.",
+				doc = "Query the configured release endpoint for a newer mare version; returns `{latest, current, newer, channel?, managed?, command?, manual_hint?, release_url?, policy?}` or `nil, reason`.",
 				lua_unchecked = true,
 				params = object({}),
 				order = {},
 				result = { oneOf = { check_result, { type = "null" } } },
-				lua_result = { "{latest: string, current: string, newer: boolean}|nil", "string|nil" },
+				lua_result = {
+					"{latest: string, current: string, newer: boolean, channel?: string, managed?: boolean, command?: string, manual_hint?: string, release_url?: string, policy?: string}|nil",
+					"string|nil",
+				},
 			},
 		},
 		events = {

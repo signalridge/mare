@@ -82,7 +82,9 @@ return {
 | `rev = "<ref>"` | 任意 git 修订。`rev = "=<sha>"` 是精确固定。 |
 | 无 | 最新的 semver 标签，否则为默认分支。 |
 
-加上 `pin = true` 可以让任何包保持原位，直到你修改声明。
+加上 `pin = true` 可以让任何包保持原位，直到你修改声明。在来源中显式设置 `auto_update = true`（默认为 `false`）时，后台定期检查会获取新修订并排队到下一次 `/reload` 或启动时切换检出，不会在当前会话运行期间改动已加载插件的目录。
+
+默认情况下，TUI 后台检查每个插件的每个新修订只提示一次，并建议运行 `mare update --plugins`（设置 `MARE_NO_UPDATE_CHECK=1` 可关闭后台检查；`MARE_OFFLINE=1` 同时阻止 `mare plugin check`/`update` 与启动时远端克隆，同时保持本地已安装包可用）。
 
 ## 锁定文件
 

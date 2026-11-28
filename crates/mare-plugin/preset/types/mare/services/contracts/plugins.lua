@@ -74,6 +74,9 @@ local update_check = object({
 	behind_count = { type = "integer", minimum = 0 },
 	commits = string_list,
 	breaking = boolean,
+	current_commit = string,
+	target_commit = string,
+	auto_update = boolean,
 	error = string,
 }, { "name", "status", "behind_count", "commits", "breaking" })
 

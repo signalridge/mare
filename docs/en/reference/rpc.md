@@ -1151,7 +1151,7 @@ Result:
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `data` | `{ behind_count: integer, breaking: boolean, commits: string[], error?: string, name: string, status: "up_to_date" \| "outdated" \| "pinned" \| "local" \| "unreachable" }[]` | yes |  |
+| `data` | `object[]` | yes |  |
 
 #### `plugins.install`
 

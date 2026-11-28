@@ -40,6 +40,7 @@ mod side;
 mod startup;
 mod state_transitions;
 mod statusline;
+mod update_notify;
 
 /// Ceiling of every wait on the app (a condition poll, not a sleep): generous so a loaded
 /// machine finishes first, and a real hang still fails with the screen in the message.
