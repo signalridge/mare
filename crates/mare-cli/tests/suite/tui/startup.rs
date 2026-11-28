@@ -29,7 +29,7 @@ async fn startup_input_stays_in_the_editor_until_the_resume_picker_settles() {
         global(&vt.host, "AG", vt.host.service_table("agent").unwrap());
         let messages: String = eval(&vt.host, "return mare.json.encode(AG:list_messages().data)").await;
         assert!(messages.contains("earlier context") && messages.contains("typed early"), "{messages}");
-        vt.host.shutdown().await;
+        drop(Term::from_vt(vt, parser));
     })
     .await
 }
@@ -66,7 +66,7 @@ async fn startup_input_is_not_sent_while_project_trust_is_undecided() {
         global(&vt.host, "AG", vt.host.service_table("agent").unwrap());
         let messages: String = eval(&vt.host, "return mare.json.encode(AG:list_messages().data)").await;
         assert!(messages.contains("typed while trusting"), "{messages}");
-        vt.host.shutdown().await;
+        drop(Term::from_vt(vt, parser));
     })
     .await
 }
@@ -87,7 +87,7 @@ async fn startup_input_is_not_sent_when_resume_fails() {
         global(&vt.host, "AG", vt.host.service_table("agent").unwrap());
         let messages: String = eval(&vt.host, "return mare.json.encode(AG:list_messages().data)").await;
         assert!(!messages.contains("must not be sent"), "{messages}");
-        vt.host.shutdown().await;
+        drop(Term::from_vt(vt, parser));
     })
     .await
 }
@@ -111,7 +111,7 @@ async fn startup_input_is_not_sent_when_trusted_project_config_fails() {
         pump_until(&mut vt, &mut parser, "missing startup error", |_, s| s.contains("Startup blocked")).await;
         assert_eq!(vt.turns_ended(), 0, "prompt ran despite failed project config");
         assert_eq!(vt.editor_text(), "must wait for trust");
-        vt.host.shutdown().await;
+        drop(Term::from_vt(vt, parser));
     })
     .await
 }
@@ -184,7 +184,7 @@ async fn cancelled_resume_picker_starts_a_new_session() {
         global(&vt.host, "AG", vt.host.service_table("agent").unwrap());
         let messages: String = eval(&vt.host, "return mare.json.encode(AG:list_messages().data)").await;
         assert!(messages.contains("after cancel") && !messages.contains("earlier context"), "{messages}");
-        vt.host.shutdown().await;
+        drop(Term::from_vt(vt, parser));
     })
     .await
 }
@@ -204,7 +204,7 @@ async fn resume_picker_without_sessions_starts_a_new_session() {
         pump_until(&mut vt, &mut parser, "the prompt never ran", |vt, _| vt.turns_ended() > 0).await;
         assert!(!parser.screen().contents().contains("Startup blocked"), "{}", parser.screen().contents());
         assert!(crate_resume_error(&vt).await.is_none());
-        vt.host.shutdown().await;
+        drop(Term::from_vt(vt, parser));
     })
     .await
 }
@@ -249,7 +249,7 @@ async fn blocked_startup_runs_slash_commands_and_new_unblocks_it() {
         global(&vt.host, "AG", vt.host.service_table("agent").unwrap());
         let messages: String = eval(&vt.host, "return mare.json.encode(AG:list_messages().data)").await;
         assert!(messages.contains("after new") && !messages.contains("refused prompt"), "{messages}");
-        vt.host.shutdown().await;
+        drop(Term::from_vt(vt, parser));
     })
     .await
 }
@@ -271,7 +271,7 @@ async fn the_welcome_banner_is_shown_once_with_the_model() {
         let mut opts = env.host().user_config(false).args(json!({ "trust_pending": true })).opts;
         opts.mode = Mode::Tui;
         let vt = OwnedVt::new(env, opts, 100, 40).await;
-        let mut t = Term { owned: vt, parser: vt100::Parser::new(nz(40), nz(100), 2000), ended: 0 };
+        let mut t = Term::from_vt(vt, vt100::Parser::new(nz(40), nz(100), 2000));
         while t.vt.starting() {
             t.step().await;
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -295,7 +295,7 @@ async fn new_session_clears_screen_and_redraws_startup_welcome_banner() {
         let mut opts = env.host().faux(script).opts;
         opts.mode = Mode::Tui;
         let vt = OwnedVt::new(env, opts, 100, 40).await;
-        let mut t = Term { owned: vt, parser: vt100::Parser::new(nz(40), nz(100), 2000), ended: 0 };
+        let mut t = Term::from_vt(vt, vt100::Parser::new(nz(40), nz(100), 2000));
         t.until("startup welcome banner", |s| {
             s.contains("/model · /help · @ file · ! bash") && s.contains("faux/echo") && s.contains('▀')
         })
@@ -362,7 +362,7 @@ async fn new_session_respects_logo_config_and_lifts_resumed_compact_mode() {
         let mut opts = env.host().faux(json!([])).args(json!({ "continue": true })).opts;
         opts.mode = Mode::Tui;
         let vt = OwnedVt::new(env, opts, 100, 40).await;
-        let mut t = Term { owned: vt, parser: vt100::Parser::new(nz(40), nz(100), 2000), ended: 0 };
+        let mut t = Term::from_vt(vt, vt100::Parser::new(nz(40), nz(100), 2000));
         t.until("resumed session history", |s| s.contains("saved reply")).await;
         assert!(!t.history().contains('▀'), "resumed startup must use compact banner");
 
@@ -411,7 +411,7 @@ async fn new_session_before_app_ready_followed_by_reload_draws_single_banner() {
             .opts;
         opts.mode = Mode::Tui;
         let vt = OwnedVt::new(env, opts, 100, 40).await;
-        let mut t = Term { owned: vt, parser: vt100::Parser::new(nz(40), nz(100), 2000), ended: 0 };
+        let mut t = Term::from_vt(vt, vt100::Parser::new(nz(40), nz(100), 2000));
         t.until("blocked startup before app/ready", |s| s.contains("Startup blocked")).await;
         expose(&t.vt.host);
         assert!(
@@ -524,6 +524,7 @@ async fn a_startup_refusal_is_not_the_retried_config_refusal() {
         vt.key(KeyEvent::new(KeyCode::Char('c'), Modifiers::CONTROL));
         vt.key(KeyEvent::new(KeyCode::Char('c'), Modifiers::CONTROL));
         assert!(vt.quit_requested(), "the original three presses did not quit");
+        drop(Term::from_vt(vt, parser));
     })
     .await;
 }
@@ -564,7 +565,7 @@ async fn tui_startup_leaves_cold_builtin_submodules_unloaded() {
             }
         }
         assert!(loaded.is_empty(), "cold modules loaded by a TUI start: {loaded:?}");
-        vt.shutdown().await;
+        drop(Term::from_vt(vt, parser));
     })
     .await
 }
@@ -608,7 +609,7 @@ async fn tui_startup_defers_gc_threshold_restore_until_after_first_frame() {
             pump_until(&mut vt, &mut parser, "startup and ui/ready settled", |vt, _| vt.startup_finished()).await;
             let after_ready: i64 = eval(&vt.host, gc_param).await;
             assert_eq!(after_ready, 68, "TUI host must restore default GC minormajor after first frame");
-            vt.shutdown().await;
+            drop(Term::from_vt(vt, parser));
         }
     })
     .await

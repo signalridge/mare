@@ -277,6 +277,21 @@ impl Vt {
         self.app.frame
     }
 
+    /// Number of `UiCmd::Clear` commands processed by the app so far.
+    pub fn clear_count(&self) -> usize {
+        self.app.clear_count
+    }
+
+    /// Whether the `Ctrl+T` or plugin transcript overlay is currently open.
+    pub fn transcript_open(&self) -> bool {
+        self.app.transcript.is_open()
+    }
+
+    /// Whether `expand_all` (`Ctrl+O`) is currently enabled.
+    pub fn expand_all(&self) -> bool {
+        self.app.expand_all
+    }
+
     /// Wait for the background startup task (`app/ready`, `StartupReady`, `finish_startup`) to
     /// complete, drain any queued startup messages/commands, and flush the writer thread before
     /// pausing tokio time for deterministic event-loop tests.

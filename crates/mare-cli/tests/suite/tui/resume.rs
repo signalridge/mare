@@ -304,7 +304,7 @@ async fn resume_with_text_opens_the_picker_searching_it() {
         let screen = parser.screen().contents();
         assert!(!screen.contains("Startup blocked") && !screen.contains("no session matches"), "{screen}");
         assert!(crate_resume_error(&vt).await.is_none());
-        vt.host.shutdown().await;
+        drop(Term::from_vt(vt, parser));
     })
     .await
 }
@@ -328,7 +328,7 @@ async fn resume_with_text_lists_the_matches_and_resumes_one() {
         global(&vt.host, "SS", vt.host.service_table("session").unwrap());
         let id: String = eval(&vt.host, "return SS:info(nil).session_id").await;
         assert_eq!(id, "sb");
-        vt.host.shutdown().await;
+        drop(Term::from_vt(vt, parser));
     })
     .await
 }
@@ -348,7 +348,7 @@ async fn resume_with_a_full_id_skips_the_picker() {
         global(&vt.host, "SS", vt.host.service_table("session").unwrap());
         let id: String = eval(&vt.host, "return SS:info(nil).session_id").await;
         assert_eq!(id, "sa");
-        vt.host.shutdown().await;
+        drop(Term::from_vt(vt, parser));
     })
     .await
 }

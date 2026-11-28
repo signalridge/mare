@@ -198,6 +198,7 @@ impl App {
                 });
             }
             UiCmd::Clear => {
+                self.clear_count += 1;
                 self.image_hold.clear();
                 self.blocks.clear();
                 self.committed = 0;

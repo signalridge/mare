@@ -255,7 +255,7 @@ async fn review_picker_uses_rebound_viewer_key() {
         let mut b = env.host().builtins(&["review"]).faux(json!([])).config(json!({"logo": false}));
         b.opts.mode = Mode::Tui;
         let owned = OwnedVt::new(env, b.opts, 120, 24).await;
-        let mut t = Term { owned, parser: vt100::Parser::new(nz(24), nz(120), 2000), ended: 0 };
+        let mut t = Term::from_vt(owned, vt100::Parser::new(nz(24), nz(120), 2000));
         t.step().await;
         expose(&t.vt.host);
         exec(
@@ -293,7 +293,7 @@ async fn review_working_hint_tracks_rebinding_and_unbinding() {
         let mut b = env.host().builtins(&["review"]).faux(json!([])).config(json!({"logo": false}));
         b.opts.mode = Mode::Tui;
         let owned = OwnedVt::new(env, b.opts, 140, 24).await;
-        let mut t = Term { owned, parser: vt100::Parser::new(nz(24), nz(140), 2000), ended: 0 };
+        let mut t = Term::from_vt(owned, vt100::Parser::new(nz(24), nz(140), 2000));
         t.step().await;
         expose(&t.vt.host);
         exec(

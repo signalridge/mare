@@ -26,8 +26,10 @@ mod editor_api;
 mod images;
 mod input;
 mod interaction_hints;
+mod invariants;
 mod keys;
 mod layout;
+mod matrix;
 #[path = "onboarding_extras.rs"]
 mod onboarding_extras;
 mod overlays;
@@ -136,6 +138,19 @@ struct Term {
     parser: vt100::Parser,
     /// turns ended before the last submit
     ended: usize,
+    saw_welcome_banner: bool,
+    skip_drop_invariants: bool,
+}
+
+impl Drop for Term {
+    fn drop(&mut self) {
+        if self.owned.0.is_none() || self.skip_drop_invariants || std::thread::panicking() {
+            return;
+        }
+        if let Err(msg) = self.check_invariants() {
+            panic!("{msg}");
+        }
+    }
 }
 
 impl Deref for Term {
@@ -167,6 +182,19 @@ impl Term {
         Self::build(script, config, json!({}), w, h, |_| {}).await
     }
 
+    async fn with_all_builtins(
+        script: Value,
+        config: Value,
+        args: Value,
+        w: u16,
+        h: u16,
+        prepare: impl FnOnce(&mut TestEnv),
+    ) -> Self {
+        let mut env = TestEnv::new().await;
+        prepare(&mut env);
+        Self::in_env_inner(env, script, config, args, w, h, true).await
+    }
+
     /// `prepare` runs on the workspace before the host starts (e.g. project resources).
     async fn build(script: Value, config: Value, args: Value, w: u16, h: u16, prepare: impl FnOnce(&TestEnv)) -> Self {
         let env = TestEnv::new().await;
@@ -175,24 +203,61 @@ impl Term {
     }
 
     async fn in_env(env: TestEnv, script: Value, config: Value, args: Value, w: u16, h: u16) -> Self {
+        Self::in_env_inner(env, script, config, args, w, h, false).await
+    }
+
+    async fn in_env_inner(
+        env: TestEnv,
+        script: Value,
+        config: Value,
+        args: Value,
+        w: u16,
+        h: u16,
+        all_builtins: bool,
+    ) -> Self {
         // the logo and the welcome line (with the temp cwd) have their own render tests; the
         // permissions plugin on, as in normal use
-        let mut b = env
-            .host()
-            .builtins(&[
-                "agents", "subagent", "jobs", "shell-mode", "compact", "lua-console", "mcp", "copy", "usage",
-                "tools-apply-patch", "user-config", "onboarding", "plugins", "images", "file-ref",
-            ])
+        let mut b = env.host();
+        if all_builtins {
+            b = b.all_builtins();
+        } else {
+            b = b.builtins(&[
+                "agents",
+                "subagent",
+                "jobs",
+                "shell-mode",
+                "compact",
+                "lua-console",
+                "mcp",
+                "copy",
+                "usage",
+                "tools-apply-patch",
+                "user-config",
+                "onboarding",
+                "plugins",
+                "images",
+                "file-ref",
+            ]);
+        }
+        let mut b = b
             .faux(script)
-			.config(json!({ "logo": false, "plugins": { "permissions": { "enabled": true }, "onboarding": { "plugins": false } } }))
+            .config(json!({ "logo": false, "plugins": { "permissions": { "enabled": true }, "onboarding": { "plugins": false } } }))
             .config(config)
             .args(args);
         b.opts.mode = Mode::Tui;
         b.opts.load_init = env.config_dir().join("init.lua").exists();
         let owned = OwnedVt::new(env, b.opts, w, h).await;
-        let mut t = Self { owned, parser: vt100::Parser::new(nz(h), nz(w), 2000), ended: 0 };
+        let mut t = Self::from_vt(owned, vt100::Parser::new(nz(h), nz(w), 2000));
         t.step().await;
         t
+    }
+
+    fn from_vt(owned: OwnedVt, parser: vt100::Parser) -> Self {
+        Self { owned, parser, ended: 0, saw_welcome_banner: false, skip_drop_invariants: false }
+    }
+
+    fn set_skip_drop_invariants(&mut self, skip: bool) {
+        self.skip_drop_invariants = skip;
     }
 
     /// One frame: run what's queued, draw, feed the bytes to the virtual terminal.
@@ -200,6 +265,14 @@ impl Term {
         self.vt.frame().await;
         let out = self.vt.output();
         self.parser.process(&out);
+        if !self.saw_welcome_banner && invariants::has_welcome_banner(&self.screen()) {
+            self.saw_welcome_banner = true;
+        }
+    }
+
+    fn check_invariants(&mut self) -> Result<(), String> {
+        let obs = invariants::observe_term(self, self.saw_welcome_banner);
+        invariants::check_global_invariants(&obs)
     }
 
     /// Draw frames until `f(screen)` holds (polling with a deadline; no fixed sleeps).

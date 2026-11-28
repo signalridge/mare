@@ -107,7 +107,7 @@ async fn snapshot_statusline_term(waiting: bool, layout: &str) -> (Term, std::pa
     }));
     b.opts.mode = Mode::Tui;
     let owned = OwnedVt::new(env, b.opts, 160, 20).await;
-    let mut t = Term { owned, parser: vt100::Parser::new(nz(20), nz(160), 2000), ended: 0 };
+    let mut t = Term::from_vt(owned, vt100::Parser::new(nz(20), nz(160), 2000));
     t.step().await;
     expose(&t.vt.host);
     (t, plugin)
@@ -356,7 +356,7 @@ async fn a_four_method_compact_replacement_preserves_the_statusline_after_a_repl
             .config(json!({ "logo": false, "plugins": { "permissions": { "enabled": true }, "onboarding": { "plugins": false } } }));
         b.opts.mode = Mode::Tui;
         let vt = OwnedVt::new(env, b.opts, 120, 20).await;
-        let mut t = Term { owned: vt, parser: vt100::Parser::new(nz(20), nz(120), 2000), ended: 0 };
+        let mut t = Term::from_vt(vt, vt100::Parser::new(nz(20), nz(120), 2000));
         t.step().await;
         expose(&t.vt.host);
         global(&t.vt.host, "K", t.vt.host.service_table("compact").unwrap());
@@ -494,7 +494,7 @@ async fn status_single_surface_lifecycle_ordering_keep_and_reload() {
         let mut b = env.host().user_config(true).no_session();
         b.opts.mode = Mode::Tui;
         let vt = OwnedVt::new(env, b.opts, 100, 16).await;
-        let mut t = Term { owned: vt, parser: vt100::Parser::new(nz(16), nz(100), 2000), ended: 0 };
+        let mut t = Term::from_vt(vt, vt100::Parser::new(nz(16), nz(100), 2000));
         t.step().await;
         expose(&t.vt.host);
 
@@ -693,7 +693,7 @@ async fn command_replaces_true_hides_builtin_bars() {
             let mut b = env.host().user_config(true).no_session();
             b.opts.mode = Mode::Tui;
             let vt = OwnedVt::new(env, b.opts, 100, 16).await;
-            let mut t = Term { owned: vt, parser: vt100::Parser::new(nz(16), nz(100), 2000), ended: 0 };
+            let mut t = Term::from_vt(vt, vt100::Parser::new(nz(16), nz(100), 2000));
             t.until_vt("startup", |t| !t.vt.starting()).await;
             t.until("external status bar", |s| {
                 let bar = s.lines().rfind(|l| !l.trim().is_empty()).unwrap_or_default();
@@ -812,7 +812,7 @@ async fn statusline_plugin_failure_includes_reload_hint() {
         }));
         b.opts.mode = Mode::Tui;
         let owned = OwnedVt::new(env, b.opts, 160, 20).await;
-        let mut t = Term { owned, parser: vt100::Parser::new(nz(20), nz(160), 2000), ended: 0 };
+        let mut t = Term::from_vt(owned, vt100::Parser::new(nz(20), nz(160), 2000));
         t.until("plugin failure with /reload hint", |s| {
             s.lines().rev().take(3).any(|line| line.contains("boom-plugin failed") && line.contains("/reload"))
         })
@@ -1026,7 +1026,7 @@ async fn statusline_first_frame_matches_post_ready_cell_for_cell_and_git_probe_u
                 first_cells, ready_cells,
                 "first frame and post-ready frame must match cell-for-cell\n--- FIRST ---\n{first_text}\n--- READY ---\n{ready_text}"
             );
-            vt.shutdown().await;
+            drop(Term::from_vt(vt, parser));
         }
 
         // 2. Git repository with background-only probes disabled (`changed_files=false, pr=false`):
@@ -1074,7 +1074,7 @@ async fn statusline_first_frame_matches_post_ready_cell_for_cell_and_git_probe_u
                     clean_first_cells, clean_ready_cells,
                     "git repo first frame and post-ready frame must match cell-for-cell\n--- FIRST ---\n{clean_first_text}\n--- READY ---\n{clean_ready_text}"
                 );
-                vt_clean.shutdown().await;
+                drop(Term::from_vt(vt_clean, parser_clean));
             }
         }
 
@@ -1114,7 +1114,7 @@ async fn statusline_first_frame_matches_post_ready_cell_for_cell_and_git_probe_u
             !git_first.contains("+- 2") && !git_first.contains("ext-probe-ok"),
             "dirty-file and external command probes must stay in background after first frame:\n{git_first}"
         );
-        let mut t2 = Term { owned: vt2, parser: parser2, ended: 0 };
+        let mut t2 = Term::from_vt(vt2, parser2);
         t2.until("background git and external probes update status bar", |s| {
             s.contains("Faux Echo") && s.contains("@ trunk") && s.contains("+- 2") && s.contains("ext-probe-ok")
         })
@@ -1161,7 +1161,7 @@ async fn partial_network_sandbox_warning_is_in_first_frame_and_matches_post_read
             first_cells, ready_cells,
             "first frame and post-ready frame must match cell-for-cell with PARTIAL sandbox warning\n--- FIRST ---\n{first_text}\n--- READY ---\n{ready_text}"
         );
-        vt.shutdown().await;
+        drop(Term::from_vt(vt, parser));
     })
     .await
 }
@@ -1197,7 +1197,7 @@ async fn statusline_reload_reruns_background_git_and_external_probes() {
         b.opts.mode = Mode::Tui;
         let cwd = env.cwd.clone();
         let owned = OwnedVt::new(env, b.opts, 160, 16).await;
-        let mut t = Term { owned, parser: vt100::Parser::new(nz(16), nz(160), 2000), ended: 0 };
+        let mut t = Term::from_vt(owned, vt100::Parser::new(nz(16), nz(160), 2000));
         t.until("initial git and external statusline segments", |s| {
             s.contains("@ trunk") && s.contains("+- 2") && s.contains("ext-before")
         })
@@ -1755,7 +1755,7 @@ async fn compact_openai_statusline_and_keymap_edge_paths() {
             }));
             b.opts.mode = Mode::Tui;
             let owned = OwnedVt::new(env, b.opts, 140, 16).await;
-            let mut t = Term { owned, parser: vt100::Parser::new(nz(16), nz(140), 2000), ended: 0 };
+            let mut t = Term::from_vt(owned, vt100::Parser::new(nz(16), nz(140), 2000));
             t.until("powerline statusline with array external command", |s| {
                 s.contains("Faux Echo") && s.contains("arr-ext-ok")
             })
@@ -1953,7 +1953,7 @@ async fn compact_openai_statusline_and_keymap_edge_paths() {
             }));
             b.opts.mode = Mode::Tui;
             let owned = OwnedVt::new(env, b.opts, 120, 16).await;
-            let mut t = Term { owned, parser: vt100::Parser::new(nz(16), nz(120), 2000), ended: 0 };
+            let mut t = Term::from_vt(owned, vt100::Parser::new(nz(16), nz(120), 2000));
             t.until("plain statusline rendered", |s| s.contains("Faux Echo")).await;
             global(&t.vt.host, "CMP", t.vt.host.service_table("compact").unwrap());
             let thresh_nil: bool = eval(&t.vt.host, "return CMP:threshold() == nil").await;
@@ -2085,7 +2085,7 @@ async fn statusline_deduplicates_pre_first_frame_renders_to_single_pass() {
         }
         let ready_cells = snapshot_cells(parser.screen());
         assert_eq!(first_cells, ready_cells, "first frame must match post-ready frame cell-for-cell");
-        vt.shutdown().await;
+        drop(Term::from_vt(vt, parser));
     })
     .await
 }
@@ -2359,7 +2359,7 @@ async fn statusline_git_status_and_review_git_cannot_write_under_read_only_prese
         let mut b = env.host().user_config(true).no_session();
         b.opts.mode = Mode::Tui;
         let vt = OwnedVt::new(env, b.opts, 100, 16).await;
-        let mut t = Term { owned: vt, parser: vt100::Parser::new(nz(16), nz(100), 2000), ended: 0 };
+        let mut t = Term::from_vt(vt, vt100::Parser::new(nz(16), nz(100), 2000));
         t.until_vt("startup", |t| !t.vt.starting()).await;
         if !require_backend(
             &t.vt.host,

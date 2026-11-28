@@ -62,6 +62,7 @@ impl App {
             show_reasoning: false,
             external_editor: None,
             deferred_clear: false,
+            clear_count: 0,
             deferred_title: None,
             cpr_pending: false,
             cpr_stale_replies: 0,

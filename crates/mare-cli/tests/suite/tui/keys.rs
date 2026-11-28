@@ -1602,7 +1602,7 @@ async fn plugin_action_default_keys_no_ui_key_and_no_key_event_fallback() {
             .config(json!({ "logo": false, "plugins": { "onboarding": { "plugins": false } } }));
         b.opts.mode = Mode::Tui;
         let owned = OwnedVt::new(env, b.opts, 80, 24).await;
-        let mut t = Term { owned, parser: vt100::Parser::new(nz(24), nz(80), 2000), ended: 0 };
+        let mut t = Term::from_vt(owned, vt100::Parser::new(nz(24), nz(80), 2000));
         t.step().await;
         t.until_vt("startup", |t| !t.vt.starting()).await;
 
@@ -1724,7 +1724,7 @@ async fn existing_bindings_survive_plugin_load_and_reload() {
             .config(json!({ "logo": false, "plugins": { "onboarding": { "plugins": false } } }));
         b.opts.mode = Mode::Tui;
         let owned = OwnedVt::new(env, b.opts, 80, 24).await;
-        let mut t = Term { owned, parser: vt100::Parser::new(nz(24), nz(80), 2000), ended: 0 };
+        let mut t = Term::from_vt(owned, vt100::Parser::new(nz(24), nz(80), 2000));
         t.step().await;
         t.until_vt("startup", |t| !t.vt.starting()).await;
         exec(
@@ -2188,7 +2188,7 @@ async fn reload_rollback_preserves_plugin_and_setup_keys_and_enforces_priority_w
         b.opts.load_init = true;
         b.opts.no_user_plugins = false;
         let owned = OwnedVt::new(env, b.opts, 120, 24).await;
-        let mut t = Term { owned, parser: vt100::Parser::new(nz(24), nz(120), 2000), ended: 0 };
+        let mut t = Term::from_vt(owned, vt100::Parser::new(nz(24), nz(120), 2000));
         t.step().await;
         t.until_vt("startup", |t| !t.vt.starting()).await;
 
@@ -2926,7 +2926,7 @@ async fn keymap_set_many_matches_set_semantics_across_runtime_config_reload_and_
             }));
             b.opts.mode = Mode::Tui;
             let owned = OwnedVt::new(env, b.opts, 80, 24).await;
-            let mut t = Term { owned, parser: vt100::Parser::new(nz(24), nz(80), 2000), ended: 0 };
+            let mut t = Term::from_vt(owned, vt100::Parser::new(nz(24), nz(80), 2000));
             t.step().await;
             t.until_vt("startup", |t| !t.vt.starting()).await;
 
