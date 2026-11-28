@@ -1013,7 +1013,22 @@ async fn approved_git_grants_reach_real_sandbox_git_fetch_across_repos_workdir_s
 
         let mut env = TestEnv::new().await;
         env.cwd = ws.clone();
-        let h = host(&env, true, json!({ "network": true }), json!({ "no_session": true })).await;
+        let h = host(
+            &env,
+            true,
+            json!({
+                "network": true,
+                "presets": {
+                    "capped_full": {
+                        "level": "workspace-write",
+                        "network": true,
+                        "like": "full-access"
+                    }
+                }
+            }),
+            json!({ "no_session": true }),
+        )
+        .await;
         if !require_backend(
             &h,
             "approved_git_grants_reach_real_sandbox_git_fetch_across_repos_workdir_symlinks_and_worktrees",
@@ -1428,14 +1443,14 @@ async fn approved_git_grants_reach_real_sandbox_git_fetch_across_repos_workdir_s
             "turn grant must expire after turn 1; turn 2 fetch must NOT update FETCH_HEAD to {head_a_v5}: {fetch_head_after_turn2}"
         );
 
-        // 7. Nominal `full-access` preset under an active host sandbox ceiling (parent switches
-        //    auto -> full-access while agent tree still enforces historical auto sandbox cap):
-        //    child requests physical `.git` write -> next ordinary `bash` must NOT drop the grant
-        //    via the `full-access` early return and must update FETCH_HEAD to head_a_v5.
+        // 7. Nominal `full-access` preset (`like = "full-access"`) under an active `workspace-write`
+        //    host sandbox ceiling: child requests physical `.git` write -> next ordinary `bash`
+        //    must NOT drop the grant via the `full-access` early return and must update FETCH_HEAD
+        //    to head_a_v5 while keeping unapproved sibling `.git` non-writable.
         let sub_full_res: String = eval(
             &h,
             r#"
-            P:set("full-access")
+            assert(P:set("capped_full"))
             local script = {
                 { tool_calls = {{ name = "request_permissions", arguments = {
                     additional_permissions = { write = { REF_A .. "/.git" } },
@@ -1453,7 +1468,6 @@ async fn approved_git_grants_reach_real_sandbox_git_fetch_across_repos_workdir_s
             local child = mare.subagent.start({
                 prompt = "fetch ref-a under nominal full-access",
                 no_session = true,
-                sandbox = { level = "workspace-write", network = true },
                 config = {
                     model = "faux/echo",
                     plugins = { ["provider-faux"] = { script_json = mare.json.encode_strict(script) } },
