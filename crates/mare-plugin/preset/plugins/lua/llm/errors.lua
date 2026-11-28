@@ -102,6 +102,60 @@ local RETRY_KINDS = {
 	stream_closed = true,
 }
 
+local IMAGE_UNSUPPORTED_PHRASES = {
+	"does not support image",
+	"doesn't support image",
+	"don't support image",
+	"not support image",
+	"does not support vision",
+	"doesn't support vision",
+	"not support vision",
+	"does not accept image",
+	"images are not supported",
+	"image is not supported",
+	"image inputs are not supported",
+	"image input is not supported",
+	"image not supported",
+	"vision is not supported",
+	"vision not supported",
+	"image_url is not supported",
+	"input_image is not supported",
+	"unsupported image input",
+	"not a vision model",
+	"text-only model",
+	"text only model",
+	"only supports text",
+}
+
+local function is_image_unsupported(msg, code)
+	local m = string.lower(tostring(msg or ""))
+	local c = string.lower(tostring(code or ""))
+	if c == "image_not_supported" or c == "unsupported_image_input" then
+		return true
+	end
+	for _, phrase in ipairs(IMAGE_UNSUPPORTED_PHRASES) do
+		if m:find(phrase, 1, true) then
+			return true
+		end
+	end
+	if
+		(m:find("image_url", 1, true) or m:find("input_image", 1, true) or m:find("image input", 1, true))
+		and (m:find("not supported", 1, true) or m:find("unsupported", 1, true) or m:find("not allowed", 1, true))
+	then
+		return true
+	end
+	if
+		(
+			m:find("unsupported content type", 1, true)
+			or m:find("unsupported modality", 1, true)
+			or m:find("modality not supported", 1, true)
+		) and (m:find("image", 1, true) or m:find("vision", 1, true))
+	then
+		return true
+	end
+	return false
+end
+
 local function has_word(m, w)
 	return m:find("%f[%w]" .. w .. "%f[%W]") ~= nil
 end
@@ -723,18 +777,25 @@ local function classify_raw(raw, opts, providers)
 		end
 	end
 
-	-- 4. Image limits and context overflow (beat a generic `"invalid"` code or 4xx status).
+	-- 4. Image limits / unsupported image modality and context overflow (beat a generic `"invalid"` code or 4xx status).
 	local msg_text = err.raw_message ~= nil and err.raw_message or err.message
 	local img_fn = (prov_errors and prov_errors.image_limit)
 		or (wire_errors and wire_errors.image_limit)
 		or opts.image_limit
+	local img_unsupported_fn = (prov_errors and prov_errors.image_unsupported)
+		or (wire_errors and wire_errors.image_unsupported)
+		or opts.image_unsupported
+	local unsupported_img = (img_unsupported_fn and img_unsupported_fn(msg_text, code_str) == true)
+		or is_image_unsupported(msg_text, code_str)
 	if
 		not mapped_kind
 		and (not matched_code or matched_code == "invalid")
-		and img_fn
-		and img_fn(msg_text, code_str)
+		and ((img_fn and img_fn(msg_text, code_str)) or unsupported_img)
 	then
 		err.kind = "image_limit"
+		if unsupported_img then
+			err.image_unsupported = true
+		end
 	else
 		local status = err.status
 		if not opts.no_reply_left and (status == 400 or status == 422 or status == nil) and err.reply_left == nil then
@@ -845,6 +906,7 @@ local function classify_raw(raw, opts, providers)
 		provider = err.provider,
 		request_id = err.request_id,
 		source = err.source,
+		image_unsupported = err.image_unsupported or nil,
 	}
 	err.raw_code = raw_code
 	err.raw_type = raw_type
@@ -858,6 +920,7 @@ return {
 	classify = classify,
 	classify_raw = classify_raw,
 	status_kind = status_kind,
+	is_image_unsupported = is_image_unsupported,
 	is_overflow = is_overflow,
 	mare_code = mare_code,
 	canonical_kind = canonical_kind,

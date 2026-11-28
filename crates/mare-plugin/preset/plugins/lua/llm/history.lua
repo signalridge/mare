@@ -89,7 +89,7 @@ local function strip_native(b)
 	return c
 end
 
-local function transform_messages(messages, model, tools, id_policy, route, default_route, wire)
+local function transform_messages(messages, model, tools, id_policy, route, default_route, wire, force_no_images)
 	local offered
 	if tools then
 		offered = {}
@@ -101,7 +101,7 @@ local function transform_messages(messages, model, tools, id_policy, route, defa
 			end
 		end
 	end
-	local no_images = lib.model_images(model) == false
+	local no_images = lib.model_images(model) == false or force_no_images == true
 	local call_map, result_map = assign_call_ids(messages, id_policy or {})
 	local textified = {} -- unique tool call ids turned into text
 	local function image_text(b)

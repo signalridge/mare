@@ -624,3 +624,331 @@ async fn empty_stop_reply_retries_and_never_stores_orphaned_thinking_or_whitespa
     })
     .await
 }
+
+#[tokio::test]
+async fn repro_issue_198_explicit_unsupported_image_error_not_recovered() {
+    local(async {
+        let env = TestEnv::new().await;
+        let server = MockServer::start().await;
+        server.route(
+            "/chat/completions",
+            vec![
+                Resp::status(400, r#"{"error":{"message":"This model does not support image inputs","type":"invalid_request_error"}}"#),
+                Resp::sse(
+                    "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"text-only\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"recovered without image\"},\"finish_reason\":null}]}\n\n\
+                     data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"text-only\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+                     data: [DONE]\n\n"
+                        .to_string(),
+                ),
+            ],
+        );
+
+        let cfg = json!({
+            "model": "custom/text-only",
+            "providers": {
+                "custom": {
+                    "wire": "openai-chat",
+                    "base_url": server.base,
+                    "api_key": "test-key",
+                    "models": [{ "model_id": "text-only", "context_window": 32000, "max_output": 4096 }]
+                }
+            },
+            "plugins": { "llm": { "retries": 0 }, "compact": { "auto": false } }
+        });
+        let h = env.host().builtins(&["compact", "usage"]).config(cfg).no_session().build().await;
+        expose(&h);
+        exec(
+            &h,
+            r#"
+            local png = mare.crypto.base64_encode("PNGDATA")
+            A:set_messages({
+                { role = "user", content = { { type = "text", text = "see attached" }, { type = "image", mime = "image/png", data = png } } },
+                { role = "assistant", content = { { type = "text", text = "noted" } } },
+            })
+            "#,
+        )
+        .await;
+        let res = h.prompt("continue", json!({})).await.unwrap();
+        h.shutdown().await;
+        assert_eq!(
+            res["text"], "recovered without image",
+            "explicit unsupported-image rejection was not recovered via image offload: {res}"
+        );
+    })
+    .await
+}
+
+#[tokio::test]
+async fn unsupported_image_recovery_keeps_generic_400_visible_and_recovers_summary_and_no_compact() {
+    local(async {
+        let env = TestEnv::new().await;
+
+        // 1. Generic HTTP 400 validation error must NOT be treated as an unsupported-image error
+        //    or silently retried.
+        let server1 = MockServer::start().await;
+        server1.route(
+            "/chat/completions",
+            vec![Resp::status(
+                400,
+                r#"{"error":{"message":"Invalid value for parameter 'temperature'","type":"invalid_request_error"}}"#,
+            )],
+        );
+        let cfg1 = json!({
+            "model": "custom/text-only",
+            "providers": {
+                "custom": {
+                    "wire": "openai-chat",
+                    "base_url": server1.base,
+                    "api_key": "test-key",
+                    "models": [{ "model_id": "text-only", "context_window": 32000, "max_output": 4096 }]
+                }
+            },
+            "plugins": { "llm": { "retries": 0 }, "compact": { "auto": false } }
+        });
+        let h1 = env.host().builtins(&["compact", "usage"]).config(cfg1).no_session().build().await;
+        expose(&h1);
+        exec(
+            &h1,
+            r#"
+            local png = mare.crypto.base64_encode("PNGDATA")
+            A:set_messages({
+                { role = "user", content = { { type = "text", text = "see attached" }, { type = "image", mime = "image/png", data = png } } },
+                { role = "assistant", content = { { type = "text", text = "noted" } } },
+            })
+            "#,
+        )
+        .await;
+        let res1 = h1.prompt("continue", json!({})).await.unwrap();
+        h1.shutdown().await;
+        assert_eq!(server1.requests().len(), 1, "generic 400 must not trigger image offload retry");
+        assert_eq!(res1["error_kind"], "invalid", "{res1}");
+
+        // 2. Without compact plugin, explicit unsupported-image error falls back to text references
+        //    via llm/history.lua and succeeds on the retry.
+        let server2 = MockServer::start().await;
+        server2.route(
+            "/chat/completions",
+            vec![
+                Resp::status(
+                    400,
+                    r#"{"error":{"message":"image_url is not supported by this model","type":"invalid_request_error"}}"#,
+                ),
+                Resp::sse(
+                    "data: {\"id\":\"c2\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"text-only\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"recovered via text ref\"},\"finish_reason\":null}]}\n\n\
+                     data: {\"id\":\"c2\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"text-only\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+                     data: [DONE]\n\n"
+                        .to_string(),
+                ),
+            ],
+        );
+        let cfg2 = json!({
+            "model": "custom/text-only",
+            "providers": {
+                "custom": {
+                    "wire": "openai-chat",
+                    "base_url": server2.base,
+                    "api_key": "test-key",
+                    "models": [{ "model_id": "text-only", "context_window": 32000, "max_output": 4096 }]
+                }
+            },
+            "plugins": { "llm": { "retries": 0 } }
+        });
+        let h2 = env.host().builtins(&["usage"]).config(cfg2).no_session().build().await;
+        expose(&h2);
+        exec(
+            &h2,
+            r#"
+            local png = mare.crypto.base64_encode("PNGDATA")
+            A:set_messages({
+                { role = "user", content = { { type = "text", text = "see attached" }, { type = "image", mime = "image/png", path = "/tmp/shot.png", data = png } } },
+                { role = "assistant", content = { { type = "text", text = "noted" } } },
+            })
+            "#,
+        )
+        .await;
+        let res2 = h2.prompt("continue", json!({})).await.unwrap();
+        h2.shutdown().await;
+        assert_eq!(res2["text"], "recovered via text ref", "{res2}");
+        let reqs2 = server2.requests();
+        assert_eq!(reqs2.len(), 2, "expected 1 retry after replacing inline image with text reference");
+        assert!(reqs2[1].body.contains("Attachment: /tmp/shot.png"), "{}", reqs2[1].body);
+        assert!(!reqs2[1].body.contains("image_url"), "{}", reqs2[1].body);
+
+        // 3. Summary request hitting explicit unsupported-image rejection strips images and succeeds.
+        let server3 = MockServer::start().await;
+        server3.route(
+            "/chat/completions",
+            vec![
+                Resp::status(
+                    400,
+                    r#"{"error":{"message":"This model does not support vision inputs","type":"invalid_request_error"}}"#,
+                ),
+                Resp::sse(
+                    "data: {\"id\":\"c3\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"text-only\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"## Summary\\nRecovered summary\"},\"finish_reason\":null}]}\n\n\
+                     data: {\"id\":\"c3\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"text-only\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+                     data: [DONE]\n\n"
+                        .to_string(),
+                ),
+            ],
+        );
+        let cfg3 = json!({
+            "model": "custom/text-only",
+            "providers": {
+                "custom": {
+                    "wire": "openai-chat",
+                    "base_url": server3.base,
+                    "api_key": "test-key",
+                    "models": [{ "model_id": "text-only", "context_window": 32000, "max_output": 4096 }]
+                }
+            },
+            "plugins": { "llm": { "retries": 0 }, "compact": { "auto": false } }
+        });
+        let h3 = env.host().builtins(&["compact", "usage"]).config(cfg3).no_session().build().await;
+        expose(&h3);
+        global(&h3, "K", h3.service_table("compact").unwrap());
+        let (ok3, summary3): (bool, String) = eval(
+            &h3,
+            r#"
+            local png = mare.crypto.base64_encode("PNGDATA")
+            local r = K:run("Summarize", {
+                summarize_only = true,
+                messages = {
+                    { role = "user", content = { { type = "text", text = string.rep("context ", 80) }, { type = "image", mime = "image/png", data = png } } },
+                    { role = "assistant", content = { { type = "text", text = string.rep("analysis ", 80) } } },
+                },
+            })
+            return type(r) == "table" and r.status == "summarized", tostring(type(r) == "table" and r.summary or r)
+            "#,
+        )
+        .await;
+        h3.shutdown().await;
+        assert!(ok3 && summary3.contains("Recovered summary"), "summary recovery failed: {summary3}");
+        let reqs3 = server3.requests();
+        assert_eq!(reqs3.len(), 2, "expected summary retry with stripped images");
+        assert!(!reqs3[1].body.contains("image_url"), "{}", reqs3[1].body);
+    })
+    .await
+}
+
+#[tokio::test]
+async fn unsupported_image_classifier_excludes_non_image_modality_and_corrupt_image_and_supports_provider_hook() {
+    local(async {
+        let env = TestEnv::new().await;
+
+        // 1. Non-image modality errors ("Unsupported modality: audio output") and corrupt image
+        //    errors ("cannot read image: bad PNG signature") must NOT be misclassified as
+        //    image_unsupported or trigger image offload / retry.
+        for (label, body) in [
+            (
+                "audio modality",
+                r#"{"error":{"message":"Unsupported modality: audio output","code":"unsupported_modality","type":"invalid_request_error"}}"#,
+            ),
+            (
+                "corrupt png",
+                r#"{"error":{"message":"cannot read image: bad PNG signature","type":"invalid_request_error"}}"#,
+            ),
+        ] {
+            let server = MockServer::start().await;
+            server.route("/chat/completions", vec![Resp::status(400, body)]);
+            let cfg = json!({
+                "model": "custom/text-only",
+                "providers": {
+                    "custom": {
+                        "wire": "openai-chat",
+                        "base_url": server.base,
+                        "api_key": "test-key",
+                        "models": [{ "model_id": "text-only", "context_window": 32000, "max_output": 4096 }]
+                    }
+                },
+                "plugins": { "llm": { "retries": 0 }, "compact": { "auto": false } }
+            });
+            let h = env.host().builtins(&["compact", "usage"]).config(cfg).no_session().build().await;
+            expose(&h);
+            exec(
+                &h,
+                r#"
+                local png = mare.crypto.base64_encode("PNGDATA")
+                A:set_messages({
+                    { role = "user", content = { { type = "text", text = "see attached" }, { type = "image", mime = "image/png", data = png } } },
+                    { role = "assistant", content = { { type = "text", text = "noted" } } },
+                })
+                "#,
+            )
+            .await;
+            let res = h.prompt("continue", json!({})).await.unwrap();
+            let inline_images: i64 = eval(
+                &h,
+                r#"
+                local n = 0
+                for _, m in ipairs(A:list_messages().data) do
+                    for _, b in ipairs(m.content or {}) do
+                        if b.type == "image" then n = n + 1 end
+                    end
+                end
+                return n
+                "#,
+            )
+            .await;
+            h.shutdown().await;
+            assert_eq!(server.requests().len(), 1, "{label}: must fail immediately without retry: {res}");
+            assert_eq!(res["error_kind"], "invalid", "{label}: expected invalid, got: {res}");
+            assert_eq!(inline_images, 1, "{label}: must not offload inline images on non-modality-mismatch error");
+        }
+
+        // 2. Endpoint-specific / localized wording is supported cleanly via provider `errors.image_unsupported`.
+        let server_hook = MockServer::start().await;
+        server_hook.route(
+            "/chat/completions",
+            vec![
+                Resp::status(
+                    400,
+                    r#"{"error":{"message":"当前模型不支持图片输入","type":"invalid_request_error"}}"#,
+                ),
+                Resp::sse(
+                    "data: {\"id\":\"c4\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"text-only\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"recovered via hook\"},\"finish_reason\":null}]}\n\n\
+                     data: {\"id\":\"c4\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"text-only\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+                     data: [DONE]\n\n"
+                        .to_string(),
+                ),
+            ],
+        );
+        let cfg_hook = json!({
+            "model": "custom/text-only",
+            "providers": {
+                "custom": {
+                    "wire": "openai-chat",
+                    "base_url": server_hook.base,
+                    "api_key": "test-key",
+                    "models": [{ "model_id": "text-only", "context_window": 32000, "max_output": 4096 }]
+                }
+            },
+            "plugins": { "llm": { "retries": 0 }, "compact": { "auto": false } }
+        });
+        let h_hook = env.host().builtins(&["compact", "usage"]).config(cfg_hook).no_session().build().await;
+        expose(&h_hook);
+        global(&h_hook, "L", h_hook.service_table("llm").unwrap());
+        exec(
+            &h_hook,
+            r#"
+            local p = L:provider("custom")
+            local orig_errors = p.errors
+            p.errors = setmetatable({
+                image_unsupported = function(msg)
+                    return tostring(msg or ""):find("不支持图片", 1, true) ~= nil
+                end,
+            }, { __index = orig_errors })
+            local png = mare.crypto.base64_encode("PNGDATA")
+            A:set_messages({
+                { role = "user", content = { { type = "text", text = "see attached" }, { type = "image", mime = "image/png", data = png } } },
+                { role = "assistant", content = { { type = "text", text = "noted" } } },
+            })
+            "#,
+        )
+        .await;
+        let res_hook = h_hook.prompt("continue", json!({})).await.unwrap();
+        h_hook.shutdown().await;
+        assert_eq!(res_hook["text"], "recovered via hook", "{res_hook}");
+        assert_eq!(server_hook.requests().len(), 2, "provider errors.image_unsupported hook must trigger offload retry");
+    })
+    .await
+}

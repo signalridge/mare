@@ -252,6 +252,8 @@ return function(D)
 						return w.OVERFLOW
 					elseif k == "image_limit" then
 						return w.IMAGE_LIMIT
+					elseif k == "image_unsupported" then
+						return w.IMAGE_UNSUPPORTED
 					elseif k == "map" then
 						return use_cerebras_map and w.cerebras_overflow_map or nil
 					end

@@ -51,7 +51,7 @@
 ---@field stop_reason? "stop"|"tool_use"|"length"|"error"|"aborted"|"paused"|"filtered"|"other"
 ---@field error_kind? string
 ---@field error_code? string
----@field error_data? {kind?: string, error_code?: string, original_error_kind?: string, raw_code?: string, raw_type?: string, status?: integer, provider?: string, request_id?: string, source?: string}
+---@field error_data? {kind?: string, error_code?: string, original_error_kind?: string, raw_code?: string, raw_type?: string, status?: integer, provider?: string, request_id?: string, source?: string, image_unsupported?: boolean}
 ---@field error? string
 ---@field tool_call_id? string
 ---@field tool_name? string
@@ -97,6 +97,7 @@
 ---@field session_id? string
 ---@field request_id? string
 ---@field no_fallback? boolean
+---@field no_images? boolean
 ---@field purpose? string
 ---@field subagent? string
 ---@field attempt? integer
@@ -136,7 +137,7 @@
 ---@field aliases? table<string, string|{family: string}>
 ---@field model_defaults? table<string, table<string, any>>
 ---@field hosted_tools? {web_search?: boolean|string|{supported?: boolean, mode?: "disabled"|"cached"|"indexed"|"live", config?: table}}
----@field errors? {codes?: table<string, string|{kind?: string, retryable?: boolean, hint?: string}>, map?: (fun(raw: table): table|nil), overflow?: (fun(msg: string, code?: any): boolean), image_limit?: (fun(msg: string, code?: any): boolean)}
+---@field errors? {codes?: table<string, string|{kind?: string, retryable?: boolean, hint?: string}>, map?: (fun(raw: table): table|nil), overflow?: (fun(msg: string, code?: any): boolean), image_limit?: (fun(msg: string, code?: any): boolean), image_unsupported?: (fun(msg: string, code?: any): boolean)}
 ---@field login? {methods: ("oauth"|"device"|"api_key")[], run: async fun(lio?: table)}|(async fun(lio?: table))
 ---@field login_label? string
 ---@field auth_keys? string[]
@@ -183,7 +184,7 @@
 ---@field finalize? fun(req: mare.LlmRequest, endpoint: table, wire: table, state?: any)
 ---@field decoder fun(sink: fun(ev: mare.StreamEvent), context?: {endpoint: table, request: table, response?: table, state?: any}): mare.WireDecoder
 ---@field error? fun(payload: any): {api_code?: any, api_type?: string, message?: string, status?: integer, request_id?: string, trace_id?: string}|nil
----@field errors? {codes?: table<string, string|{kind?: string, retryable?: boolean, hint?: string}>, overflow?: (fun(msg: string, code?: any): boolean), image_limit?: (fun(msg: string, code?: any): boolean)}
+---@field errors? {codes?: table<string, string|{kind?: string, retryable?: boolean, hint?: string}>, overflow?: (fun(msg: string, code?: any): boolean), image_limit?: (fun(msg: string, code?: any): boolean), image_unsupported?: (fun(msg: string, code?: any): boolean)}
 ---@field retry? fun(wire: table, err: table): boolean
 ---@field estimate_hints? mare.TokenEstimateHint Wire-specific image shapes and capped opaque fields for `mare.text.tokens`.
 

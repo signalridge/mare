@@ -91,6 +91,7 @@ return function(D)
 			codes = opts.codes,
 			overflow = opts.overflow,
 			image_limit = opts.image_limit,
+			image_unsupported = opts.image_unsupported,
 			map = opts.map,
 			no_reply_left = opts.no_reply_left,
 			api_err = api,
