@@ -4338,7 +4338,8 @@ async fn rpc_options_set_does_not_elevate_into_cli_layer_or_bypass_untrusted_cei
                 load_init: false,
                 project_trusted: true,
                 args: json!({ "no_session": true }),
-                no_user_plugins: true,
+                // `no_user_plugins: true` represents `--clean`, which forces untrusted workspaces.
+                no_user_plugins: false,
             };
             let manager = mare_host::HostManager::new();
             let s1_rt = manager.create_session(base_opts.clone()).await.unwrap();
