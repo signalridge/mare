@@ -18,6 +18,7 @@ thread_local! {
     /// The next fsync on this thread fails (tests run concurrently).
     pub(crate) static BEFORE_DURABLE_SYNC: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(crate) static FAIL_NEXT_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(crate) static FAIL_NEXT_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     pub(crate) static BEFORE_SNAPSHOT_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(crate) static AFTER_SNAPSHOT_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(crate) static OPEN_BASELINE_SYNCS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -29,8 +30,10 @@ pub struct SessionFile {
     _lock: std::sync::Arc<LockGuard>,
     /// written but not yet fsynced (made durable at the next semantic boundary / flush)
     dirty: bool,
-    /// a failed write could not be rolled back: no further appends until reopened
-    poisoned: bool,
+    /// file or lock identity was lost on disk: no further writes until reopened
+    identity_lost: bool,
+    /// offset of a failed append whose rollback did not finish; revalidated before retrying
+    pending_rollback: Option<u64>,
     /// a torn final write starts here; cut before the next append
     torn_at: Option<u64>,
     /// bytes of complete lines (where a failed batch is truncated back to)
@@ -177,7 +180,8 @@ impl SessionFile {
             file,
             _lock: std::sync::Arc::new(lock),
             dirty: false,
-            poisoned: false,
+            identity_lost: false,
+            pending_rollback: None,
             torn_at,
             len,
             stats,
@@ -204,10 +208,14 @@ impl SessionFile {
         self.path_binding(path).unwrap_or(false)
     }
 
+    fn is_poisoned(&self) -> bool {
+        self.identity_lost || self.pending_rollback.is_some()
+    }
+
     /// False proves the requested path does not identify the healthy held file/lock (missing
     /// or different identities). Other IO failures and a poisoned writer are errors.
     pub fn matches_path_checked(&self, path: &Path) -> std::io::Result<bool> {
-        if self.poisoned {
+        if self.is_poisoned() {
             return Err(std::io::Error::other("session writer is poisoned; reopen it"));
         }
         self.path_binding(path)
@@ -246,7 +254,7 @@ impl SessionFile {
     /// after a failed write that could not be rolled back, or when the file's length isn't what
     /// this handle wrote. The caller records it in the session index.
     pub fn checkpoint(&mut self) -> Result<Option<Checkpoint>> {
-        if self.poisoned || self.torn_at.is_some() || !self.matches_path(&self.path) {
+        if self.is_poisoned() || self.torn_at.is_some() || !self.matches_path(&self.path) {
             return Ok(None);
         }
         self.flush()?;
@@ -259,11 +267,71 @@ impl SessionFile {
 
     fn ensure_live_identity(&mut self) -> std::io::Result<()> {
         if !self.matches_path(&self.path) {
-            self.poisoned = true;
+            self.identity_lost = true;
             return Err(std::io::Error::other(
                 "session file identity changed before durable acknowledgement; reopen it",
             ));
         }
+        Ok(())
+    }
+
+    /// Revalidate writer identity and finish any rollback that failed on an earlier append
+    /// (for example due to `ENOSPC` when recording or clearing rollback state).
+    fn recover_pending_rollback(&mut self) -> Result<()> {
+        if self.identity_lost {
+            anyhow::bail!("session file identity changed before durable acknowledgement; reopen it");
+        }
+        let Some(target) = self.pending_rollback else {
+            return Ok(());
+        };
+        self.ensure_live_identity()?;
+        let cur_len = self.file.metadata().context("session recovery failed: reading file metadata")?.len();
+        if cur_len < target {
+            self.identity_lost = true;
+            anyhow::bail!(
+                "session recovery failed: file length ({cur_len}) is shorter than rollback offset ({target}); reopen it"
+            );
+        }
+        let rev = self._lock.revision().context("session recovery failed: reading rollback revision")?;
+        let marker =
+            crate::lock::rollback_record(&self.path).context("session recovery failed: reading rollback marker")?;
+        if let Some((dev, ino, offset)) = marker {
+            let held = crate::lock::file_id(&self.file).context("session recovery failed: reading file identity")?;
+            if (dev, ino) != held || offset != target {
+                self.identity_lost = true;
+                anyhow::bail!("session recovery failed: rollback marker does not match active writer; reopen it");
+            }
+        }
+        if cur_len == target && rev % 2 == 0 && marker.is_none() {
+            self.file.sync_data().context("session recovery failed: syncing journal")?;
+            self._lock.sync_data().context("session recovery failed: syncing lock file")?;
+            self.ensure_live_identity()?;
+            let _ = crate::lock::write_committed_prefix(&self.path, &self.file, target);
+            self.pending_rollback = None;
+            return Ok(());
+        }
+        if rev % 2 == 0 {
+            self._lock.begin_rollback_revision(&self.path, &self.file, target).with_context(|| {
+                format!("session recovery failed: rollback to {target} bytes could not be recorded")
+            })?;
+        } else if cur_len > target && marker.is_none() {
+            crate::lock::write_rollback_marker(&self.path, &self.file, target).with_context(|| {
+                format!("session recovery failed: rollback marker for {target} bytes could not be recorded")
+            })?;
+        }
+        self.file
+            .set_len(target)
+            .and_then(|_| self.file.sync_data())
+            .with_context(|| format!("session recovery failed: could not truncate journal to {target} bytes"))?;
+        self.ensure_live_identity()?;
+        self._lock
+            .clear_rollback_marker(&self.path)
+            .context("session recovery failed: rollback marker could not be cleared")?;
+        self._lock
+            .finish_rollback_revision()
+            .context("session recovery failed: rollback revision could not be finalized")?;
+        let _ = crate::lock::write_committed_prefix(&self.path, &self.file, target);
+        self.pending_rollback = None;
         Ok(())
     }
 
@@ -296,15 +364,13 @@ impl SessionFile {
     /// (before a model call, before a side-effecting tool, at each step start); without, a
     /// plain O_APPEND write, marked dirty until the next sync / [`flush`](Self::flush). If the write
     /// or its fsync fails, the file is truncated back to its length before the batch
-    /// and the error returned; if even that fails, the file refuses
-    /// further appends until reopened.
+    /// and the error returned; if rollback itself fails (for example due to `ENOSPC`), the
+    /// unfinished rollback offset is retained and revalidated before the next append or flush.
     pub fn append_batch(&mut self, entries: &[Value], sync: bool) -> Result<()> {
         if !self.matches_path(&self.path) {
             anyhow::bail!("session file identity changed before append; reopen it");
         }
-        if self.poisoned {
-            anyhow::bail!("session file has a partial write that could not be rolled back; reopen it");
-        }
+        self.recover_pending_rollback()?;
         if self.len == 0 && !entries.is_empty() {
             crate::format::check_header(&entries[0])?;
         }
@@ -333,7 +399,13 @@ impl SessionFile {
         let res = self
             .file
             .seek(SeekFrom::Start(before))
-            .and_then(|_| self.file.write_all(buf.as_bytes()))
+            .and_then(|_| {
+                #[cfg(test)]
+                if FAIL_NEXT_WRITE.with(|f| f.replace(false)) {
+                    return Err(std::io::Error::other("injected write failure before append"));
+                }
+                self.file.write_all(buf.as_bytes())
+            })
             .and_then(|_| if sync { self.sync(before + buf.len() as u64) } else { Ok(()) });
         if let Err(e) = res {
             #[cfg(test)]
@@ -341,8 +413,14 @@ impl SessionFile {
                 hook();
             }
             self.ensure_live_identity()?;
+            if self.file.metadata().ok().is_some_and(|m| m.len() == before)
+                && self._lock.revision().ok().is_some_and(|r| r % 2 == 0)
+                && crate::lock::rollback_pending(&self.path).ok() == Some(false)
+            {
+                return Err(e.into());
+            }
             if let Err(revision_error) = self._lock.begin_rollback_revision(&self.path, &self.file, before) {
-                self.poisoned = true;
+                self.pending_rollback = Some(before);
                 anyhow::bail!("session batch failed ({e}) and rollback could not be recorded: {revision_error}");
             }
             #[cfg(test)]
@@ -351,7 +429,7 @@ impl SessionFile {
             }
             let rollback = self.file.set_len(before).and_then(|_| self.file.sync_data());
             if rollback.is_err() {
-                self.poisoned = true;
+                self.pending_rollback = Some(before);
             }
             if let Err(rollback_error) = rollback {
                 anyhow::bail!("session batch failed ({e}) and rollback failed: {rollback_error}");
@@ -362,13 +440,13 @@ impl SessionFile {
             }
             self.ensure_live_identity()?;
             if let Err(rollback_error) = self._lock.clear_rollback_marker(&self.path) {
-                self.poisoned = true;
+                self.pending_rollback = Some(before);
                 anyhow::bail!(
                     "session batch failed ({e}) and its rollback marker could not be cleared: {rollback_error}"
                 );
             }
             if let Err(revision_error) = self._lock.finish_rollback_revision() {
-                self.poisoned = true;
+                self.pending_rollback = Some(before);
                 anyhow::bail!(
                     "session batch failed ({e}) and its rollback revision could not be recorded: {revision_error}"
                 );
@@ -389,9 +467,7 @@ impl SessionFile {
     /// fsync pending writes. Returns whether anything was flushed. On
     /// failure the writes stay in place and `dirty`, so the next flush retries them.
     pub fn flush(&mut self) -> Result<bool> {
-        if self.poisoned {
-            anyhow::bail!("session writer is poisoned; reopen it");
-        }
+        self.recover_pending_rollback()?;
         self.ensure_live_identity()?;
         if !self.dirty {
             return Ok(false);
@@ -613,5 +689,125 @@ mod independent_snapshot_tests {
             err.contains(CORRUPT),
             "uncommitted first batch with agent/run-end must not be promoted into a forkable snapshot: {err}"
         );
+    }
+
+    /// Issue #183: when a failed append also fails to write its rollback marker (e.g. ENOSPC /
+    /// unwritable directory), the writer is poisoned permanently and refuses later appends even
+    /// after the directory/disk condition recovers.
+    #[test]
+    fn poisoned_writer_recovers_after_rollback_marker_failure_clears() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("recover.jsonl");
+        let mut writer = SessionFile::create_new(&path).unwrap();
+        writer.append(&serde_json::json!({"type":"session", "version":3, "session_id":"s"}), true).unwrap();
+
+        // Deterministically inject a durable sync failure followed by two rollback-marker write
+        // failures (works identically under root/DAC_OVERRIDE and non-Unix platforms).
+        crate::lock::FAIL_WRITE_ROLLBACK_MARKER.with(|fail| fail.set(2));
+        FAIL_NEXT_SYNC.with(|fail| fail.set(true));
+        let first_err = writer
+            .append(&serde_json::json!({"type":"custom", "kind":"test/fail", "data":{"n":1}}), true)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            first_err.contains("rollback could not be recorded"),
+            "expected rollback-marker failure, got: {first_err}"
+        );
+
+        // While marker writes are still failing, retries report an actionable recovery failure
+        // and retain rollback state without corrupting the file.
+        let still_blocked = writer
+            .append(&serde_json::json!({"type":"custom", "kind":"test/still_blocked", "data":{"n":2}}), true)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            still_blocked.contains("session recovery failed"),
+            "expected actionable recovery failure while marker writes fail, got: {still_blocked}"
+        );
+        assert!(writer.matches_path_checked(&path).is_err(), "unrecovered writer remains poisoned");
+
+        // Once the injected marker write failures clear, subsequent append recovers safely.
+        let retry = writer.append(&serde_json::json!({"type":"custom", "kind":"test/recovered", "data":{"n":2}}), true);
+        assert!(
+            retry.is_ok(),
+            "writer should recover after rollback failure condition clears, got: {:?}",
+            retry.unwrap_err()
+        );
+        assert!(writer.matches_path_checked(&path).unwrap(), "recovered writer is healthy");
+        assert!(!crate::lock::rollback_pending(&path).unwrap(), "rollback marker cleared after recovery");
+        let entries = crate::read_fork_snapshot(&path, Some("s")).unwrap();
+        assert_eq!(entries.len(), 2, "failed partial batch rolled back, recovered entry persisted: {entries:?}");
+        assert_eq!(entries[1]["kind"], "test/recovered");
+    }
+
+    #[test]
+    fn writer_recovers_after_mid_rollback_marker_clear_failure_and_pre_append_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("recover-stages.jsonl");
+        let mut writer = SessionFile::create_new(&path).unwrap();
+        writer.append(&serde_json::json!({"type":"session", "version":3, "session_id":"s"}), true).unwrap();
+
+        // 1. Failure BEFORE a partial append (0 bytes written) must not poison the writer or try to
+        //    write a rollback marker.
+        crate::lock::FAIL_WRITE_ROLLBACK_MARKER.with(|fail| fail.set(1));
+        FAIL_NEXT_WRITE.with(|fail| fail.set(true));
+        let pre_err = writer
+            .append(&serde_json::json!({"type":"custom", "kind":"test/pre", "data":{}}), true)
+            .unwrap_err()
+            .to_string();
+        assert!(pre_err.contains("injected write failure"), "{pre_err}");
+        assert_eq!(
+            crate::lock::FAIL_WRITE_ROLLBACK_MARKER.with(|f| f.replace(0)),
+            1,
+            "pre-append failure must not attempt to write a rollback marker"
+        );
+        assert!(writer.matches_path_checked(&path).unwrap(), "pre-append failure must not poison writer");
+        writer.append(&serde_json::json!({"type":"custom", "kind":"test/after_pre", "data":{}}), true).unwrap();
+
+        // 2. Failure AFTER truncate (at clear_rollback_marker) leaves an odd lock revision and
+        //    leftover .rollback marker; flush() recovers both once marker clearing succeeds.
+        crate::lock::FAIL_CLEAR_ROLLBACK_MARKER.with(|fail| fail.set(1));
+        FAIL_NEXT_SYNC.with(|fail| fail.set(true));
+        let mid_err = writer
+            .append(&serde_json::json!({"type":"custom", "kind":"test/mid", "data":{}}), true)
+            .unwrap_err()
+            .to_string();
+        assert!(mid_err.contains("rollback marker could not be cleared"), "{mid_err}");
+        assert!(crate::lock::rollback_pending(&path).unwrap());
+        assert_eq!(writer._lock.revision().unwrap() % 2, 1, "lock revision must be odd while rollback is incomplete");
+
+        assert!(!writer.flush().unwrap(), "flush recovers pending rollback even when not dirty");
+        assert!(!crate::lock::rollback_pending(&path).unwrap());
+        assert_eq!(writer._lock.revision().unwrap() % 2, 0, "lock revision must be even after recovery");
+
+        // 3. Failure at finish_rollback_revision's lock-file sync leaves an even revision, correct
+        //    length, and cleared marker; retry must still sync the lock file before clearing
+        //    pending_rollback.
+        crate::lock::FAIL_LOCK_SYNC.with(|fail| fail.set(2));
+        FAIL_NEXT_SYNC.with(|fail| fail.set(true));
+        let lock_sync_err = writer
+            .append(&serde_json::json!({"type":"custom", "kind":"test/lock_sync", "data":{}}), true)
+            .unwrap_err()
+            .to_string();
+        assert!(lock_sync_err.contains("rollback revision could not be recorded"), "{lock_sync_err}");
+        assert!(!crate::lock::rollback_pending(&path).unwrap(), "marker already cleared before lock sync failed");
+        assert_eq!(writer._lock.revision().unwrap() % 2, 0, "revision already bumped to even before lock sync failed");
+
+        // Second injected lock-sync failure: recovery must NOT clear pending_rollback yet.
+        let retry_lock_err = writer.flush().unwrap_err().to_string();
+        assert!(
+            retry_lock_err.contains("syncing lock file"),
+            "even-revision recovery must retry lock-file sync, got: {retry_lock_err}"
+        );
+        assert!(writer.matches_path_checked(&path).is_err(), "writer stays pending rollback until lock sync succeeds");
+
+        // Third attempt: lock sync succeeds, pending_rollback clears, and new appends persist.
+        assert!(!writer.flush().unwrap(), "flush succeeds once lock sync succeeds");
+        assert!(writer.matches_path_checked(&path).unwrap(), "writer healthy after lock sync recovery");
+
+        writer.append(&serde_json::json!({"type":"custom", "kind":"test/after_mid", "data":{}}), true).unwrap();
+        let entries = crate::read_fork_snapshot(&path, Some("s")).unwrap();
+        let kinds: Vec<_> = entries.iter().filter_map(|e| e.get("kind").and_then(Value::as_str)).collect();
+        assert_eq!(kinds, ["test/after_pre", "test/after_mid"]);
     }
 }
