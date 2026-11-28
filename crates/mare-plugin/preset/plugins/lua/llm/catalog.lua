@@ -15,7 +15,6 @@ return function(D)
 		"default_effort",
 		"truncation",
 		"input",
-		"images",
 		"cost",
 		"protocol",
 		"edit_tool",
@@ -83,8 +82,10 @@ return function(D)
 		local o = overrides[m.ref]
 		if o then
 			for k, v in pairs(o) do
-				m[k] = v
-				src[k] = "user"
+				if k ~= "images" and k ~= "input_modalities" then
+					m[k] = v
+					src[k] = "user"
+				end
 			end
 			if o.max_output ~= nil then
 				m.max_output_default = nil
@@ -93,12 +94,13 @@ return function(D)
 		if m.tool_update == false then
 			m.tool_update = nil
 		end
+		m.images = nil
 		local derived = D.lib.model_images(m)
 		if derived ~= nil then
 			m.images = derived
-			if src.images == nil and src.input ~= nil then
-				src.images = src.input
-			end
+			src.images = src.input
+		else
+			src.images = nil
 		end
 		if m.ref then
 			model_sources[m.ref] = src
@@ -496,10 +498,6 @@ return function(D)
 			m.input = copy
 			src.input = "server"
 		end
-		if type(l.images) == "boolean" then
-			m.images = l.images
-			src.images = "server"
-		end
 		if type(l.truncation) == "table" then
 			m.truncation = l.truncation
 			src.truncation = "server"
@@ -634,10 +632,6 @@ return function(D)
 				if not prev then
 					added = added + 1
 				end
-				local images
-				if type(l.images) == "boolean" then
-					images = l.images
-				end
 				local src = init_sources(ref, l, "server", p)
 				for k, sname in pairs(l._sources or {}) do
 					src[k] = sname
@@ -667,7 +661,6 @@ return function(D)
 					default_effort = type(l.default_effort) == "string" and l.default_effort or nil,
 					edit_tool = type(l.edit_tool) == "string" and l.edit_tool or nil,
 					input = type(l.input) == "table" and l.input or nil,
-					images = images,
 					cost = type(l.cost) == "table" and l.cost or nil,
 					-- models.dev's wire protocol for the model (llm/routes layer 4)
 					protocol = type(l.protocol) == "string" and l.protocol or nil,

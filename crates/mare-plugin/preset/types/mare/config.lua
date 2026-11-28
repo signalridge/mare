@@ -230,6 +230,7 @@ function mare.tools.disable(names) end
 ---@field max_output? integer
 ---@field reasoning? boolean
 ---@field efforts? string[]
+---@field input? string[] accepted input modalities (e.g. `{ "text", "image" }`)
 ---@field cost? {input?: number, output?: number, cache_read?: number, cache_write?: number} USD per 1M tokens
 ---@field edit_tool? "apply_patch"|"replace"
 ---@field alias? string another name: `/model <alias>`; with plain `params` values it pins them

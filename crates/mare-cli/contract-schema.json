@@ -2758,9 +2758,6 @@
               "hidden": {
                 "type": "boolean"
               },
-              "images": {
-                "type": "boolean"
-              },
               "input": {
                 "items": {
                   "type": "string"

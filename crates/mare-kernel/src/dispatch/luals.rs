@@ -1,12 +1,12 @@
 //! LuaLS declarations generated from service contracts: JSON Schema to LuaLS
 //! types, and one `*.gen.lua` class per typed service. Shared by the contract tooling and the
 //! event and config registries (separate from contract parsing, contracts.rs).
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use serde_json::{Value as Json, json};
 
-use super::contracts::Expose;
+use super::contracts::{Expose, NamedTypeSpec};
 use crate::ServiceContract;
 
 /// The LuaLS type the generator writes for a JSON Schema (what a titled class's field is checked
@@ -334,9 +334,124 @@ pub fn luals_events(contracts: &std::collections::BTreeMap<String, ServiceContra
     out
 }
 
+/// Generate one named LuaLS class (`types/mare/services/<name>.gen.lua`) from a contract's
+/// `types.<name>` declaration (schema properties + optional required override + Lua-only fields).
+pub fn luals_named_type(service: &str, name: &str, spec: &NamedTypeSpec) -> String {
+    let file = service.replace('-', "_");
+    let mut out = format!(
+        "---@meta _\n\
+         -- GENERATED from types/mare/services/contracts/{file}.lua (service `{service}`, type `{name}`): do not edit.\n\
+         -- Regenerate: UPDATE_GENERATED=1 cargo test -p mare-cli generated_luals_are_current\n\n"
+    );
+    if let Some(doc) = &spec.doc {
+        for line in doc.lines().filter(|l| !l.is_empty()) {
+            let _ = writeln!(out, "--- {line}");
+        }
+    }
+    let _ = writeln!(out, "---@class {}", spec.class);
+
+    let mut fields: BTreeMap<&str, String> = BTreeMap::new();
+    if let Some(properties) = spec.schema.get("properties").and_then(Json::as_object) {
+        for (k, v) in properties {
+            fields.insert(k.as_str(), luals_type(v));
+        }
+    }
+    for (k, ty) in &spec.lua_fields {
+        fields.insert(k.as_str(), ty.clone());
+    }
+
+    let required_order: Vec<&str> = match &spec.required {
+        Some(req) => req.iter().map(String::as_str).collect(),
+        None => spec
+            .schema
+            .get("required")
+            .and_then(Json::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Json::as_str)
+            .collect(),
+    };
+
+    let mut emitted = BTreeSet::new();
+    for k in &required_order {
+        if let Some(ty) = fields.get(k)
+            && emitted.insert(*k)
+        {
+            let _ = writeln!(out, "---@field {k} {ty}");
+        }
+    }
+    for (k, ty) in &fields {
+        if emitted.insert(*k) {
+            let _ = writeln!(out, "---@field {k}? {ty}");
+        }
+    }
+    out
+}
+
+/// Generate every named LuaLS type declared across `contracts` (`types = { <stem> = ... }`),
+/// keyed by `<stem>` (written to `types/mare/services/<stem>.gen.lua`).
+pub fn luals_named_types(contracts: &BTreeMap<String, ServiceContract>) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for (service, contract) in contracts {
+        for (name, spec) in &contract.types {
+            let rendered = luals_named_type(service, name, spec);
+            let prev = out.insert(name.clone(), rendered);
+            assert!(prev.is_none(), "duplicate generated named type `{name}` declared by `{service}`");
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn luals_named_types_handles_empty_contracts_and_renders_generic_declarations() {
+        // Contracts without `llm` (or with no `types`) must never panic.
+        assert!(luals_named_types(&BTreeMap::new()).is_empty());
+
+        let lua = mlua::Lua::new();
+        let value: mlua::Value = lua
+            .load(
+                r#"return {
+                    demo = {
+                        methods = {
+                            ping = { doc = "ping", result = { type = "boolean" } },
+                        },
+                        types = {
+                            widget = {
+                                class = "mare.Widget",
+                                doc = "A custom contract-declared LuaLS class.",
+                                schema = {
+                                    type = "object",
+                                    properties = {
+                                        kind = { type = "string" },
+                                        count = { type = "integer" },
+                                    },
+                                    required = { "kind" },
+                                },
+                                required = { "id", "kind" },
+                                lua_fields = {
+                                    id = "string",
+                                    cached = "boolean",
+                                },
+                            },
+                        },
+                    },
+                }"#,
+            )
+            .eval()
+            .unwrap();
+        let parsed = crate::contracts::parse_contracts(&lua, value).unwrap();
+        let generated = luals_named_types(&parsed);
+        let widget = generated.get("widget").expect("widget generated");
+        assert!(widget.contains("---@class mare.Widget\n"), "{widget}");
+        assert!(widget.contains("---@field id string\n"), "{widget}");
+        assert!(widget.contains("---@field kind string\n"), "{widget}");
+        assert!(widget.contains("---@field count? integer\n"), "{widget}");
+        assert!(widget.contains("---@field cached? boolean\n"), "{widget}");
+    }
 
     #[test]
     fn any_of_and_one_of_unions_render_to_luals() {

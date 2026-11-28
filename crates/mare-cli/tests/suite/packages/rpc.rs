@@ -641,7 +641,7 @@ fn rpc_pkg_reload_gate_and_remote_failure_keep_disk_consistent() {
         json!({
             "provider": "gateprov",
             "default_model": "g1",
-            "models": [{ "model_id": "g1", "name": "Gate 1", "context_window": 128000, "max_output": 2048, "images": false }],
+            "models": [{ "model_id": "g1", "name": "Gate 1", "context_window": 128000, "max_output": 2048, "input": ["text"] }],
             "callbacks": ["stream"]
         }),
     );

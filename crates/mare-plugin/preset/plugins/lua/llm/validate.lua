@@ -103,7 +103,6 @@ local MODEL_FIELDS = {
 	context_window_measured = "boolean",
 	max_output = "positive_number",
 	reasoning = "boolean",
-	images = "boolean",
 	hidden = "boolean",
 	tool_update = "tool_update",
 	cache_retention = "string",
@@ -112,7 +111,7 @@ local MODEL_FIELDS = {
 	default_effort = "string",
 	cost = "table",
 	truncation = "table",
-	input = "table",
+	input = "string_array",
 	params = "table",
 	effort_map = "table",
 	unavailable = "string_or_boolean",
@@ -287,7 +286,17 @@ local function validate_models(models, pname, extra_model_fields)
 		if m.vision ~= nil then
 			return false,
 				("models[%d].vision"):format(i),
-				("provider %q: model field `vision` was replaced by `images`"):format(pname)
+				("provider %q: model field `vision` was replaced by `input`"):format(pname)
+		end
+		if m.images ~= nil then
+			return false,
+				("models[%d].images"):format(i),
+				("provider %q: model field `images` is a derived read-only output; use `input` instead"):format(pname)
+		end
+		if m.input_modalities ~= nil then
+			return false,
+				("models[%d].input_modalities"):format(i),
+				("provider %q: model field `input_modalities` was replaced by `input`"):format(pname)
 		end
 		if type(m.cost) == "table" then
 			for _, ck in ipairs({ "input", "output", "cache_read", "cache_write" }) do

@@ -178,6 +178,18 @@ pub struct CapabilitySpec {
     pub doc: String,
 }
 
+/// One named LuaLS class derived from a service contract schema (`types = { stem = { class, schema, ... } }`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NamedTypeSpec {
+    pub class: String,
+    pub doc: Option<String>,
+    pub schema: Json,
+    /// Required field names for the generated LuaLS class (when `None`, falls back to `schema["required"]`).
+    pub required: Option<Vec<String>>,
+    /// Lua-only runtime fields not exposed on the wire JSON Schema (field name -> LuaLS type).
+    pub lua_fields: BTreeMap<String, String>,
+}
+
 impl MethodSpec {
     pub fn remote(&self) -> bool {
         self.expose == Expose::Both
@@ -1100,6 +1112,77 @@ fn parse_doc_field_json_owned(
     }
 }
 
+fn parse_types_json_owned(service: &str, value: Option<Json>) -> mlua::Result<BTreeMap<String, NamedTypeSpec>> {
+    let shape = || {
+        error(
+            service,
+            "`types` maps each snake_case stem to `{ class = ..., schema = ..., doc?, required?, lua_fields? }`",
+        )
+    };
+    let table = match value {
+        None | Some(Json::Null) => return Ok(BTreeMap::new()),
+        Some(Json::Object(table)) => table,
+        _ => return Err(shape()),
+    };
+    let mut types = BTreeMap::new();
+    for (key, entry_val) in table {
+        let Json::Object(mut entry) = entry_val else { return Err(shape()) };
+        if !mare_shared::errors::valid_name(&key) {
+            return Err(error(service, format!("type name `{key}` is not lowercase snake_case")));
+        }
+        for field in entry.keys() {
+            if !matches!(field.as_str(), "class" | "doc" | "schema" | "required" | "lua_fields") {
+                return Err(shape());
+            }
+        }
+        let Some(Json::String(class)) = entry.remove("class") else { return Err(shape()) };
+        if class.trim().is_empty() {
+            return Err(error(service, format!("type `{key}` requires a non-empty `class`")));
+        }
+        let doc = match entry.remove("doc").filter(|v| !v.is_null()) {
+            None => None,
+            Some(Json::String(d)) => Some(d),
+            _ => return Err(shape()),
+        };
+        let Some(schema) = entry.remove("schema").filter(|v| !v.is_null()) else { return Err(shape()) };
+        if !schema.get("properties").is_some_and(Json::is_object) {
+            return Err(error(service, format!("type `{key}` `schema` must be an object schema with `properties`")));
+        }
+        compile(service, &format!("type `{key}` schema"), &schema)?;
+        let required = match entry.remove("required").filter(|v| !v.is_null()) {
+            None => None,
+            Some(Json::Array(items)) => {
+                let mut req = Vec::with_capacity(items.len());
+                for item in items {
+                    let Json::String(name) = item else { return Err(shape()) };
+                    if name.trim().is_empty() {
+                        return Err(shape());
+                    }
+                    req.push(name);
+                }
+                Some(req)
+            }
+            _ => return Err(shape()),
+        };
+        let mut lua_fields = BTreeMap::new();
+        match entry.remove("lua_fields").filter(|v| !v.is_null()) {
+            None => {}
+            Some(Json::Object(map)) => {
+                for (fname, fty) in map {
+                    let Json::String(ty) = fty else { return Err(shape()) };
+                    if fname.trim().is_empty() || ty.trim().is_empty() {
+                        return Err(shape());
+                    }
+                    lua_fields.insert(fname, ty);
+                }
+            }
+            _ => return Err(shape()),
+        }
+        types.insert(key, NamedTypeSpec { class, doc, schema, required, lua_fields });
+    }
+    Ok(types)
+}
+
 fn parse_one_json_owned(name: &str, mut contract: serde_json::Map<String, Json>) -> mlua::Result<ServiceContract> {
     let essential = parse_bool_field_json(name, &contract, "essential")?;
     let project_scoped = parse_bool_field_json(name, &contract, "project_scoped")?;
@@ -1142,7 +1225,7 @@ fn parse_one_json_owned(name: &str, mut contract: serde_json::Map<String, Json>)
     for key in contract.keys() {
         if !matches!(
             key.as_str(),
-            "doc" | "methods" | "errors" | "essential" | "events" | "project_scoped" | "capabilities"
+            "doc" | "methods" | "errors" | "essential" | "events" | "project_scoped" | "capabilities" | "types"
         ) {
             return Err(error(name, format!("unknown field `{key}`")));
         }
@@ -1180,6 +1263,7 @@ fn parse_one_json_owned(name: &str, mut contract: serde_json::Map<String, Json>)
         }
     }
     let events = super::contract_events::parse_events_json_owned(name, name, contract.remove("events"))?;
+    let types = parse_types_json_owned(name, contract.remove("types"))?;
     let poisoned_allow = if methods.values().any(|spec| spec.poisoned.is_some()) {
         Some(methods.iter().filter(|(_, spec)| spec.poisoned == Some(true)).map(|(method, _)| method.clone()).collect())
     } else {
@@ -1198,6 +1282,7 @@ fn parse_one_json_owned(name: &str, mut contract: serde_json::Map<String, Json>)
         owner: None,
         events,
         capabilities,
+        types,
     })
 }
 
@@ -1598,7 +1683,7 @@ pub use super::contract_events::{
     CORE_ONLY_EVENT_ROOTS, EventRetain, EventScope, EventSpec, is_host_only_contract, is_protocol_reserved_event_root,
     valid_event_kebab_name,
 };
-pub use super::luals::{luals_events, luals_schema_type, luals_types};
+pub use super::luals::{luals_events, luals_named_type, luals_named_types, luals_schema_type, luals_types};
 
 #[cfg(test)]
 mod tests {

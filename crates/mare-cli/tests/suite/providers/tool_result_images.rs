@@ -211,8 +211,9 @@ async fn google_non_vision_model_downgrades_tool_result_images_to_text() {
         let mut env = TestEnv::new().await;
         let server = MockServer::start().await;
         server.route("/google", vec![Resp::sse(fixture("google.sse"))]);
-        let h = provider_host(&mut env, &server, json!({ "models": { "google/gemini-2.5-pro": { "images": false } } }))
-            .await;
+        let h =
+            provider_host(&mut env, &server, json!({ "models": { "google/gemini-2.5-pro": { "input": ["text"] } } }))
+                .await;
 
         stream_history(
             &h,
@@ -293,7 +294,7 @@ async fn openai_compat_non_vision_model_downgrades_tool_result_images_to_text() 
         let h = provider_host(
             &mut env,
             &server,
-            json!({ "models": { "deepseek/deepseek-reasoner": { "images": false } } }),
+            json!({ "models": { "deepseek/deepseek-reasoner": { "input": ["text"] } } }),
         )
         .await;
 
@@ -510,7 +511,7 @@ async fn agent_turn_read_image_respects_non_vision_model() {
             &server,
             json!({
                 "model": "anthropic/claude-sonnet-5-5",
-                "models": { "anthropic/claude-sonnet-5-5": { "images": false } },
+                "models": { "anthropic/claude-sonnet-5-5": { "input": ["text"] } },
             }),
         )
         .await;

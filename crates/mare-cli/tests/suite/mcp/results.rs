@@ -392,8 +392,8 @@ async fn mcp_image_result_is_replaced_with_text_when_model_lacks_image_support()
         let entry = with(fake.entry(json!({ "tools": ["image"] })), json!({ "tier": "direct" }));
         let cfg = json!({
             "models": {
-                "faux/text-only": { "context_window": 100000, "max_output": 4096, "images": false },
-                "faux/vision": { "context_window": 100000, "max_output": 4096, "images": true }
+                "faux/text-only": { "context_window": 100000, "max_output": 4096, "input": ["text"] },
+                "faux/vision": { "context_window": 100000, "max_output": 4096, "input": ["text", "image"] }
             },
             "plugins": {
                 "mcp": { "servers": { "fake": entry } }

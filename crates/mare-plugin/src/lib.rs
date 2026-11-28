@@ -142,6 +142,7 @@ pub fn types_texts() -> Vec<(&'static str, std::borrow::Cow<'static, str>)> {
         "mare/services/copy.gen.lua",
         "mare/services/ctx.lua",
         "mare/services/images.gen.lua",
+        "mare/services/model.gen.lua",
         "mare/services/models.lua",
         "mare/services/permissions.gen.lua",
         "mare/services/review.gen.lua",
@@ -269,7 +270,7 @@ mod static_contracts {
     use mare_kernel::ServiceContract;
     use mare_kernel::contracts::{
         Access, CallbackSpec, CapabilitySpec, ErrorSpec, EventDelivery, EventMode, EventOnError, EventReach,
-        EventRetain, EventScope, EventSpec, Expose, MethodProvider, MethodSpec, ReleaseOn, Scope,
+        EventRetain, EventScope, EventSpec, Expose, MethodProvider, MethodSpec, NamedTypeSpec, ReleaseOn, Scope,
     };
     use serde_json::{Map, Number, Value as Json};
 
@@ -310,6 +311,14 @@ mod static_contracts {
     pub(super) struct StaticCapabilitySpec {
         pub method: &'static str,
         pub doc: &'static str,
+    }
+
+    pub(super) struct StaticNamedTypeSpec {
+        pub class: &'static str,
+        pub doc: Option<&'static str>,
+        pub schema: u32,
+        pub required: Option<&'static [&'static str]>,
+        pub lua_fields: &'static [(&'static str, &'static str)],
     }
 
     pub(super) struct StaticMethodSpec {
@@ -379,6 +388,7 @@ mod static_contracts {
         pub owner: Option<&'static str>,
         pub events: &'static [(&'static str, StaticEventSpec)],
         pub capabilities: &'static [(&'static str, StaticCapabilitySpec)],
+        pub types: &'static [(&'static str, StaticNamedTypeSpec)],
     }
 
     include!(concat!(env!("OUT_DIR"), "/builtin_contracts.rs"));
@@ -522,6 +532,22 @@ mod static_contracts {
                     (k.to_owned(), CapabilitySpec { method: cap.method.to_owned(), doc: cap.doc.to_owned() })
                 })
                 .collect();
+            let types = c
+                .types
+                .iter()
+                .map(|&(k, ref ty)| {
+                    (
+                        k.to_owned(),
+                        NamedTypeSpec {
+                            class: ty.class.to_owned(),
+                            doc: ty.doc.map(str::to_owned),
+                            schema: to_json(ty.schema),
+                            required: ty.required.map(str_vec),
+                            lua_fields: ty.lua_fields.iter().map(|&(fk, fv)| (fk.to_owned(), fv.to_owned())).collect(),
+                        },
+                    )
+                })
+                .collect();
             out.insert(
                 name.to_owned(),
                 Arc::new(ServiceContract {
@@ -535,6 +561,7 @@ mod static_contracts {
                     owner: c.owner.map(str::to_owned),
                     events,
                     capabilities,
+                    types,
                 }),
             );
         }

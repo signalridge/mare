@@ -54,8 +54,8 @@ async fn catalog_input_modalities_derive_image_capability_and_respect_overrides(
             &server,
             json!({
                 "models": {
-                    "localcompat/overridden-text": { "images": true },
-                    "localcompat/overridden-vision": { "images": false }
+                    "localcompat/overridden-text": { "input": ["text", "image"] },
+                    "localcompat/overridden-vision": { "input": ["text"] }
                 },
                 "providers": {
                     "localcompat": {
@@ -158,39 +158,62 @@ return d_text.images, d_vision.images, d_unknown.images, r_unknown.images == nil
 }
 
 #[tokio::test]
-async fn catalog_listed_images_false_is_preserved_over_input_modalities() {
+async fn modality_input_is_single_source_and_images_input_field_is_rejected() {
     local(async {
         let mut env = TestEnv::new().await;
         let server = MockServer::start().await;
         let h = provider_host(&mut env, &server, json!({})).await;
 
-        let (desc_images, raw_images_false, converted_has_no_image, converted_has_attachment): (
-            bool,
-            bool,
-            bool,
-            bool,
-        ) = eval(
+        let (
+            seed_rejected,
+            mod_ignored_modalities,
+            desc_images,
+            raw_images_false,
+            converted_has_no_image,
+            converted_has_attachment,
+        ): (bool, bool, bool, bool, bool, bool) = eval(
             &h,
             r#"
+local disp, seed_err = LLM:register_provider({
+  provider = "bad-images-seed",
+  no_key = true,
+  models = { { model_id = "m1", name = "M1", images = false } },
+  stream = function() error("unused") end,
+})
+assert(disp == nil and tostring(seed_err):find("images", 1, true), "seed `images` must be rejected: " .. tostring(seed_err))
+assert(LLM:provider("bad-images-seed") == nil, "rejected provider must not be registered")
+
+local disp2, mod_err = LLM:register_provider({
+  provider = "bad-modalities-seed",
+  no_key = true,
+  models = { { model_id = "m1", name = "M1", input_modalities = { "text" } } },
+  stream = function() error("unused") end,
+})
+assert(disp2 == nil and tostring(mod_err):find("input_modalities", 1, true), "seed `input_modalities` must be rejected: " .. tostring(mod_err))
+
+local lib = require("mare_lib")
+local ignored_mod = (lib.model_images({ input_modalities = { "text" } }) == nil)
+
 LLM:register_provider({
-  provider = "listed-images-test",
+  provider = "listed-input-test",
+  no_key = true,
   is_configured = function() return true end,
+  stream = function() error("unused") end,
   list_models = function()
     return {
       {
-        id = "vision-disabled",
-        name = "Vision Disabled",
-        input = { "text", "image" },
-        images = false,
+        id = "text-only",
+        name = "Text Only",
+        input = { "text" },
       },
     }
   end,
 })
-local out = LLM:refresh_catalog({ name = "listed-images-test", force = true })
-assert(out["listed-images-test"] == 1, "expected 1 listed model, got: " .. tostring(out["listed-images-test"]))
+local out = LLM:refresh_catalog({ name = "listed-input-test", force = true })
+assert(out["listed-input-test"] == 1, "expected 1 listed model, got: " .. tostring(out["listed-input-test"]))
 
-local d = LLM:get_model("listed-images-test/vision-disabled")
-local r = assert(LLM:resolve("listed-images-test/vision-disabled"))
+local d = LLM:get_model("listed-input-test/text-only")
+local r = assert(LLM:resolve("listed-input-test/text-only"))
 
 local history = {
   { role = "user", content = { { type = "text", text = "look" }, { type = "image", data = "AAAA", mime = "image/png", path = "/tmp/shot.png" } } },
@@ -211,27 +234,17 @@ for _, m in ipairs(converted) do
   end
 end
 
-return d.images, r.images == false, not has_image, has_attachment
+return disp == nil and disp2 == nil, ignored_mod, d.images, r.images == false, not has_image, has_attachment
 "#,
         )
         .await;
 
-        assert!(
-            !desc_images,
-            "listed model with input=['text','image'] and explicit images=false must report descriptor images=false"
-        );
-        assert!(
-            raw_images_false,
-            "listed model with explicit images=false must preserve raw m.images == false"
-        );
-        assert!(
-            converted_has_no_image,
-            "transform_messages must strip images when listed model has images=false"
-        );
-        assert!(
-            converted_has_attachment,
-            "transform_messages must downgrade image to Attachment text when listed model has images=false"
-        );
+        assert!(seed_rejected, "register_provider seed model must reject `images` input field");
+        assert!(mod_ignored_modalities, "mare_lib.model_images must not read `input_modalities` directly");
+        assert!(!desc_images, "listed model with input=['text'] must report derived descriptor images=false");
+        assert!(raw_images_false, "listed model with input=['text'] must derive read-only r.images == false");
+        assert!(converted_has_no_image, "transform_messages must strip images for input=['text']");
+        assert!(converted_has_attachment, "transform_messages must downgrade image to Attachment text");
 
         h.shutdown().await;
     })

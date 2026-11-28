@@ -208,7 +208,7 @@ async fn capabilities_detach_param_functions_and_report_unavailable_models() {
                         context_window = 64000,
                         max_output = 4096,
                         reasoning = true,
-                        images = false,
+                        input = { "text" },
                         efforts = { "low", "custom_max" },
                     },
                     {

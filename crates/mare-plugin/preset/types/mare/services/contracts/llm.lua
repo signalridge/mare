@@ -11,6 +11,25 @@ return {
 	["llm"] = {
 		essential = true,
 		doc = "Models, providers, credentials and model requests.",
+		types = {
+			model = {
+				class = "mare.Model",
+				schema = model,
+				required = { "id", "ref", "provider" },
+				lua_fields = {
+					id = "string",
+					input = "string[]",
+					truncation = '{mode: "tokens"|"bytes", limit: integer}',
+					cache_retention = '"none"|"short"|"long"',
+					protocol = '"responses"|"messages"|"chat-completions"|"generate-content"',
+					hidden = "boolean",
+					listed = "boolean",
+					max_output_default = "boolean",
+					effort_map = "table<string, any>",
+					unavailable = "string|boolean",
+				},
+			},
+		},
 		errors = {
 			unknown_model = { doc = "no model with that ref or alias" },
 			model_unavailable = {
@@ -174,7 +193,6 @@ return {
 							context_window_measured = boolean,
 							max_output = { type = "number", minimum = 1 },
 							reasoning = boolean,
-							images = boolean,
 							hidden = boolean,
 							tool_update = {
 								oneOf = {

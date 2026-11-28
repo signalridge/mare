@@ -1231,7 +1231,7 @@ fn acp_preserves_trust_source_for_trust_default_and_trust_resolve_plugins() {
         ctx.llm:register_provider({{
             provider = "rec",
             no_key = true,
-            models = {{ {{ model_id = "m", name = "Rec", images = true }} }},
+            models = {{ {{ model_id = "m", name = "Rec", input = {{ "text", "image" }} }} }},
             stream = function(req)
                 mare.fs.write({:?}, mare.json.encode({{ system = req.system }}))
                 return {{ role = "assistant", content = {{ {{ type = "text", text = "ok" }} }}, stop_reason = "stop" }}
@@ -1301,7 +1301,7 @@ fn acp_preserves_trust_source_for_trust_default_and_trust_resolve_plugins() {
         ctx.llm:register_provider({{
             provider = "rec",
             no_key = true,
-            models = {{ {{ model_id = "m", name = "Rec", images = true }} }},
+            models = {{ {{ model_id = "m", name = "Rec", input = {{ "text", "image" }} }} }},
             stream = function(req)
                 mare.fs.write({:?}, mare.json.encode({{ system = req.system }}))
                 return {{ role = "assistant", content = {{ {{ type = "text", text = "ok" }} }}, stop_reason = "stop" }}

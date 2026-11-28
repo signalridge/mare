@@ -61,7 +61,7 @@ async fn granted_peer_provider_is_owned_by_connection(replace_first: bool) {
         "peer-register",
         "llm.register_provider",
         json!({"provider":"hostprov", "default_model":"m1", "replace":replace_first, "callbacks":["stream"],
-            "models":[{"model_id":"m1","name":"Host Model 1","context_window":128000,"max_output":4096,"images":true}]}),
+            "models":[{"model_id":"m1","name":"Host Model 1","context_window":128000,"max_output":4096,"input":["text","image"]}]}),
     )
     .await;
     assert_eq!(
@@ -110,7 +110,7 @@ async fn granted_peer_provider_is_owned_by_connection(replace_first: bool) {
             if index == 0 { "register" } else { "replace" },
             "llm.register_provider",
             json!({"provider":"hostprov", "default_model":model, "replace":replace_first || index != 0, "callbacks":["stream"],
-                "models":[{"model_id":model,"name":"Host Model 1","context_window":128000,"max_output":4096,"images":true}]}),
+                "models":[{"model_id":model,"name":"Host Model 1","context_window":128000,"max_output":4096,"input":["text","image"]}]}),
         )
         .await;
         assert!(reg["error"].is_null(), "primary provider registration: {reg}");
@@ -170,7 +170,7 @@ async fn rpc_llm_register_provider_streams_deltas_cancels_and_replaces() {
                 json!({
                     "provider": "streamprov",
                     "default_model": "s1",
-                    "models": [{ "model_id": "s1", "name": "Stream 1", "context_window": 128000, "max_output": 2048, "images": false }],
+                    "models": [{ "model_id": "s1", "name": "Stream 1", "context_window": 128000, "max_output": 2048, "input": ["text"] }],
                     "callbacks": ["stream"]
                 }),
             )

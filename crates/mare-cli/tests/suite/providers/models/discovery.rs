@@ -6,7 +6,7 @@ async fn switching_models_converts_the_history_without_touching_it() {
         let mut env = TestEnv::new().await;
         let server = MockServer::start().await;
         server.route("/anthropic", vec![Resp::sse(fixture("anthropic.sse"))]);
-        let h = provider_host(&mut env, &server, json!({ "models": { "anthropic/claude-sonnet-5-5": { "images": false } } })).await;
+        let h = provider_host(&mut env, &server, json!({ "models": { "anthropic/claude-sonnet-5-5": { "input": ["text"] } } })).await;
         let (unchanged, n): (bool, i64) = eval(
             &h,
             r#"
