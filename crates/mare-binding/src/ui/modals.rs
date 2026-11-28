@@ -748,18 +748,25 @@ fn title_first_line(text: &str, max_chars: usize) -> String {
     }
 }
 
-fn format_generic_arguments(arguments: &serde_json::Value) -> Option<String> {
-    let non_empty = match arguments {
-        serde_json::Value::Null => false,
-        serde_json::Value::Object(m) => !m.is_empty(),
-        serde_json::Value::Array(a) => !a.is_empty(),
-        serde_json::Value::String(s) => !s.trim().is_empty(),
-        _ => true,
+fn format_generic_arguments(arguments: &serde_json::Value, exclude_keys: &[&str]) -> Option<String> {
+    let filtered = match arguments {
+        serde_json::Value::Null => return None,
+        serde_json::Value::Object(m) => {
+            let kept: serde_json::Map<String, serde_json::Value> = m
+                .iter()
+                .filter(|(k, _)| !exclude_keys.contains(&k.as_str()))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            if kept.is_empty() {
+                return None;
+            }
+            serde_json::Value::Object(kept)
+        }
+        serde_json::Value::Array(a) if a.is_empty() => return None,
+        serde_json::Value::String(s) if s.trim().is_empty() => return None,
+        other => other.clone(),
     };
-    if !non_empty {
-        return None;
-    }
-    let raw = serde_json::to_string(arguments).ok()?;
+    let raw = serde_json::to_string(&filtered).ok()?;
     const MAX_ARG_CHARS: usize = 2048;
     if raw.chars().count() <= MAX_ARG_CHARS {
         Some(raw)
@@ -828,10 +835,9 @@ fn build_approval_presentation(
     if let Some(scope) = reusable_sandbox_scope(&snapshot.arguments) {
         body.push(format!("Requested access: {scope}"));
     }
-    if let Some(url) = non_empty_str(&snapshot.arguments, "url") {
-        if snapshot.tool == "web_fetch" {
-            showed_specific_args = true;
-        }
+    if snapshot.tool == "web_fetch"
+        && let Some(url) = non_empty_str(&snapshot.arguments, "url")
+    {
         body.push(format!("URL: {url}"));
     }
     let mut has_structured_permissions = false;
@@ -846,7 +852,6 @@ fn build_approval_presentation(
                 && !paths.is_empty()
             {
                 has_structured_permissions = true;
-                showed_specific_args = true;
                 body.push(heading.to_string());
                 for item in paths {
                     if let Some(p) = item.as_str().filter(|s| !s.is_empty()) {
@@ -858,22 +863,29 @@ fn build_approval_presentation(
         match additional.get("network") {
             Some(serde_json::Value::Bool(true)) => {
                 has_structured_permissions = true;
-                showed_specific_args = true;
                 body.push("Network: all hosts".to_string());
             }
             Some(serde_json::Value::Array(hosts)) if !hosts.is_empty() => {
                 let list: Vec<&str> = hosts.iter().filter_map(serde_json::Value::as_str).collect();
                 if !list.is_empty() {
                     has_structured_permissions = true;
-                    showed_specific_args = true;
                     body.push(format!("Network: {}", list.join(", ")));
                 }
             }
             _ => {}
         }
     }
-    if !showed_specific_args && let Some(arg_summary) = format_generic_arguments(&snapshot.arguments) {
-        body.push(format!("Arguments: {arg_summary}"));
+    if !showed_specific_args {
+        let mut exclude = vec!["additional_permissions", "justification", "sandbox_permissions"];
+        if snapshot.tool == "web_fetch" {
+            exclude.push("url");
+        }
+        if snapshot.scoped {
+            exclude.push("scope");
+        }
+        if let Some(arg_summary) = format_generic_arguments(&snapshot.arguments, &exclude) {
+            body.push(format!("Arguments: {arg_summary}"));
+        }
     }
 
     let justification = non_empty_str(&snapshot.arguments, "justification");
@@ -1139,9 +1151,11 @@ mod tests {
             arguments: serde_json::json!({
                 "url": "https://api.example.invalid/orders",
                 "method": "POST",
-                "limit": 5
+                "limit": 5,
+                "additional_permissions": { "network": ["api.example.invalid"] },
+                "justification": "post order"
             }),
-            requested_permissions: None,
+            requested_permissions: Some(serde_json::json!({ "network": ["api.example.invalid"] })),
             unconfined: false,
             protected_arguments: false,
             origin: None,
@@ -1152,10 +1166,14 @@ mod tests {
         let (mcp_title, mcp_body) = build_approval_presentation(&mcp_snap, &choices, false);
         assert_eq!(mcp_title, "Allow mcp__srv__request?");
         let mcp_joined = mcp_body.join("\n");
-        assert!(mcp_joined.contains("URL: https://api.example.invalid/orders"), "{mcp_joined}");
+        assert!(
+            !mcp_joined.contains("URL:"),
+            "non-web_fetch MCP tool must not duplicate url as a separate URL: line: {mcp_joined}"
+        );
+        assert!(mcp_joined.contains("Network: api.example.invalid"), "{mcp_joined}");
         assert!(
             mcp_joined.contains(r#"Arguments: {"url":"https://api.example.invalid/orders","method":"POST","limit":5}"#),
-            "MCP tools with url must still display full Arguments JSON: {mcp_joined}"
+            "MCP tools with additional_permissions and url must still display business Arguments JSON: {mcp_joined}"
         );
 
         let fetch_snap = Snapshot {

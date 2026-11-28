@@ -22,6 +22,11 @@ return function(D)
 	local function resolve_workdir(...)
 		return D.bash_run.resolve_workdir(...)
 	end
+	local function visible_control(s)
+		return (s:gsub("[%z\1-\8\10-\31\127]", function(ch)
+			return ("\\x%02x"):format(string.byte(ch))
+		end))
+	end
 	local function shell_preview(a, call_cwd)
 		local cmd = type(a) == "table" and type(a.command) == "string" and a.command or ""
 		local cwd = (type(call_cwd) == "string" and call_cwd ~= "") and call_cwd or resolve_workdir(a)
@@ -30,13 +35,14 @@ return function(D)
 			items[#items + 1] = ui.Paragraph(
 				ui.Line({
 					ui.Span("cwd: "):hl("MareMuted"),
-					ui.Span(cwd):hl("MareTitle"),
+					ui.Span(visible_control(cwd)):hl("MareTitle"),
 				}),
 				{ hard_wrap = true }
 			)
 		end
 		for _, line in ipairs(mare.text.split_lines(cmd)) do
-			items[#items + 1] = ui.Paragraph(ui.Line({ ui.Span(line):hl("MareText") }), { hard_wrap = true })
+			items[#items + 1] =
+				ui.Paragraph(ui.Line({ ui.Span(visible_control(line)):hl("MareText") }), { hard_wrap = true })
 		end
 		return #items > 0 and ui.Lines(items) or nil
 	end

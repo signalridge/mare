@@ -931,7 +931,7 @@ async fn long_bash_approval_shows_tail_marker_cwd_exact_scope_and_generic_tool_a
     local(async {
         let url_segments = "segment_part/".repeat(22);
         let long_cmd = format!(
-            "echo first_line_head && curl https://example.invalid/{url_segments}TAIL_MARKER_300_END\necho second_line_hidden_in_title"
+            "echo first_line_head && printf '\x1b[30;40m' && curl https://example.invalid/{url_segments}TAIL_MARKER_300_END\necho second_line_hidden_in_title"
         );
         assert!(long_cmd.len() > 300);
         let script = json!([
@@ -1019,10 +1019,25 @@ async fn long_bash_approval_shows_tail_marker_cwd_exact_scope_and_generic_tool_a
             .collect::<Vec<_>>()
             .join("");
         assert!(
+            compact.contains("\\x1b[30;40m"),
+            "control/SGR escapes in shell preview must be rendered visibly instead of styled:\n{screen}"
+        );
+        assert!(
             compact.contains("TAIL_MARKER_300_END"),
             "300-char URL command tail marker must be hard-wrapped and visible before approval:\n{screen}"
         );
         assert!(compact.contains("work-sub"), "working directory must be visible before approval:\n{screen}");
+
+        // Narrow & short terminal (76x10) must still show the approval preview (never drop it).
+        t.resize(76, 10).await;
+        t.step().await;
+        let tiny_screen = t.screen();
+        assert!(
+            tiny_screen.contains("Preview") && tiny_screen.contains("work-sub"),
+            "narrow+short approval modal must still render Preview pane with cwd/command:\n{tiny_screen}"
+        );
+        t.resize(110, 30).await;
+        t.step().await;
 
         // Deny bash, then verify bash with reusable `sandbox_permissions` does not claim "exact command".
         t.key(KeyCode::Char('n'), Modifiers::NONE);
@@ -1046,16 +1061,19 @@ async fn long_bash_approval_shows_tail_marker_cwd_exact_scope_and_generic_tool_a
         t.key(KeyCode::Enter, Modifiers::NONE);
         t.idle().await;
 
-        // Verify non-web_fetch MCP tool with `url` still displays full Arguments JSON.
+        // Verify non-web_fetch MCP tool with `url` displays full Arguments JSON without duplicate URL: line.
         t.submit("run mcp tool").await;
         t.until("mcp tool approval dialog with arguments", |screen| {
             screen.contains("Allow mcp__demo__query?")
                 && screen.contains("Allow this exact call for this session (a)")
-                && screen.contains("URL: https://api.example.invalid/query")
                 && screen.contains("Arguments:")
         })
         .await;
         let mcp_screen = t.screen();
+        assert!(
+            !mcp_screen.contains("URL:"),
+            "non-web_fetch MCP tool must not duplicate url as a separate URL: line:\n{mcp_screen}"
+        );
         let mcp_compact: String = mcp_screen
             .lines()
             .filter(|l| l.contains('│'))
@@ -1063,8 +1081,10 @@ async fn long_bash_approval_shows_tail_marker_cwd_exact_scope_and_generic_tool_a
             .collect::<Vec<_>>()
             .join("");
         assert!(
-            mcp_compact.contains("\"table\":\"orders\"") && mcp_compact.contains("\"limit\":7"),
-            "MCP tool with url must still display full argument summary:\n{mcp_screen}"
+            mcp_compact.contains("\"url\":\"https://api.example.invalid/query\"")
+                && mcp_compact.contains("\"table\":\"orders\"")
+                && mcp_compact.contains("\"limit\":7"),
+            "MCP tool with url must display full argument summary:\n{mcp_screen}"
         );
         t.key(KeyCode::Char('n'), Modifiers::NONE);
         t.until("why prompt 2", |s| s.contains("Tell the model why")).await;

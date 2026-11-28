@@ -574,9 +574,18 @@ impl App {
                 }
                 let search_rows = usize::from(*searching || !filter.is_empty());
                 let min_list_rows = visible.len().clamp(1, 6);
-                let reserved_pv_h =
-                    if *approval && preview.is_some() && !wide && max_h >= 10 { (max_h / 3).clamp(4, 10) } else { 0 };
-                let head_budget = max_h.saturating_sub(2 + search_rows + min_list_rows + reserved_pv_h).max(1);
+                let reserved_pv_h = if *approval && preview.is_some() && !wide {
+                    (max_h / 3).clamp(3, 10).min(max_h.saturating_sub(4).max(3))
+                } else {
+                    0
+                };
+                let effective_min_list =
+                    if reserved_pv_h > 0 && max_h < 2 + search_rows + min_list_rows + reserved_pv_h + 1 {
+                        1
+                    } else {
+                        min_list_rows
+                    };
+                let head_budget = max_h.saturating_sub(2 + search_rows + effective_min_list + reserved_pv_h).max(1);
                 body_scroll_max = head.len().saturating_sub(head_budget);
                 let body_sc = (*body_scroll).min(body_scroll_max);
                 let head_total = head.len();
@@ -590,7 +599,11 @@ impl App {
                 }
                 let chrome = 2 + search_rows + head.len();
                 let (cap_h, pv_inner_max) = if preview.is_some() && !wide {
-                    if max_h >= chrome + 4 {
+                    let avail_for_pv = max_h.saturating_sub(chrome + 1);
+                    if *approval && avail_for_pv >= 3 {
+                        let pv_box_h = reserved_pv_h.min(avail_for_pv).max(3);
+                        (default_list_h.min(max_h.saturating_sub(pv_box_h + chrome).max(1)), pv_box_h - 2)
+                    } else if max_h >= chrome + 4 {
                         let pv_box_h = (max_h / 3).clamp(3, 10).min(max_h - (chrome + 1));
                         (default_list_h.min(max_h - pv_box_h - chrome), pv_box_h - 2)
                     } else {
