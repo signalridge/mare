@@ -788,20 +788,16 @@ async fn stale_picker_reply_after_live_update_resolves_by_item_id() {
         // in on_open, and an update-raced reply without item_id must warn instead of falling back
         // to models[i].
         let mut env2 = TestEnv::new().await;
-        let cache_dir2 = env2.home.path().join("state/models-cache");
-        std::fs::create_dir_all(&cache_dir2).unwrap();
-        std::fs::write(
-            cache_dir2.join("deepseek.json"),
-            r#"{"fetched_at": 9999999999, "models": [{"id": "deepseek-chat"}]}"#,
-        )
-        .unwrap();
         let server2 = MockServer::start().await;
         server2.route(
             "/compat/models",
-            vec![Resp::status(
-                200,
-                r#"{"object":"list","data":[{"id":"deepseek-000-pre-open","name":"Pre-Open Model"}]}"#,
-            )],
+            vec![
+                Resp::status(200, r#"{"object":"list","data":[{"id":"deepseek-chat"}]}"#),
+                Resp::status(
+                    200,
+                    r#"{"object":"list","data":[{"id":"deepseek-000-pre-open","name":"Pre-Open Model"}]}"#,
+                ),
+            ],
         );
         let h2 = provider_host(
             &mut env2,
@@ -816,6 +812,8 @@ async fn stale_picker_reply_after_live_update_resolves_by_item_id() {
         let (reconciled, no_id_after, no_id_notes): (bool, String, String) = eval(
             &h2,
             r#"
+            -- Prime deepseek's in-memory refresh timestamp so /model's on_open=true skips auto-refresh.
+            LLM:refresh_catalog({ name = "deepseek", force = true })
             local notes = {}
             mare.ui.notify = function(msg, lvl)
               notes[#notes + 1] = tostring(lvl) .. ":" .. tostring(msg)
@@ -1144,6 +1142,207 @@ mare.provider("beta", {{
 
         assert_eq!(server.count("/alpha/chat/completions"), 0, "alpha must receive 0 requests");
         assert_eq!(server.count("/beta/chat/completions"), 0, "beta must receive 0 requests");
+    })
+    .await;
+}
+
+/// Regression: custom Moonshot/Kimi providers with `kimi-k3` (`reasoning = true`, no `efforts`)
+/// inherit the Kimi K3 effort list (`low/high/max`) rather than the generic `low/medium/high`
+/// fallback, and never emit `reasoning_effort = "medium"`.
+#[tokio::test]
+async fn custom_moonshot_kimi_without_efforts_uses_low_high_max_and_never_sends_medium() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let server = MockServer::start().await;
+        let ok_sse = compat_events(&[compat_text("ok"), compat_stop()]);
+        server.route("/moonshot-custom/chat/completions", vec![Resp::sse(ok_sse)]);
+
+        let h = provider_host(
+            &mut env,
+            &server,
+            json!({
+                "providers": {
+                    "moonshot-host": {
+                        "wire": "openai-chat",
+                        "base_url": "https://api.moonshot.ai/v1",
+                        "api_key": "k-host",
+                        "list_models": false,
+                        "models": [{ "model_id": "kimi-k3", "reasoning": true, "context_window": 262144, "max_output": 131072 }]
+                    },
+                    "moonshot-mock": {
+                        "wire": "openai-chat",
+                        "dialect": "kimi",
+                        "base_url": format!("{}/moonshot-custom", server.base),
+                        "api_key": "k-mock",
+                        "list_models": false,
+                        "models": [{ "model_id": "kimi-k3", "reasoning": true, "context_window": 262144, "max_output": 131072 }]
+                    }
+                }
+            }),
+        )
+        .await;
+
+        let (host_opts, mock_opts, med_ok): (String, String, bool) = eval(
+            &h,
+            r#"
+            local mh = assert(LLM:resolve("moonshot-host/kimi-k3"))
+            local mm = assert(LLM:resolve("moonshot-mock/kimi-k3"))
+            LLM:set_model("moonshot-mock/kimi-k3", { save = false })
+            local ok_med = pcall(LLM.set_effort, LLM, "medium", { save = false })
+            return table.concat(LLM:effort_options(mh) or {}, ","),
+              table.concat(LLM:effort_options(mm) or {}, ","),
+              ok_med
+            "#,
+        )
+        .await;
+        assert_eq!(host_opts, "low,high,max", "host-detected moonshot kimi-k3 must offer low,high,max");
+        assert_eq!(mock_opts, "low,high,max", "custom kimi dialect kimi-k3 must offer low,high,max");
+        assert!(!med_ok, "custom kimi-k3 without efforts must reject 'medium'");
+
+        let res = h.prompt("hi", json!({})).await.unwrap();
+        assert!(res["error"].is_null(), "default prompt on custom kimi-k3 must succeed: {res}");
+        let req = server
+            .requests()
+            .into_iter()
+            .find(|r| r.path == "/moonshot-custom/chat/completions")
+            .expect("moonshot-custom request sent")
+            .json();
+        let eff = req["reasoning_effort"].as_str().unwrap_or("");
+        assert_ne!(eff, "medium", "custom kimi-k3 must never emit reasoning_effort=medium: {req}");
+        assert!(
+            matches!(eff, "low" | "high" | "max"),
+            "custom kimi-k3 must emit a valid K3 reasoning_effort: {req}"
+        );
+        h.shutdown().await;
+    })
+    .await;
+}
+
+/// Regression: an earlier `sync_picker` rebuild suspended inside `is_configured()` must discard
+/// its stale snapshot if a newer rebuild completes first, leaving the newer list active and
+/// selectable in `/model`.
+#[tokio::test]
+async fn earlier_suspended_sync_picker_rebuild_does_not_overwrite_newer_list() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let server = MockServer::start().await;
+        server.route(
+            "/compat/models",
+            vec![
+                Resp::status(200, r#"{"object":"list","data":[{"id":"deepseek-chat"}]}"#),
+                Resp::status(
+                    200,
+                    r#"{"object":"list","data":[{"id":"deepseek-000-newer","name":"Newer Live Model"}]}"#,
+                ),
+            ],
+        );
+
+        let h = provider_host(
+            &mut env,
+            &server,
+            json!({
+                "model": "anthropic/claude-sonnet-5-5",
+                "plugins": { "llm": { "catalog_open_refresh_ms": 600000 } }
+            }),
+        )
+        .await;
+        expose(&h);
+
+        let (update_count, has_newer_at_end, selected_ref): (i64, bool, String) = eval(
+            &h,
+            r#"
+            -- Prime deepseek's in-memory refresh timestamp so /model's on_open=true skips auto-refresh.
+            LLM:refresh_catalog({ name = "deepseek", force = true })
+            mare.ui.notify = function() end
+            local dp = assert(LLM:provider("deepseek"))
+            local orig_is_configured = dp.is_configured
+            local resume_tx, resume_rx = mare.task.channel()
+            local done_tx, done_rx = mare.task.channel()
+            local in_on_open = false
+            local suspended_once = false
+            local latest_items = nil
+            local updates = 0
+
+            dp.is_configured = function()
+              if in_on_open and not suspended_once then
+                suspended_once = true
+                -- Inside on_open's sync_picker() after capturing the stale list:
+                -- trigger a newer refresh while suspended here.
+                mare.task.spawn(function()
+                  LLM:refresh_catalog({ name = "deepseek", force = true })
+                end)
+                local _, ok = mare.task.select(function()
+                  return resume_rx:recv()
+                end, function()
+                  mare.task.sleep(5000)
+                  return false
+                end)
+                assert(ok == true, "newer rebuild must wake suspended rebuild")
+                done_tx:send(true)
+              end
+              return orig_is_configured()
+            end
+
+            mare.ui.select = function(opts)
+              latest_items = opts.items
+              local open = true
+              local handle = {
+                is_open = function() return open end,
+                update = function(_, next_items)
+                  updates = updates + 1
+                  latest_items = next_items
+                  -- Once the newer rebuild publishes the refreshed list, wake the stale rebuild.
+                  for _, it in ipairs(next_items) do
+                    if it.item_id == "deepseek/deepseek-000-newer" then
+                      resume_tx:send(true)
+                      break
+                    end
+                  end
+                  return true
+                end,
+              }
+              in_on_open = true
+              if opts.on_open then opts.on_open(handle) end
+              in_on_open = false
+              -- Wait for the stale rebuild to finish resuming and confirm it did NOT overwrite.
+              local _, resumed = mare.task.select(function()
+                return done_rx:recv()
+              end, function()
+                mare.task.sleep(5000)
+                return false
+              end)
+              assert(resumed == true, "stale rebuild must resume")
+              -- Yield once so any post-resume update attempt would run before selection.
+              mare.task.sleep(10)
+              local chosen
+              for idx, it in ipairs(latest_items) do
+                if it.item_id == "deepseek/deepseek-000-newer" then
+                  chosen = idx
+                  break
+                end
+              end
+              open = false
+              return chosen, 1, nil, "", chosen and latest_items[chosen].item_id or nil
+            end
+
+            C.cordis:get("commands"):run("/model")
+            dp.is_configured = orig_is_configured
+
+            local has_newer = false
+            for _, it in ipairs(latest_items or {}) do
+              if it.item_id == "deepseek/deepseek-000-newer" then
+                has_newer = true
+                break
+              end
+            end
+            return updates, has_newer, assert(LLM:current()).ref
+            "#,
+        )
+        .await;
+        assert_eq!(update_count, 1, "stale rebuild must be dropped and never issue a second update");
+        assert!(has_newer_at_end, "picker must keep the newer list containing deepseek/deepseek-000-newer");
+        assert_eq!(selected_ref, "deepseek/deepseek-000-newer");
+        h.shutdown().await;
     })
     .await;
 }

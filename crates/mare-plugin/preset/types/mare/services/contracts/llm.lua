@@ -549,7 +549,7 @@ return {
 				result = { type = { "string", "null" } },
 			},
 			effort_options = {
-				doc = "Return every effort value defined for `model` (built-in levels plus rule additions), or nil.",
+				doc = "Return the effort values offered for `model` on its active route (same source as `param_list`), or nil.",
 				lua_unchecked = true,
 				params = object({}),
 				lua = { model = "mare.Model?" },

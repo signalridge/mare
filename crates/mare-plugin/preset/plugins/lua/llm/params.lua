@@ -225,25 +225,8 @@ return function(D)
 					effort_opts[#effort_opts + 1] = { value = v }
 				end
 			end
-			local fallback_only = { "low", "medium", "high" }
-			if
-				type(model.efforts) ~= "table"
-				and type(model.default_effort) == "string"
-				and model.default_effort ~= ""
-			then
-				local seen = false
-				for _, v in ipairs(fallback_only) do
-					if v == model.default_effort then
-						seen = true
-						break
-					end
-				end
-				if not seen then
-					fallback_only[#fallback_only + 1] = model.default_effort
-				end
-			end
 			derived.define.effort = {
-				only = model.efforts or fallback_only,
+				only = model.efforts,
 				options = effort_opts,
 				default = model.default_effort,
 				aliases = model.effort_map,
@@ -493,17 +476,32 @@ return function(D)
 				end
 				if d.type == "bool" then
 					d.list = { true, false }
-				elseif d.only then
-					d.list = {}
-					for _, v in ipairs(d.only) do
-						if not d.gone[v] then
-							d.list[#d.list + 1] = v
+				else
+					local only = d.only
+					if not only and name == "effort" and model.reasoning then
+						only = { "low", "medium", "high" }
+						if
+							type(model.default_effort) == "string"
+							and model.default_effort ~= ""
+							and not table.find(only, model.default_effort)
+						then
+							only[#only + 1] = model.default_effort
 						end
 					end
-				else
-					d.list = {}
-					for _, o in ipairs(d.options) do
-						d.list[#d.list + 1] = o.value
+					if only then
+						local out = {}
+						for _, v in ipairs(only) do
+							if not d.gone[v] then
+								out[#out + 1] = v
+							end
+						end
+						d.list = out
+					else
+						local out = {}
+						for _, o in ipairs(d.options) do
+							out[#out + 1] = o.value
+						end
+						d.list = out
 					end
 				end
 			end
