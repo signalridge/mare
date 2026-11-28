@@ -43,7 +43,7 @@ fn tool(cfg: &Value, n: &str, changed: bool) -> Value {
     if (truthy(cfg.get("invalid_initial")) && n == "broken")
         || (truthy(cfg.get("invalid_after_change")) && n == "echo" && changed)
     {
-        result["inputSchema"]["properties"]["text"]["format"] = json!("email");
+        result["inputSchema"]["properties"]["text"]["$ref"] = json!("https://example.invalid/text.json");
     }
     if truthy(cfg.get("invalid_large")) && n == "huge" {
         result["inputSchema"]["properties"]["text"]["const"] = json!(u64::MAX);

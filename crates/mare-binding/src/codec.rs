@@ -142,6 +142,28 @@ impl UserData for OutputSchema {
     }
 }
 
+fn canonical_json(value: &serde_json::Value) -> Result<String, serde_json::Error> {
+    fn sort(v: &mut serde_json::Value) {
+        match v {
+            serde_json::Value::Object(m) => {
+                m.sort_keys();
+                for value in m.values_mut() {
+                    sort(value);
+                }
+            }
+            serde_json::Value::Array(a) => {
+                for value in a {
+                    sort(value);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut copy = value.clone();
+    sort(&mut copy);
+    serde_json::to_string(&copy)
+}
+
 struct ToolSchema {
     schema: mare_shared::schema::Schema,
     wire: serde_json::Value,
@@ -163,26 +185,11 @@ impl UserData for ToolSchema {
             let value = crate::projection::restore_json(lua, value, revision)?;
             this.schema.validate(&value).map_err(rt_err)
         });
-        m.add_method("fingerprint", |_, this, ()| {
-            fn sort(v: &mut serde_json::Value) {
-                match v {
-                    serde_json::Value::Object(m) => {
-                        m.sort_keys();
-                        for value in m.values_mut() {
-                            sort(value);
-                        }
-                    }
-                    serde_json::Value::Array(a) => {
-                        for value in a {
-                            sort(value);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            let mut value = this.wire.clone();
-            sort(&mut value);
-            serde_json::to_string(&value).map_err(rt_err)
+        m.add_method("fingerprint", |_, this, ()| canonical_json(&this.wire).map_err(rt_err));
+        m.add_method("is_external", |_, this, ()| Ok(this.schema.is_external()));
+        m.add_method("matches", |lua, this, value: Value| {
+            let value = strict_lua_to_json(lua, value)?;
+            Ok(canonical_json(&value).map_err(rt_err)? == canonical_json(&this.wire).map_err(rt_err)?)
         });
     }
 }
@@ -263,8 +270,34 @@ pub fn install(lua: &Lua, mare: &Table) -> mlua::Result<()> {
     schemas.set(
         "compile",
         lua.create_function(|lua, value: Value| {
+            if let Value::UserData(ud) = &value
+                && let Ok(existing) = ud.borrow::<ToolSchema>()
+            {
+                if !existing.schema.is_object_root() || existing.schema.is_external() {
+                    return Err(rt_err("$: schema handle must be an object-root built-in ToolSchema"));
+                }
+                return lua
+                    .create_userdata(ToolSchema { schema: existing.schema.clone(), wire: existing.wire.clone() });
+            }
             let wire = strict_lua_to_json(lua, value)?;
             let schema = mare_shared::schema::Schema::compile(wire.clone()).map_err(rt_err)?;
+            lua.create_userdata(ToolSchema { schema, wire })
+        })?,
+    )?;
+    schemas.set(
+        "compile_external",
+        lua.create_function(|lua, value: Value| {
+            if let Value::UserData(ud) = &value
+                && let Ok(existing) = ud.borrow::<ToolSchema>()
+            {
+                if !existing.schema.is_object_root() || !existing.schema.is_external() {
+                    return Err(rt_err("$: schema handle must be an object-root external ToolSchema"));
+                }
+                return lua
+                    .create_userdata(ToolSchema { schema: existing.schema.clone(), wire: existing.wire.clone() });
+            }
+            let wire = strict_lua_to_json(lua, value)?;
+            let schema = mare_shared::schema::Schema::compile_external(wire.clone()).map_err(rt_err)?;
             lua.create_userdata(ToolSchema { schema, wire })
         })?,
     )?;
@@ -696,6 +729,44 @@ mod tests {
             local dst_cyc = {}
             dst_cyc.self = dst_cyc
             assert(not pcall(mare.json.copy_metadata, cyc, dst_cyc))
+            "#,
+        )
+        .exec()
+        .unwrap();
+    }
+
+    #[test]
+    fn schema_compile_handle_reuse_enforces_compile_kind_and_object_root() {
+        let lua = mlua::Lua::new();
+        let mare = lua.create_table().unwrap();
+        super::install(&lua, &mare).unwrap();
+        lua.globals().set("mare", mare).unwrap();
+        lua.load(
+            r#"
+            local scalar_val = mare.schema.compile_value({ type = "string" })
+            local obj_val = mare.schema.compile_value({ type = "object" })
+            local builtin = mare.schema.compile({ type = "object", properties = { a = { type = "string" } } })
+            local ext = mare.schema.compile_external({
+                type = "object",
+                properties = { n = { type = "integer", minimum = 1 } },
+            })
+
+            assert(not pcall(mare.schema.compile_external, scalar_val), "compile_external must reject scalar compile_value handle")
+            assert(not pcall(mare.schema.compile_external, obj_val), "compile_external must reject object compile_value handle")
+            assert(not pcall(mare.schema.compile_external, builtin), "compile_external must reject built-in handle")
+            assert(not pcall(mare.schema.compile, scalar_val), "compile must reject scalar compile_value handle")
+            assert(not pcall(mare.schema.compile, obj_val), "compile must reject object compile_value handle")
+            assert(not pcall(mare.schema.compile, ext), "compile must reject external handle")
+
+            local ext_clone = mare.schema.compile_external(ext)
+            assert(ext_clone:is_external() == true)
+            assert(ext_clone:matches(ext:value()) == true)
+            assert(not pcall(ext_clone.validate, ext_clone, { n = 0 }))
+            ext_clone:validate({ n = 1 })
+
+            local builtin_clone = mare.schema.compile(builtin)
+            assert(builtin_clone:is_external() == false)
+            assert(builtin_clone:matches(builtin:value()) == true)
             "#,
         )
         .exec()
