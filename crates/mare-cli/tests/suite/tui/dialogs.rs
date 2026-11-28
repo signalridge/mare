@@ -80,6 +80,62 @@ async fn select_tabs_keep_the_active_tab_visible_at_narrow_widths() {
     .await
 }
 
+/// Assert the modal displays the full untruncated `Directory: <canonical_cwd>` across any wrapped
+/// lines, then collapse those wrapped lines back to `<indent>│ Directory: <tmp> │` so 80-col
+/// snapshots stay stable regardless of platform/CI `TMPDIR` length.
+fn normalize_modal_directory_line(raw_lines: &mut Vec<String>, canonical_cwd: &str) {
+    let Some(dir_idx) = raw_lines.iter().position(|l| l.contains("│ Directory:")) else {
+        panic!("approval modal missing `Directory:` line:\n{}", raw_lines.join("\n"));
+    };
+    let indent = raw_lines[dir_idx].split("│ Directory:").next().unwrap_or("");
+    let prefix = format!("{indent}│ ");
+    let is_field_or_end = |l: &str| {
+        let Some(inner) = l.trim_end().strip_prefix(&prefix).and_then(|s| s.strip_suffix(" │")) else {
+            return true;
+        };
+        let t = inner.trim();
+        t.is_empty()
+            || [
+                "Requester:",
+                "Tool:",
+                "Path:",
+                "Command:",
+                "URL:",
+                "Read paths:",
+                "Write paths:",
+                "Network:",
+                "Purpose:",
+                "Reason:",
+                "Sandbox:",
+                "Scope:",
+                "Maximum grant:",
+            ]
+            .iter()
+            .any(|hdr| t.starts_with(hdr))
+    };
+    let mut end_idx = dir_idx + 1;
+    while end_idx < raw_lines.len() && !is_field_or_end(&raw_lines[end_idx]) {
+        end_idx += 1;
+    }
+    let joined: String = raw_lines[dir_idx..end_idx]
+        .iter()
+        .map(|l| {
+            let s = l.trim_end();
+            let s = s.strip_prefix(&prefix).unwrap_or(s);
+            s.strip_suffix(" │").unwrap_or(s).trim_end()
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    let expected = format!("Directory:{canonical_cwd}");
+    let joined_no_space = joined.replace("Directory: ", "Directory:");
+    assert!(
+        joined_no_space == expected,
+        "approval modal must display full untruncated Directory path:\nexpected: {expected}\ngot: {joined}\nscreen:\n{}",
+        raw_lines.join("\n")
+    );
+    raw_lines.splice(dir_idx..end_idx, [format!("{indent}│ Directory: <tmp> │")]);
+}
+
 /// The approval dialog (read-only preset, a write needs approval): allowing runs the tool,
 /// denying tells the model.
 #[tokio::test]
@@ -93,7 +149,9 @@ async fn the_approval_dialog_allows_and_denies() {
         ]);
         let cfg =
             json!({ "reduce_motion": true, "plugins": { "permissions": { "enabled": true, "preset": "read-only" } } });
-        let mut t = Term::with(script, cfg, 80, 24).await;
+        // Use 28 rows so long CI/macOS/Windows TMPDIR paths wrapping `Directory:` onto 2-3 lines
+        // still leave vertical room for the `Responding…` working row below the modal.
+        let mut t = Term::with(script, cfg, 80, 28).await;
         let cwd = t._env.cwd.clone();
         t.submit("write a").await;
         t.until("the approval dialog over the running turn", |s| {
@@ -101,7 +159,12 @@ async fn the_approval_dialog_allows_and_denies() {
         })
         .await;
         assert!(t.vt.busy(), "the turn is still running under the dialog");
-        insta::assert_snapshot!("approval_dialog", t.snap().await);
+        let canonical_cwd = dunce::canonicalize(&cwd).unwrap().to_string_lossy().into_owned();
+        t.vt.dismiss_notices();
+        t.step().await;
+        let mut raw_lines: Vec<String> = t.screen().lines().map(str::to_string).collect();
+        normalize_modal_directory_line(&mut raw_lines, &canonical_cwd);
+        insta::assert_snapshot!("approval_dialog", trimmed(&raw_lines.join("\n")));
         t.key(KeyCode::Enter, Modifiers::NONE);
         t.idle().await;
         assert_eq!(
@@ -123,6 +186,129 @@ async fn the_approval_dialog_allows_and_denies() {
         global(&t.vt.host, "AG", t.vt.host.service_table("agent").unwrap());
         let messages: String = eval(&t.vt.host, "return mare.json.encode(AG:list_messages().data)").await;
         assert!(messages.contains("denied by the user: use the scratch dir. Do not retry"), "{messages}");
+    })
+    .await
+}
+
+/// 80×24 coverage for the approval dialog: a short cwd must keep the full modal, preview,
+/// `Responding…` row, input box and footer visible simultaneously; a long wrapped cwd (>= 90 chars)
+/// must still display the full untruncated Directory path and keep all approval options reachable.
+#[tokio::test]
+async fn approval_dialog_80x24_layout_and_long_cwd_reachability() {
+    local(async {
+        let cfg =
+            json!({ "reduce_motion": true, "plugins": { "permissions": { "enabled": true, "preset": "read-only" } } });
+
+        // 1) Stable short cwd at 80×24: single-line Directory fits all rows including `Responding…`.
+        let short_dir = {
+            #[cfg(unix)]
+            {
+                tempfile::Builder::new()
+                    .prefix("m")
+                    .tempdir_in("/tmp")
+                    .unwrap_or_else(|_| tempfile::Builder::new().prefix("m").tempdir().unwrap())
+            }
+            #[cfg(not(unix))]
+            {
+                tempfile::Builder::new().prefix("m").tempdir().unwrap()
+            }
+        };
+        let short_cwd = dunce::canonicalize(short_dir.path()).unwrap();
+        let short_cwd_str = short_cwd.to_string_lossy().into_owned();
+        assert!(
+            short_cwd_str.len() <= 58,
+            "expected short cwd <= 58 chars for single-line Directory at 80×24, got {} ({short_cwd_str})",
+            short_cwd_str.len()
+        );
+        let mut env_short = TestEnv::new().await;
+        env_short.cwd = short_cwd.clone();
+        let script_short = json!([
+            { "tool_calls": [{ "name": "write", "arguments": { "path": "a.txt", "content": "A" } }] },
+            { "text": "wrote a" }
+        ]);
+        let mut t = Term::in_env(env_short, script_short, cfg.clone(), json!({}), 80, 24).await;
+        t.submit("write a").await;
+        t.until("80x24 approval dialog", |s| s.contains("Allow once") && s.contains("Enter confirm")).await;
+        assert!(t.vt.busy(), "the turn is still running under the 80x24 dialog");
+        t.vt.dismiss_notices();
+        t.step().await;
+        let screen = t.screen();
+        let mut raw_lines: Vec<String> = screen.lines().map(str::to_string).collect();
+        normalize_modal_directory_line(&mut raw_lines, &short_cwd_str);
+        for required in [
+            "Allow write?",
+            "Requester: Main session",
+            "Tool: write",
+            "Path: a.txt",
+            "Allow once (y)",
+            "Allow for this session (a)",
+            "Allow and remember (A)",
+            "Deny, and tell the model why (n)",
+            "Deny and stop this turn (ctrl+c)",
+            "Preview",
+            "1 + A",
+            "Responding…",
+            "Queue a message…",
+            "Enter confirm",
+        ] {
+            assert!(screen.contains(required), "80x24 short-cwd approval dialog missing {required:?}:\n{screen}");
+        }
+        t.key(KeyCode::Enter, Modifiers::NONE);
+        t.idle().await;
+        assert_eq!(std::fs::read_to_string(short_cwd.join("a.txt")).ok().as_deref(), Some("A"));
+        drop(t);
+        drop(short_dir);
+
+        // 2) Long wrapped cwd (>= 90 chars) at 80×24: full untruncated Directory path + all options reachable.
+        let mut env_long = TestEnv::new().await;
+        let nested = env_long
+            .cwd
+            .join("very-long-workspace-segment-alpha")
+            .join("very-long-workspace-segment-beta")
+            .join("deep-subdir");
+        std::fs::create_dir_all(&nested).unwrap();
+        let long_cwd = dunce::canonicalize(&nested).unwrap();
+        let long_cwd_str = long_cwd.to_string_lossy().into_owned();
+        assert!(
+            long_cwd_str.len() >= 90,
+            "expected long cwd >= 90 chars to force multi-line wrap, got {} ({long_cwd_str})",
+            long_cwd_str.len()
+        );
+        env_long.cwd = long_cwd.clone();
+        let script_long = json!([
+            { "tool_calls": [{ "name": "write", "arguments": { "path": "b.txt", "content": "B" } }] },
+            { "text": "wrote b" }
+        ]);
+        let mut t = Term::in_env(env_long, script_long, cfg, json!({}), 80, 24).await;
+        t.submit("write b").await;
+        t.until("80x24 long-cwd approval dialog", |s| s.contains("Allow once") && s.contains("1 of 5")).await;
+        t.vt.dismiss_notices();
+        t.step().await;
+        let screen = t.screen();
+        let mut raw_lines: Vec<String> = screen.lines().map(str::to_string).collect();
+        normalize_modal_directory_line(&mut raw_lines, &long_cwd_str);
+        for option in [
+            "Allow once (y)",
+            "Allow for this session (a)",
+            "Allow and remember (A)",
+            "Deny, and tell the model why (n)",
+            "Deny and stop this turn (ctrl+c)",
+        ] {
+            assert!(screen.contains(option), "80x24 long-cwd approval dialog missing option {option:?}:\n{screen}");
+        }
+        // Navigate down through all 5 options to confirm the last option is reachable, then approve via `y`.
+        for expected_pos in ["2 of 5", "3 of 5", "4 of 5", "5 of 5"] {
+            t.key(KeyCode::Down, Modifiers::NONE);
+            t.step().await;
+            assert!(
+                t.screen().contains(expected_pos),
+                "expected selection to reach {expected_pos} in 80x24 long-cwd modal:\n{}",
+                t.screen()
+            );
+        }
+        t.key(KeyCode::Char('y'), Modifiers::NONE);
+        t.idle().await;
+        assert_eq!(std::fs::read_to_string(long_cwd.join("b.txt")).ok().as_deref(), Some("B"));
     })
     .await
 }
