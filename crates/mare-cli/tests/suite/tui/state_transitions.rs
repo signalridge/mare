@@ -32,6 +32,43 @@ async fn wait_vt(t: &mut Term, what: &str, f: impl Fn(&mut Term) -> bool) {
     }
 }
 
+/// Repro #209: a blank `$VISUAL` value must not suppress `$EDITOR` when launching `Ctrl+G`.
+#[cfg(unix)]
+#[tokio::test]
+async fn repro_209_blank_visual_suppresses_editor_fallback() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        env.set_var("VISUAL", "   ");
+        env.set_var("EDITOR", "sh -c 'printf \"from-editor\\n\" > \"$1\"' _");
+        let mut b = env.host().faux(json!([])).no_session().config(json!({ "logo": false }));
+        b.opts.mode = Mode::Tui;
+        let mut vt = OwnedVt::new(env, b.opts, 80, 20).await;
+        let deadline = Instant::now() + TRANSITION_WAIT;
+        loop {
+            vt.frame().await;
+            if !vt.starting() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for startup");
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+
+        vt.key(KeyEvent::new(KeyCode::Char('g'), Modifiers::CONTROL));
+        for _ in 0..20 {
+            vt.frame().await;
+            if vt.editor_text() == "from-editor" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let text = vt.editor_text();
+        let out = String::from_utf8_lossy(&vt.output()).into_owned();
+        vt.shutdown().await;
+        assert_eq!(text, "from-editor", "blank VISUAL suppressed EDITOR fallback; output:\n{out}");
+    })
+    .await
+}
+
 /// External editor handoff (`Ctrl+G`) must reset completion/history state and clear stale focus.
 #[cfg(unix)]
 #[tokio::test]
