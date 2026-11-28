@@ -74,6 +74,7 @@ return {
 
 		ctx.llm:register_provider({
 			provider = "faux",
+			models_dev = false,
 			default_model = "echo",
 			is_configured = function()
 				return mare.env("MARE_FAUX_SCRIPT") ~= nil or cfg.script_json ~= nil

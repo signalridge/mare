@@ -42,7 +42,7 @@ local ds_in = {
     },
     const = { pattern = "\\0" },
 }
-local ds_out = S.sanitize(ds_in, "deepseek", "https://api.deepseek.com/v1", "deepseek-chat")
+local ds_out = S.sanitize(ds_in, "deepseek", "https://api.deepseek.com/v1", "deepseek-flash")
 assert(ds_out.properties.content.pattern == "^[^\\u0000]*$")
 assert(ds_out.properties.content.default.pattern == "\\0", "default data must not be rewritten")
 assert(ds_out.const.pattern == "\\0", "const data must not be rewritten")
@@ -85,7 +85,7 @@ local ds_out_schema = S.sanitize(
     { type = "object", properties = { p = { type = "string", pattern = "^[^\\0]*$" } } },
     "deepseek",
     "https://api.deepseek.com/v1",
-    "deepseek-reasoner",
+    "deepseek-v4-pro",
     { output_schema = true }
 )
 assert(ds_out_schema.properties.p.pattern == "^[^\\u0000]*$")
@@ -352,6 +352,7 @@ async fn wire_sanitizes_tool_and_output_schemas_per_provider() {
             &server,
             json!({
                 "providers": {
+                    "deepseek": { "wire": "openai-chat" },
                     "grok": {
                         "base_url": format!("{}/compat", server.base),
                         "dialect": "grok",
@@ -402,7 +403,7 @@ return {
             &h,
             lua_probe,
             json!([
-                "deepseek/deepseek-reasoner",
+                "deepseek/deepseek-flash",
                 { "type": "object", "properties": { "p": { "type": "string", "pattern": "^[^\\0]*$" } } },
                 { "type": "object", "properties": { "p": { "type": "string", "pattern": "^[a-z]+$" } } }
             ]),
@@ -691,7 +692,6 @@ async fn unsupported_tool_schema_rejected_at_registration_and_edge_schemas_consi
             &mut env,
             &server,
             json!({
-                "providers": { "deepseek": { "base_url": format!("{}/compat", server.base) } },
                 "plugins": {
                     "llm": { "retries": 0 },
                     "provider-openai": { "base_url": format!("{}/openai", server.base), "transport": "http" },
@@ -782,7 +782,7 @@ C.cordis:on("provider/request", function(w, next)
   return next(w)
 end)
 
-for _, ref in ipairs({ "openai/gpt-6.1-terra", "deepseek/deepseek-chat", "anthropic/claude-opus-5-5", "google/gemini-2.5-pro" }) do
+for _, ref in ipairs({ "openai/gpt-6.1-terra", "compat/chat-model", "anthropic/claude-opus-5-5", "google/gemini-2.5-pro" }) do
   tamper = true
   local m_bad = LLM:stream({ model = LLM:resolve(ref), messages = msgs, tools = req_tools, no_fallback = true }, function() end)
   assert(m_bad.stop_reason == "error", "tampering tool declarations in provider/request must be blocked on " .. ref)
@@ -848,7 +848,7 @@ return {
 		assert(resolved_norm:sub(-#"rel/file.txt") == "rel/file.txt" and resolved_norm ~= "rel/file.txt")
 
 		local S = require("mare_lib.schema_sanitize")
-		local sanitized = S.sanitize(src, "deepseek", "https://api.deepseek.com/v1", "deepseek-chat")
+		local sanitized = S.sanitize(src, "deepseek", "https://api.deepseek.com/v1", "deepseek-flash")
 		assert(mare.json.encode(sanitized) == mare.json.encode(src))
 		mare.probe_j_ok = true
 	end,

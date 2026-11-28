@@ -353,6 +353,8 @@ function ui.notification_history() end
 --- list takes `ratio` of the popup (default 0.4), at least `min` columns (default 24); the
 --- preview keeps at least 20.
 --- The 4th result is the search text then (re-open a picker after an action without losing it).
+--- The 5th result is the chosen item's `item_id` as rendered by the frontend (when declared on
+--- the item), allowing callers using `sel:update` to resolve by identity even across live updates.
 --- A `filter` given up front opens in searching mode: the first Esc clears the search, the next
 --- one closes the select.
 --- `on_open(sel)` is called once the select is open with its handle: `sel:update(items)` replaces
@@ -363,7 +365,7 @@ function ui.notification_history() end
 --- returns `nil, "cancelled"`. When no UI responder is available, returns `nil, "unavailable"`.
 --- Ctrl+C cannot be declared in `keys`.
 ---@param t {title?: string, title_right?: string|mare.Line, split?: {ratio?: number, min?: integer}, items?: mare.SelectItem[], selected?: integer, multi?: boolean, accept_label?: string, allow_search?: boolean, filter?: string, tabs?: {name: string, items: mare.SelectItem[], selected?: integer}[], tab?: integer, kind?: "list"|"confirm", keys?: (string|{key: string, label?: string})[], body?: string|string[], vim?: boolean, cancel?: mare.Token, on_highlight?: (fun(index: integer, tab: integer): mare.Node|nil), on_open?: fun(sel: mare.SelectHandle), wait_kind?: string, wait_title?: string}
----@return integer|integer[]|nil index, (integer|string)|nil tab_or_error, string|nil key, string|nil filter
+---@return integer|integer[]|nil index, (integer|string)|nil tab_or_error, string|nil key, string|nil filter, string|nil item_id
 function ui.select(t) end
 
 --- Dedicated trusted human approval prompt: native code renders the title, bound arguments,

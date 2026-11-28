@@ -310,7 +310,6 @@ function mare.params(rule) end
 ---@field default_context? integer default context window for unknown models on this provider
 ---@field default_max_output? integer default max output tokens for unknown models on this provider
 ---@field default_reasoning? boolean whether unknown models default to reasoning-capable
----@field reasoning? boolean shorthand for `default_reasoning`
 ---@field tool_update? "addition_only" default mid-conversation tool update capability for models on this provider
 ---@field models? table[] seed model list (replaces preset seeds on an overlay)
 ---@field list_models? boolean set `false` to disable live `GET /models` fetching

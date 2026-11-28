@@ -159,7 +159,7 @@ function M.entry(m)
 		name = (type(m.display_name) == "string" and m.display_name ~= "" and m.display_name)
 			or (type(m.name) == "string" and m.name ~= "" and m.name)
 			or nil,
-		hidden = m.visibility == "hide" or nil,
+		hidden = (m.visibility == "hide" and true) or (m.visibility == "list" and false) or nil,
 		context_window = tonumber(m.context_window),
 		max_output = tonumber(m.max_output),
 		reasoning = reasoning,

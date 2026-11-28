@@ -104,10 +104,10 @@ pub(super) fn install(lua: &Lua, ui: &Table, shared: &Arc<UiShared>) -> mlua::Re
                 let on_open = t.get::<Option<mlua::Function>>("on_open")?;
                 let cancel = parse_cancel(&t)?;
                 if !s.can_respond() {
-                    return Ok((None, Some(Value::String(lua.create_string("unavailable")?)), None, None));
+                    return Ok((None, Some(Value::String(lua.create_string("unavailable")?)), None, None, None));
                 }
                 if cancel.as_ref().is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
-                    return Ok((None, Some(Value::String(lua.create_string("cancelled")?)), None, None));
+                    return Ok((None, Some(Value::String(lua.create_string("cancelled")?)), None, None, None));
                 }
                 let token = if on_open.is_some() { s.next_id.fetch_add(1, Ordering::Relaxed) } else { 0 };
                 let modal_id = s.next_id.fetch_add(1, Ordering::Relaxed);
@@ -137,7 +137,7 @@ pub(super) fn install(lua: &Lua, ui: &Table, shared: &Arc<UiShared>) -> mlua::Re
                 };
                 if !s.send(cmd) {
                     open.store(false, Ordering::SeqCst);
-                    return Ok((None, Some(Value::String(lua.create_string("unavailable")?)), None, None));
+                    return Ok((None, Some(Value::String(lua.create_string("unavailable")?)), None, None, None));
                 }
                 let mut guard = ModalCancelGuard { ui: s.clone(), modal_id, armed: true, open: Some(open) };
                 let mut early_reply: Option<Result<Result<mare_shared::ui::SelectReply, Dismissed>, ()>> = None;
@@ -151,7 +151,7 @@ pub(super) fn install(lua: &Lua, ui: &Table, shared: &Arc<UiShared>) -> mlua::Re
                     tokio::select! {
                         biased;
                         _ = cancel_or_pending(cancel.as_ref()) => {
-                            return Ok((None, Some(Value::String(lua.create_string("cancelled")?)), None, None));
+                            return Ok((None, Some(Value::String(lua.create_string("cancelled")?)), None, None, None));
                         }
                         r = &mut rx => {
                             guard.armed = false;
@@ -173,7 +173,7 @@ pub(super) fn install(lua: &Lua, ui: &Table, shared: &Arc<UiShared>) -> mlua::Re
                 // -> index (1-based), tab (1-based), key (when an extra key chose the item), and
                 // the search text then (re-open a picker after an action without losing it)
                 Ok(match reply_res {
-                    Err(()) => (None, Some(Value::String(lua.create_string("cancelled")?)), None, None),
+                    Err(()) => (None, Some(Value::String(lua.create_string("cancelled")?)), None, None, None),
                     Ok(Ok(r)) => {
                         // a Ctrl key comes back as "ctrl+d", the way it was asked for
                         let key = r.key.map(|c| {
@@ -192,9 +192,11 @@ pub(super) fn install(lua: &Lua, ui: &Table, shared: &Arc<UiShared>) -> mlua::Re
                         } else {
                             Value::Integer((r.index + 1) as i64)
                         };
-                        (Some(selected), Some(Value::Integer((r.tab + 1) as i64)), key, Some(r.filter))
+                        (Some(selected), Some(Value::Integer((r.tab + 1) as i64)), key, Some(r.filter), r.item_id)
                     }
-                    Ok(Err(reason)) => (None, Some(Value::String(lua.create_string(reason.as_str())?)), None, None),
+                    Ok(Err(reason)) => {
+                        (None, Some(Value::String(lua.create_string(reason.as_str())?)), None, None, None)
+                    }
                 })
             }
         })?,

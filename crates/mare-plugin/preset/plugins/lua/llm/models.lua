@@ -7,6 +7,7 @@ return function(D)
 	local params = D.params
 	local apply_overrides = D.catalog.apply_overrides
 	local validate = require("llm.validate")
+	local closest = require("llm.closest")
 	local provider_accessor_mod
 	local function provider_accessor()
 		if not provider_accessor_mod then
@@ -162,6 +163,7 @@ return function(D)
 			entry.models = normalized_models
 		end
 		if is_rpc then
+			entry._builtin_seeds = false
 			entry.is_configured = function()
 				return true
 			end
@@ -448,12 +450,33 @@ return function(D)
 		end
 		return out
 	end
+	local function date_key(id)
+		local d
+		for n in id:gmatch("%d+") do
+			if #n == 8 then
+				d = tonumber(n)
+			end
+		end
+		return d
+	end
 	local function newer_version(a, b)
 		local x, y = version_key(a), version_key(b)
 		for i = 1, math.max(#x, #y) do
 			if (x[i] or -1) ~= (y[i] or -1) then
 				return (x[i] or -1) > (y[i] or -1)
 			end
+		end
+		-- Prefer undated aliases over dated snapshots of the same version; among dated snapshots,
+		-- pick the newest date (pi model-resolver.ts:291-299).
+		local da, db = date_key(a), date_key(b)
+		if da ~= db then
+			if da == nil then
+				return true
+			end
+			if db == nil then
+				return false
+			end
+			return da > db
 		end
 		return a < b
 	end
@@ -513,9 +536,26 @@ return function(D)
 		end
 		return nil
 	end
-	function llm.resolve(_, caller, ref)
-		if not ref or ref == "" then
-			return nil
+	local function provider_has_catalog(prov)
+		local p = providers[prov]
+		if type(p) == "table" and type(p.models) == "table" and #p.models > 0 then
+			return true
+		end
+		for _, m in pairs(models) do
+			if m.provider == prov and m.listed then
+				return true
+			end
+		end
+		return false
+	end
+
+	--- Single model-reference resolution and bare-id disambiguation shared across CLI, /model,
+	--- ACP, and Lua (`pi` model-resolver.ts: collect all candidates deterministically before
+	--- choosing; never depend on table iteration or registration order).
+	--- Returns `model | nil, err_reason`.
+	local function resolve_ref(caller, ref)
+		if type(ref) ~= "string" or ref == "" then
+			return nil, "unknown model: " .. tostring(ref)
 		end
 		local prov, id = string.match(ref, "^([^/]+)/(.+)$")
 		if prov and providers[prov] then
@@ -527,7 +567,7 @@ return function(D)
 		end
 		local target = llm.alias_target(llm, caller, ref)
 		if target and target ~= ref then
-			return llm.resolve(llm, caller, target)
+			return resolve_ref(caller, target)
 		end
 		-- a model whose provider plugin/wire failed at startup, is disabled, or is unresolved
 		-- stays selectable (config, /model, a resumed session) instead of silently falling back
@@ -545,14 +585,10 @@ return function(D)
 				unavailable = why,
 			})
 		end
-		-- bare id: trigger non-blocking background hydration without doing I/O here
-		D.catalog.schedule_hydrate()
-		for _, m in pairs(models) do
-			if m.id == ref then
-				return m
-			end
-		end
 		if prov and providers[prov] then
+			if provider_has_catalog(prov) then
+				return nil, closest.format_unknown(ref, prov, models, providers)
+			end
 			local p = providers[prov]
 			local m = {
 				id = id,
@@ -566,27 +602,95 @@ return function(D)
 			}
 			return apply_overrides(m)
 		end
-		return nil
+		-- bare id (or gateway id containing `/`): collect all matches sorted by ref so
+		-- registration/hash order never picks the provider
+		D.catalog.schedule_hydrate()
+		local matches = {}
+		for _, m in pairs(models) do
+			if m.id == ref and not m.hidden then
+				matches[#matches + 1] = m
+			end
+		end
+		if #matches == 1 then
+			return matches[1]
+		elseif #matches > 1 then
+			table.sort(matches, function(a, b)
+				return a.ref < b.ref
+			end)
+			local refs = {}
+			for i, m in ipairs(matches) do
+				refs[i] = m.ref
+			end
+			return nil,
+				("ambiguous model %q: matches %s — specify provider/model"):format(ref, table.concat(refs, ", "))
+		end
+		if prov then
+			return nil, ("unknown model: %s (unknown provider %q)"):format(ref, prov)
+		end
+		return nil, "unknown model: " .. ref
 	end
 
-	function llm.current(self, caller)
-		local m = self:resolve(caller, state.model)
-		if not m then
-			if not D.startup_done then
-				return nil
-			end
-			-- fall back to the first provider that reports being configured
-			for _, p in ipairs(all_providers()) do
-				if p.default_model and (not p.is_configured or p.is_configured()) then
-					m = self:resolve(caller, p.name .. "/" .. p.default_model)
-					if m and not m.unavailable and (not p.unavailable_for or not p.unavailable_for(m)) then
-						break
-					end
-					m = nil
+	local function resolve_ref_hydrated(caller, ref)
+		if type(ref) == "string" and ref ~= "" and not models[ref] then
+			local prov = string.match(ref, "^([^/]+)/")
+			D.catalog.ensure_loaded(prov and providers[prov] and prov or nil)
+		end
+		return resolve_ref(caller, ref)
+	end
+
+	function llm.resolve(_, caller, ref)
+		if not ref or ref == "" then
+			return nil
+		end
+		return (resolve_ref_hydrated(caller, ref))
+	end
+
+	local function first_available_provider_model(p)
+		local best, best_idx
+		for _, m in pairs(models) do
+			if
+				m.provider == p.name
+				and not m.hidden
+				and not m.unavailable
+				and (not p.unavailable_for or not p.unavailable_for(m))
+			then
+				local idx = tonumber(m.listed_index)
+				if not best then
+					best, best_idx = m, idx
+				elseif idx and (not best_idx or idx < best_idx) then
+					best, best_idx = m, idx
+				elseif not idx and not best_idx and m.ref < best.ref then
+					best = m
 				end
 			end
 		end
-		return m
+		return best
+	end
+
+	function llm.current(self, caller)
+		-- Only auto-select a provider default when no explicit model was specified.
+		if type(state.model) == "string" and state.model ~= "" then
+			return (resolve_ref(caller, state.model))
+		end
+		if not D.startup_done then
+			return nil
+		end
+		-- fall back to the first provider that reports being configured: prefer its static
+		-- default_model when still present in the catalog, else fall back to its first available
+		-- listed model (preserving endpoint listing order).
+		for _, p in ipairs(all_providers()) do
+			if not p.is_configured or p.is_configured() then
+				local m = p.default_model and self:resolve(caller, p.name .. "/" .. p.default_model) or nil
+				if m and not m.unavailable and (not p.unavailable_for or not p.unavailable_for(m)) then
+					return m
+				end
+				local fallback = first_available_provider_model(p)
+				if fallback then
+					return fallback
+				end
+			end
+		end
+		return nil
 	end
 	local function clone_state(value)
 		if type(value) ~= "table" then
@@ -670,9 +774,9 @@ return function(D)
 		if failure then
 			error(failure, 0)
 		end
-		local m = self:resolve(caller, ref)
+		local m, why = resolve_ref_hydrated(caller, ref)
 		if not m then
-			lib.fail("llm.unknown_model", "unknown model: " .. tostring(ref))
+			lib.fail("llm.unknown_model", why or ("unknown model: " .. tostring(ref)))
 		end
 		local commit
 		local pinned = (mare.config.model_alias_params or {})[ref]
@@ -744,9 +848,9 @@ return function(D)
 	--- set_model(ref, opts?) -> the detached descriptor of the selected model. The descriptor is
 	--- built before anything changes, so a failure leaves the selection as it was.
 	function llm.set_model(self, caller, ref, opts)
-		local m = self:resolve(caller, ref)
+		local m, why = resolve_ref_hydrated(caller, ref)
 		if not m then
-			lib.fail("llm.unknown_model", "unknown model: " .. tostring(ref))
+			lib.fail("llm.unknown_model", why or ("unknown model: " .. tostring(ref)))
 		end
 		local descriptor, err = self:capabilities(caller, m)
 		if not descriptor then
@@ -770,7 +874,7 @@ return function(D)
 
 	--- clamp_effort(model, effort?) -> the effort `model` runs at (nil: it has no effort
 	--- parameter). The model-parameters engine (llm/params): a model's explicit mapping
-	--- (effort_map: DeepSeek V4 reads xhigh as max) wins over the nearest-level rule, lower on a
+	--- (effort_map: DeepSeek V4 reads xhigh as max) wins over the nearest-level rule, higher on a
 	--- tie; without `effort`, the value chosen by layer (session, config, the model's default)
 	function llm.clamp_effort(_, _, model, effort)
 		if not model then
@@ -786,17 +890,17 @@ return function(D)
 		return params.clamp(d, effort)
 	end
 
-	--- effort_options(model?) -> every effort value defined for the model (the built-in levels
-	--- plus options a rule adds), lowest first; nil when it has no effort parameter
+	--- effort_options(model?) -> the effort values offered for `model` on its active route
+	--- (same source as `param_list`), lowest first; nil when it has no effort parameter
 	function llm.effort_options(self, caller, model)
 		model = model or self:current(caller)
 		local d = model and params.defs(model).effort
-		if not d then
+		if not d or not d.list then
 			return nil
 		end
 		local out = {}
-		for _, o in ipairs(d.options) do
-			out[#out + 1] = o.value
+		for i, v in ipairs(d.list) do
+			out[i] = v
 		end
 		return out
 	end
@@ -844,6 +948,7 @@ return function(D)
 		state.scoped_params = {}
 		state.scoped_cleared = {}
 		state.model = state.default_model
+		local has_default = type(state.default_model) == "string" and state.default_model ~= ""
 		local m = self:current(caller)
 		local p = m and providers[m.provider]
 		if
@@ -853,21 +958,15 @@ return function(D)
 			or lacks_credentials(p, m.provider)
 			or (p.unavailable_for and p.unavailable_for(m))
 		then
-			state.model = nil
-			m = nil
-			for _, candidate in ipairs(all_providers()) do
-				if candidate.default_model and (not candidate.is_configured or candidate.is_configured()) then
-					local model = self:resolve(caller, candidate.name .. "/" .. candidate.default_model)
-					if
-						model
-						and not model.unavailable
-						and (not candidate.unavailable_for or not candidate.unavailable_for(model))
-					then
-						m, p, state.model = model, candidate, model.ref
-						break
-					end
-				end
+			if has_default then
+				-- Explicit default_model is unresolvable, unavailable, or lacks credentials:
+				-- keep state.model = state.default_model so session lifecycle warns and readiness
+				-- reports the exact reason instead of silently falling back to another provider.
+				return nil
 			end
+			state.model = nil
+			m = self:current(caller)
+			p = m and providers[m.provider]
 		end
 		if
 			not m
@@ -902,9 +1001,18 @@ return function(D)
 		if not d then
 			lib.fail("llm.no_effort", m.ref .. " has no effort parameter")
 		end
-		local valid = EFFORT_INDEX[e] or params.known_option("effort", e) or d.index[e] ~= nil
+		local offered = d.list or {}
+		local valid = table.find(offered, e) ~= nil
+			or (
+				opts
+				and opts.restoring == true
+				and (EFFORT_INDEX[e] or params.known_option("effort", e) or d.index[e] ~= nil)
+			)
 		if not valid then
-			lib.fail("llm.unknown_effort", "unknown effort: " .. tostring(e))
+			lib.fail(
+				"llm.unknown_effort",
+				("unknown effort: %s (supported for %s: %s)"):format(tostring(e), m.ref, table.concat(offered, ", "))
+			)
 		end
 		local scope = opts and opts.scope_name
 		if scope ~= nil then
@@ -953,7 +1061,7 @@ return function(D)
 			select_model(self, caller, selection.model, { save = false, restoring = true, checked = true })
 		end
 		if selection.effort ~= nil then
-			select_effort(self, caller, selection.effort, { save = false, checked = true })
+			select_effort(self, caller, selection.effort, { save = false, restoring = true, checked = true })
 		end
 		return {}
 	end
@@ -1087,9 +1195,10 @@ return function(D)
 				return nil, "no model selected"
 			end
 		elseif type(ref) == "string" then
-			m = self:resolve(caller, ref)
+			local why
+			m, why = resolve_ref_hydrated(caller, ref)
 			if not m then
-				return nil, "unknown model: " .. ref
+				return nil, why or ("unknown model: " .. ref)
 			end
 		elseif type(ref) == "table" and type(ref.ref) == "string" then
 			m = self:resolve(caller, ref.ref) or ref
@@ -1179,7 +1288,7 @@ return function(D)
 	function llm.get_model(self, caller, ref)
 		local descriptor, err = self:capabilities(caller, ref)
 		if not descriptor then
-			if type(err) == "string" and err:match("^unknown model:") then
+			if type(err) == "string" and (err:match("^unknown model") or err:match("^ambiguous model")) then
 				lib.fail("llm.unknown_model", err)
 			end
 			error(err, 0)
@@ -1192,5 +1301,12 @@ return function(D)
 		install_provider = install_provider,
 		uninstall_provider = uninstall_provider,
 		normalize_entry = normalize_entry,
+		unresolved_model = function()
+			if type(state.model) ~= "string" or state.model == "" then
+				return nil
+			end
+			local m, why = resolve_ref(ctx, state.model)
+			return not m and why or nil
+		end,
 	}
 end

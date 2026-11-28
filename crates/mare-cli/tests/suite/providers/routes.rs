@@ -65,7 +65,7 @@ async fn a_models_route_comes_from_the_first_layer_that_names_one() {
         .await;
         assert_eq!(route(&h, "opencode-go/glm-5.3-flash").await, "responses ← mare.model");
         assert_eq!(route(&h, "opencode-go/deepseek-v4.1-flash").await, r#"anthropic ← model_routes "deep*""#);
-        assert_eq!(route(&h, "opencode-go/crouton-alpha-free").await, "responses ← provider default");
+        assert_eq!(route(&h, "opencode-go/mimo-v2.6-flash").await, "responses ← provider default");
         // the longest glob wins over a shorter one
         exec(&h, r#"mare.config.models = {}"#).await;
         assert_eq!(route(&h, "opencode-go/glm-5.3-flash").await, r#"responses ← model_routes "glm-5.3-*""#);
@@ -74,7 +74,7 @@ async fn a_models_route_comes_from_the_first_layer_that_names_one() {
             &h,
             r#"local p = LLM:provider("opencode-go")
                p.model_routes = {}
-               local c = LLM:resolve("opencode-go/crouton-alpha-free")
+               local c = LLM:resolve("opencode-go/mimo-v2.6-flash")
                c.protocol = "messages"
                local g = LLM:resolve("opencode-go/glm-5.3-flash")
                g.protocol = "chat-completions"
@@ -83,9 +83,9 @@ async fn a_models_route_comes_from_the_first_layer_that_names_one() {
         )
         .await;
         assert_eq!(route(&h, "opencode-go/deepseek-v4.1-flash").await, "anthropic ← built-in catalogue");
-        assert_eq!(route(&h, "opencode-go/crouton-alpha-free").await, "responses ← provider default");
+        assert_eq!(route(&h, "opencode-go/mimo-v2.6-flash").await, "responses ← provider default");
         exec(&h, r#"LLM:provider("opencode-go").models_dev_routes = true"#).await;
-        assert_eq!(route(&h, "opencode-go/crouton-alpha-free").await, "anthropic ← models.dev (messages)");
+        assert_eq!(route(&h, "opencode-go/mimo-v2.6-flash").await, "anthropic ← models.dev (messages)");
         assert_eq!(
             route(&h, "opencode-go/glm-5.3-flash").await,
             "responses ← provider default",
@@ -96,7 +96,7 @@ async fn a_models_route_comes_from_the_first_layer_that_names_one() {
         assert_eq!(route(&h, "openai/gpt-6.1-terra").await, "responses ← provider");
         // /model, /doctor: the route and the layer that chose it
         let lines: String =
-            eval(&h, r#"return table.concat(LLM:explain_lines("opencode-go/crouton-alpha-free"), "\n")"#).await;
+            eval(&h, r#"return table.concat(LLM:explain_lines("opencode-go/mimo-v2.6-flash"), "\n")"#).await;
         assert!(lines.starts_with("route anthropic ← models.dev (messages)\n"), "{lines}");
         let lines: String = eval(&h, r#"return table.concat(LLM:explain_lines("openai/gpt-6.1-terra"), "\n")"#).await;
         assert!(!lines.contains("route "), "one-route providers show no route line: {lines}");

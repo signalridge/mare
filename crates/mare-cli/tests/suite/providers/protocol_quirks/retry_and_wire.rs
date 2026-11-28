@@ -39,7 +39,7 @@ async fn retry_after_from_error_body_above_max_ms_fails_without_sleeping() {
         );
         let h = provider_host(&mut env, &server, json!({ "plugins": { "llm": { "retry_after_max_ms": 2000 } } })).await;
         let t0 = Instant::now();
-        let msg = ask(&h, "deepseek/deepseek-reasoner").await;
+        let msg = ask(&h, "compat/reasoner-model").await;
         let elapsed = t0.elapsed();
 
         assert_eq!(msg["stop_reason"], "error", "{msg}");
@@ -69,6 +69,7 @@ async fn deepseek_chat_tool_turn_without_reasoning_emits_space_placeholder() {
             &mut env,
             &server,
             json!({ "providers": {
+                "deepseek": { "wire": "openai-chat" },
                 "openrouter": { "base_url": format!("{}/openrouter", server.base) }
             } }),
         )
@@ -88,19 +89,19 @@ async fn deepseek_chat_tool_turn_without_reasoning_emits_space_placeholder() {
             { "role": "tool_result", "tool_call_id": "call_1", "tool_name": "read", "content": [{ "type": "text", "text": "ok" }] }
         ]);
 
-        // 1. Cross-provider switch into deepseek/deepseek-reasoner
-        stream_with_history(&h, "deepseek/deepseek-reasoner", cross_provider_history.clone(), Some(read_tool_decl())).await;
+        // 1. Cross-provider switch into deepseek/deepseek-flash (on openai-chat)
+        stream_with_history(&h, "deepseek/deepseek-flash", cross_provider_history.clone(), Some(read_tool_decl())).await;
         let b1 = server.requests().pop().unwrap().json();
         let a1 = b1["messages"].as_array().unwrap().iter().find(|m| m["role"] == "assistant").unwrap();
         assert_eq!(a1["reasoning_content"], " ", "cross-provider tool turn on deepseek must emit space placeholder: {a1}");
 
-        // 2. Same-provider deepseek-reasoner with empty/missing thinking
+        // 2. Same-provider deepseek-flash with empty/missing thinking
         let empty_same_history = json!([
             { "role": "user", "content": [{ "type": "text", "text": "read" }] },
             {
                 "role": "assistant",
                 "provider": "deepseek",
-                "model": "deepseek-reasoner",
+                "model": "deepseek-flash",
                 "content": [
                     { "type": "thinking", "text": "" },
                     { "type": "tool_call", "id": "call_2", "name": "read", "arguments": { "path": "b.txt" } }
@@ -108,13 +109,13 @@ async fn deepseek_chat_tool_turn_without_reasoning_emits_space_placeholder() {
             },
             { "role": "tool_result", "tool_call_id": "call_2", "tool_name": "read", "content": [{ "type": "text", "text": "ok" }] }
         ]);
-        stream_with_history(&h, "deepseek/deepseek-reasoner", empty_same_history, Some(read_tool_decl())).await;
+        stream_with_history(&h, "deepseek/deepseek-flash", empty_same_history, Some(read_tool_decl())).await;
         let b2 = server.requests().pop().unwrap().json();
         let a2 = b2["messages"].as_array().unwrap().iter().find(|m| m["role"] == "assistant").unwrap();
         assert_eq!(a2["reasoning_content"], " ", "empty thinking on deepseek tool turn must emit space placeholder: {a2}");
 
-        // 3. Non-deepseek endpoint serving a deepseek model (openrouter/deepseek/deepseek-chat)
-        stream_with_history(&h, "openrouter/deepseek/deepseek-chat", cross_provider_history, Some(read_tool_decl())).await;
+        // 3. Non-deepseek endpoint serving a deepseek model (openrouter/deepseek/deepseek-v4.1-flash)
+        stream_with_history(&h, "openrouter/deepseek/deepseek-v4.1-flash", cross_provider_history, Some(read_tool_decl())).await;
         let b3 = server.requests().pop().unwrap().json();
         let a3 = b3["messages"].as_array().unwrap().iter().find(|m| m["role"] == "assistant").unwrap();
         assert_eq!(a3["reasoning_content"], " ", "deepseek model on openrouter must emit space placeholder: {a3}");
@@ -132,7 +133,7 @@ async fn deepseek_chat_tool_turn_without_reasoning_emits_space_placeholder() {
             },
             { "role": "user", "content": [{ "type": "text", "text": "now read a.txt" }] }
         ]);
-        stream_with_history(&h, "deepseek/deepseek-reasoner", plain_then_tools_history, Some(read_tool_decl())).await;
+        stream_with_history(&h, "deepseek/deepseek-flash", plain_then_tools_history, Some(read_tool_decl())).await;
         let b4 = server.requests().pop().unwrap().json();
         let a4 = b4["messages"].as_array().unwrap().iter().find(|m| m["role"] == "assistant").unwrap();
         assert_eq!(a4["reasoning_content"], " ", "prior plain assistant turn with tools on deepseek must emit space placeholder: {a4}");
@@ -367,10 +368,10 @@ async fn empty_tool_result_uses_placeholder_across_all_wires() {
         assert!(a_img.to_string().contains("AAAA") && !a_img.to_string().contains("image omitted"), "{a_img}");
 
         // Chat Completions
-        stream_with_history(&h, "deepseek/deepseek-chat", empty_err_history.clone(), Some(read_tool_decl())).await;
+        stream_with_history(&h, "compat/reasoner-model", empty_err_history.clone(), Some(read_tool_decl())).await;
         let c_empty = server.requests().pop().unwrap().json();
         assert_eq!(c_empty["messages"][3]["content"], "(no tool output)");
-        stream_with_history(&h, "deepseek/deepseek-chat", img_only_history.clone(), Some(read_tool_decl())).await;
+        stream_with_history(&h, "compat/reasoner-model", img_only_history.clone(), Some(read_tool_decl())).await;
         let c_img = server.requests().pop().unwrap().json();
         assert!(c_img.to_string().contains("AAAA") && !c_img.to_string().contains("image omitted"), "{c_img}");
 

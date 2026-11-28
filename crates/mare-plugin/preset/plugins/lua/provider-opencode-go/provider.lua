@@ -166,7 +166,7 @@ return function(D)
 	llm:register_provider({
 		provider = NAME,
 		label = LABEL,
-		models_dev = "opencode",
+		models_dev = "opencode-go",
 		login = {
 			methods = { "api_key" },
 			run = function(lio)
@@ -236,43 +236,51 @@ return function(D)
 				end
 			end,
 		},
+		-- Offline fallback seeds keep only fields absent from the bundled models.dev snapshot
+		-- (params, effort lists, effort_map); names, limits, modalities, reasoning flags and
+		-- pricing are hydrated from preset/resources/models_dev.json.gz (MIT). No `route`: built-in seeds
+		-- stay on the default (responses) route unless routed via `model_routes` or `mare.model`.
 		models = {
-			-- models.dev (2026-11): billed against the Go subscription (billing_source "go"). No
-			-- `route`: every built-in model stays on the default (responses) route
 			{
 				model_id = "glm-5.3-flash",
-				name = "GLM 5.3 Flash",
-				context_window = 1000000,
-				max_output = 131072,
-				reasoning = true,
 				-- the model layer's default effort: medium, chosen by the
 				-- glm A/B — high wins on quality, but with the default prompt it multiplies
 				-- thinking and cost (~4-5x, one 19-minute runaway); `/effort high` when wanted
 				params = { effort = "medium" },
-				cost = { input = 0.15, output = 0.50, cache_read = 0.03, cache_write = 0 },
+				-- opencode Go's Responses route does not require a placeholder reasoning item on
+				-- cross-route history (unlike Chat Completions interleaved reasoning_content).
+				needs_reasoning_placeholder = false,
+			},
+			{
+				model_id = "glm-5.3",
+				efforts = { "off", "low", "high", "max" },
 			},
 			{
 				model_id = "deepseek-v4.1-flash",
-				name = "DeepSeek V4.1 Flash",
-				context_window = 1000000,
-				max_output = 384000,
-				reasoning = true,
 				-- DeepSeek V4's levels are low|high|max (off → "none"); max is sent as max, never
-				-- collapsed to high, and xhigh maps to max as DeepSeek's own API reads it. The
-				-- reasoning comes back as a summary-only reasoning item, which the gateway turns
-				-- back into `reasoning_content` when it is replayed (interleaved thinking).
+				-- collapsed to high, and xhigh maps to max as DeepSeek's own API reads it.
 				efforts = { "off", "low", "high", "max" },
 				effort_map = { xhigh = "max" },
-				cost = { input = 0.15, output = 0.60, cache_read = 0.003, cache_write = 0 },
 			},
-			-- still served by /models but no longer in the Go docs' model list
 			{
-				model_id = "crouton-alpha-free",
-				name = "Crouton Alpha (free)",
-				context_window = 1000000,
-				max_output = 32000,
-				reasoning = true,
-				cost = { input = 0, output = 0, cache_read = 0, cache_write = 0 },
+				model_id = "deepseek-v4-pro",
+				efforts = { "off", "high", "max" },
+				effort_map = { xhigh = "max" },
+			},
+			{
+				model_id = "gpt-6-luna",
+				efforts = { "off", "low", "medium", "high", "xhigh", "max" },
+			},
+			{
+				model_id = "claude-haiku-5-5",
+				efforts = { "off", "low", "medium", "high", "xhigh", "max" },
+			},
+			{
+				model_id = "muse-spark-1.3-contributor",
+				efforts = { "off", "minimal", "low", "medium", "high", "xhigh" },
+			},
+			{
+				model_id = "mimo-v2.6-flash",
 			},
 		},
 	})

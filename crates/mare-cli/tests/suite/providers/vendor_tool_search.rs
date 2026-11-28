@@ -5,9 +5,10 @@
 //!   `tool_result` batch.
 //! - Non-Kimi dialects and Kimi K2 models (without `defer_loading`) never emit tool-bearing
 //!   system messages.
-//! - DeepSeek preset stays on `openai-chat` without `defer_loading`; third-party
-//!   `anthropic-messages` data-tier providers register cleanly without implicitly enabling
-//!   `tool_update`.
+//! - DeepSeek built-in preset uses `openai-responses`, with `tool_update = "addition_only"` on
+//!   `deepseek-flash` (native `tool_search` / `tool_search_call` / `tool_search_output`) and not
+//!   on `deepseek-v4-pro`; third-party `anthropic-messages` data-tier providers register cleanly
+//!   without implicitly enabling `tool_update`.
 
 use super::*;
 use crate::suite::kernel::write_plugin;
@@ -458,7 +459,7 @@ async fn non_kimi_and_non_deferred_kimi_do_not_emit_system_tools_messages() {
             .builtins(&["tools-apply-patch", "mcp", "usage", "compact", "user-config", "jobs"])
             .config(json!({
                 "providers": {
-                    "deepseek": { "base_url": format!("{base}/deepseek") },
+                    "deepseek": { "wire": "openai-chat", "base_url": format!("{base}/deepseek") },
                     "kimi": { "base_url": format!("{base}/kimi") },
                     "generic-compat": {
                         "wire": "openai-chat",
@@ -469,7 +470,8 @@ async fn non_kimi_and_non_deferred_kimi_do_not_emit_system_tools_messages() {
                     },
                 },
                 "models": {
-                    "deepseek/deepseek-chat": { "tool_update": "addition_only" },
+                    "deepseek/deepseek-flash": { "tool_update": "addition_only" },
+                    "kimi/kimi-k3-non-defer": { "tool_update": false },
                 },
                 "plugins": {
                     "llm": { "retry_base_ms": 1 },
@@ -493,7 +495,7 @@ async fn non_kimi_and_non_deferred_kimi_do_not_emit_system_tools_messages() {
               { name = "tool_search", description = "search", parameters = { type = "object", properties = {} } },
               { name = "alpha", description = "alpha", defer_loading = true, parameters = { type = "object", properties = {} } },
             }
-            for _, ref in ipairs({ "deepseek/deepseek-chat", "kimi/kimi-k2-thinking", "generic-compat/generic-1" }) do
+            for _, ref in ipairs({ "deepseek/deepseek-flash", "kimi/kimi-k3-non-defer", "generic-compat/generic-1" }) do
               local m = assert(LLM:resolve(ref), "missing " .. ref)
               local msg = LLM:stream({ model = m, system = "SYS", messages = history, tools = tools }, function() end)
               assert(not msg.error, ref .. ": " .. tostring(msg.error))
@@ -526,16 +528,40 @@ async fn non_kimi_and_non_deferred_kimi_do_not_emit_system_tools_messages() {
 }
 
 #[tokio::test]
-async fn deepseek_stays_on_openai_chat_and_anthropic_wire_accepts_data_provider() {
+async fn deepseek_flash_uses_openai_responses_native_deferred_tools_and_anthropic_data_provider_registers() {
     local(async {
         let mut env = TestEnv::new().await;
         env.set_var("DEEPSEEK_API_KEY", "test-deepseek");
 
+        let server = MockServer::start().await;
+        let turn1_sse = [
+            responses_event(json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "id": "tsc_ds_1",
+                    "type": "tool_search_call",
+                    "call_id": "call_ds_search_1",
+                    "execution": "client",
+                    "status": "completed",
+                    "arguments": { "query": "alpha" }
+                }
+            })),
+            responses_event(json!({
+                "type": "response.completed",
+                "response": { "usage": { "input_tokens": 50, "output_tokens": 10 } }
+            })),
+        ]
+        .concat();
+        server.route("/deepseek/responses", vec![Resp::sse(turn1_sse), Resp::sse(responses_text("done"))]);
+
+        let base = &server.base;
         let h = env
             .host()
             .builtins(&["tools-apply-patch", "mcp", "usage", "compact", "user-config", "jobs"])
             .config(json!({
                 "providers": {
+                    "deepseek": { "base_url": format!("{base}/deepseek") },
                     "deepseek-anthropic": {
                         "wire": "anthropic-messages",
                         "base_url": "https://api.deepseek.com/anthropic",
@@ -552,7 +578,7 @@ async fn deepseek_stays_on_openai_chat_and_anthropic_wire_accepts_data_provider(
             .await;
         global(&h, "LLM", h.service_table("llm").unwrap());
 
-        let (ds_chat_defer, ds_reasoner_defer, ds_wire, da_state, da_wire, da_route, da_model_ok, da_defer): (
+        let (ds_flash_defer, ds_pro_defer, ds_wire, da_state, da_wire, da_route, da_model_ok, da_defer): (
             bool,
             bool,
             String,
@@ -564,14 +590,42 @@ async fn deepseek_stays_on_openai_chat_and_anthropic_wire_accepts_data_provider(
         ) = eval(
             &h,
             r#"
-                local dc = assert(LLM:resolve("deepseek/deepseek-chat"))
-                local dr = assert(LLM:resolve("deepseek/deepseek-reasoner"))
+                local df = assert(LLM:resolve("deepseek/deepseek-flash"))
+                local dp_m = assert(LLM:resolve("deepseek/deepseek-v4-pro"))
                 local dp = assert(LLM:provider("deepseek"))
                 local st = require("llm.directory").status("deepseek-anthropic") or {}
                 local dap = assert(LLM:provider("deepseek-anthropic"))
                 local dam = LLM:resolve("deepseek-anthropic/deepseek-flash")
-                return dc.tool_update == "addition_only",
-                  dr.tool_update == "addition_only",
+
+                local tools = {
+                  { name = "tool_search", description = "search", parameters = { type = "object", properties = {} } },
+                  { name = "alpha", description = "alpha tool", defer_loading = true, parameters = { type = "object", properties = {} } },
+                }
+                local m1 = LLM:stream({
+                  model = df,
+                  system = "SYS",
+                  messages = { { role = "user", content = { { type = "text", text = "find alpha" } } } },
+                  tools = tools,
+                }, function() end)
+                assert(not m1.error, tostring(m1.error))
+                local history = {
+                  { role = "user", content = { { type = "text", text = "find alpha" } } },
+                  m1,
+                  {
+                    role = "tool_result",
+                    tool_call_id = "call_ds_search_1",
+                    tool_name = "tool_search",
+                    content = { { type = "text", text = "loaded alpha" } },
+                    details = {
+                      loaded_tools = { "alpha" },
+                    },
+                  },
+                }
+                local m2 = LLM:stream({ model = df, system = "SYS", messages = history, tools = tools }, function() end)
+                assert(not m2.error, tostring(m2.error))
+
+                return df.tool_update == "addition_only",
+                  dp_m.tool_update == "addition_only",
                   tostring(dp.wire or ""),
                   tostring(st.state or ""),
                   tostring(dap.wire or ""),
@@ -583,14 +637,42 @@ async fn deepseek_stays_on_openai_chat_and_anthropic_wire_accepts_data_provider(
         .await;
         h.shutdown().await;
 
-        assert!(!ds_chat_defer, "deepseek-chat on openai-chat must not enable tool_update");
-        assert!(!ds_reasoner_defer, "deepseek-reasoner on openai-chat must not enable tool_update");
-        assert_eq!(ds_wire, "openai-chat");
+        assert!(ds_flash_defer, "deepseek-flash on openai-responses must enable tool_update = addition_only");
+        assert!(!ds_pro_defer, "deepseek-v4-pro must keep tool_update = nil");
+        assert_eq!(ds_wire, "openai-responses");
         assert_eq!(da_state, "registered", "anthropic-messages must accept data-tier configured endpoints");
         assert_eq!(da_wire, "anthropic-messages");
         assert_eq!(da_route, "anthropic");
         assert!(da_model_ok, "deepseek-anthropic/deepseek-flash must resolve");
         assert!(!da_defer, "third-party anthropic-messages data providers must not implicitly enable tool_update");
+
+        let reqs: Vec<_> = server.requests().into_iter().filter(|r| r.path == "/deepseek/responses").collect();
+        assert_eq!(reqs.len(), 2, "expected 2 Responses requests to /deepseek/responses");
+        let b1 = reqs[0].json();
+        assert!(
+            b1["tools"].as_array().unwrap().iter().any(|t| t["type"] == "tool_search" && t["execution"] == "client"),
+            "turn 1 must declare client tool_search tool: {}",
+            b1["tools"]
+        );
+        assert!(
+            b1["tools"].as_array().unwrap().iter().any(|t| t["name"] == "alpha" && t["defer_loading"] == true),
+            "turn 1 must mark alpha defer_loading=true: {}",
+            b1["tools"]
+        );
+        let b2 = reqs[1].json();
+        let input2 = b2["input"].as_array().unwrap();
+        assert!(
+            input2.iter().any(|it| it["type"] == "tool_search_call" && it["call_id"] == "call_ds_search_1"),
+            "turn 2 must replay tool_search_call: {input2:?}"
+        );
+        let tso = input2
+            .iter()
+            .find(|it| it["type"] == "tool_search_output" && it["call_id"] == "call_ds_search_1")
+            .unwrap_or_else(|| panic!("turn 2 must replay tool_search_output: {input2:?}"));
+        assert!(
+            tso["tools"].as_array().unwrap().iter().any(|t| t["name"] == "alpha"),
+            "turn 2 tool_search_output.tools must contain alpha: {tso}"
+        );
     })
     .await
 }

@@ -237,3 +237,42 @@ return d.images, r.images == false, not has_image, has_attachment
     })
     .await
 }
+
+/// Built-in seeds declare `input` without a redundant `images` flag so overriding only
+/// `input = { "text" }` in user config cleanly derives `images = false`.
+#[tokio::test]
+async fn builtin_seed_input_override_to_text_only_disables_images() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let server = MockServer::start().await;
+        let h = provider_host(
+            &mut env,
+            &server,
+            json!({
+                "models": {
+                    "deepseek/deepseek-flash": { "input": ["text"] },
+                    "anthropic/claude-sonnet-5-5": { "input": ["text"] },
+                    "openai/gpt-6-luna": { "input": ["text"] }
+                }
+            }),
+        )
+        .await;
+
+        let (ds_img, ant_img, oai_img, pro_img): (bool, bool, bool, bool) = eval(
+            &h,
+            r#"
+            return assert(LLM:resolve("deepseek/deepseek-flash")).images == true,
+                assert(LLM:resolve("anthropic/claude-sonnet-5-5")).images == true,
+                assert(LLM:resolve("openai/gpt-6-luna")).images == true,
+                assert(LLM:resolve("deepseek/deepseek-v4-pro")).images == true
+            "#,
+        )
+        .await;
+        assert!(!ds_img, "deepseek-flash with input=['text'] override must derive images=false");
+        assert!(!ant_img, "claude-sonnet-5-5 with input=['text'] override must derive images=false");
+        assert!(!oai_img, "gpt-6-luna with input=['text'] override must derive images=false");
+        assert!(!pro_img, "deepseek-v4-pro with input=['text'] seed must derive images=false");
+        h.shutdown().await;
+    })
+    .await
+}

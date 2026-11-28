@@ -94,7 +94,7 @@ fn host_extra_for(wire: &str, base: &str) -> Value {
         }
         "anthropic" => json!({ "plugins": { "provider-anthropic": { "base_url": format!("{base}/anthropic") } } }),
         "compat" => {
-            json!({ "providers": { "deepseek": { "base_url": format!("{base}/compat") } } })
+            json!({ "providers": { "compat": { "base_url": format!("{base}/compat") } } })
         }
         other => panic!("unknown wire {other}"),
     }
@@ -110,7 +110,7 @@ async fn a_complete_stream_ends_at_its_terminal_event_while_the_connection_stays
     for (wire, file, model, cache_write) in [
         ("responses", "openai-responses.sse", "openai/gpt-6.1-terra", 0),
         ("anthropic", "anthropic.sse", "anthropic/claude-sonnet-5-5", 5),
-        ("compat", "openai-compat.sse", "deepseek/deepseek-reasoner", 0),
+        ("compat", "openai-compat.sse", "compat/reasoner-model", 0),
     ] {
         local(async {
             let mut env = TestEnv::new().await;
@@ -207,7 +207,7 @@ async fn terminal_error_events_end_without_eof_and_close_connection() {
         (
             "compat-error",
             "compat",
-            "deepseek/deepseek-reasoner",
+            "compat/reasoner-model",
             "data: {\"error\":{\"code\":\"invalid_request_error\",\"message\":\"stream error compat\"}}\n\n",
             "stream error compat",
         ),

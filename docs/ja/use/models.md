@@ -2,7 +2,7 @@
 
 プロバイダーへのサインイン、モデルと推論の強度の選択、モデルのメタデータの上書き、カスタムプロバイダーの追加の方法を扱います。
 
-モデルは `provider/id` の形で指定します。例: `openai/gpt-6.1-terra`。プロバイダーは組み込みのプラグインで、それぞれが自分のモデルを登録します。サインイン後に、ライブのモデル一覧を取得するものもあります。
+モデルは `provider/id` の形で指定します。例: `openai/gpt-6-luna`。プロバイダーは組み込みのプラグインで、それぞれが自分のモデルを登録します。サインイン後に、ライブのモデル一覧を取得するものもあります。
 
 ## プロバイダー
 
@@ -67,7 +67,7 @@ mare.provider("anthropic", { api_key = { cmd = { "pass", "show", "anthropic/api-
 ## モデルを選ぶ
 
 ```sh
-mare -m openai/gpt-6.1-terra            # this run
+mare -m openai/gpt-6-luna               # this run
 mare -m sonnet                          # an alias
 ```
 
@@ -77,8 +77,8 @@ mare -m sonnet                          # an alias
 
 ```lua
 mare.setup {
-  model = "openai/gpt-6.1-terra",
-  favorite_models = { "openai/gpt-6.1-terra", "anthropic/claude-sonnet-5-5" },
+  model = "openai/gpt-6-luna",
+  favorite_models = { "openai/gpt-6-luna", "anthropic/claude-sonnet-5-5" },
   fallback_models = { "google/gemini-2.5-pro" },   -- tried when the current model is overloaded or out of quota
 }
 ```
@@ -86,7 +86,7 @@ mare.setup {
 `MARE_MODEL` でも設定できます。`init.lua` (またはフラグや環境変数) に明示した `model` は、`/model` で最後に選んで mare が `state.json` に記憶しているモデルより優先されます (後述)。組み込みの別名 `sonnet`、`opus`、`haiku` は、そのファミリーの最新の Anthropic モデルを選びます。独自の別名は `mare.model` で定義します。
 
 ```lua
-mare.model { provider = "openai", id = "gpt-6.1-terra", alias = "main" }
+mare.model { provider = "openai", id = "gpt-6-luna", alias = "main" }
 ```
 
 これ以降、`-m main`、`/model main`、`fallback_models` で `main` を使えます。

@@ -58,7 +58,7 @@ async fn compat_usage_survives_reasoning_tokens_above_completion_tokens() {
         server.route("/compat", vec![Resp::sse(&sse)]);
         let h = provider_host(&mut env, &server, json!({})).await;
 
-        let u = &ask(&h, "deepseek/deepseek-chat").await["usage"];
+        let u = &ask(&h, "compat/chat-model").await["usage"];
         assert_eq!(u["input"], 891, "951 - 60: {u}");
         assert_eq!(u["cache_read"], 60, "{u}");
         assert_eq!(u["output"], 6000, "{u}");
@@ -103,7 +103,7 @@ async fn a_4xx_status_wins_over_retryable_message_text() {
         );
         let h = provider_host(&mut env, &server, retrying()).await;
 
-        let msg = ask(&h, "deepseek/deepseek-chat").await;
+        let msg = ask(&h, "compat/chat-model").await;
         assert_eq!(msg["error_kind"], "invalid", "{msg}");
         assert_eq!(server.count("/compat"), 1, "a 400 must not retry");
         h.shutdown().await;

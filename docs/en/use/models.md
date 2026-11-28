@@ -2,7 +2,7 @@
 
 How to sign in to a provider, pick a model and a reasoning effort, override model metadata, and add a custom provider.
 
-A model is named `provider/id`, for example `openai/gpt-6.1-terra`. The providers are built-in plugins; each registers its models, and some also fetch a live model list once you are signed in.
+A model is named `provider/id`, for example `openai/gpt-6-luna`. The providers are built-in plugins; each registers its models, and some also fetch a live model list once you are signed in.
 
 ## Providers
 
@@ -67,7 +67,7 @@ mare.provider("anthropic", { api_key = { cmd = { "pass", "show", "anthropic/api-
 ## Choosing a model
 
 ```sh
-mare -m openai/gpt-6.1-terra            # this run
+mare -m openai/gpt-6-luna               # this run
 mare -m sonnet                          # an alias
 ```
 
@@ -77,8 +77,8 @@ To set a default, use `init.lua`:
 
 ```lua
 mare.setup {
-  model = "openai/gpt-6.1-terra",
-  favorite_models = { "openai/gpt-6.1-terra", "anthropic/claude-sonnet-5-5" },
+  model = "openai/gpt-6-luna",
+  favorite_models = { "openai/gpt-6-luna", "anthropic/claude-sonnet-5-5" },
   fallback_models = { "google/gemini-2.5-pro" },   -- tried when the current model is overloaded or out of quota
 }
 ```
@@ -86,7 +86,7 @@ mare.setup {
 You can also set `MARE_MODEL`. An explicit `model` in `init.lua` (or the flag or variable) wins over the model you last picked with `/model`, which mare remembers in `state.json` (see below). The built-in aliases `sonnet`, `opus` and `haiku` select the newest Anthropic model of that family. Define your own with `mare.model`:
 
 ```lua
-mare.model { provider = "openai", id = "gpt-6.1-terra", alias = "main" }
+mare.model { provider = "openai", id = "gpt-6-luna", alias = "main" }
 ```
 
 After that `-m main`, `/model main` and `fallback_models` accept `main`.

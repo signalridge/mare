@@ -141,7 +141,7 @@ Explain the retry logic in @src/client.rs
 `/model` 会打开选择器。没有凭据的 provider 会被归入需要登录的一组。直接给出模型引用即可切换：
 
 ```text
-/model openai/gpt-6.1-terra
+/model openai/gpt-6-luna
 ```
 
 `/effort` 为当前模型设置推理强度。你也可以在启动时用 `-m/--model` 和 `-e/--effort`（或 `MARE_EFFORT`）指定。作为全局覆盖，`effort` 仅限单次调用生效，写在 `init.lua` 中的全局 `effort` 会被忽略；而 `init.lua` 中的 `model` 会覆盖 `~/.local/state/mare/state.json` 里记住的选择。
@@ -169,7 +169,7 @@ mare -c --fork-session   # continue in a copy and leave the original alone
 ```lua
 -- ~/.config/mare/init.lua
 mare.setup {
-  model = "openai/gpt-6.1-terra",
+  model = "openai/gpt-6-luna",
 }
 
 -- give long shell commands more time

@@ -465,6 +465,58 @@ pub fn install(lua: &Lua, mare: &Table) -> mlua::Result<()> {
     t.set("default_source", mare_plugin_manager::DEFAULT_SOURCE)?;
     // mare's own NEWS.md (the copy in the runtime directory is the same text)
     t.set("mare_news", lua.create_function(|_, ()| Ok(crate::news_text().into_owned()))?)?;
+    // Generic read-only resource reader for installed packages (`<pkg>/resources/<path>`) and
+    // built-in preset resources (`preset/resources/<path>`), transparently gunzipping `.gz` files.
+    t.set(
+        "read_resource",
+        lua.create_function(|lua, (path, opts): (String, Option<Table>)| {
+            let norm = crate::validate_resource_path(&path)
+                .map_err(|e| mlua::Error::runtime(format!("mare.plugins.read_resource: {e}")))?;
+            let target_pkg: Option<String> = match opts {
+                Some(ref o) => o.get("package")?,
+                None => None,
+            };
+            let mare: Table = lua.globals().get("mare")?;
+            let no_user_plugins = mare.get::<Option<bool>>("no_user_plugins")?.unwrap_or(false);
+            if !no_user_plugins {
+                let cfg = current_config(lua)?;
+                let dirs = mare_plugin_manager::resource_dirs(&cfg, None)
+                    .map_err(|e| mlua::Error::runtime(format!("mare.plugins.read_resource: {e}")))?;
+                for (name, dir) in dirs {
+                    if let Some(ref want) = target_pkg
+                        && &name != want
+                    {
+                        continue;
+                    }
+                    let res_root = dir.join("resources");
+                    let candidate = res_root.join(&norm);
+                    if candidate.is_file() {
+                        let canon_root = mare_shared::paths::resolve_path(&res_root)
+                            .map_err(|e| mlua::Error::runtime(format!("mare.plugins.read_resource: {e}")))?
+                            .physical;
+                        let canon_file = mare_shared::paths::resolve_path(&candidate)
+                            .map_err(|e| mlua::Error::runtime(format!("mare.plugins.read_resource: {e}")))?
+                            .physical;
+                        if !canon_file.starts_with(&canon_root) {
+                            return Err(mlua::Error::runtime(format!(
+                                "mare.plugins.read_resource: path escapes package resources: {path:?}"
+                            )));
+                        }
+                        let bytes = std::fs::read(&canon_file)
+                            .map_err(|e| mlua::Error::runtime(format!("mare.plugins.read_resource: {e}")))?;
+                        let text = crate::decode_resource_bytes(&norm, &bytes)
+                            .map_err(|e| mlua::Error::runtime(format!("mare.plugins.read_resource: {e}")))?;
+                        return Ok(Some(text));
+                    }
+                }
+            }
+            if target_pkg.is_some() {
+                return Ok(None);
+            }
+            crate::read_builtin_resource(&norm)
+                .map_err(|e| mlua::Error::runtime(format!("mare.plugins.read_resource: {e}")))
+        })?,
+    )?;
     t.set("news_version", crate::NEWS_VERSION)?;
     mare.set("plugins", t)
 }
