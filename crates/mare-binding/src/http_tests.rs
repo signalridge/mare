@@ -20,6 +20,8 @@ async fn http_watched_reports_the_first_expired_timeout_and_prioritizes_cancel()
             bad_utf8: Default::default(),
             caps: SseCaps { line: sse::DEFAULT_CAP, event: sse::DEFAULT_CAP },
             idle: Some(Duration::from_secs(idle_secs)),
+            first_event_timeout: None,
+            first_event_deadline: None,
             deadline: Some(tokio::time::Instant::from_std(last + Duration::from_secs(total_secs))),
             last_activity: std::sync::Arc::new(std::sync::Mutex::new(last)),
         };

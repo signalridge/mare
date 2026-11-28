@@ -42,6 +42,9 @@ pub struct Response {
     /// idle watchdog: no bytes at all for this long
     /// fails the read. Measured on raw bytes, so SSE heartbeat comments count as activity.
     idle: Option<Duration>,
+    /// deadline for the first dispatched SSE data event (not reset by heartbeat comments).
+    first_event_timeout: Option<Duration>,
+    first_event_deadline: Option<tokio::time::Instant>,
     deadline: Option<tokio::time::Instant>,
     last_activity: std::sync::Arc<std::sync::Mutex<std::time::Instant>>,
 }

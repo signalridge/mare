@@ -74,6 +74,7 @@ return function(D)
 			"attempt",
 			"header_timeout_ms",
 			"idle_timeout_ms",
+			"first_event_timeout_ms",
 			"sse_max_event_bytes",
 			"sse_max_line_bytes",
 			"fresh_connection",

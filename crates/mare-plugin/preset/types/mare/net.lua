@@ -117,7 +117,8 @@ mare.http = {}
 --- Failures read `transport: …` (retryable), `malformed_response: …` (an unparseable stream,
 --- including invalid UTF-8) or `aborted` (cancelled). `idle_timeout_ms`: no bytes at all for this
 --- long fails the read (heartbeat comments count as activity); `header_timeout_ms`: wait for the
---- response headers; `fresh`: a new connection instead of a pooled one. Proxies come from
+--- response headers; `first_event_timeout_ms`: wait for the first dispatched SSE data event
+--- (heartbeat comments do not extend it); `fresh`: a new connection instead of a pooled one. Proxies come from
 --- HTTP(S)_PROXY / ALL_PROXY / NO_PROXY (SOCKS and PAC are a clear error); custom CAs from
 --- MARE_CA_CERTIFICATE, else SSL_CERT_FILE plus SSL_CERT_DIR (a directory of PEM / .crt files). `proxy`: this request's own HTTP(S) proxy (NO_PROXY
 --- still applies); `connect_timeout_ms`: its connect timeout (default 30 s). `sse_max_line_bytes`
@@ -125,7 +126,7 @@ mare.http = {}
 --- event's lines together, exceed this many bytes (default 16 MiB each). `redirect`:
 --- `"follow"` (default), `"manual"` (return 3xx without following), or `"same-origin"`.
 --- `max_redirects`: maximum redirects allowed (default 10).
----@param opts {url: string, method?: string, headers?: table<string,string>, body?: string, json?: any, form?: table<string,string>, timeout_ms?: number, cancel?: mare.Token, idle_timeout_ms?: number, header_timeout_ms?: number, fresh?: boolean, proxy?: string, connect_timeout_ms?: number, sse_max_line_bytes?: number, sse_max_event_bytes?: number, redirect?: "follow"|"manual"|"same-origin", max_redirects?: integer}
+---@param opts {url: string, method?: string, headers?: table<string,string>, body?: string, json?: any, form?: table<string,string>, timeout_ms?: number, cancel?: mare.Token, idle_timeout_ms?: number, header_timeout_ms?: number, first_event_timeout_ms?: number, fresh?: boolean, proxy?: string, connect_timeout_ms?: number, sse_max_line_bytes?: number, sse_max_event_bytes?: number, redirect?: "follow"|"manual"|"same-origin", max_redirects?: integer}
 ---@return mare.Response
 function mare.http.request(opts) end
 --- `retry-after-ms`, or `Retry-After` in seconds or as an HTTP date, in milliseconds.
