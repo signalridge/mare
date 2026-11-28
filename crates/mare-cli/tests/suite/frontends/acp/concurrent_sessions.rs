@@ -701,3 +701,68 @@ return {{
 
     rpc.kill_and_wait();
 }
+
+#[test]
+fn repro_issue_202_acp_session_resume_busy_lacks_machine_readable_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dunce::canonicalize(dir.path()).unwrap();
+    let home = tempfile::tempdir().unwrap();
+
+    let mut rpc1 = acp_in_home(home.path(), json!([{ "text": "persisted" }]), &[], &[]);
+    let _ = rpc1.call_raw("initialize", json!({ "protocolVersion": 1, "clientCapabilities": {} }), |_| json!(null));
+    let sid =
+        rpc1.call_raw("session/new", json!({ "cwd": cwd, "mcpServers": [] }), |_| json!(null))["result"]["sessionId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+    let p = rpc1.call_raw(
+        "session/prompt",
+        json!({ "sessionId": sid, "prompt": [{ "type": "text", "text": "save" }] }),
+        |_| json!(null),
+    );
+    assert_eq!(p["result"]["stopReason"], "end_turn", "{p}");
+
+    // Path 1: same-process already-loaded session (both session/resume and session/load).
+    let same_proc =
+        rpc1.call_raw("session/resume", json!({ "sessionId": sid, "cwd": cwd, "mcpServers": [] }), |_| json!(null));
+    assert!(same_proc.get("error").is_some(), "expected error resuming already-loaded session: {same_proc}");
+    let same_proc_load =
+        rpc1.call_raw("session/load", json!({ "sessionId": sid, "cwd": cwd, "mcpServers": [] }), |_| json!(null));
+    assert!(same_proc_load.get("error").is_some(), "expected error loading already-loaded session: {same_proc_load}");
+
+    // Path 2: cross-process busy/locked session (both session/resume and session/load).
+    let mut rpc2 = acp_in_home(home.path(), json!([]), &[], &[]);
+    let _ = rpc2.call_raw("initialize", json!({ "protocolVersion": 1, "clientCapabilities": {} }), |_| json!(null));
+    let cross_proc =
+        rpc2.call_raw("session/resume", json!({ "sessionId": sid, "cwd": cwd, "mcpServers": [] }), |_| json!(null));
+    assert!(cross_proc.get("error").is_some(), "expected error resuming cross-process busy session: {cross_proc}");
+    let cross_proc_load =
+        rpc2.call_raw("session/load", json!({ "sessionId": sid, "cwd": cwd, "mcpServers": [] }), |_| json!(null));
+    assert!(
+        cross_proc_load.get("error").is_some(),
+        "expected error loading cross-process busy session: {cross_proc_load}"
+    );
+
+    rpc2.kill_and_wait();
+    rpc1.kill_and_wait();
+
+    for (label, resp, expected_reason, expected_substr) in [
+        ("same_proc resume", &same_proc, "already_loaded", "already active"),
+        ("same_proc load", &same_proc_load, "already_loaded", "already active"),
+        ("cross_proc resume", &cross_proc, "locked", "open in another mare process"),
+        ("cross_proc load", &cross_proc_load, "locked", "open in another mare process"),
+    ] {
+        assert_eq!(resp["error"]["code"], -32602, "{label}: {resp}");
+        let data = &resp["error"]["data"];
+        assert!(data.is_object(), "{label} must return structured data: {resp}");
+        assert_eq!(data["code"], "session_busy", "{label}: {resp}");
+        assert_eq!(data["reason"], expected_reason, "{label}: {resp}");
+        assert_eq!(data["busy"], true, "{label}: {resp}");
+        assert_eq!(data["sessionId"], sid, "{label}: {resp}");
+        let msg = data["message"].as_str().unwrap_or("");
+        assert!(
+            msg.contains(expected_substr),
+            "{label} must retain human-readable message containing {expected_substr:?}: {resp}"
+        );
+    }
+}
