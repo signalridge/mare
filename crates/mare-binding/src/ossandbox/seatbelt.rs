@@ -53,6 +53,7 @@ impl Policy {
         s.push_str(")\n");
         // read-only subpaths (.git, .mare); later rules win, so grants inside them come after
         let protected = self.protected_subpaths();
+        let granted = if protected.is_empty() { vec![] } else { self.granted_in_protected() };
         if !protected.is_empty() {
             s.push_str("(deny file-write*\n");
             for p in &protected {
@@ -61,7 +62,6 @@ impl Policy {
                 let _ = writeln!(s, "  (subpath \"{qp}\")");
             }
             s.push_str(")\n");
-            let granted = self.granted_in_protected();
             if !granted.is_empty() {
                 s.push_str("(allow file-write*\n");
                 for g in &granted {
@@ -96,7 +96,10 @@ impl Policy {
         }
         // Keep this after all read and write grants. Deny both file-read* and file-write*
         // with both (literal ...) and (subpath ...) so denied files/dirs cannot be renamed out.
-        let mut ancestor_targets = protected;
+        // Protected subpaths explicitly reopened by a grant no longer need directory-unlink
+        // pinning inside the reopened subtree.
+        let mut ancestor_targets: Vec<PathBuf> =
+            protected.into_iter().filter(|p| !granted.iter().any(|g| p.starts_with(g))).collect();
         if self.deny_read.iter().any(|d| d.is_dir.is_some()) {
             s.push_str("(deny file-read* file-write*\n");
             for d in self.deny_read.iter().filter(|d| d.is_dir.is_some()) {
@@ -208,5 +211,66 @@ mod tests {
         let profile = p.seatbelt(None);
         assert!(profile.contains("(deny system-fcntl (fcntl-command 80 110))"));
         assert!(profile.contains(&format!("(deny file-ioctl (ioctl-command {MACOS_TIOCSTI}))")));
+    }
+
+    #[test]
+    fn seatbelt_granted_external_git_allows_write_without_synthesizing_git_mare() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let ws = root.join("ws");
+        let ext_repo = root.join("ext-repo");
+        let ext_git = ext_repo.join(".git");
+        let ext_other = root.join("ext-other");
+        std::fs::create_dir_all(ws.join(".git")).unwrap();
+        std::fs::create_dir_all(&ext_git).unwrap();
+        std::fs::create_dir_all(ext_other.join(".git")).unwrap();
+
+        let lua = Lua::new();
+        let spec = lua.create_table().unwrap();
+        spec.set("level", "workspace-write").unwrap();
+        spec.set("writable", vec![ext_git.to_string_lossy().into_owned(), ext_other.to_string_lossy().into_owned()])
+            .unwrap();
+        let p = Policy::from_lua(&lua, &Value::Table(spec), &ws).unwrap().unwrap();
+        let protected = p.protected_subpaths();
+        assert!(!protected.contains(&ext_git.join(".mare")), "must not synthesize .mare inside .git: {protected:?}");
+        assert!(protected.contains(&ws.join(".git")), "workspace .git must stay protected: {protected:?}");
+        assert!(protected.contains(&ext_other.join(".git")), "ordinary extra root .git must stay protected");
+        assert!(protected.contains(&ext_other.join(".mare")), "ordinary extra root .mare must stay protected");
+
+        let profile = p.seatbelt(None);
+        let q = |p: &Path| p.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
+        assert!(profile.contains(&format!("(subpath \"{}\")", q(&ext_git))), "{profile}");
+        assert!(!profile.contains(&q(&ext_git.join(".mare"))), "unexpected .git/.mare rule:\n{profile}");
+        assert!(
+            !profile.contains(&format!(
+                "(deny file-write-unlink (require-all (vnode-type DIRECTORY) (literal \"{}\")))",
+                q(&ext_git)
+            )),
+            "must not emit directory unlink deny for granted external .git:\n{profile}"
+        );
+
+        // When both an external repo root and its `.git` are granted, `.git` is reopened by a
+        // trailing allow rule and has no residual directory-unlink deny on `.git` itself.
+        let spec2 = lua.create_table().unwrap();
+        spec2.set("level", "workspace-write").unwrap();
+        spec2
+            .set("writable", vec![ext_repo.to_string_lossy().into_owned(), ext_git.to_string_lossy().into_owned()])
+            .unwrap();
+        let p2 = Policy::from_lua(&lua, &Value::Table(spec2), &ws).unwrap().unwrap();
+        let profile2 = p2.seatbelt(None);
+        let deny_idx = profile2.find("(deny file-write*\n  (literal \"").unwrap();
+        assert!(
+            profile2[deny_idx..].contains(&format!("(literal \"{}\")", q(&ext_git))),
+            "protected deny block must still list ext_git:\n{profile2}"
+        );
+        let allow_idx = profile2[deny_idx..].find(&format!("(allow file-write*\n  (literal \"{}\")", q(&ext_git)));
+        assert!(allow_idx.is_some(), "explicitly granted .git must be reopened after deny:\n{profile2}");
+        assert!(
+            !profile2.contains(&format!(
+                "(deny file-write-unlink (require-all (vnode-type DIRECTORY) (literal \"{}\")))",
+                q(&ext_git)
+            )),
+            "reopened .git must not keep directory unlink deny:\n{profile2}"
+        );
     }
 }

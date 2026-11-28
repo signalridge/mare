@@ -12,6 +12,112 @@ struct Profile {
     network: J,
 }
 
+fn is_dot_git_name(path: &std::path::Path) -> bool {
+    path.file_name().is_some_and(|n| {
+        if cfg!(any(target_os = "macos", windows)) {
+            n.to_string_lossy().eq_ignore_ascii_case(".git")
+        } else {
+            n == ".git"
+        }
+    })
+}
+
+fn no_symlink_dir(path: &std::path::Path) -> Option<PathBuf> {
+    let resolved = mare_shared::paths::resolve_path(path).ok()?;
+    let same = if cfg!(windows) {
+        resolved
+            .logical
+            .to_string_lossy()
+            .replace('\\', "/")
+            .eq_ignore_ascii_case(&resolved.physical.to_string_lossy().replace('\\', "/"))
+    } else {
+        resolved.logical == resolved.physical
+    };
+    (same && resolved.physical.is_dir()).then_some(resolved.physical)
+}
+
+fn read_regular_text(path: &std::path::Path, max_bytes: u64, label: &str) -> mlua::Result<String> {
+    let meta = std::fs::symlink_metadata(path).map_err(|e| mlua::Error::runtime(format!("invalid {label}: {e}")))?;
+    if meta.file_type().is_symlink() || !meta.is_file() || meta.len() > max_bytes {
+        return Err(mlua::Error::runtime(format!("invalid or symlinked {label}")));
+    }
+    let raw = std::fs::read_to_string(path).map_err(|e| mlua::Error::runtime(format!("invalid {label}: {e}")))?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.contains(['\0', '\r', '\n']) {
+        return Err(mlua::Error::runtime(format!("invalid {label}")));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn valid_git_head(dir: &std::path::Path) -> bool {
+    read_regular_text(&dir.join("HEAD"), 256, "git HEAD").is_ok_and(|t| {
+        t.strip_prefix("ref:").is_some_and(|r| r.trim_start().starts_with("refs/"))
+            || ((t.len() == 40 || t.len() == 64) && t.bytes().all(|b| b.is_ascii_hexdigit()))
+    })
+}
+
+fn resolve_git_pointer_writes(dot_git: &std::path::Path) -> mlua::Result<Vec<String>> {
+    let parent = dot_git.parent().ok_or_else(|| mlua::Error::runtime("invalid .git parent directory"))?;
+    let parent_phys =
+        dunce::canonicalize(parent).map_err(|e| mlua::Error::runtime(format!("invalid .git parent directory: {e}")))?;
+    let dot_git_phys = parent_phys.join(".git");
+    let raw = read_regular_text(&dot_git_phys, 65_536, ".git pointer file")?;
+    let gd = raw
+        .strip_prefix("gitdir:")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| mlua::Error::runtime("invalid .git pointer file"))?;
+    let gd_phys = no_symlink_dir(&parent_phys.join(gd))
+        .ok_or_else(|| mlua::Error::runtime("symlinked or invalid .git gitdir"))?;
+    let commondir_path = gd_phys.join("commondir");
+    if matches!(std::fs::symlink_metadata(&commondir_path), Err(e) if e.kind() == std::io::ErrorKind::NotFound) {
+        if no_symlink_dir(&gd_phys.join("objects")).is_none()
+            || no_symlink_dir(&gd_phys.join("refs")).is_none()
+            || !valid_git_head(&gd_phys)
+        {
+            return Err(mlua::Error::runtime(".git gitdir is not a valid git directory"));
+        }
+        return Ok(vec![gd_phys.to_string_lossy().into_owned()]);
+    }
+    let cd_rel = read_regular_text(&commondir_path, 65_536, "git commondir")?;
+    let cd_phys = no_symlink_dir(&gd_phys.join(cd_rel))
+        .ok_or_else(|| mlua::Error::runtime("symlinked or missing git commondir"))?;
+    let worktrees_dir = no_symlink_dir(&cd_phys.join("worktrees"))
+        .ok_or_else(|| mlua::Error::runtime("gitdir is not a worktree inside commondir"))?;
+    if !gd_phys.starts_with(&worktrees_dir) || gd_phys == worktrees_dir {
+        return Err(mlua::Error::runtime("gitdir is not a worktree inside commondir"));
+    }
+    if no_symlink_dir(&cd_phys.join("objects")).is_none()
+        || no_symlink_dir(&cd_phys.join("refs")).is_none()
+        || !valid_git_head(&cd_phys)
+        || !valid_git_head(&gd_phys)
+    {
+        return Err(mlua::Error::runtime("commondir is not a valid git repository"));
+    }
+    let back_rel = read_regular_text(&gd_phys.join("gitdir"), 65_536, "worktree gitdir backlink")?;
+    let back_resolved = mare_shared::paths::resolve_path(&gd_phys.join(back_rel))
+        .map_err(|e| mlua::Error::runtime(format!("invalid worktree gitdir backlink: {e}")))?;
+    if back_resolved.logical != back_resolved.physical || back_resolved.physical != dot_git_phys {
+        return Err(mlua::Error::runtime("worktree gitdir backlink does not match .git"));
+    }
+    Ok(vec![gd_phys.to_string_lossy().into_owned(), cd_phys.to_string_lossy().into_owned()])
+}
+
+fn normalize_physical_write_entries(write: Vec<String>, cwd: &std::path::Path) -> mlua::Result<Vec<String>> {
+    let mut out = Vec::with_capacity(write.len());
+    for raw in write {
+        let expanded = mare_binding::ossandbox::expand(&raw, cwd);
+        if is_dot_git_name(&expanded) && std::fs::metadata(&expanded).is_ok_and(|m| !m.is_dir()) {
+            out.extend(resolve_git_pointer_writes(&expanded)?);
+            continue;
+        }
+        let phys = mare_binding::ossandbox::resolve(&expanded)
+            .map_err(|e| mlua::Error::runtime(format!("invalid write path {raw:?}: {e}")))?;
+        out.push(phys.to_string_lossy().into_owned());
+    }
+    Ok(out)
+}
+
 impl Profile {
     fn parse(lua: &Lua, value: &J, cwd: &std::path::Path) -> mlua::Result<Self> {
         Self::parse_paths(lua, value, cwd, true)
@@ -47,7 +153,8 @@ impl Profile {
         let net = net_spec(&network)?;
         let read = paths("read")?;
         let write = paths("write")?;
-        let spec = json!({ "level": "workspace-write", "write": if physical { write.clone() } else { vec![] },
+        let physical_write = if physical { normalize_physical_write_entries(write.clone(), cwd)? } else { vec![] };
+        let spec = json!({ "level": "workspace-write", "write": physical_write,
             "readable": if physical { read.clone() } else { vec![] }, "network": net });
         let policy = Policy::from_lua(lua, &json_to_lua(lua, &spec)?, cwd)?.unwrap();
         if physical {
@@ -135,17 +242,26 @@ impl Profile {
             network: self.network.clone(),
         };
         let t = base.to_lua(lua)?;
-        let mut paths = base.writable.clone();
-        paths.extend(valid.write.iter().cloned());
         if !valid.write.is_empty() {
-            t.set("level", "workspace-write")?;
             if base.level == mare_binding::ossandbox::Level::ReadOnly {
+                t.set("level", "workspace-write")?;
                 t.set("exclude_tmpdir_env_var", true)?;
                 t.set("exclude_slash_tmp", true)?;
+                t.set("writable", Value::Nil)?;
+                t.set("write", valid.write.iter().map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>())?;
+            } else {
+                let mut extra = base.extra.clone();
+                extra.extend(valid.write.iter().cloned());
+                let extra_s: Vec<String> = extra.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+                if base.root_writable {
+                    t.set("write", Value::Nil)?;
+                    t.set("writable", extra_s)?;
+                } else {
+                    t.set("writable", Value::Nil)?;
+                    t.set("write", extra_s)?;
+                }
             }
         }
-        t.set("writable", Value::Nil)?;
-        t.set("write", paths.iter().map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>())?;
         let mut read = if base.restrict_read { base.read_roots().unwrap_or_default() } else { base.readable.clone() };
         if base.restrict_read {
             t.set("reads_pinned", true)?;
@@ -270,10 +386,11 @@ pub(crate) fn record(lua: &Lua, store: &Store, call: &J, info: &J, vote: &J) -> 
         return Ok(());
     }
     let Some(base) = mare_binding::ossandbox::ceiling(lua) else { return Ok(()) };
+    let call_cwd = call.get("cwd").and_then(J::as_str).map(PathBuf::from).unwrap_or_else(|| base.root.clone());
     let args = &call["arguments"];
-    let mut granted = Profile::parse(lua, &args["additional_permissions"], &base.root)?;
+    let mut granted = Profile::parse(lua, &args["additional_permissions"], &call_cwd)?;
     for constraint in vote.get("permission_constraints").and_then(J::as_array).into_iter().flatten() {
-        granted = granted.narrow(&Profile::parse(lua, constraint, &base.root)?, lua, &base.root)?;
+        granted = granted.narrow(&Profile::parse(lua, constraint, &call_cwd)?, lua, &call_cwd)?;
     }
     let session_cap = args["scope"] == mare_shared::SESSION_SCOPE
         || (args.get("scope").is_none() && info.get("permission_request") != Some(&J::Bool(true)));

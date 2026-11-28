@@ -21,6 +21,19 @@ fn push_with_target(out: &mut Vec<PathBuf>, path: PathBuf) -> std::io::Result<()
     Ok(())
 }
 
+fn is_git_metadata_root(root: &Path) -> bool {
+    root.components().any(|c| match c {
+        std::path::Component::Normal(name) => {
+            if cfg!(any(target_os = "macos", windows)) {
+                name.to_string_lossy().eq_ignore_ascii_case(".git")
+            } else {
+                name == ".git"
+            }
+        }
+        _ => false,
+    })
+}
+
 fn push_root_protected(out: &mut Vec<PathBuf>, root: &Path) -> std::io::Result<()> {
     let git = root.join(".git");
     if mare_shared::git::marker_present(root) {
@@ -332,6 +345,11 @@ impl Policy {
     pub fn protected_subpaths(&self) -> Vec<PathBuf> {
         let mut out = vec![];
         for root in self.workspace_roots() {
+            // An explicitly granted `.git` (or worktree gitdir under `.git`) is git metadata,
+            // not a project root: never synthesize `<root>/.mare` inside an external `.git`.
+            if root != self.root && is_git_metadata_root(&root) {
+                continue;
+            }
             if push_root_protected(&mut out, &root).is_err() {
                 out.push(root.clone());
             }

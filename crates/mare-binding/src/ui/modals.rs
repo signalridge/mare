@@ -308,8 +308,18 @@ pub(super) fn install(lua: &Lua, ui: &Table, shared: &Arc<UiShared>) -> mlua::Re
                 if protected_arguments {
                     what.push_str(" (hidden registered values restored at execution; approve once)");
                 }
-                let reason_suffix = reason.as_deref().map(|r| format!("  {r}")).unwrap_or_default();
+                let sandbox_scope =
+                    arguments.get("sandbox_permissions").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+                let body_reason = (scoped || sandbox_scope.is_some())
+                    .then(|| reason.as_deref().filter(|s| !s.trim().is_empty()))
+                    .flatten();
+                let reason_suffix = if body_reason.is_some() {
+                    String::new()
+                } else {
+                    reason.as_deref().map(|r| format!("  {r}")).unwrap_or_default()
+                };
                 let title = format!("{who}Allow {tool}{what}?{reason_suffix}");
+                let body = body_reason.map(|r| vec![r.to_string()]).unwrap_or_default();
                 let theme = s.theme.read().unwrap().clone();
                 let preview = match t.get::<Value>("preview")? {
                     Value::Nil => None,
@@ -320,10 +330,15 @@ pub(super) fn install(lua: &Lua, ui: &Table, shared: &Arc<UiShared>) -> mlua::Re
                 let mut keys: Vec<(char, String)> = Vec::new();
                 let mut by_key: HashMap<char, String> = HashMap::new();
                 for choice in raw_choices {
-                    let (label, key_char, key_label) = match choice.as_str() {
+                    let (label, detail, key_char, key_label) = match choice.as_str() {
                         "allow" => (
                             if scoped { "Allow requested access for this turn (y)" } else { "Allow once (y)" }
                                 .to_string(),
+                            if scoped {
+                                Some("reused by later commands until this turn ends".to_string())
+                            } else {
+                                None
+                            },
                             Some('y'),
                             if scoped { "this turn" } else { "allow once" }.to_string(),
                         ),
@@ -334,20 +349,28 @@ pub(super) fn install(lua: &Lua, ui: &Table, shared: &Arc<UiShared>) -> mlua::Re
                                 "Allow for this session (a)"
                             }
                             .to_string(),
+                            if scoped {
+                                Some("reused by later commands until session ends or permissions change".to_string())
+                            } else {
+                                None
+                            },
                             Some('a'),
                             "this session".to_string(),
                         ),
                         "allow_amend" => (
                             format!("Allow and remember (A): {}", amendment_desc.as_deref().unwrap_or("this rule")),
+                            None,
                             Some('A'),
                             "remember".to_string(),
                         ),
-                        "deny" => ("Deny, and tell the model why (n)".to_string(), Some('n'), "deny".to_string()),
-                        "abort" => ("Deny and stop this turn (ctrl+c)".to_string(), None, "deny and stop".to_string()),
+                        "deny" => ("Deny, and tell the model why (n)".to_string(), None, Some('n'), "deny".to_string()),
+                        "abort" => {
+                            ("Deny and stop this turn (ctrl+c)".to_string(), None, None, "deny and stop".to_string())
+                        }
                         other => return Err(mlua::Error::runtime(format!("invalid approval choice: {other}"))),
                     };
                     choices.push(choice.clone());
-                    items.push(SelectItem { label, preview: preview.clone(), ..Default::default() });
+                    items.push(SelectItem { label, detail, preview: preview.clone(), ..Default::default() });
                     if let Some(key_char) = key_char {
                         keys.push((key_char, key_label));
                         by_key.insert(key_char, choice);
@@ -375,7 +398,7 @@ pub(super) fn install(lua: &Lua, ui: &Table, shared: &Arc<UiShared>) -> mlua::Re
                     tab: 0,
                     kind: "list".into(),
                     keys,
-                    body: vec![],
+                    body,
                     vim: false,
                     highlight: None,
                     reply: tx,

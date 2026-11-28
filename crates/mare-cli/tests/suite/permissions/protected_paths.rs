@@ -1,7 +1,7 @@
 //! Paths that stay protected: git and mare metadata, credentials, missing roots.
 
 use super::*;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use crate::suite::sandbox_expect::require_backend;
 
 #[cfg(target_os = "linux")]
@@ -942,6 +942,687 @@ async fn linked_worktree_write_git_grants_commondir_for_real_sandbox_commit_and_
             hst.shutdown().await;
             drop(env_s);
         }
+    })
+    .await
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn approved_git_grants_reach_real_sandbox_git_fetch_across_repos_workdir_symlinks_and_worktrees() {
+    local(async {
+        let base = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+        let root = dunce::canonicalize(base.path()).unwrap();
+
+        let git_ok = |dir: &std::path::Path, args: &[&str]| {
+            let out = fixture_git(dir)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Mare Test")
+                .env("GIT_AUTHOR_EMAIL", "mare@example.test")
+                .env("GIT_COMMITTER_NAME", "Mare Test")
+                .env("GIT_COMMITTER_EMAIL", "mare@example.test")
+                .output()
+                .expect("git installed");
+            assert!(
+                out.status.success(),
+                "git {:?} in {} failed: {}\n{}",
+                args,
+                dir.display(),
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+
+        let make_repo_with_upstream_update = |name: &str| {
+            let remote = root.join(format!("{name}-remote.git"));
+            let seed = root.join(format!("{name}-seed"));
+            let clone = root.join(name);
+            std::fs::create_dir_all(&remote).unwrap();
+            std::fs::create_dir_all(&seed).unwrap();
+            git_ok(&remote, &["init", "--bare", "-q", "-b", "main"]);
+            git_ok(&seed, &["init", "-q", "-b", "main"]);
+            std::fs::write(seed.join("f.txt"), format!("{name}-v1\n")).unwrap();
+            git_ok(&seed, &["add", "f.txt"]);
+            git_ok(&seed, &["commit", "-q", "-m", "v1"]);
+            git_ok(&seed, &["push", "-q", remote.to_str().unwrap(), "HEAD:refs/heads/main"]);
+            let out = fixture_git(&root)
+                .args(["clone", "-q", remote.to_str().unwrap(), clone.to_str().unwrap()])
+                .output()
+                .expect("git clone");
+            assert!(out.status.success(), "git clone failed: {}", String::from_utf8_lossy(&out.stderr));
+            // Push a second commit to the bare remote so `git fetch` must update FETCH_HEAD + refs + objects.
+            std::fs::write(seed.join("f.txt"), format!("{name}-v2\n")).unwrap();
+            git_ok(&seed, &["add", "f.txt"]);
+            git_ok(&seed, &["commit", "-q", "-m", "v2"]);
+            git_ok(&seed, &["push", "-q", remote.to_str().unwrap(), "HEAD:refs/heads/main"]);
+            let head_v2 = git_ok(&seed, &["rev-parse", "HEAD"]).trim().to_string();
+            (clone, seed, remote, head_v2)
+        };
+
+        let (ref_a, seed_a, remote_a, head_a_v2) = make_repo_with_upstream_update("ref-a");
+        let (ref_b, _seed_b, _remote_b, head_b_v2) = make_repo_with_upstream_update("ref-b");
+        let (ref_c, _seed_c, _remote_c, head_c_v2) = make_repo_with_upstream_update("ref-c");
+        let ext_wt = root.join("ext-wt");
+        git_ok(&ref_a, &["worktree", "add", "-q", "-b", "wt-fetch", ext_wt.to_str().unwrap()]);
+        let sym_parent = root.join("ghq-link");
+        std::os::unix::fs::symlink(&root, &sym_parent).unwrap();
+
+        let ws = root.join("workspace");
+        std::fs::create_dir_all(&ws).unwrap();
+        git_ok(&ws, &["init", "-q"]);
+
+        let mut env = TestEnv::new().await;
+        env.cwd = ws.clone();
+        let h = host(&env, true, json!({ "network": true }), json!({ "no_session": true })).await;
+        if !require_backend(
+            &h,
+            "approved_git_grants_reach_real_sandbox_git_fetch_across_repos_workdir_symlinks_and_worktrees",
+            &["bwrap", "seatbelt"],
+        )
+        .await
+        {
+            return h.shutdown().await;
+        }
+        global(&h, "REF_A", ref_a.to_string_lossy().to_string());
+        global(&h, "REF_B", ref_b.to_string_lossy().to_string());
+        global(&h, "REF_C", ref_c.to_string_lossy().to_string());
+        global(&h, "EXT_WT", ext_wt.to_string_lossy().to_string());
+        global(&h, "SYM_PARENT", sym_parent.to_string_lossy().to_string());
+
+        // 1. Without approval, git fetch fails under the real OS sandbox (bwrap on Linux, Seatbelt on macOS);
+        //    warm the persistent shell too.
+        let (warm_ok, denied_err, denied_msg): (bool, bool, String) = eval(
+            &h,
+            r#"
+            local warm = T:execute({ id = "warm", name = "bash", arguments = { command = "echo warm" } }, {})
+            local r = T:execute({
+                id = "fetch-denied",
+                name = "bash",
+                arguments = { command = string.format("git -C %q fetch", REF_A) }
+            }, {})
+            return warm.is_error ~= true, r.is_error == true, tostring(r.content)
+            "#,
+        )
+        .await;
+        assert!(warm_ok);
+        assert!(denied_err, "unapproved git fetch must fail: {denied_msg}");
+
+        // 1b. Approving only `write:<ref-c>` (repo root, not `.git`) warns that `.git` stays
+        //     read-only and `git fetch` still fails; requesting `write:<ref-c>/.git` afterwards
+        //     must NOT be deduplicated away by the ancestor `<ref-c>` grant, must prompt, and
+        //     once approved must lift `.git` read-only protection and write `FETCH_HEAD`.
+        let (repo_only_err, repo_only_reason, git_prompted, repo_plus_git_ok, repo_plus_git_msg, after_turn_err): (
+            bool,
+            String,
+            bool,
+            bool,
+            String,
+            bool,
+        ) = eval(
+            &h,
+            r#"
+            local seen_reason = ""
+            local r_repo = T:execute({
+                id = "fetch-repo-only",
+                name = "bash",
+                arguments = {
+                    command = string.format("git -C %q fetch", REF_C),
+                    sandbox_permissions = "write:" .. REF_C,
+                    justification = "write repo root only",
+                }
+            }, { approve = function(_, _, v)
+                seen_reason = tostring(v and v.reason or "")
+                return { decision = "allow" }
+            end })
+            -- Store ancestor repo root grant first, then separately request `<repo>/.git`.
+            local r_anc = P:request({ write = { REF_C } }, {
+                justification = "allow repo root first",
+                scope = "turn",
+                approve = function() return { decision = "allow", scope = "turn" } end,
+            })
+            local prompted_for_git = false
+            local r_git = P:request({ write = { REF_C .. "/.git" } }, {
+                justification = "now explicitly allow repo .git",
+                scope = "turn",
+                approve = function()
+                    prompted_for_git = true
+                    return { decision = "allow", scope = "turn" }
+                end,
+            })
+            local r_fetch = T:execute({
+                id = "fetch-after-repo-and-git",
+                name = "bash",
+                arguments = { command = string.format("git -C %q fetch", REF_C) }
+            }, {})
+            -- End the turn so turn grants expire; fetching ref-c must fail again.
+            C.cordis:emit("turn/completed", {})
+            local r_expired = T:execute({
+                id = "fetch-after-turn-expired",
+                name = "bash",
+                arguments = { command = string.format("git -C %q fetch", REF_C) }
+            }, {})
+            return r_repo.is_error == true, seen_reason,
+                   prompted_for_git,
+                   r_anc.refused ~= true and r_git.refused ~= true and r_fetch.is_error ~= true,
+                   tostring(r_fetch.content),
+                   r_expired.is_error == true
+            "#,
+        )
+        .await;
+        assert!(repo_only_err, "write:<repo> alone must keep <repo>/.git read-only");
+        assert!(
+            repo_only_reason.contains(".git inside granted directory stays read-only")
+                && repo_only_reason.contains("Allow once = this call only"),
+            "approval reason must explain .git protection and scope/expiry: {repo_only_reason}"
+        );
+        assert!(git_prompted, "ancestor repo grant must NOT deduplicate away a subsequent .git write request");
+        assert!(
+            repo_plus_git_ok,
+            "explicitly approving <repo>/.git after <repo> must lift read-only protection: {repo_plus_git_msg}"
+        );
+        let fetch_head_c = std::fs::read_to_string(ref_c.join(".git/FETCH_HEAD")).unwrap_or_default();
+        assert!(fetch_head_c.contains(&head_c_v2), "FETCH_HEAD must record fetched commit {head_c_v2}: {fetch_head_c}");
+        assert!(after_turn_err, "turn grant must expire after turn/completed so subsequent git fetch fails");
+
+        // 2. Approve ref-a/.git and ref-b/.git via request_permissions (session scope), verify
+        //    scope/expiry in both approval reason and tool result, then run real git fetch:
+        //    (a) directly after persistent shell, (b) with sandbox_permissions="network",
+        //    and (c) with sandbox_permissions="write:<ref-b>/.git". None may drop prior grants,
+        //    and unapproved ref-c must remain denied.
+        let (
+            req_a_ok,
+            req_b_ok,
+            req_reason_has_expiry,
+            req_result_has_expiry,
+            direct_ok,
+            direct_msg,
+            net_ok,
+            net_msg,
+            reused_ok,
+            reused_msg,
+            unapproved_err,
+        ): (bool, bool, bool, bool, bool, String, bool, String, bool, String, bool) = eval(
+            &h,
+            r#"
+            local req_reason = ""
+            local approve_session = function(_, _, v)
+                if v and v.reason and req_reason == "" then
+                    req_reason = tostring(v.reason)
+                end
+                return { decision = "allow_session" }
+            end
+            local ra = P:request({ write = { REF_A .. "/.git" } }, {
+                justification = "fetch ref-a", scope = "session", approve = approve_session,
+            })
+            local rb = P:request({ write = { REF_B .. "/.git" } }, {
+                justification = "fetch ref-b", scope = "session", approve = approve_session,
+            })
+            local parsed_ra = mare.json.decode(ra.content or "{}")
+            local direct = T:execute({
+                id = "fetch-both-direct",
+                name = "bash",
+                arguments = { command = string.format("git -C %q fetch && git -C %q fetch", REF_A, REF_B) }
+            }, {})
+            local with_net = T:execute({
+                id = "fetch-both-with-net",
+                name = "bash",
+                arguments = {
+                    command = string.format("git -C %q fetch && git -C %q fetch", REF_A, REF_B),
+                    sandbox_permissions = "network",
+                    justification = "fetch both repos",
+                }
+            }, { approve = approve_session })
+            local with_one = T:execute({
+                id = "fetch-both-with-ref-b-scope",
+                name = "bash",
+                arguments = {
+                    command = string.format("git -C %q fetch && git -C %q fetch", REF_A, REF_B),
+                    sandbox_permissions = "write:" .. REF_B .. "/.git",
+                    justification = "fetch both repos with one scope named",
+                }
+            }, { approve = approve_session })
+            local unapproved = T:execute({
+                id = "fetch-ref-c-unapproved",
+                name = "bash",
+                arguments = { command = string.format("git -C %q fetch", REF_C) }
+            }, {})
+            return ra.refused ~= true and ra.is_error ~= true,
+                   rb.refused ~= true and rb.is_error ~= true,
+                   req_reason:find("maximum grant scope: session", 1, true) ~= nil
+                       and req_reason:find("expires when this session ends", 1, true) ~= nil,
+                   parsed_ra.scope == "session" and parsed_ra.expires == "session_or_policy_change",
+                   direct.is_error ~= true, tostring(direct.content),
+                   with_net.is_error ~= true, tostring(with_net.content),
+                   with_one.is_error ~= true, tostring(with_one.content),
+                   unapproved.is_error == true
+            "#,
+        )
+        .await;
+        assert!(req_a_ok && req_b_ok, "request_permissions for .git must succeed");
+        assert!(req_reason_has_expiry, "request_permissions approval reason must show scope and expiry");
+        assert!(req_result_has_expiry, "request_permissions tool result must report scope and expiry");
+        assert!(direct_ok, "git fetch after request_permissions must succeed: {direct_msg}");
+        assert!(net_ok, "sandbox_permissions='network' must preserve granted .git writes: {net_msg}");
+        assert!(reused_ok, "sandbox_permissions for ref-b/.git must preserve ref-a/.git grant: {reused_msg}");
+        assert!(unapproved_err, "unapproved ref-c must stay protected");
+        assert_eq!(git_ok(&ref_a, &["rev-parse", "refs/remotes/origin/main"]).trim(), head_a_v2);
+        assert_eq!(git_ok(&ref_b, &["rev-parse", "refs/remotes/origin/main"]).trim(), head_b_v2);
+        assert!(!ref_a.join(".git/.mare").exists(), "must never create .mare inside external .git");
+        assert!(!ref_b.join(".git/.mare").exists(), "must never create .mare inside external .git");
+
+        // 3. workdir + relative `write:.git` must resolve against workdir (not mare.cwd),
+        //    and workspace's own `.git` must remain protected.
+        let (wd_ok, wd_msg, ws_git_still_blocked): (bool, String, bool) = eval(
+            &h,
+            r#"
+            local r = T:execute({
+                id = "fetch-workdir-rel-git",
+                name = "bash",
+                arguments = {
+                    workdir = REF_C,
+                    command = "git fetch",
+                    sandbox_permissions = "write:.git",
+                    justification = "fetch ref-c via workdir",
+                }
+            }, { approve = function() return { decision = "allow" } end })
+            local ws_probe = T:execute({
+                id = "ws-git-still-ro",
+                name = "bash",
+                arguments = {
+                    workdir = REF_C,
+                    command = string.format("touch %q", mare.cwd .. "/.git/escape-probe"),
+                    sandbox_permissions = "write:.git",
+                    justification = "verify workspace .git is not granted",
+                }
+            }, { approve = function() return { decision = "allow" } end })
+            return r.is_error ~= true, tostring(r.content), ws_probe.is_error == true
+            "#,
+        )
+        .await;
+        assert!(wd_ok, "workdir + write:.git must grant workdir/.git: {wd_msg}");
+        assert!(ws_git_still_blocked, "workdir + write:.git must not grant workspace/.git");
+        assert!(!ws.join(".git/escape-probe").exists());
+        assert_eq!(git_ok(&ref_c, &["rev-parse", "refs/remotes/origin/main"]).trim(), head_c_v2);
+
+        // 4. Symlinked ancestor path in sandbox_permissions="write:<symlink>/ref-c/.git" canonicalizes cleanly.
+        let (sym_ok, sym_msg): (bool, String) = eval(
+            &h,
+            r#"
+            local r = T:execute({
+                id = "fetch-symlink-ancestor",
+                name = "bash",
+                arguments = {
+                    command = string.format("git -C %q fetch", SYM_PARENT .. "/ref-c"),
+                    sandbox_permissions = "write:" .. SYM_PARENT .. "/ref-c/.git",
+                    justification = "fetch through symlinked ancestor",
+                }
+            }, { approve = function() return { decision = "allow" } end })
+            return r.is_error ~= true, tostring(r.content)
+            "#,
+        )
+        .await;
+        assert!(sym_ok, "symlinked ancestor in write:<path> must canonicalize for sandbox: {sym_msg}");
+
+        // 4b. Approving `sandbox_permissions="write:<ref-c>/.git"` for this session merges into
+        //     subsequent bash calls without repeating `sandbox_permissions`.
+        let (sp_sess_ok, sp_next_ok, sp_next_msg): (bool, bool, String) = eval(
+            &h,
+            r#"
+            local r1 = T:execute({
+                id = "fetch-ref-c-sp-session",
+                name = "bash",
+                arguments = {
+                    command = string.format("git -C %q fetch", REF_C),
+                    sandbox_permissions = "write:" .. REF_C .. "/.git",
+                    justification = "fetch ref-c for this session",
+                }
+            }, { approve = function() return { decision = "allow_session" } end })
+            local r2 = T:execute({
+                id = "fetch-ref-c-subsequent-no-sp",
+                name = "bash",
+                arguments = {
+                    command = string.format("git -C %q fetch && git -C %q fetch", REF_A, REF_C),
+                }
+            }, {})
+            return r1.is_error ~= true, r2.is_error ~= true, tostring(r2.content)
+            "#,
+        )
+        .await;
+        assert!(sp_sess_ok, "sandbox_permissions session approval must succeed");
+        assert!(sp_next_ok, "session-approved sandbox_permissions must merge into later bash calls: {sp_next_msg}");
+
+        // 5. Worktree `.git` pointer file works via `request_permissions` (including under symlinked ancestor),
+        //    while a symlinked `.git` pointer file is still refused.
+        std::fs::write(seed_a.join("f.txt"), "ref-a-v3\n").unwrap();
+        git_ok(&seed_a, &["add", "f.txt"]);
+        git_ok(&seed_a, &["commit", "-q", "-m", "v3"]);
+        git_ok(&seed_a, &["push", "-q", remote_a.to_str().unwrap(), "HEAD:refs/heads/main"]);
+        let head_a_v3 = git_ok(&seed_a, &["rev-parse", "HEAD"]).trim().to_string();
+
+        let bad_sym_wt = root.join("bad-sym-wt");
+        std::fs::create_dir_all(&bad_sym_wt).unwrap();
+        std::os::unix::fs::symlink(ext_wt.join(".git"), bad_sym_wt.join(".git")).unwrap();
+        global(&h, "BAD_SYM_WT", bad_sym_wt.to_string_lossy().to_string());
+
+        let (wt_req_ok, wt_fetch_ok, wt_fetch_msg, bad_sym_refused): (bool, bool, String, bool) = eval(
+            &h,
+            r#"
+            local r_bad = P:request({ write = { BAD_SYM_WT .. "/.git" } }, {
+                justification = "must reject symlinked .git pointer",
+                approve = function() error("must not ask for symlinked .git pointer") end,
+            })
+            local r_wt = P:request({ write = { SYM_PARENT .. "/ext-wt/.git" } }, {
+                justification = "fetch linked worktree",
+                scope = "turn",
+                approve = function() return { decision = "allow", scope = "turn" } end,
+            })
+            local fetch = T:execute({
+                id = "fetch-ext-wt",
+                name = "bash",
+                arguments = { command = string.format("git -C %q fetch", EXT_WT) }
+            }, {})
+            return r_wt.refused ~= true and r_wt.is_error ~= true,
+                   fetch.is_error ~= true, tostring(fetch.content),
+                   r_bad.refused == true
+            "#,
+        )
+        .await;
+        assert!(bad_sym_refused, "request_permissions must still refuse a symlinked .git pointer file");
+        assert!(wt_req_ok, "request_permissions must resolve valid worktree .git pointer files");
+        assert!(wt_fetch_ok, "git fetch in linked worktree after request_permissions must succeed: {wt_fetch_msg}");
+        assert_eq!(git_ok(&ext_wt, &["rev-parse", "refs/remotes/origin/main"]).trim(), head_a_v3);
+
+        // 6. Subagent under `auto` preset requesting `.git` write with turn scope:
+        //    - Turn 1: next ordinary `bash` executes `git fetch` -> verifies FETCH_HEAD content;
+        //      unapproved sibling `ref-b` stays non-writable.
+        //    - Turn 2: after turn 1 completes, the turn grant has expired -> subsequent fetch fails.
+        std::fs::write(seed_a.join("f.txt"), "ref-a-v4\n").unwrap();
+        git_ok(&seed_a, &["add", "f.txt"]);
+        git_ok(&seed_a, &["commit", "-q", "-m", "v4"]);
+        git_ok(&seed_a, &["push", "-q", remote_a.to_str().unwrap(), "HEAD:refs/heads/main"]);
+        let head_a_v4 = git_ok(&seed_a, &["rev-parse", "HEAD"]).trim().to_string();
+
+        let sub_res: String = eval(
+            &h,
+            r#"
+            C.cordis:get("policy"):voter("tool/approval", function(call)
+                if call.arguments and call.arguments.additional_permissions then
+                    return { decision = "allow", scope = "turn" }
+                end
+                return { decision = "deny", reason = "unexpected ask" }
+            end)
+            local script = {
+                { tool_calls = {{ name = "request_permissions", arguments = {
+                    additional_permissions = { write = { SYM_PARENT .. "/ref-a/.git" } },
+                    justification = "fetch ref-a in subagent",
+                    scope = "turn",
+                } }} },
+                { tool_calls = {{ name = "bash", arguments = {
+                    command = string.format("git -C %q fetch", REF_A),
+                } }} },
+                { tool_calls = {{ name = "bash", arguments = {
+                    command = string.format("touch %q", REF_B .. "/.git/sibling-denied-probe"),
+                } }} },
+                { text = "turn1-done" }
+            }
+            local child = mare.subagent.start({
+                prompt = "fetch ref-a",
+                no_session = true,
+                config = {
+                    model = "faux/echo",
+                    plugins = { ["provider-faux"] = { script_json = mare.json.encode_strict(script) } },
+                },
+            })
+            local r1 = child:wait()
+            return mare.json.encode(r1)
+            "#,
+        )
+        .await;
+        assert!(
+            !ref_b.join(".git/sibling-denied-probe").exists(),
+            "unapproved sibling repo .git must remain non-writable during subagent turn"
+        );
+        let fetch_head_a_v4 = std::fs::read_to_string(ref_a.join(".git/FETCH_HEAD")).unwrap_or_default();
+        assert!(
+            fetch_head_a_v4.contains(&head_a_v4),
+            "subagent git fetch must update FETCH_HEAD with {head_a_v4}: {fetch_head_a_v4} (res={sub_res})"
+        );
+        assert_eq!(
+            git_ok(&ref_a, &["rev-parse", "refs/remotes/origin/main"]).trim(),
+            head_a_v4,
+            "subagent git fetch after request_permissions failed: {sub_res}"
+        );
+
+        // Push v5 and verify a fresh subagent turn without a new grant cannot fetch ref-a
+        // (subagent turn grants never leak past their turn or to another subagent).
+        std::fs::write(seed_a.join("f.txt"), "ref-a-v5\n").unwrap();
+        git_ok(&seed_a, &["add", "f.txt"]);
+        git_ok(&seed_a, &["commit", "-q", "-m", "v5"]);
+        git_ok(&seed_a, &["push", "-q", remote_a.to_str().unwrap(), "HEAD:refs/heads/main"]);
+        let head_a_v5 = git_ok(&seed_a, &["rev-parse", "HEAD"]).trim().to_string();
+
+        let _sub_turn2: String = eval(
+            &h,
+            r#"
+            local script2 = {
+                { tool_calls = {{ name = "bash", arguments = {
+                    command = string.format("git -C %q fetch", REF_A),
+                } }} },
+                { text = "turn2-done" }
+            }
+            local child2 = mare.subagent.start({
+                prompt = "fetch ref-a again after turn grant expired",
+                no_session = true,
+                config = {
+                    model = "faux/echo",
+                    plugins = { ["provider-faux"] = { script_json = mare.json.encode_strict(script2) } },
+                },
+            })
+            return mare.json.encode(child2:wait())
+            "#,
+        )
+        .await;
+        let fetch_head_after_turn2 = std::fs::read_to_string(ref_a.join(".git/FETCH_HEAD")).unwrap_or_default();
+        assert!(
+            !fetch_head_after_turn2.contains(&head_a_v5),
+            "turn grant must expire after turn 1; turn 2 fetch must NOT update FETCH_HEAD to {head_a_v5}: {fetch_head_after_turn2}"
+        );
+
+        // 7. Nominal `full-access` preset under an active host sandbox ceiling (parent switches
+        //    auto -> full-access while agent tree still enforces historical auto sandbox cap):
+        //    child requests physical `.git` write -> next ordinary `bash` must NOT drop the grant
+        //    via the `full-access` early return and must update FETCH_HEAD to head_a_v5.
+        let sub_full_res: String = eval(
+            &h,
+            r#"
+            P:set("full-access")
+            local script = {
+                { tool_calls = {{ name = "request_permissions", arguments = {
+                    additional_permissions = { write = { REF_A .. "/.git" } },
+                    justification = "fetch ref-a under nominal full-access with sandbox cap",
+                    scope = "turn",
+                } }} },
+                { tool_calls = {{ name = "bash", arguments = {
+                    command = string.format("git -C %q fetch", REF_A),
+                } }} },
+                { tool_calls = {{ name = "bash", arguments = {
+                    command = string.format("touch %q", REF_B .. "/.git/full-sibling-denied"),
+                } }} },
+                { text = "done" }
+            }
+            local child = mare.subagent.start({
+                prompt = "fetch ref-a under nominal full-access",
+                no_session = true,
+                sandbox = { level = "workspace-write", network = true },
+                config = {
+                    model = "faux/echo",
+                    plugins = { ["provider-faux"] = { script_json = mare.json.encode_strict(script) } },
+                },
+            })
+            return mare.json.encode(child:wait())
+            "#,
+        )
+        .await;
+        assert!(
+            !ref_b.join(".git/full-sibling-denied").exists(),
+            "unapproved sibling repo .git must remain non-writable under capped full-access child"
+        );
+        let fetch_head_a_v5 = std::fs::read_to_string(ref_a.join(".git/FETCH_HEAD")).unwrap_or_default();
+        assert!(
+            fetch_head_a_v5.contains(&head_a_v5),
+            "nominal full-access child with active sandbox ceiling must pass granted .git to next bash and update FETCH_HEAD to {head_a_v5}: {fetch_head_a_v5} (res={sub_full_res})"
+        );
+        assert_eq!(
+            git_ok(&ref_a, &["rev-parse", "refs/remotes/origin/main"]).trim(),
+            head_a_v5,
+            "nominal full-access child git fetch failed: {sub_full_res}"
+        );
+
+        h.shutdown().await;
+    })
+    .await
+}
+
+/// Regression tests for the three Lua permission-grant boundaries kept from review:
+/// 1. Baseline `/tmp` (`wider == false`) is never promoted into an explicit host bind mount when
+///    another grant is active.
+/// 2. Session cache does not bypass `needs == true` when a symlinked scope is retargeted to a
+///    different physical repo.
+/// 3. Partial approval excluding `.git` never resurrects `R/.git` via ancestor grant `R`.
+#[cfg(unix)]
+#[tokio::test]
+async fn permission_grant_boundaries_tmp_symlink_cache_and_partial_approval() {
+    local(async {
+        let base = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+        let root = dunce::canonicalize(base.path()).unwrap();
+        let init_repo = |dir: &std::path::Path| {
+            std::fs::create_dir_all(dir).unwrap();
+            let out = fixture_git(dir).args(["init", "-q", "-b", "main"]).output().expect("git installed");
+            assert!(out.status.success(), "git init: {}", String::from_utf8_lossy(&out.stderr));
+        };
+
+        let ws = root.join("ws");
+        let repo_a = root.join("repo-a");
+        let repo_b = root.join("repo-b");
+        let other_dir = root.join("other");
+        let link_repo = root.join("repo-link");
+        init_repo(&ws);
+        init_repo(&repo_a);
+        init_repo(&repo_b);
+        std::fs::create_dir_all(&other_dir).unwrap();
+        std::os::unix::fs::symlink(&repo_a, &link_repo).unwrap();
+
+        let mut env = TestEnv::new().await;
+        env.cwd = ws.clone();
+        let h = host(&env, true, json!({ "network": true }), json!({ "no_session": true })).await;
+        if !require_backend(&h, "permission_grant_boundaries_tmp_symlink_cache_and_partial_approval", &["bwrap", "seatbelt"]).await {
+            return h.shutdown().await;
+        }
+        exec(&h, VOTE).await;
+        global(&h, "REPO_B", repo_b.to_string_lossy().to_string());
+        global(&h, "OTHER", other_dir.to_string_lossy().to_string());
+        global(&h, "LINK_REPO", link_repo.to_string_lossy().to_string());
+
+        // 1. Baseline `/tmp` (`wider == false`) must not be promoted into explicit writable roots.
+        let host_tmp_probe = std::path::PathBuf::from("/tmp").join(format!("mare-tmp-probe-{}", std::process::id()));
+        let _ = std::fs::remove_file(&host_tmp_probe);
+        global(&h, "TMP_PROBE", host_tmp_probe.to_string_lossy().to_string());
+        let (tmp_not_promoted, mech): (bool, String) = eval(
+            &h,
+            r#"
+            local ra = P:request({ write = { OTHER } }, {
+                justification = "active grant", scope = "turn",
+                approve = function() return { decision = "allow", scope = "turn" } end,
+            })
+            assert(ra.refused ~= true)
+            local v = VOTE(BASH("touch " .. TMP_PROBE, "write:/tmp", "use temp"))
+            local has_tmp = false
+            for _, w in ipairs((type(v.sandbox_grant) == "table" and (v.sandbox_grant.writable or v.sandbox_grant.write)) or {}) do
+                if w == "/tmp" or w == "/private/tmp" then has_tmp = true end
+            end
+            local r = T:execute({
+                id = "tmp-no-promote", name = "bash",
+                arguments = { command = "touch " .. TMP_PROBE, sandbox_permissions = "write:/tmp", justification = "temp" },
+            }, {})
+            assert(r.is_error ~= true, tostring(r.content))
+            C.cordis:emit("turn/completed", {})
+            return not has_tmp, mare.proc.sandbox.capabilities().mechanism
+            "#,
+        )
+        .await;
+        assert!(tmp_not_promoted, "baseline /tmp must not be promoted into explicit writable roots");
+        if mech == "bwrap" {
+            assert!(!host_tmp_probe.exists(), "bwrap must keep /tmp on private tmpfs, not host /tmp");
+        }
+        let _ = std::fs::remove_file(&host_tmp_probe);
+
+        // 2. Session cache must not bypass `needs == true` when symlink ancestor retargets A -> B.
+        let first_ok: bool = eval(
+            &h,
+            r#"
+            local r = T:execute({
+                id = "sym-cache-1", name = "bash",
+                arguments = {
+                    command = string.format("touch %q", LINK_REPO .. "/.git/cache-ok"),
+                    sandbox_permissions = "write:" .. LINK_REPO .. "/.git",
+                    justification = "write repo-a git",
+                },
+            }, { approve = function() return { decision = "allow_session" } end })
+            return r.is_error ~= true
+            "#,
+        )
+        .await;
+        assert!(first_ok && repo_a.join(".git/cache-ok").exists());
+        std::fs::remove_file(&link_repo).unwrap();
+        std::os::unix::fs::symlink(&repo_b, &link_repo).unwrap();
+        let (reprompted, refused_b): (bool, bool) = eval(
+            &h,
+            r#"
+            local asked = false
+            local r = T:execute({
+                id = "sym-cache-2", name = "bash",
+                arguments = {
+                    command = string.format("touch %q", LINK_REPO .. "/.git/cache-ok"),
+                    sandbox_permissions = "write:" .. LINK_REPO .. "/.git",
+                    justification = "write repo-a git",
+                },
+            }, { approve = function() asked = true; return { decision = "deny" } end })
+            return asked, r.refused == true
+            "#,
+        )
+        .await;
+        assert!(reprompted && refused_b, "retargeted symlink must not hit session cache when needs == true");
+        assert!(!repo_b.join(".git/cache-ok").exists());
+
+        // 3. Partial approval excluding `.git` must not resurrect `R/.git` via stored ancestor `R`.
+        let (partial_json, other_ok, git_blocked): (String, bool, bool) = eval(
+            &h,
+            r#"
+            C.cordis:emit("permission/changed", {})
+            local r_anc = P:request({ write = { REPO_B } }, {
+                justification = "repo-b root", scope = "turn",
+                approve = function() return { decision = "allow", scope = "turn" } end,
+            })
+            assert(r_anc.refused ~= true)
+            local r_part = P:request({ write = { REPO_B .. "/.git", OTHER } }, {
+                justification = "git and other", scope = "turn",
+                approve = function()
+                    return { decision = "allow", scope = "turn", permissions = { write = { OTHER } } }
+                end,
+            })
+            assert(r_part.refused ~= true)
+            local r_other = T:execute({ id = "part-other", name = "bash", arguments = { command = string.format("touch %q", OTHER .. "/partial-ok") } }, {})
+            local r_git = T:execute({ id = "part-git", name = "bash", arguments = { command = string.format("touch %q", REPO_B .. "/.git/partial-escape") } }, {})
+            C.cordis:emit("turn/completed", {})
+            return tostring(r_part.content), r_other.is_error ~= true, r_git.is_error == true
+            "#,
+        )
+        .await;
+        assert!(!partial_json.contains(".git"), "partial approval must not resurrect excluded .git: {partial_json}");
+        assert!(other_ok && other_dir.join("partial-ok").exists());
+        assert!(git_blocked && !repo_b.join(".git/partial-escape").exists());
+
+        h.shutdown().await;
     })
     .await
 }

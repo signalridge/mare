@@ -318,3 +318,39 @@ fn bwrap_bridge_unshares_the_network_and_binds_before_the_seal() {
     p.network = Network::Proxy(NetPolicy::deny_all());
     assert!(p.bwrap_args(&cwd).contains(&"--unshare-net".to_string()));
 }
+
+#[test]
+fn bwrap_and_landlock_grant_external_git_without_synthesizing_git_mare() {
+    let d = tempfile::tempdir().unwrap();
+    let root = dunce::canonicalize(d.path()).unwrap();
+    let ws_dir = root.join("ws");
+    let ext_git = root.join("ext-repo/.git");
+    std::fs::create_dir_all(ws_dir.join(".git")).unwrap();
+    std::fs::create_dir_all(&ext_git).unwrap();
+
+    let p = ws(&ws_dir, &[&ext_git]);
+    assert!(p.can_write(&ext_git.join("FETCH_HEAD")));
+    assert!(!p.can_write(&ws_dir.join(".git/FETCH_HEAD")));
+    assert!(!p.protected_subpaths().contains(&ext_git.join(".mare")));
+
+    let bwrap_args = p.bwrap_args(&ws_dir);
+    let ext_s = ext_git.to_string_lossy().into_owned();
+    assert!(
+        bwrap_args.windows(3).any(|w| w == ["--bind", ext_s.as_str(), ext_s.as_str()]),
+        "granted external .git must be bind-mounted rw: {bwrap_args:?}"
+    );
+    assert!(
+        !bwrap_args.iter().any(|arg| arg.contains(&ext_git.join(".mare").to_string_lossy().into_owned())),
+        "must not mount .mare inside granted .git: {bwrap_args:?}"
+    );
+
+    let ll = p.landlock_grants();
+    assert!(ll.rw.contains(&ext_git), "Landlock rw grants must include external .git: {ll:?}");
+
+    #[cfg(target_os = "linux")]
+    if backend() == Backend::Bwrap {
+        let prepared = Prepared::from_policy(p, &ws_dir).unwrap();
+        assert!(!ext_git.join(".mare").exists(), "Prepared must never create .mare inside external .git");
+        drop(prepared);
+    }
+}
