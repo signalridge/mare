@@ -189,13 +189,13 @@ impl LayerMap {
     }
 }
 
-/// Whether a canonical key string represents an unmodified printable character (without Ctrl/Alt).
+/// Whether a canonical key string represents an unmodified printable character (without Ctrl/Alt/Super).
 pub fn is_printable_key_name(key: &str) -> bool {
     if key.contains(' ') {
         return false;
     }
     let mut rest = key;
-    while let Some(r) = rest.strip_prefix("shift+").or_else(|| rest.strip_prefix("super+")) {
+    while let Some(r) = rest.strip_prefix("shift+") {
         rest = r;
     }
     rest == "space" || rest.chars().count() == 1
@@ -954,7 +954,7 @@ mod tests {
     fn printable_rule_and_bindings_in_chain_skip_printable_global_keys() {
         assert!(is_printable_key_name("q"));
         assert!(is_printable_key_name("shift+a"));
-        assert!(is_printable_key_name("super+x"));
+        assert!(!is_printable_key_name("super+x"));
         assert!(is_printable_key_name("space"));
         assert!(!is_printable_key_name("ctrl+x"));
         assert!(!is_printable_key_name("alt+x"));
@@ -965,8 +965,11 @@ mod tests {
         km.set("global", "super+x".into(), vec![e("g_sx", 2)]);
         km.set("global", "f5".into(), vec![e("redraw", 3)]);
         let ed = km.chain_for("editor").unwrap();
-        assert_eq!(km.bindings_in_chain(&ed), [("f5".to_string(), "redraw".to_string())]);
-        assert!(km.hint("g_sx", &ed).is_empty());
+        assert_eq!(
+            km.bindings_in_chain(&ed),
+            [("f5".to_string(), "redraw".to_string()), ("super+x".to_string(), "g_sx".to_string())]
+        );
+        assert_eq!(km.hint("g_sx", &ed), ["super+x"]);
 
         let mask = Entry { unbound: true, ..e("", 4) };
         km.set("transcript.search", "j".into(), vec![mask]);
