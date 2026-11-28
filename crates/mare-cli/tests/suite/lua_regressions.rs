@@ -132,6 +132,11 @@ return {
 	name = "repro",
 	inject = { "agent", "tools" },
 	apply = function(ctx)
+		-- Subagents inherit parent workspace trust (#73 / #30) and load `.mare/plugins/*.lua`;
+		-- keep this harness plugin on the parent VM so the child does not recursively spawn itself.
+		if mare.mode == "child" then
+			return
+		end
 		local tx, rx = mare.task.channel()
 		ctx:on("item/completed", function(ev)
 			local m = ev and ev.item and ev.item.message
