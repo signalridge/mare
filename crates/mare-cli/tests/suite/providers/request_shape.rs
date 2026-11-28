@@ -631,3 +631,53 @@ async fn anthropic_mixed_textified_and_error_image_tool_results_flush_images_aft
     })
     .await
 }
+
+/// Issue #189: a valid no-argument tool with bare `{"type":"object"}` schema must emit an
+/// explicit empty `"properties": {}` map on OpenAI Chat Completions wire requests.
+#[tokio::test]
+async fn openai_chat_wire_emits_empty_properties_map_for_bare_object_tool() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let server = MockServer::start().await;
+        server.route("/compat", vec![Resp::sse(compat_events(&[compat_text("ok"), compat_stop()]))]);
+        let h = provider_host(&mut env, &server, json!({ "model": "deepseek/deepseek-chat" })).await;
+        expose(&h);
+        exec(
+            &h,
+            r#"T:register("bare_no_args_tool", {
+                description = "no-argument tool",
+                parameters = { type = "object" },
+                execute = function() return "ok" end,
+            })
+            T:register("strict_no_args_tool", {
+                description = "strict no-argument tool",
+                parameters = { type = "object", additionalProperties = false },
+                execute = function() return "ok" end,
+            })"#,
+        )
+        .await;
+        h.prompt("hello", json!({})).await.unwrap();
+        let body = server.requests().pop().unwrap().json();
+        let tools = body["tools"].as_array().unwrap();
+        let tool =
+            tools.iter().find(|t| t["function"]["name"] == "bare_no_args_tool").expect("bare_no_args_tool in request");
+        assert_eq!(
+            tool["function"]["parameters"].get("properties"),
+            Some(&json!({})),
+            "OpenAI Chat tool parameters omitted empty properties map: {}",
+            tool["function"]["parameters"]
+        );
+        let strict_tool = tools
+            .iter()
+            .find(|t| t["function"]["name"] == "strict_no_args_tool")
+            .expect("strict_no_args_tool in request");
+        assert_eq!(
+            strict_tool["function"]["parameters"],
+            json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+            "OpenAI Chat tool parameters must add empty properties map without dropping existing fields: {}",
+            strict_tool["function"]["parameters"]
+        );
+        h.shutdown().await;
+    })
+    .await
+}

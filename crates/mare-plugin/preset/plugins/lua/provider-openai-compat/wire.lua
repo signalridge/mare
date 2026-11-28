@@ -514,6 +514,27 @@ function M.convert_messages(system, messages, endpoint, opts)
 	return out
 end
 
+local function normalize_tool_parameters(params)
+	if type(params) ~= "table" then
+		return { type = "object", properties = {} }
+	end
+	if (params.type == "object" or next(params) == nil) and params.properties == nil then
+		local copy = {}
+		for k, v in pairs(params) do
+			copy[k] = v
+		end
+		if copy.type == nil then
+			copy.type = "object"
+		end
+		copy.properties = {}
+		if mare and mare.json and mare.json.copy_metadata then
+			mare.json.copy_metadata(params, copy)
+		end
+		return copy
+	end
+	return params
+end
+
 function M.convert_tools(tools, dialect, opts)
 	local out = {}
 	local defer_loading = type(opts) == "table" and opts.defer_loading == true
@@ -521,7 +542,7 @@ function M.convert_tools(tools, dialect, opts)
 	local sanitize = dialect and require("mare_lib.schema_sanitize").sanitize or nil
 	for _, t in ipairs(tools or {}) do
 		if t.type ~= "hosted" then
-			local params = sanitize and sanitize(t.parameters, dialect) or t.parameters
+			local params = normalize_tool_parameters(sanitize and sanitize(t.parameters, dialect) or t.parameters)
 			local entry = {
 				type = "function",
 				["function"] = { name = t.name, description = t.description, parameters = params },
