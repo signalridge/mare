@@ -10,9 +10,10 @@ local M = {}
 ---@return {alias_of?: string, args?: string, auto_execute?: boolean, availability?: ("always"|"idle"|"session"|"main"|"running"|"tui")|(("always"|"idle"|"session"|"main"|"running"|"tui")[]), description?: string, local_only?: boolean, name: string}|nil
 function M:get(name) end
 
---- Registered non-alias slash commands, sorted by name (data only, no callbacks).
+--- Registered non-alias slash commands, sorted by name (data only, no callbacks). Pass `available = true` to filter to commands executable right now for the active frontend and turn state.
+---@param opts? {allow_local?: boolean, available?: boolean}
 ---@return {data: ({alias_of?: string, args?: string, auto_execute?: boolean, availability?: ("always"|"idle"|"session"|"main"|"running"|"tui")|(("always"|"idle"|"session"|"main"|"running"|"tui")[]), description?: string, local_only?: boolean, name: string})[]}
-function M:list() end
+function M:list(opts) end
 
 --- Register a slash command or alias (`alias_of`) owned by the caller; remote callers must pass `replace = true` to overwrite an existing name, and releasing a registration restores any previous definition.
 ---@param name string

@@ -59,21 +59,29 @@ local function register_core(ctx, commands, stacks, registry)
 	reg("help", {
 		description = "Show commands and keyboard shortcuts",
 		run = function()
+			local connected = ui.connected and ui.connected()
+			local list = connected and commands:list().data or commands:list({ available = true }).data
 			---@type mare.Node[]
 			local lines = { ui.Line({ ui.Span("Commands"):hl("MareHeading") }) }
-			for _, d in ipairs(commands:list().data) do
+			local plain = { "Commands:" }
+			for _, d in ipairs(list) do
 				local al = aliases_of(stacks, d.name)
+				local alias_text = #al > 0 and ("  (" .. table.concat(al, ", ") .. ")") or ""
 				lines[#lines + 1] = ui.Line({
 					ui.Span(("/%-14s"):format(d.name)):hl("MareAccent"),
 					ui.Span(d.description or ""):hl("MareMuted"),
-					ui.Span(#al > 0 and ("  (" .. table.concat(al, ", ") .. ")") or ""):hl("MareDim"),
+					ui.Span(alias_text):hl("MareDim"),
 				})
+				plain[#plain + 1] = ("/%-14s %s%s"):format(d.name, d.description or "", alias_text)
 			end
 			lines[#lines + 1] = ui.Gap()
 			for _, l in ipairs(require("commands.keys").lines(16)) do
 				lines[#lines + 1] = l
 			end
 			ui.overlay("Help", ui.Lines(lines))
+			if not connected then
+				return table.concat(plain, "\n")
+			end
 		end,
 	})
 	alias("h", "help")
@@ -157,6 +165,7 @@ local function register_browse_and_reasoning(ctx, commands, run_local)
 
 	reg("commands", {
 		description = "Browse slash commands; Enter runs one",
+		availability = "tui",
 		run = function()
 			browse(commands, run_local, "Commands", function(n)
 				return string.sub(n, 1, 6) ~= "skill:"
@@ -166,6 +175,7 @@ local function register_browse_and_reasoning(ctx, commands, run_local)
 
 	reg("skills", {
 		description = "Browse skills; Enter loads one",
+		availability = "tui",
 		run = function()
 			browse(commands, run_local, "Skills", function(n)
 				return string.sub(n, 1, 6) == "skill:"
@@ -176,6 +186,7 @@ local function register_browse_and_reasoning(ctx, commands, run_local)
 	local show_reasoning = false
 	reg("show-reasoning", {
 		description = "Toggle showing full reasoning instead of “Thought for N s”",
+		availability = "tui",
 		run = function(args)
 			if args == "on" then
 				show_reasoning = true
@@ -236,6 +247,7 @@ local function register_ops(ctx, commands)
 
 	reg("terminal-setup", {
 		description = "Check this terminal's keys (Shift+Enter, Alt+Enter) and show how to fix them",
+		availability = "tui",
 		run = function()
 			require("commands.terminal_setup")(ctx)
 		end,
@@ -275,6 +287,7 @@ local function register_ops(ctx, commands)
 
 	reg("hotkeys", {
 		description = "Show key bindings",
+		availability = "tui",
 		run = function()
 			return require("commands.hotkeys")(ctx)
 		end,

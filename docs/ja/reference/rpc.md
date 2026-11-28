@@ -361,7 +361,10 @@ Parameters for `baseline.read`.
 
 #### `commands.list`
 
-パラメーターなし。
+| フィールド | 型 | 必須 | 説明 |
+|---|---|---|---|
+| `allow_local` | `boolean` |  |  |
+| `available` | `boolean` |  |  |
 
 結果:
 

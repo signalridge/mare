@@ -361,7 +361,10 @@ Parameters for `baseline.read`.
 
 #### `commands.list`
 
-无参数。
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `allow_local` | `boolean` |  |  |
+| `available` | `boolean` |  |  |
 
 结果:
 

@@ -1187,38 +1187,14 @@ pub(super) fn parse_slash_command(text: &str) -> Option<(&str, &str)> {
     Some((name, tail.trim()))
 }
 
-fn command_executable_in_acp(entry: &J, has_session: bool) -> bool {
-    if entry.get("alias_of").and_then(J::as_str).is_some() {
-        return false;
-    }
-    if entry.get("local_only").and_then(J::as_bool) == Some(true) {
-        return false;
-    }
-    let check_cond = |c: &str| match c {
-        "tui" | "running" => false,
-        "session" => has_session,
-        "always" | "idle" | "main" => true,
-        _ => false,
-    };
-    match entry.get("availability") {
-        None | Some(J::Null) => true,
-        Some(J::String(s)) => check_cond(s),
-        Some(J::Array(arr)) => arr.iter().all(|v| v.as_str().is_some_and(check_cond)),
-        _ => false,
-    }
-}
-
-/// Build ACP `AvailableCommand` entries from the `commands` service registry, excluding
-/// `local_only` commands and commands whose `availability` cannot execute in this ACP session.
-pub(super) fn filter_available_commands(list: &J, has_session: bool) -> Vec<AvailableCommand> {
+/// Project pre-evaluated executable entries from `commands.list({ available = true })` into ACP
+/// `AvailableCommand` descriptors without re-implementing availability rules in Rust.
+pub(super) fn commands_to_acp(list: &J) -> Vec<AvailableCommand> {
     let Some(entries) = list.get("data").and_then(J::as_array) else {
         return Vec::new();
     };
     let mut out = Vec::new();
     for entry in entries {
-        if !command_executable_in_acp(entry, has_session) {
-            continue;
-        }
         let Some(name) = entry.get("name").and_then(J::as_str).filter(|s| !s.is_empty()) else {
             continue;
         };
@@ -1232,17 +1208,12 @@ pub(super) fn filter_available_commands(list: &J, has_session: bool) -> Vec<Avai
     out
 }
 
-/// Query the host's command registry and session availability for executable ACP commands.
+/// Query the host's command registry for commands currently executable in this ACP session.
 pub(super) async fn available_commands(host: &Host) -> Vec<AvailableCommand> {
-    let has_session = match call_service(host, "session", "available", vec![]).await {
-        Ok(J::Bool(b)) => b,
-        Ok(J::Array(a)) => a.first().and_then(J::as_bool).unwrap_or(false),
-        _ => false,
-    };
-    let Ok(list) = call_service(host, "commands", "list", vec![]).await else {
+    let Ok(list) = call_service(host, "commands", "list", vec![json!({ "available": true })]).await else {
         return Vec::new();
     };
-    filter_available_commands(&list, has_session)
+    commands_to_acp(&list)
 }
 
 pub(super) fn available_commands_update(commands: &[AvailableCommand]) -> J {
@@ -1953,7 +1924,7 @@ mod tests {
     }
 
     #[test]
-    fn available_commands_filter_and_slash_parsing_respect_local_only_and_availability() {
+    fn available_commands_projection_and_slash_parsing_produce_valid_updates() {
         assert_eq!(parse_slash_command("/compact"), Some(("compact", "")));
         assert_eq!(parse_slash_command("/compact focus on tests"), Some(("compact", "focus on tests")));
         assert_eq!(parse_slash_command("/model faux/echo"), Some(("model", "faux/echo")));
@@ -1961,30 +1932,23 @@ mod tests {
         assert_eq!(parse_slash_command("/"), None);
         assert_eq!(parse_slash_command("plain text"), None);
 
-        let registry = json!({
+        let evaluated = json!({
             "data": [
-                { "name": "compact", "description": "Compact history", "args": "[focus]", "availability": "idle" },
-                { "name": "lua", "description": "Local console", "local_only": true },
-                { "name": "termonly", "description": "TUI only", "availability": "tui" },
-                { "name": "midturn", "description": "Running only", "availability": "running" },
-                { "name": "rename", "description": "Rename session", "availability": ["idle", "session"] },
-                { "name": "alias", "description": "Alias", "alias_of": "compact" }
+                { "name": "compact", "description": "Compact history", "args": "[focus]" },
+                { "name": "rename", "description": "Rename session" }
             ]
         });
 
-        let with_session = filter_available_commands(&registry, true);
-        let names_with: Vec<&str> = with_session.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names_with, vec!["compact", "rename"]);
+        let projected = commands_to_acp(&evaluated);
+        let names: Vec<&str> = projected.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["compact", "rename"]);
         assert!(matches!(
-            with_session[0].input,
+            projected[0].input,
             Some(AvailableCommandInput::Unstructured(ref u)) if u.hint == "[focus]"
         ));
+        assert!(projected[1].input.is_none());
 
-        let without_session = filter_available_commands(&registry, false);
-        let names_without: Vec<&str> = without_session.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names_without, vec!["compact"]);
-
-        let update = available_commands_update(&with_session);
+        let update = available_commands_update(&projected);
         assert!(
             serde_json::from_value::<SessionNotification>(json!({ "sessionId": "s1", "update": update })).is_ok(),
             "available_commands_update must parse as a valid ACP SessionNotification"
