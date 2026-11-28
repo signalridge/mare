@@ -783,8 +783,14 @@ async fn subagent_approval_ui_shows_requester_full_wrapped_path_duration_and_wai
             "full long path must be visible across wrapped modal lines without truncation:\nscreen:\n{screen}\ncompact:\n{compact}"
         );
 
-        // Snapshot the rendered TUI frame (stabilize random subagent UUID, child id, and elapsed seconds).
-        let snap = stabilize_subagent_snap(t.snap().await);
+        // Snapshot the rendered TUI frame (stabilize random subagent UUID, child id, elapsed seconds,
+        // and any wrapped `Directory:` temp path).
+        let canonical_cwd = dunce::canonicalize(&t._env.cwd).unwrap().to_string_lossy().into_owned();
+        t.vt.dismiss_notices();
+        t.step().await;
+        let mut raw_lines: Vec<String> = t.screen().lines().map(str::to_string).collect();
+        super::normalize_modal_directory_line(&mut raw_lines, &canonical_cwd);
+        let snap = stabilize_subagent_snap(trimmed(&raw_lines.join("\n")));
         insta::assert_snapshot!("subagent_approval_dialog", snap);
 
         // Approval itself remains enforced: file does not exist until user approves (`y`).
@@ -1157,6 +1163,7 @@ async fn subagent_request_permissions_dialog_renders_full_paths_purpose_expirati
         t.vt.dismiss_notices();
         t.step().await;
         let mut raw_lines: Vec<String> = t.screen().lines().map(str::to_string).collect();
+        super::normalize_modal_directory_line(&mut raw_lines, &canonical_cwd);
         if let Some(wp_idx) = raw_lines.iter().position(|l| l.contains("Write paths:"))
             && let Some(purpose_rel) = raw_lines[wp_idx + 1..].iter().position(|l| l.contains("Purpose:"))
         {
