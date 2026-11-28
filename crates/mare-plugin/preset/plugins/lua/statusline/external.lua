@@ -29,9 +29,36 @@ local function build_payload(ctx, S)
 	})
 end
 
+local function resolve_command(command)
+	if type(command) == "table" then
+		return command[1], { table.unpack(command, 2) }
+	end
+	if mare.os == "windows" then
+		local comspec = mare.env("COMSPEC")
+		if type(comspec) ~= "string" or comspec:match("^%s*$") then
+			comspec = "cmd.exe"
+		end
+		return comspec, { "/C", command }
+	end
+	return "sh", { "-c", command }
+end
+
+local function warn_once(ctx, key, msg, state)
+	if state.last_error == key then
+		return
+	end
+	state.last_error = key
+	if ctx.logger and ctx.logger.warn then
+		ctx.logger:warn(msg)
+	elseif mare.log then
+		mare.log("warn", msg)
+	end
+end
+
 function M.create(ctx, cfg, S)
 	local running = false
 	local rerun = false
+	local diag = { last_error = nil }
 	return function()
 		if not cfg.command then
 			return
@@ -51,12 +78,7 @@ function M.create(ctx, cfg, S)
 			repeat
 				rerun = false
 				local payload = build_payload(ctx, S)
-				local cmd, args
-				if type(cfg.command) == "table" then
-					cmd, args = cfg.command[1], { table.unpack(cfg.command, 2) }
-				else
-					cmd, args = "sh", { "-c", cfg.command }
-				end
+				local cmd, args = resolve_command(cfg.command)
 				local ok, r = pcall(mare.proc.run, {
 					cmd = cmd,
 					args = args,
@@ -64,7 +86,16 @@ function M.create(ctx, cfg, S)
 					timeout_ms = cfg.command_timeout_ms,
 					max_output = 4096,
 				})
-				if ok and r and not r.timed_out and r.code == 0 then
+				if not ok then
+					local err = tostring(r)
+					warn_once(
+						ctx,
+						"spawn:" .. tostring(cmd) .. ":" .. err,
+						("statusline command failed to launch (%s): %s"):format(tostring(cmd), err),
+						diag
+					)
+				elseif r and not r.timed_out and r.code == 0 then
+					diag.last_error = nil
 					local line = string.match(r.stdout or "", "^([^\n]*)") or ""
 					S.external_text = mare.text.sanitize(line)
 					ctx.ui:invalidate("external")
