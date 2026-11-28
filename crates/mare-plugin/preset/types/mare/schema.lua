@@ -10,6 +10,11 @@ function Schema:validate(value) end
 function Schema:value() end
 ---@return string canonical schema JSON
 function Schema:fingerprint() end
+---@return boolean whether this schema was compiled with `compile_external`
+function Schema:is_external() end
+---@param value any strict lossless JSON value to compare against this schema's snapshot
+---@return boolean
+function Schema:matches(value) end
 --- Validate references against the original schema using a private native JSON copy. No raw
 --- values are returned to Lua/callbacks, and no tool executes. Unknown/revoked references or a
 --- stale revision fail closed. Execution validates again inside the approved sandbox.
@@ -25,10 +30,15 @@ function OutputSchema:validate(value) end
 ---@param text string
 ---@return any
 function OutputSchema:validate_text(text) end
---- Compile an object-root JSON Schema into a reusable tool argument validator.
----@param schema table object-root argument schema
+--- Compile an object-root JSON Schema (or clone an existing built-in `ToolSchema`) into a reusable tool argument validator.
+---@param schema table|mare.ToolSchema object-root argument schema
 ---@return mare.ToolSchema
 function mare.schema.compile(schema) end
+--- Compile an object-root external JSON Schema (or clone an existing external `ToolSchema`) using the
+--- bounded offline standard JSON Schema validator instead of the built-in keyword allowlist.
+---@param schema table|mare.ToolSchema
+---@return mare.ToolSchema
+function mare.schema.compile_external(schema) end
 --- Compile a tool output JSON Schema (or clone an existing `OutputSchema`).
 ---@param schema table|mare.OutputSchema
 ---@return mare.OutputSchema

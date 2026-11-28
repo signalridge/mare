@@ -178,10 +178,17 @@ return function(D)
 		end
 		local tt = tool_tier(e, t.name)
 		local exposure = (opts and opts.exposure) or (tt == "codemode" and "nested" or nil)
+		local sok, compiled_schema = pcall(mare.schema.compile_external, t.inputSchema)
+		if not sok then
+			local reason = ("MCP %s tool %s: %s"):format(e.name, tostring(t.name), tostring(compiled_schema))
+			mare.mcp.log(e.name, "warn", reason)
+			ctx.bus:emit("mcp/error", { server = e.name, error = reason })
+			return nil
+		end
 		local ok
 		ok, remove = pcall(ctx.tools.register, ctx.tools, tname, {
 			description = ("[MCP %s] %s"):format(e.name, type(t.description) == "string" and t.description or t.name),
-			parameters = t.inputSchema,
+			parameters = compiled_schema,
 			unconfined = true,
 			exposure = exposure,
 			sort_key = e.name .. "\0" .. tostring(t.name) .. "\0" .. tname,

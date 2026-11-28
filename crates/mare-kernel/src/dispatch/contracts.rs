@@ -1437,13 +1437,35 @@ fn mark_arguments_with(
     Ok(())
 }
 
+/// Whether a hybrid `lua` type annotation lists a top-level `mare.*` userdata handle
+/// (outside `fun(...)` parameter/return types), such as `table|mare.ToolSchema|fun(...)`.
+fn lua_allows_userdata(kind: &str) -> bool {
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (idx, ch) in kind.char_indices() {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            '|' if depth == 0 => {
+                if kind[start..idx].trim().starts_with("mare.") {
+                    return true;
+                }
+                start = idx + 1;
+            }
+            _ => {}
+        }
+    }
+    kind[start..].trim().starts_with("mare.")
+}
+
 pub fn positional_object(lua: &Lua, spec: &MethodSpec, args: mlua::MultiValue) -> mlua::Result<Json> {
     let props = spec.params.get("properties").and_then(Json::as_object);
     let prop_names: BTreeSet<&str> = props.map(|map| map.keys().map(String::as_str).collect()).unwrap_or_default();
     let mut obj = positional_fields(lua, &spec.order, spec.rest, &spec.callbacks, &prop_names, args.clone())?;
-    // If a hybrid `table|fun(...)` parameter in `params.required` (like `tools.register`'s
-    // `parameters`) was passed as a Lua function in trailing opts, satisfy required-object presence
-    // for contract parameter validation while keeping the original Lua function intact.
+    // If a hybrid `table|mare.ToolSchema|fun(...)` parameter in `params.required` (like
+    // `tools.register`'s `parameters`) was passed as a Lua function or userdata handle in
+    // trailing opts, satisfy required-object presence for contract parameter validation while
+    // keeping the original Lua value intact.
     if spec.rest
         && let Some(props) = props
         && let Some(required) = spec.params.get("required").and_then(Json::as_array)
@@ -1452,20 +1474,23 @@ pub fn positional_object(lua: &Lua, spec: &MethodSpec, args: mlua::MultiValue) -
     {
         for (name, kind) in &spec.callbacks {
             if required.iter().any(|v| v.as_str() == Some(name.as_str()))
-                && kind.contains("fun(")
                 && props.contains_key(name)
                 && !map.contains_key(name)
-                && matches!(options.get::<Value>(name.as_str())?, Value::Function(_))
             {
-                let placeholder = match props.get(name).and_then(|s| s.get("type")).and_then(Json::as_str) {
-                    Some("string") => json!("_"),
-                    Some("array") => json!([]),
-                    Some("boolean") => json!(false),
-                    Some("integer") => json!(1),
-                    Some("number") => json!(0),
-                    _ => json!({}),
-                };
-                map.insert(name.clone(), placeholder);
+                let raw = options.get::<Value>(name.as_str())?;
+                let matched_hybrid = (kind.contains("fun(") && matches!(raw, Value::Function(_)))
+                    || (lua_allows_userdata(kind) && matches!(raw, Value::UserData(_)));
+                if matched_hybrid {
+                    let placeholder = match props.get(name).and_then(|s| s.get("type")).and_then(Json::as_str) {
+                        Some("string") => json!("_"),
+                        Some("array") => json!([]),
+                        Some("boolean") => json!(false),
+                        Some("integer") => json!(1),
+                        Some("number") => json!(0),
+                        _ => json!({}),
+                    };
+                    map.insert(name.clone(), placeholder);
+                }
             }
         }
     }
@@ -1503,8 +1528,9 @@ pub(crate) fn positional_fields(
                     let callback = matches!(&key, Value::String(k) if callbacks.iter().any(|(c, kind)| {
                         k.as_bytes().as_ref() == c.as_bytes()
                             && (!wire_props.contains(c.as_str())
-                                || !kind.contains("fun(")
-                                || matches!(field, Value::Function(_)))
+                                || (!kind.contains("fun(") && !lua_allows_userdata(kind))
+                                || (kind.contains("fun(") && matches!(field, Value::Function(_)))
+                                || (lua_allows_userdata(kind) && matches!(field, Value::UserData(_))))
                     }));
                     if !callback {
                         copy.raw_set(key, field)?;

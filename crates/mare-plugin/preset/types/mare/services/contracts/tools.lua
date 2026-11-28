@@ -87,7 +87,7 @@ return {
 				},
 				lua = {
 					description = "string|fun(): string",
-					parameters = "table|fun(model?: mare.Model): table",
+					parameters = "table|mare.ToolSchema|fun(model?: mare.Model): table|mare.ToolSchema",
 					admit = "fun(): boolean|string|nil",
 					summary = "string|fun(args: table): string",
 					render = "fun(...): any",
@@ -103,6 +103,7 @@ return {
 					allow_nested = "boolean",
 					output_schema = "table",
 					examples = "table[]",
+					external_schema = "boolean",
 					display = "table",
 					unconfined = "boolean",
 					command_tool = "boolean",
