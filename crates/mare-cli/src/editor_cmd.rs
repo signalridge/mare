@@ -6,19 +6,53 @@ use std::process::Command;
 
 use mare_host::Host;
 
-/// `mare.o.editor`, then $VISUAL / $EDITOR, then vi.
+/// `mare.o.editor`, then `$VISUAL` / `$EDITOR` (skipping blank values), then a platform default.
 pub(crate) fn program(host: &Host) -> String {
-    let configured = host
-        .lua()
-        .load("local o = mare.o; return o and o.editor")
-        .eval::<Option<String>>()
-        .ok()
-        .flatten()
-        .filter(|s| !s.trim().is_empty());
-    configured
-        .or_else(|| std::env::var("VISUAL").ok())
-        .or_else(|| std::env::var("EDITOR").ok())
-        .unwrap_or_else(|| "vi".into())
+    let configured = host.lua().load("local o = mare.o; return o and o.editor").eval::<Option<String>>().ok().flatten();
+    resolve_program(configured, &|k| std::env::var(k).ok(), &command_on_path, cfg!(windows))
+}
+
+fn non_blank(value: Option<String>) -> Option<String> {
+    value.filter(|s| !s.trim().is_empty())
+}
+
+fn command_on_path_in(name: &str, path_env: Option<std::ffi::OsString>, cwd: &Path) -> bool {
+    mare_binding::proc::which_path(name, path_env, cwd).is_some()
+}
+
+fn command_on_path(name: &str) -> bool {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    command_on_path_in(name, std::env::var_os("PATH"), &cwd)
+}
+
+fn resolve_program(
+    configured: Option<String>,
+    var: &dyn Fn(&str) -> Option<String>,
+    on_path: &dyn Fn(&str) -> bool,
+    is_windows: bool,
+) -> String {
+    non_blank(configured)
+        .or_else(|| non_blank(var("VISUAL")))
+        .or_else(|| non_blank(var("EDITOR")))
+        .unwrap_or_else(|| default_program(on_path, is_windows))
+}
+
+fn default_program(on_path: &dyn Fn(&str) -> bool, is_windows: bool) -> String {
+    if is_windows {
+        for cand in ["notepad", "nano", "vim", "nvim"] {
+            if on_path(cand) {
+                return cand.into();
+            }
+        }
+        "notepad".into()
+    } else {
+        for cand in ["vi", "nano", "vim"] {
+            if on_path(cand) {
+                return cand.into();
+            }
+        }
+        "vi".into()
+    }
 }
 
 /// Split an editor command string into `(program, args)` using shell lexical rules.
@@ -145,5 +179,57 @@ mod tests {
             [r"C:\Program Files\VS Code\code.exe", "--wait"]
         );
         assert!(split_windows_program(r#""C:\Program Files\unclosed"#).is_none());
+    }
+
+    #[test]
+    fn resolve_program_skips_blank_overrides_and_uses_platform_defaults() {
+        let none = |_: &str| None;
+        let no_bins = |_: &str| false;
+
+        // Blank configured/env values fall through to the next non-blank choice.
+        let env = |k: &str| match k {
+            "VISUAL" => Some("   \t ".into()),
+            "EDITOR" => Some("code --wait".into()),
+            _ => None,
+        };
+        assert_eq!(resolve_program(Some("  ".into()), &env, &no_bins, true), "code --wait");
+        assert_eq!(resolve_program(Some("nvim -u NONE".into()), &env, &no_bins, true), "nvim -u NONE");
+
+        // All blank on Windows falls back to an available Windows default (never `vi`).
+        let blank_env = |k: &str| matches!(k, "VISUAL" | "EDITOR").then(|| "  ".into());
+        assert_eq!(resolve_program(None, &blank_env, &no_bins, true), "notepad");
+        assert_eq!(resolve_program(None, &none, &|c| c == "nano", true), "nano");
+
+        // Unix keeps `vi` when available and falls back to `nano` when `vi` is absent.
+        assert_eq!(resolve_program(None, &none, &|c| c == "vi", false), "vi");
+        assert_eq!(resolve_program(None, &none, &|c| c == "nano", false), "nano");
+        assert_eq!(resolve_program(None, &none, &no_bins, false), "vi");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_on_path_ignores_non_executable_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let dir1 = root.path().join("dir1");
+        let dir2 = root.path().join("dir2");
+        std::fs::create_dir_all(&dir1).unwrap();
+        std::fs::create_dir_all(&dir2).unwrap();
+
+        // A non-executable `vi` in an earlier PATH entry must not match or shadow executable `nano`.
+        let fake_vi = dir1.join("vi");
+        std::fs::write(&fake_vi, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&fake_vi, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let fake_nano = dir2.join("nano");
+        std::fs::write(&fake_nano, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&fake_nano, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let path_env = std::env::join_paths([&dir1, &dir2]).unwrap();
+        assert!(!command_on_path_in("vi", Some(path_env.clone()), root.path()));
+        assert!(command_on_path_in("nano", Some(path_env.clone()), root.path()));
+        let chosen = default_program(&|cand| command_on_path_in(cand, Some(path_env.clone()), root.path()), false);
+        assert_eq!(chosen, "nano");
     }
 }

@@ -318,7 +318,7 @@ fn register_spawn(lua: &Lua, t: &Table, cwd: String) -> mlua::Result<()> {
 /// (Neovim `exepath()`). A bare name is looked up in `path_env` (PATH; on Windows with the
 /// PATHEXT extensions); a name with a path separator is a path, relative to `cwd`, and is returned
 /// only when it is an executable file.
-pub(crate) fn which_path(name: &str, path_env: Option<std::ffi::OsString>, cwd: &std::path::Path) -> Option<String> {
+pub fn which_path(name: &str, path_env: Option<std::ffi::OsString>, cwd: &std::path::Path) -> Option<String> {
     if name.is_empty() {
         return None;
     }
