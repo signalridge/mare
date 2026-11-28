@@ -716,3 +716,264 @@ async fn retain_ratio_scales_retained_tail_with_message_budget() {
     })
     .await
 }
+
+/// Manual `/compact` with a low `threshold_tokens` (below default `keep_recent_tokens = 20000`):
+/// stays a no-op when history is under target, and falls back to smaller retention tiers when
+/// history is over target even though the default retained tail covers the entire history.
+#[tokio::test]
+async fn manual_compaction_with_low_threshold_below_retention_compacts_when_over_target() {
+    local(async {
+        let env = TestEnv::new().await;
+        let base = overhead(&env).await;
+        let limit = base + 3000;
+        let cfg = json!({
+            "plugins": {
+                "compact": {
+                    "auto": false,
+                    "threshold_tokens": limit,
+                    "stages": ["local"]
+                }
+            }
+        });
+        let h = env
+            .host()
+            .builtins(&["compact", "usage"])
+            .faux(json!([
+                { "text": "## Summary\nCompact summary of earlier turns." },
+                { "text": "## Turn context\nLatest turn prefix." }
+            ]))
+            .config(cfg)
+            .no_session()
+            .build()
+            .await;
+        expose(&h);
+        global(&h, "L", h.service_table("llm").unwrap());
+        global(&h, "K", h.service_table("compact").unwrap());
+        exec(&h, RECORD_REQUESTS).await;
+
+        // 1. Short history under threshold_tokens: manual /compact stays a no-op with 0 requests.
+        let (under_status, under_reqs): (String, i64) = eval(
+            &h,
+            r#"
+            A:set_messages({
+                { role = "user", content = { { type = "text", text = string.rep("short ", 40) } } },
+                { role = "assistant", content = { { type = "text", text = string.rep("reply ", 40) } } },
+            })
+            local r = K:run()
+            return tostring(r.status), #SENT
+            "#,
+        )
+        .await;
+        assert_eq!(under_status, "nothing_to_compact");
+        assert_eq!(under_reqs, 0, "short under-threshold history must not call the model");
+
+        // 2. History over threshold_tokens (~5000 tokens) yet well below default keep_recent_tokens (20000):
+        //    manual /compact must fall back to a smaller retention tier and converge below target.
+        let (over_status, over_reqs, after_tokens): (String, i64, i64) = eval(
+            &h,
+            r#"
+            local msgs = {}
+            for i = 1, 4 do
+                msgs[#msgs + 1] = { role = "user", content = { { type = "text", text = ("U%d "):format(i) .. string.rep("detail ", 280) } } }
+                msgs[#msgs + 1] = { role = "assistant", content = { { type = "text", text = ("A%d "):format(i) .. string.rep("answer ", 280) } } }
+            end
+            A:set_messages(msgs)
+            local r = K:run()
+            return tostring(r.status), #SENT, K:measure()
+            "#,
+        )
+        .await;
+        assert_eq!(over_status, "compacted", "over-threshold manual /compact must compact instead of returning nothing_to_compact");
+        assert!(over_reqs >= 1, "expected at least 1 summary request, got {over_reqs}");
+        assert!(after_tokens <= limit * 9 / 10, "compacted tokens ({after_tokens}) must fit below 90% of {limit}");
+        h.shutdown().await;
+    })
+    .await
+}
+
+/// Automatic compaction with a low `threshold_tokens` (below default `prune_protect_tokens = 40000`
+/// and `prune_min_saving_tokens = 20000`): the prune stage must scale its protection and saving
+/// floors down to the threshold budget so old large tool outputs are pruned without invoking local summary.
+#[tokio::test]
+async fn auto_compaction_with_low_threshold_prunes_despite_default_prune_protect() {
+    local(async {
+        let env = TestEnv::new().await;
+        let base = overhead(&env).await;
+        let limit = base + 12_000;
+        let cfg = json!({
+            "plugins": {
+                "compact": {
+                    "threshold_tokens": limit,
+                    "stages": ["prune", "local"]
+                }
+            }
+        });
+        let h = env.host().builtins(&["compact", "usage"]).faux(json!([])).config(cfg).no_session().build().await;
+        expose(&h);
+        global(&h, "K", h.service_table("compact").unwrap());
+        global(&h, "L", h.service_table("llm").unwrap());
+        exec(&h, PREPARE_REQUEST).await;
+
+        let (stages, summarized, pruned, after_tokens): (String, i64, bool, i64) = eval(
+            &h,
+            r#"
+            STAGES, SUMMARIZED = {}, 0
+            C.cordis:on("compact/stage", function(ev)
+                if ev.phase == "after" then STAGES[#STAGES + 1] = ev.stage .. (ev.changed and "+" or "-") end
+                if ev.stage == "local" and ev.phase == "candidate" then SUMMARIZED = SUMMARIZED + 1 end
+            end)
+            local big_tool = "HEAD " .. string.rep("tool output payload line\n", 1800) .. " TAIL"
+            A:set_messages({
+                { role = "user", content = { { type = "text", text = "read large output" } } },
+                { role = "assistant", content = { { type = "tool_call", id = "c1", name = "read", arguments = { path = "big.txt" } } } },
+                { role = "tool_result", tool_call_id = "c1", tool_name = "read", content = { { type = "text", text = big_tool } } },
+                { role = "assistant", content = { { type = "text", text = "read it" } } },
+                { role = "user", content = { { type = "text", text = string.rep("follow up question ", 350) } } },
+            })
+            PREPARE_REQUEST()
+            local msgs = A:list_messages().data
+            local did_prune = msgs[3].content[1].text:find("tool result middle pruned", 1, true) ~= nil
+            return table.concat(STAGES, ","), SUMMARIZED, did_prune, K:measure()
+            "#,
+        )
+        .await;
+        assert_eq!(stages, "prune+", "prune must succeed on low threshold without falling through to local: {stages}");
+        assert_eq!(summarized, 0, "local summary must not run when prune already met threshold");
+        assert!(pruned, "old large tool output must be pruned");
+        assert!(after_tokens <= limit, "post-prune tokens ({after_tokens}) must be <= threshold ({limit})");
+        h.shutdown().await;
+    })
+    .await
+}
+
+/// Overflow compaction with default retention (`keep_recent_tokens = 20000`, `prune_protect_tokens = 40000`)
+/// and a history smaller than 40k tokens must still prune oversized tool output and converge.
+#[tokio::test]
+async fn overflow_compaction_with_default_retention_prunes_and_summarizes() {
+    local(async {
+        let env = TestEnv::new().await;
+        let base = overhead(&env).await;
+        let limit = base + 12_000;
+        let cfg = json!({
+            "plugins": {
+                "compact": {
+                    "auto": false,
+                    "threshold_tokens": limit,
+                    "stages": ["prune", "local"]
+                }
+            }
+        });
+        let h = env
+            .host()
+            .builtins(&["compact", "usage"])
+            .faux(json!([{ "text": "## Summary\nOverflow compacted cleanly." }]))
+            .config(cfg)
+            .no_session()
+            .build()
+            .await;
+        expose(&h);
+        global(&h, "K", h.service_table("compact").unwrap());
+
+        let (ok, stages, pruned_or_summarized, after_tokens): (bool, String, bool, i64) = eval(
+            &h,
+            r#"
+            STAGES = {}
+            C.cordis:on("compact/stage", function(ev)
+                if ev.phase == "after" then STAGES[#STAGES + 1] = ev.stage .. (ev.changed and "+" or "-") end
+            end)
+            local big_tool = "HEAD " .. string.rep("overflow payload line\n", 1800) .. " TAIL"
+            A:set_messages({
+                { role = "user", content = { { type = "text", text = "read large output" } } },
+                { role = "assistant", content = { { type = "tool_call", id = "c1", name = "read", arguments = { path = "big.txt" } } } },
+                { role = "tool_result", tool_call_id = "c1", tool_name = "read", content = { { type = "text", text = big_tool } } },
+                { role = "assistant", content = { { type = "text", text = "done reading" } } },
+                { role = "user", content = { { type = "text", text = string.rep("next question ", 350) } } },
+            })
+            local reply = C.cordis:get("bus"):waterfall("compact/overflow", {})
+            local res = reply.res
+            local encoded = mare.json.encode(A:list_messages().data)
+            return reply.succeeded == true and type(res) == "table" and res.status == "compacted",
+                table.concat(STAGES, ","),
+                encoded:find("Overflow compacted cleanly", 1, true) ~= nil,
+                K:measure()
+            "#,
+        )
+        .await;
+        assert!(ok, "overflow compaction must succeed: stages={stages}");
+        assert!(stages.contains("prune+"), "overflow must prune old large tool output even under default 40k protect: {stages}");
+        assert!(stages.contains("local+") && pruned_or_summarized, "overflow must continue to summary stage: {stages}");
+        assert!(after_tokens <= limit * 9 / 10, "overflow post-compaction tokens ({after_tokens}) must fit target");
+        h.shutdown().await;
+    })
+    .await
+}
+
+/// Over-threshold prune must honor the configured `prune_protect_tokens` tail before falling back
+/// to a smaller threshold-scaled tier: when older tool output outside the configured tail already
+/// meets `prune_min_saving_tokens`, a tool output inside the configured protected tail stays intact.
+#[tokio::test]
+async fn over_threshold_prune_respects_configured_protect_tail_before_fallback() {
+    local(async {
+        let env = TestEnv::new().await;
+        let base = overhead(&env).await;
+        // target_budget = 12_000 -> fallback protect would be 6_000, while configured protect is 8_000.
+        let limit = base + 12_000;
+        let cfg = json!({
+            "plugins": {
+                "compact": {
+                    "threshold_tokens": limit,
+                    "prune_protect_tokens": 8000,
+                    "prune_min_saving_tokens": 1500,
+                    "prune_tool_result_chars": 400,
+                    "prune_head_chars": 80,
+                    "prune_tail_chars": 40,
+                    "stages": ["prune"]
+                }
+            }
+        });
+        let h = env.host().builtins(&["compact", "usage"]).faux(json!([])).config(cfg).no_session().build().await;
+        expose(&h);
+        global(&h, "K", h.service_table("compact").unwrap());
+        global(&h, "L", h.service_table("llm").unwrap());
+        exec(&h, PREPARE_REQUEST).await;
+
+        let (old_pruned, protected_pruned, tail_tokens): (bool, bool, i64) = eval(
+            &h,
+            r#"
+            -- Old tool result (~7000 tokens, well outside 8000-token protected tail)
+            local old_big = "OLD_HEAD " .. string.rep("older output chunk payload\n", 1100) .. " OLD_TAIL"
+            -- Recent tool result (~3300 tokens) + tail (~3300 tokens) = ~6600 tokens:
+            -- strictly inside configured 8000-token protect tail, but outside naive 0.5*12000 = 6000 tail.
+            local recent_big = "PROT_HEAD " .. string.rep("protected recent output chunk\n", 450) .. " PROT_TAIL"
+            local tail_filler = string.rep("recent conversation turn text ", 440)
+            local m5 = { role = "tool_result", tool_call_id = "c2", tool_name = "read", content = { { type = "text", text = recent_big } } }
+            local m6 = { role = "assistant", content = { { type = "text", text = tail_filler } } }
+            local m7 = { role = "user", content = { { type = "text", text = "continue" } } }
+            local tail_t = mare.text.tokens(m5) + mare.text.tokens(m6) + mare.text.tokens(m7)
+            assert(tail_t > 6000 and tail_t <= 8000, "expected tail_t in (6000, 8000], got " .. tostring(tail_t))
+            A:set_messages({
+                { role = "user", content = { { type = "text", text = "step 1" } } },
+                { role = "assistant", content = { { type = "tool_call", id = "c1", name = "read", arguments = { path = "old.txt" } } } },
+                { role = "tool_result", tool_call_id = "c1", tool_name = "read", content = { { type = "text", text = old_big } } },
+                { role = "assistant", content = { { type = "tool_call", id = "c2", name = "read", arguments = { path = "recent.txt" } } } },
+                m5,
+                m6,
+                m7,
+            })
+            PREPARE_REQUEST()
+            local msgs = A:list_messages().data
+            local p1 = msgs[3].content[1].text:find("tool result middle pruned", 1, true) ~= nil
+            local p2 = msgs[5].content[1].text:find("tool result middle pruned", 1, true) ~= nil
+            return p1, p2, tail_t
+            "#,
+        )
+        .await;
+        assert!(old_pruned, "older tool output outside configured protect tail must be pruned (tail_tokens={tail_tokens})");
+        assert!(
+            !protected_pruned,
+            "recent tool output inside configured 8000-token protect tail must remain unpruned when older output suffices (tail_tokens={tail_tokens})"
+        );
+        h.shutdown().await;
+    })
+    .await
+}

@@ -94,7 +94,7 @@ return function(D)
 		cp_tail = cp_tail,
 		id_of = id_of,
 		session_path = session_path,
-		S = S,
+		threshold = threshold,
 		usage_current = function()
 			return S.usage_version == S.version
 		end,
