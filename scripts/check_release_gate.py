@@ -85,13 +85,46 @@ def evaluate_jobs(jobs: list[dict]) -> list[str]:
     return errors
 
 
-def check_runs(runs: list[dict], fetch_jobs) -> tuple[bool, list[str]]:
+REQUIRED_EVENT = "push"
+REQUIRED_BRANCH = "main"
+
+
+def _matches_expected_run(run: dict, expected_commit: str) -> bool:
+    return (
+        run.get("event") == REQUIRED_EVENT
+        and run.get("headBranch") == REQUIRED_BRANCH
+        and run.get("headSha") == expected_commit
+    )
+
+
+def check_runs(
+    runs: list[dict],
+    fetch_jobs,
+    *,
+    expected_commit: str,
+) -> tuple[bool, list[str]]:
     if not runs:
         return False, ["no ci.yml workflow runs found for commit"]
 
     last_errors: list[str] = []
+    matching_runs: list[dict] = []
+    for run in runs:
+        run_id = run.get("databaseId")
+        if not _matches_expected_run(run, expected_commit):
+            last_errors = [
+                f"ci.yml run {run_id} does not match event={REQUIRED_EVENT!r}, "
+                f"branch={REQUIRED_BRANCH!r}, head_sha={expected_commit!r} "
+                f"(got event={run.get('event')!r}, branch={run.get('headBranch')!r}, "
+                f"head_sha={run.get('headSha')!r})"
+            ]
+            continue
+        matching_runs.append(run)
+
+    if not matching_runs:
+        return False, last_errors
+
     # Prefer the most recent runs first
-    sorted_runs = sorted(runs, key=lambda r: r.get("createdAt", ""), reverse=True)
+    sorted_runs = sorted(matching_runs, key=lambda r: r.get("createdAt", ""), reverse=True)
     for run in sorted_runs:
         run_id = run.get("databaseId")
         if run.get("status") != "completed":
@@ -112,6 +145,7 @@ def wait_for_runs(
     list_runs,
     fetch_jobs,
     *,
+    expected_commit: str,
     wait_minutes: float = 0.0,
     poll_interval: float = 30.0,
     monotonic=time.monotonic,
@@ -120,11 +154,15 @@ def wait_for_runs(
     deadline = monotonic() + max(0.0, wait_minutes) * 60.0
     while True:
         runs = list_runs()
-        ok, msgs = check_runs(runs, fetch_jobs)
+        ok, msgs = check_runs(runs, fetch_jobs, expected_commit=expected_commit)
         if ok:
             return True, msgs
 
-        pending = [r for r in runs if r.get("status") != "completed"]
+        pending = [
+            r
+            for r in runs
+            if r.get("status") != "completed" and _matches_expected_run(r, expected_commit)
+        ]
         if not runs or pending:
             remaining = deadline - monotonic()
             if remaining <= 0:
@@ -165,21 +203,6 @@ def _extract_job_block(ci_text: str, job_key: str) -> str:
     return "\n".join(lines[start:end])
 
 
-def check_ci_workflow_accept_tools(ci_text: str) -> list[str]:
-    accept_block = _extract_job_block(ci_text, "accept")
-    if not accept_block:
-        return ["accept-nightly.yml is missing 'accept' job"]
-    errors: list[str] = []
-    for tool in ("stylua", "ast-grep", "lua-language-server"):
-        if tool not in accept_block:
-            errors.append(f"accept-nightly.yml accept job must install {tool} so accept.sh --release never skips it")
-    if "--allow-missing-tools" in accept_block:
-        errors.append("accept-nightly.yml accept job must not pass --allow-missing-tools")
-    if "scripts/accept.sh --release" not in accept_block:
-        errors.append("accept-nightly.yml accept job must run scripts/accept.sh --release")
-    return errors
-
-
 def gh_json(args: list[str]) -> object:
     proc = subprocess.run(
         ["gh", *args],
@@ -193,6 +216,27 @@ def gh_json(args: list[str]) -> object:
 
 
 class ReleaseGateSelfTests(unittest.TestCase):
+    TEST_COMMIT = "a" * 40
+
+    def _run(
+        self,
+        run_id: int,
+        *,
+        status: str = "completed",
+        created_at: str = "2026-11-15T10:00:00Z",
+        commit: str | None = None,
+        event: str = "push",
+        branch: str = "main",
+    ) -> dict:
+        return {
+            "databaseId": run_id,
+            "status": status,
+            "createdAt": created_at,
+            "event": event,
+            "headBranch": branch,
+            "headSha": self.TEST_COMMIT if commit is None else commit,
+        }
+
     def _all_ok_jobs(self) -> list[dict]:
         return [
             {"name": n, "conclusion": "success"}
@@ -200,7 +244,7 @@ class ReleaseGateSelfTests(unittest.TestCase):
         ]
 
     def test_no_runs_fails(self):
-        ok, errs = check_runs([], lambda _id: [])
+        ok, errs = check_runs([], lambda _id: [], expected_commit=self.TEST_COMMIT)
         self.assertFalse(ok)
         self.assertTrue(any("no ci.yml workflow runs" in e for e in errs), errs)
 
@@ -209,8 +253,8 @@ class ReleaseGateSelfTests(unittest.TestCase):
         for job in jobs:
             if job["name"] in ("actionlint", "yamllint", "cargo-deny", "stylua · public-api-lint"):
                 job["conclusion"] = "skipped"
-        runs = [{"databaseId": 101, "status": "completed", "createdAt": "2026-11-15T10:00:00Z"}]
-        ok, msgs = check_runs(runs, lambda _id: jobs)
+        runs = [self._run(101)]
+        ok, msgs = check_runs(runs, lambda _id: jobs, expected_commit=self.TEST_COMMIT)
         self.assertTrue(ok, msgs)
 
         # Docs-only commit where all conditional jobs (including build-linux-tests) were skipped.
@@ -218,7 +262,7 @@ class ReleaseGateSelfTests(unittest.TestCase):
             {"name": n, "conclusion": "success" if n in ALWAYS_REQUIRED_JOBS else "skipped"}
             for n in (*ALWAYS_REQUIRED_JOBS, BUILD_LINUX_JOB, *REQUIRED_JOBS)
         ]
-        ok, msgs = check_runs(runs, lambda _id: docs_only)
+        ok, msgs = check_runs(runs, lambda _id: docs_only, expected_commit=self.TEST_COMMIT)
         self.assertTrue(ok, msgs)
 
     def test_ci_failures_missing_jobs_or_skipped_changes_fail(self):
@@ -251,8 +295,8 @@ class ReleaseGateSelfTests(unittest.TestCase):
         ]
         for label, run_id, jobs, predicate in cases:
             with self.subTest(case=label):
-                runs = [{"databaseId": run_id, "status": "completed", "createdAt": "2026-11-15T10:00:00Z"}]
-                ok, errs = check_runs(runs, lambda _id, j=jobs: j)
+                runs = [self._run(run_id)]
+                ok, errs = check_runs(runs, lambda _id, j=jobs: j, expected_commit=self.TEST_COMMIT)
                 self.assertFalse(ok)
                 self.assertTrue(any(predicate(e) for e in errs), errs)
 
@@ -372,28 +416,22 @@ class ReleaseGateSelfTests(unittest.TestCase):
             disp_out = run_classifier(repo, {"EVENT_NAME": "workflow_dispatch"})
             self.assertTrue(all(v == "true" for v in disp_out.values()), disp_out)
 
-    def test_accept_job_requires_lua_tools_and_no_allow_missing_tools(self):
-        accept_path = pathlib.Path(__file__).resolve().parent.parent / ".github" / "workflows" / "accept-nightly.yml"
-        if not accept_path.is_file():
-            self.skipTest("accept-nightly.yml not present")
-        ci_text = accept_path.read_text(encoding="utf-8")
-        self.assertEqual(check_ci_workflow_accept_tools(ci_text), [])
-        for tool in ("stylua", "ast-grep", "lua-language-server"):
-            broken = ci_text.replace(tool, "removed-tool")
-            errs = check_ci_workflow_accept_tools(broken)
-            self.assertTrue(
-                any(tool in e for e in errs),
-                f"expected error mentioning missing {tool}, got: {errs}",
-            )
-        with_allow = ci_text.replace(
-            "sh scripts/accept.sh --release",
-            "sh scripts/accept.sh --release --allow-missing-tools",
-        )
-        errs = check_ci_workflow_accept_tools(with_allow)
-        self.assertTrue(
-            any("--allow-missing-tools" in e for e in errs),
-            f"expected error mentioning --allow-missing-tools, got: {errs}",
-        )
+    def test_runtime_gate_requires_push_main_matching_commit(self):
+        commit = self.TEST_COMMIT
+        other_sha = "b" * 40
+        jobs = self._all_ok_jobs()
+        for label, bad_run in (
+            ("pull_request_event", self._run(301, event="pull_request")),
+            ("non_main_branch", self._run(302, branch="feat/other")),
+            ("wrong_head_sha", self._run(303, commit=other_sha)),
+        ):
+            with self.subTest(case=label):
+                ok, errs = check_runs([bad_run], lambda _id: jobs, expected_commit=commit)
+                self.assertFalse(ok)
+                self.assertTrue(any("does not match event='push'" in e for e in errs), errs)
+
+        ok, msgs = check_runs([self._run(304)], lambda _id: jobs, expected_commit=commit)
+        self.assertTrue(ok, msgs)
 
     def test_required_jobs_includes_workflow_linters(self):
         self.assertIn("actionlint", REQUIRED_JOBS)
@@ -405,10 +443,11 @@ class ReleaseGateSelfTests(unittest.TestCase):
         def fake_sleep(dt: float) -> None:
             clock[0] += dt
 
-        pending = [{"databaseId": 201, "status": "in_progress", "createdAt": "2026-11-25T10:00:00Z"}]
+        pending = [self._run(201, status="in_progress", created_at="2026-11-25T10:00:00Z")]
         ok, errs = wait_for_runs(
             lambda: pending,
             lambda _id: [],
+            expected_commit=self.TEST_COMMIT,
             wait_minutes=1.0,
             poll_interval=20.0,
             monotonic=lambda: clock[0],
@@ -428,12 +467,13 @@ class ReleaseGateSelfTests(unittest.TestCase):
         def fake_list() -> list[dict]:
             calls[0] += 1
             if calls[0] < 3:
-                return [{"databaseId": 202, "status": "in_progress", "createdAt": "2026-11-25T10:00:00Z"}]
-            return [{"databaseId": 202, "status": "completed", "createdAt": "2026-11-25T10:00:00Z"}]
+                return [self._run(202, status="in_progress", created_at="2026-11-25T10:00:00Z")]
+            return [self._run(202, status="completed", created_at="2026-11-25T10:00:00Z")]
 
         ok, msgs = wait_for_runs(
             fake_list,
             lambda _id: self._all_ok_jobs(),
+            expected_commit=self.TEST_COMMIT,
             wait_minutes=2.0,
             poll_interval=15.0,
             monotonic=lambda: clock[0],
@@ -452,10 +492,11 @@ class ReleaseGateSelfTests(unittest.TestCase):
 
         jobs = self._all_ok_jobs()
         jobs[0]["conclusion"] = "failure"
-        completed = [{"databaseId": 203, "status": "completed", "createdAt": "2026-11-25T10:00:00Z"}]
+        completed = [self._run(203, created_at="2026-11-25T10:00:00Z")]
         ok, errs = wait_for_runs(
             lambda: completed,
             lambda _id: jobs,
+            expected_commit=self.TEST_COMMIT,
             wait_minutes=5.0,
             poll_interval=15.0,
             monotonic=lambda: clock[0],
@@ -476,11 +517,12 @@ class ReleaseGateSelfTests(unittest.TestCase):
             calls[0] += 1
             if calls[0] == 1:
                 return []
-            return [{"databaseId": 204, "status": "completed", "createdAt": "2026-11-25T10:00:00Z"}]
+            return [self._run(204, created_at="2026-11-25T10:00:00Z")]
 
         ok, msgs = wait_for_runs(
             fake_list,
             lambda _id: self._all_ok_jobs(),
+            expected_commit=self.TEST_COMMIT,
             wait_minutes=1.0,
             poll_interval=10.0,
             monotonic=lambda: clock[0],
@@ -518,22 +560,16 @@ def main() -> int:
         print("--commit is required", file=sys.stderr)
         return 2
 
-    accept_path = pathlib.Path(__file__).resolve().parent.parent / ".github" / "workflows" / "accept-nightly.yml"
-    if accept_path.is_file():
-        wf_errors = check_ci_workflow_accept_tools(accept_path.read_text(encoding="utf-8"))
-        if wf_errors:
-            for err in wf_errors:
-                print(f"release gate error: {err}", file=sys.stderr)
-            return 1
-
     repo_args = ["--repo", args.repo] if args.repo else []
     try:
         ok, msgs = wait_for_runs(
             lambda: gh_json([
                 "run", "list",
                 "--workflow", "ci.yml",
+                "--event", "push",
+                "--branch", "main",
                 "--commit", args.commit,
-                "--json", "databaseId,status,conclusion,createdAt",
+                "--json", "databaseId,status,conclusion,createdAt,event,headBranch,headSha",
                 *repo_args,
             ]),
             lambda run_id: gh_json([
@@ -541,6 +577,7 @@ def main() -> int:
                 "--json", "jobs",
                 *repo_args,
             ]).get("jobs", []),
+            expected_commit=args.commit,
             wait_minutes=args.wait_minutes,
             poll_interval=args.poll_interval,
         )

@@ -7,5 +7,6 @@
     "sha256": "2afaa5ffb5e3493402e31e7c67a5a1fb42133e3f66fc315ca0051934125561c7"
   },
   "cargo_about": "0.9.3",
-  "lua": "5.4"
+  "lua": "5.4.9",
+  "lua_sha256": "2335b6c582a52654f94612bf10d2f4672805d05329aa6568b1d8cd9e5c6fb8e6"
 }

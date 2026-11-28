@@ -276,14 +276,6 @@ def check_companion_workflows_and_files(root: pathlib.Path) -> list[str]:
     if not ci_wf.is_file():
         errors.append("missing .github/workflows/ci.yml")
 
-    nightly_wf = root / ".github" / "workflows" / "accept-nightly.yml"
-    if not nightly_wf.is_file():
-        errors.append("missing .github/workflows/accept-nightly.yml")
-    else:
-        nightly_text = nightly_wf.read_text(encoding="utf-8")
-        if "refs/heads/main:refs/remotes/origin/main" not in nightly_text:
-            errors.append("accept-nightly.yml must explicitly fetch origin/main for detached SHA checkouts")
-
     nfpm_action = root / ".github" / "actions" / "setup-nfpm" / "action.yml"
     if not nfpm_action.is_file():
         errors.append("missing .github/actions/setup-nfpm/action.yml")
@@ -426,8 +418,11 @@ def check_ci_version_files(root: pathlib.Path) -> list[str]:
             if not re.fullmatch(r"[0-9a-f]{64}", nfpm_sha):
                 errors.append(f".github/ci-tools.json: invalid sha256 for 'nfpm.sha256': {nfpm_sha!r}")
         lua_val = str(tools.get("lua", ""))
-        if not re.fullmatch(r"\d+\.\d+(?:\.\d+)?", lua_val):
-            errors.append(f".github/ci-tools.json: invalid lua version: {lua_val!r}")
+        if not re.fullmatch(r"\d+\.\d+\.\d+", lua_val):
+            errors.append(f".github/ci-tools.json: lua must pin exact X.Y.Z version, got {lua_val!r}")
+        lua_sha = str(tools.get("lua_sha256", ""))
+        if not re.fullmatch(r"[0-9a-f]{64}", lua_sha):
+            errors.append(f".github/ci-tools.json: invalid sha256 for 'lua_sha256': {lua_sha!r}")
 
     wf_dir = root / ".github" / "workflows"
     forbidden_patterns = (

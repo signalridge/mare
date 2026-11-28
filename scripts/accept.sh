@@ -265,12 +265,17 @@ PYMETA
 }
 
 # a tree shipped as an archive (remote acceptance) has no .git: it carries .shipped-sha instead
+tree_sha=""
 if [ "$no_git" -eq 0 ] && [ -e .git ]; then
-	sha=$(git rev-parse --short HEAD 2>/dev/null || head -c 12 .shipped-sha 2>/dev/null || echo unknown)
-	dirty=""
-	[ -n "$(git status --porcelain 2>/dev/null)" ] && dirty=" (dirty tree)"
+	sha=$(git rev-parse --verify HEAD 2>/dev/null || head -c 40 .shipped-sha 2>/dev/null || echo unknown)
+	tree_sha=$(git rev-parse --verify 'HEAD^{tree}' 2>/dev/null || echo unknown)
+	if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+		dirty=" (dirty tree)"
+	else
+		dirty=" (clean checkout)"
+	fi
 else
-	sha=$(head -c 12 .shipped-sha 2>/dev/null || echo unknown)
+	sha=$(head -c 40 .shipped-sha 2>/dev/null || echo unknown)
 	dirty=""
 fi
 host=$(uname -n 2>/dev/null || echo unknown)
@@ -612,7 +617,12 @@ fi
 	echo "<!-- accept-section-begin -->"
 	echo "## $platform @ $host ($accept_mode): $verdict"
 	echo
-	echo "- git: \`$sha\`$dirty"
+	if [ -n "$tree_sha" ]; then
+		echo "- git: \`$sha\` (tree \`$tree_sha\`)$dirty"
+	else
+		echo "- git: \`$sha\`$dirty"
+	fi
+	echo "- scope: this platform only ($platform; does not cover the other release platforms)"
 	echo "- started: $started, total ${total}s"
 	[ -n "$tools_line" ] && echo "- tools: $tools_line"
 	echo "- tests: ${nextest_line:-n/a}"
