@@ -37,14 +37,14 @@ impl App {
                     if self.show_reasoning != value {
                         self.show_reasoning = value;
                         self.transcript.invalidate_cache();
-                        self.reflow.invalidated(app_now());
+                        self.reflow.force_invalidated(app_now());
                     }
                 }
                 "expand_all" => {
                     if self.expand_all != value {
                         self.expand_all = value;
                         self.transcript.invalidate_cache();
-                        self.reflow.invalidated(app_now());
+                        self.reflow.force_invalidated(app_now());
                     }
                 }
                 // spinners hold still (static marker), no animation frames
@@ -148,6 +148,11 @@ impl App {
                         || patch.markdown.is_some()
                         || patch.expanded.is_some()
                         || patch.kind.is_some();
+                    let visible_change = patch.node.is_some()
+                        || patch.markdown.is_some()
+                        || patch.title.is_some()
+                        || patch.kind.is_some()
+                        || (self.expand_all && patch.expanded.is_some());
                     let replaces_partial = block.partial > 0 && replaces_layout;
                     block.apply(patch);
                     if replaces_partial {
@@ -157,10 +162,12 @@ impl App {
                         block.sc = Default::default();
                     }
                     if index < self.committed || replaces_partial {
-                        // Late asynchronous presentation updates use the same bounded,
-                        // debounced history replay as resize/theme changes.
                         self.transcript.invalidate_cache();
-                        self.reflow.invalidated(Instant::now());
+                        if visible_change || replaces_partial {
+                            // Visible committed changes schedule a content reflow; hidden expanded
+                            // updates (e.g. inline output eviction while collapsed) need no redraw.
+                            self.reflow.invalidated(app_now());
+                        }
                     }
                 }
             }

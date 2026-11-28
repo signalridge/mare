@@ -90,17 +90,45 @@ impl App {
         self.held.drain(..).flat_map(|h| h.ready.unwrap_or(h.lines)).collect()
     }
 
+    fn reflow_policy(&self) -> (mare_tui::reflow::ReflowMode, usize) {
+        let cfg = self.host.kernel.config();
+        let mode = cfg
+            .pointer("/terminal/reflow/mode")
+            .and_then(|v| v.as_str())
+            .and_then(mare_tui::reflow::ReflowMode::parse)
+            .unwrap_or_default();
+        let configured_cap = cfg.pointer("/terminal/reflow/max_rows").and_then(|v| v.as_u64()).map(|n| n as usize);
+        let cap = mare_tui::reflow::resolve_max_rows(configured_cap, self.reflow_cap);
+        (mode, cap)
+    }
+
     /// Resize reflow: re-render committed history at the current width from
     /// the in-memory records, clear the terminal's scrollback and screen, and replay all of it
     /// (up to the terminal's row cap). A streaming block's committed part is recomputed from its
     /// committed *source position*, not the old row count.
     pub(in crate::app) fn rebuild_history(&mut self) {
+        self.rebuild_history_with_mode(mare_tui::reflow::RebuildTrigger::Force);
+    }
+
+    /// Debounced rebuild triggered by [`ReflowState::take_due`]: honors `terminal.reflow.mode`
+    /// on width resizes and background content updates, and forces full replay on explicit user
+    /// view toggles (`Ctrl+O`, `/show-reasoning`).
+    pub(in crate::app) fn rebuild_history_from_reflow(&mut self) {
+        self.rebuild_history_with_mode(self.reflow.last_rebuild_trigger());
+    }
+
+    fn rebuild_history_with_mode(&mut self, trigger: mare_tui::reflow::RebuildTrigger) {
+        let force_replay = trigger == mare_tui::reflow::RebuildTrigger::Force;
         if self.transcript.is_open() {
             // Never emit CSI 3J or main-screen history while the alternate-screen overlay is active.
             self.transcript.frame.clear();
-            self.reflow.invalidated(app_now());
+            self.reflow.requeue(trigger, app_now());
             return;
         }
+        let (mode, configured_cap) = self.reflow_policy();
+        let preserve_only = !force_replay && mode == mare_tui::reflow::ReflowMode::Preserve;
+        let visible_tail_cap = self.renderer.visible_history_rows();
+        let cap = if preserve_only { visible_tail_cap } else { configured_cap };
         // the scrollback can't be redrawn: its pictures are waited for, not reserved
         let _images = mare_tui::image::blocking();
         let theme = self.theme();
@@ -122,7 +150,6 @@ impl App {
                 b.partial = n;
             }
         }
-        let cap = self.reflow_cap;
         let show_reasoning = self.show_reasoning;
         let expand_key = self.editor_action_key("toggle-expand");
         let tail_partial = if replay_committed == self.committed
@@ -146,8 +173,10 @@ impl App {
         };
         let mut total_rows = tail_partial.as_ref().map_or(0, |(idx, r)| r.len() + usize::from(*idx > 0));
         let mut chunks: Vec<(usize, Vec<Line>)> = Vec::new();
+        let mut truncated = false;
         for idx in (0..replay_committed).rev() {
             if total_rows >= cap {
+                truncated = true;
                 break;
             }
             // Historical image payloads are materialized only for the current visible tail.
@@ -175,8 +204,14 @@ impl App {
             total_rows += r.len() + usize::from(idx > 0);
             chunks.push((idx, r));
         }
-        let mut rows = Vec::with_capacity(total_rows.min(cap));
-        let mut to_drop = total_rows.saturating_sub(cap);
+        if total_rows > cap {
+            truncated = true;
+        }
+        let preserve_scrollback =
+            preserve_only || (!force_replay && mode == mare_tui::reflow::ReflowMode::Auto && truncated);
+        let target_cap = if preserve_scrollback { visible_tail_cap } else { cap };
+        let mut rows = Vec::with_capacity(total_rows.min(target_cap));
+        let mut to_drop = total_rows.saturating_sub(target_cap);
         for (idx, r) in chunks.into_iter().rev() {
             if idx > 0 {
                 if to_drop > 0 {
@@ -210,10 +245,14 @@ impl App {
                 rows.extend(r);
             }
         }
-        let bytes = self.renderer.replay_bytes(&rows);
+        let bytes = if preserve_scrollback {
+            self.renderer.replay_visible_bytes(&rows)
+        } else {
+            self.renderer.replay_bytes(&rows)
+        };
         self.invalidate_cpr();
         self.sync_position_known();
         mare_tui::out::write(bytes);
-        self.emit("ui/reflow", serde_json::json!({ "rows": rows.len() }));
+        self.emit("ui/reflow", serde_json::json!({ "rows": rows.len(), "preserved": preserve_scrollback }));
     }
 }

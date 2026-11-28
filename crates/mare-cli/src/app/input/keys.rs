@@ -39,7 +39,7 @@ impl App {
                 // scrollback (via debounced reflow) and live blocks.
                 self.expand_all = !self.expand_all;
                 self.transcript.invalidate_cache();
-                self.reflow.invalidated(app_now());
+                self.reflow.force_invalidated(app_now());
                 let mode = if self.expand_all { "expanded" } else { "compact" };
                 self.push_notice_with_id(
                     (format!("Tool output: {mode}"), "info".into(), app_now()),
