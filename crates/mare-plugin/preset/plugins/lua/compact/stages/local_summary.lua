@@ -25,6 +25,17 @@ return function(D)
 		return budget and math.min(n, math.floor(budget.message * cfg.retain_ratio)) or n
 	end
 
+	--- Tier retention budget: attempt 1 honors `retain(n)`; when over a low threshold,
+	--- attempt 2 caps retention to the threshold's `retain_ratio` share before attempt 3 drops the tail.
+	local function tier_retain(n, attempt, scale, threshold, over_target)
+		local kept = math.floor(retain(n) * scale)
+		if attempt == 2 and over_target and threshold then
+			local target_cap = math.floor(math.max(0, threshold - D.overhead()) * cfg.retain_ratio)
+			kept = math.min(kept, target_cap)
+		end
+		return kept
+	end
+
 	--- user messages kept verbatim, newest first: while within `budget` (`recent_user_tokens`, see
 	--- retain); the one that doesn't fit is truncated to what is left, older ones live on in the
 	--- summary only. Candidates are the user messages of the summarized range and those an
@@ -116,10 +127,12 @@ return function(D)
 			and msgs[#msgs].role == "tool_result"
 			and ctx.agent.activity ~= nil
 			and ctx.agent:activity().busy == true
+		local threshold = D.threshold()
+		local over_target = st.over or (estimate(msgs) + D.overhead() > threshold)
 		local attempt = st.local_attempt or 1
 		local scale = attempt == 1 and 1 or (attempt == 2 and 0.5 or 0)
 		local cut = (mid_turn or scale == 0) and #msgs + 1
-			or cut_point(msgs, math.floor(retain(cfg.keep_recent_tokens) * scale))
+			or cut_point(msgs, tier_retain(cfg.keep_recent_tokens, attempt, scale, threshold, over_target))
 		local prev, start = nil, 1
 		while start <= #msgs and (msgs[start].compaction or msgs[start].preserved) do
 			if msgs[start].compaction then
@@ -135,9 +148,10 @@ return function(D)
 			cut = #msgs + 1
 		end
 		if not cut or cut <= 1 then
-			-- Manual /compact preserves the previous no-op when the first retention budget
-			-- contains the whole conversation. Automatic pressure recovery may still shrink it.
-			if st.reason == "manual" and attempt == 1 then
+			-- Manual /compact stays a no-op when the history is under the threshold and fits
+			-- inside the first retention budget; once over the threshold (or in auto / overflow
+			-- recovery), fall back to smaller retention tiers.
+			if st.reason == "manual" and attempt == 1 and not over_target then
 				return nil, "nothing to compact"
 			end
 			if attempt < 3 then
@@ -152,16 +166,16 @@ return function(D)
 			not force_portable_remote
 			and prev
 			and start > #msgs
-			and estimate(msgs) + D.overhead() <= D.threshold() * 0.9
+			and estimate(msgs) + D.overhead() <= threshold * 0.9
 		then
 			return nil, "nothing to compact"
 		end
 		if
 			not force_portable_remote
 			and cut <= start
-			and (not prev or estimate(msgs) + D.overhead() <= D.threshold() * 0.9)
+			and (not prev or estimate(msgs) + D.overhead() <= threshold * 0.9)
 		then
-			if st.reason == "manual" and attempt == 1 then
+			if st.reason == "manual" and attempt == 1 and not over_target then
 				return nil, "nothing to compact"
 			end
 			if not prev and attempt < 3 then
@@ -170,7 +184,7 @@ return function(D)
 			end
 			return nil, "nothing to compact"
 		end
-		if minimum > D.threshold() * 0.9 then
+		if minimum > threshold * 0.9 then
 			st.exhausted = true
 			return nil, "fixed request overhead leaves no room for a summary below the target"
 		end
@@ -184,7 +198,12 @@ return function(D)
 		if attempt == 3 then
 			preview_users = minimal_users(msgs, start, cut)
 		else
-			preview_users = preserve_users(msgs, start, cut, math.floor(retain(cfg.recent_user_tokens) * scale))
+			preview_users = preserve_users(
+				msgs,
+				start,
+				cut,
+				tier_retain(cfg.recent_user_tokens, attempt, scale, threshold, over_target)
+			)
 		end
 		-- Offloading a summarized image can make a preserved user message smaller.
 		-- Until that projection is known, zero is the safe lower bound for its users.
@@ -222,6 +241,8 @@ return function(D)
 			prev = prev,
 			start = start,
 			force_portable_remote = force_portable_remote,
+			threshold = threshold,
+			over_target = over_target,
 		}
 	end
 
@@ -470,7 +491,7 @@ return function(D)
 		local wrapped = SUMMARY_PREFIX .. full .. SUMMARY_SUFFIX
 		-- The last tier may discard the tail, but never the latest user message: retain
 		-- as much of it as fits after the fixed overhead and the actual summary.
-		local user_budget = math.floor(retain(cfg.recent_user_tokens) * scale)
+		local user_budget = tier_retain(cfg.recent_user_tokens, attempt, scale, plan.threshold, plan.over_target)
 		if attempt == 3 then
 			user_budget = math.max(
 				0,

@@ -83,21 +83,28 @@ return function(deps)
 	--- threshold anyway (a summary would break the cache entirely).
 	function stage_impl.prune(st)
 		local msgs = deps.messages()
-		local acc, protect_from = 0, #msgs + 1
-		for i = #msgs, 1, -1 do
-			acc = acc + msg_tokens(msgs[i])
-			if acc > cfg.prune_protect_tokens then
-				break
+		local limit = deps.threshold and deps.threshold() or nil
+		local target_budget = limit and math.max(0, limit - deps.overhead()) or nil
+		local base_protect = cfg.prune_protect_tokens
+		local base_min_saving = cfg.prune_min_saving_tokens
+		local function find_protect_from(protect)
+			local acc, idx = 0, #msgs + 1
+			for i = #msgs, 1, -1 do
+				acc = acc + msg_tokens(msgs[i])
+				if acc > protect then
+					break
+				end
+				idx = i
 			end
-			protect_from = i
+			return idx
 		end
 		local cached = 0
 		if S.svc.usage and usage_current() then
 			cached = (S.svc.usage:totals() or {}).last_cache_read or 0
 		end
-		local function plan(skip_cached)
+		local function plan(skip_cached, from)
 			local map, n, saved, offset = {}, 0, 0, 0
-			for i = 1, protect_from - 1 do
+			for i = 1, from - 1 do
 				local m = msgs[i]
 				offset = offset + msg_tokens(m)
 				-- `m.pruned` only says the content was projected (prune or offload): a result whose
@@ -140,11 +147,42 @@ return function(deps)
 			end
 			return map, n, saved
 		end
-		local map, n, saved = plan(cached > 0)
-		if saved < cfg.prune_min_saving_tokens and cached > 0 and st.over then
-			map, n, saved = plan(false)
+		local function plan_tier(protect, floor, allow_break_cache)
+			local from = find_protect_from(protect)
+			local map, n, saved = plan(cached > 0, from)
+			if saved < floor and cached > 0 and allow_break_cache then
+				map, n, saved = plan(false, from)
+			end
+			return map, n, saved, from
 		end
-		if n == 0 or (saved < cfg.prune_min_saving_tokens and not st.force_prune) then
+		-- Try the configured protection tail and saving floor first; only fall back to
+		-- threshold-scaled tiers if the configured strategy makes no or insufficient progress.
+		local min_saving = base_min_saving
+		local map, n, saved, protect_from = plan_tier(base_protect, base_min_saving, st.over or st.force_prune)
+		local needs_fallback = n == 0 or (saved < min_saving and not st.force_prune)
+		if needs_fallback and (st.over or st.force_prune) and target_budget then
+			local fallback_protect = math.min(base_protect, math.floor(target_budget * 0.5))
+			local fallback_min_saving = math.min(base_min_saving, math.max(1, math.floor(target_budget * 0.25)))
+			if fallback_min_saving < base_min_saving then
+				min_saving = fallback_min_saving
+				map, n, saved, protect_from = plan_tier(base_protect, fallback_min_saving, true)
+				needs_fallback = n == 0 or (saved < min_saving and not st.force_prune)
+			end
+			if needs_fallback and fallback_protect < base_protect then
+				min_saving = fallback_min_saving
+				map, n, saved, protect_from = plan_tier(fallback_protect, fallback_min_saving, true)
+			end
+		end
+		if n == 0 and st.force_prune and protect_from <= #msgs then
+			local relaxed = find_protect_from(math.floor(estimate(msgs) * 0.25))
+			if relaxed > protect_from then
+				map, n, saved = plan(false, relaxed)
+			end
+			if n == 0 then
+				map, n, saved = plan(false, #msgs + 1)
+			end
+		end
+		if n == 0 or (saved < min_saving and not st.force_prune) then
 			return false, n == 0 and "no old tool output to prune" or "pruning would save too little"
 		end
 		local new, before, after = persist_projection(map, n, "prune", msgs)
