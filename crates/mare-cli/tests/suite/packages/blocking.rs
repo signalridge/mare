@@ -463,12 +463,25 @@ async fn undeclared_replacement_plugin_is_not_blamed() {
             "provider-ghost",
             "return { name = 'provider-ghost', inject = { 'llm' }, apply = function() error('ghost sentinel') end }",
         );
+        user_plugin(
+            &env,
+            "wire-readonly",
+            "return { name = 'wire-readonly', inject = { 'llm' }, wires = { 'readonly-wire' },\
+             apply = function(ctx)\
+               ctx.llm:register_wire({\
+                 name = 'readonly-wire', route = 'readonly', path = '/ro', auth = { 'bearer' },\
+                 encode = function() return { method = 'POST', url = 'http://localhost:1/ro', body = {} } end,\
+                 decoder = function() return { event = function() end, finish = function() return {} end } end,\
+               })\
+             end }",
+        );
         std::fs::write(
             env.config_dir().join("init.lua"),
             "mare.setup { model = 'faux/echo',\n\
                providers = {\n\
                  acct2 = { base_url = 'http://localhost:1/v1' },\n\
-                 ant_cfg = { base_url = 'http://localhost:2/v1', wire_api = 'anthropic' },\n\
+                 ant_cfg = { base_url = 'http://localhost:2/v1', wire_api = 'anthropic', no_key = true },\n\
+                 ro_cfg = { base_url = 'http://localhost:3/v1', wire = 'readonly-wire' },\n\
                } }\n\
              mare.plugin('provider-google', { enabled = false })",
         )
@@ -495,10 +508,16 @@ async fn undeclared_replacement_plugin_is_not_blamed() {
             "{acct2_reason}"
         );
 
-        // Config entry on a registered wire without a `provider` factory reports explicit refusal.
+        // Config entry on `anthropic-messages` now resolves cleanly via its data-tier factory.
         exec(&h, "L:set_model('ant_cfg/x', { save = false })").await;
-        let ant_reason = blocked_reason(&h).await.expect("ant_cfg must be unresolved");
-        assert!(ant_reason.contains("wire anthropic-messages does not accept configured endpoints"), "{ant_reason}");
+        let ant_resolved: bool = eval(&h, "return L:resolve('ant_cfg/x') ~= nil").await;
+        assert!(ant_resolved, "ant_cfg/x must resolve on anthropic-messages");
+        assert_eq!(blocked_reason(&h).await, None, "ant_cfg with no_key=true must not be blocked");
+
+        // Config entry on a registered wire without a `provider` factory still reports explicit refusal.
+        exec(&h, "L:set_model('ro_cfg/x', { save = false })").await;
+        let ro_reason = blocked_reason(&h).await.expect("ro_cfg must be unresolved");
+        assert!(ro_reason.contains("wire readonly-wire does not accept configured endpoints"), "{ro_reason}");
 
         // Disabled built-in provider plugin reports disabled with plugin name.
         exec(&h, "L:set_model('google/gemini-2.5-pro', { save = false })").await;

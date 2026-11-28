@@ -1,6 +1,6 @@
 # 模型与 provider
 
-如何登录 provider、选择模型和推理强度、覆盖模型元数据，以及添加与 OpenAI 兼容的端点。
+如何登录 provider、选择模型和推理强度、覆盖模型元数据，以及添加自定义 provider。
 
 模型以 `provider/id` 命名，例如 `openai/gpt-6.1-terra`。provider 是内置插件；每个 provider 注册自己的模型，有些在你登录后还会获取实时的模型列表。
 
@@ -132,14 +132,25 @@ mare.setup {
 
 常用字段有 `name`、`context_window`、`max_output`、`reasoning`、`efforts`、`input`（列表，例如 `{ "text", "image" }`）和 `cost`（`input`、`output`、`cache_read`，每百万 token）。其他方面未知的模型，在你设置之前，上下文窗口为 128,000 个 token，最大输出为 16,384。上下文窗口很重要：[自动压缩](sessions.md)由它触发。
 
-## 添加与 OpenAI 兼容的 provider
+## 添加自定义 provider
 
-任何支持 Chat Completions API 的服务器都可以用 `mare.provider` 添加。不是内置 provider 的名称加上 `base_url`，就定义了一个新的 provider。同一服务的两个账号就是两个名称。
+任何支持 mare 内置协议线路（wire）的服务器都可以用 `mare.provider` 添加。不是内置 provider 的名称加上 `base_url`，就定义了一个新的 provider。同一服务的两个账号就是两个名称。
+
+通过 `wire_api` 选择协议（默认 `"chat"`）：
+
+| `wire_api` | 线路名称（`wire`） | 请求端点 | 原生认证请求头 |
+| --- | --- | --- | --- |
+| `"chat"`（默认） | `openai-chat` | `<base_url>/chat/completions` | `Authorization: Bearer <key>` |
+| `"responses"` | `openai-responses` | `<base_url>/responses` | `Authorization: Bearer <key>` |
+| `"anthropic"` | `anthropic-messages` | `<base_url>/v1/messages`（若 `base_url` 已以 `/v1` 结尾则为 `<base_url>/messages`） | `x-api-key: <key>` + `anthropic-version` |
+| `"google"` | `google-generate` | `<base_url>/models/<model>:streamGenerateContent?alt=sse` | `x-goog-api-key: <key>` |
+
+示例——OpenAI Chat Completions 端点（默认 `wire_api = "chat"`）：
 
 ```lua
 mare.provider("lab", {
   base_url = "http://10.0.0.5:8080/v1",
-  api_key = "LAB_API_KEY",            -- an environment variable name, a { cmd = {...} } helper, or a literal
+  api_key = "LAB_API_KEY",            -- 环境变量名、{ cmd = {...} } 辅助命令，或字面量
   default_model = "qwen3",
   default_context = 131072,
   models = {
@@ -148,11 +159,27 @@ mare.provider("lab", {
 })
 ```
 
-```sh
-mare -m lab/qwen3
+示例——Anthropic Messages 端点（`wire_api = "anthropic"`）：
+
+```lua
+mare.provider("claude-proxy", {
+  wire_api = "anthropic",
+  base_url = "https://gateway.example.com/anthropic",
+  api_key = "CLAUDE_PROXY_API_KEY",
+  headers = { ["x-team"] = "infra" },
+  default_model = "claude-sonnet-5-5",
+  models = {
+    { model_id = "claude-sonnet-5-5", context_window = 200000, max_output = 32000, reasoning = true, adaptive = true },
+  },
+})
 ```
 
-有用的字段：`no_key = true` 用于无需认证的服务器，`list_models` 用于读取服务器的模型列表，`dialect`（`"deepseek"`、`"openrouter"`、`"kimi"`、`"cerebras"`、`"zai"`、`"together"`、`"qwen"` 等）按声明选择协议特性而不再依赖 provider 名称，`effort_param`（`"reasoning_effort"` 或 `"openrouter"`）、`reasoning_format`、`needs_reasoning_placeholder`、`key_prefixes`、`models_dev`（models.dev 的厂商 ID，或设为 `false` 禁用富化），还有 `headers`、`query_params`、`retries`、`stream_idle_timeout_ms`、`connect_timeout_ms`、`drop_fields`、`transport` 和 `proxy`。更窄的显式字段（`reasoning_format`、`effort_param`、`cache_control_format`、`needs_reasoning_placeholder`）优先于 `dialect`，其次才按主机名或模型 ID 探测。`wire_api = "responses"`（或 `wire = "openai-responses"`）会把数据条目迁到 OpenAI Responses 线路。
+```sh
+mare -m lab/qwen3
+mare -m claude-proxy/claude-sonnet-5-5
+```
+
+四种协议通用的字段：`no_key = true` 用于无需认证的服务器，`list_models = false` 禁用自动拉取模型列表（`GET /models` 或 `GET /v1/models`），以及 `api_key`、`api_key_env`、`default_model`、`default_context`、`default_max_output`、`default_reasoning`、`key_prefixes`、`models_dev`（models.dev 的厂商 ID，或设为 `false` 禁用富化）、`headers`、`query_params`、`retries`、`stream_idle_timeout_ms`、`connect_timeout_ms`、`drop_fields`、`transport` 和 `proxy`。针对 `anthropic`（`anthropic-messages`）端点，还支持 provider 级的 `auth`（`"x-api-key"` 或 `"bearer"`）、`replay_unsigned_reasoning`、`fine_grained_tool_streaming`、`reasoning_budgets`、`reasoning_display`、`supports_long_cache_retention` 以及需显式开启的 `tool_update = "addition_only"`（自定义端点默认关闭）。针对 `chat`（`openai-chat`）端点，还可用 `dialect`（`"deepseek"`、`"openrouter"`、`"kimi"`、`"cerebras"`、`"zai"`、`"together"`、`"qwen"` 等）、`effort_param`（`"reasoning_effort"` 或 `"openrouter"`）、`reasoning_format`、`cache_control_format` 和 `needs_reasoning_placeholder` 按声明选择协议特性而不再依赖 provider 名称；更窄的显式字段优先于 `dialect`，其次才按主机名或模型 ID 探测。
 
 ### 预设叠加与区域端点
 

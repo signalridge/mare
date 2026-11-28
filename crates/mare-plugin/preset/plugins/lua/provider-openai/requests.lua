@@ -825,7 +825,10 @@ return function(D)
 		local raw_key = not cfg_has_key and type(entry.api_key) == "string" and entry.api_key ~= "" and entry.api_key
 			or nil
 		local hosted = normalize_hosted_tools(entry, false)
-		local function api_key()
+		local function custom_api_key(eff)
+			if eff and eff.no_key then
+				return nil
+			end
 			return raw_key or llm:api_key(name, envs)
 		end
 		local function live_entry()
@@ -835,9 +838,13 @@ return function(D)
 			end
 			return entry
 		end
+		local function live_base_url(eff)
+			local raw = llm:base_url(name, (eff and eff.base_url) or entry.base_url)
+			return tostring(raw or ""):gsub("/+$", "")
+		end
 		local function custom_endpoint(_req)
 			local eff = live_entry()
-			local key = api_key()
+			local key = custom_api_key(eff)
 			if not key and not eff.no_key then
 				error({
 					message = ("%s is not configured: run /login %s or set %s"):format(
@@ -852,7 +859,7 @@ return function(D)
 			for k, v in pairs(eff.headers or {}) do
 				merged_headers[k] = v
 			end
-			local base = llm:base_url(name, eff.base_url or entry.base_url)
+			local base = live_base_url(eff)
 			return {
 				provider = name,
 				label = eff.label or name,
@@ -874,7 +881,7 @@ return function(D)
 			wire = "openai-responses",
 			endpoint = custom_endpoint,
 			warm_url = function()
-				return llm:base_url(name, entry.base_url)
+				return live_base_url(live_entry())
 			end,
 			stream = function(req, sink)
 				return M.stream(custom_endpoint, req, sink)
@@ -895,13 +902,35 @@ return function(D)
 				return entry.no_key or raw_key ~= nil or llm:has_api_key(name, envs)
 			end,
 			catalog_target = entry.list_models ~= false and function()
+				local eff = live_entry()
 				return {
-					url = mare.http.build_url(llm:base_url(name, entry.base_url) .. "/models"),
+					url = mare.http.build_url(live_base_url(eff) .. "/models"),
+					headers = eff.headers,
+					query_params = eff.query_params,
 				}
 			end or nil,
-			catalog = entry.list_models ~= false and openai_catalog_descriptor(name, function()
-				return llm:base_url(name, entry.base_url)
-			end, api_key, false) or nil,
+			catalog_scope = entry.list_models ~= false and function()
+				if live_entry().no_key then
+					return "no_key"
+				end
+				return raw_key ~= nil and ("api_key:" .. mare.crypto.sha256(raw_key)) or nil
+			end or nil,
+			catalog = entry.list_models ~= false and function(for_fetch)
+				local eff = live_entry()
+				local headers = {}
+				for k, v in pairs(eff.headers or {}) do
+					headers[k] = v
+				end
+				return {
+					label = ("%s GET /models"):format(name),
+					url = live_base_url(eff) .. "/models",
+					headers = headers,
+					auth = "bearer",
+					key = for_fetch and custom_api_key(eff) or nil,
+					no_key = eff.no_key,
+					decode = decode_openai_models(name),
+				}
+			end or nil,
 		}
 	end
 

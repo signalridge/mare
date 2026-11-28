@@ -1,6 +1,6 @@
 # Models and providers
 
-How to sign in to a provider, pick a model and a reasoning effort, override model metadata, and add an OpenAI-compatible endpoint.
+How to sign in to a provider, pick a model and a reasoning effort, override model metadata, and add a custom provider.
 
 A model is named `provider/id`, for example `openai/gpt-6.1-terra`. The providers are built-in plugins; each registers its models, and some also fetch a live model list once you are signed in.
 
@@ -132,9 +132,20 @@ mare.setup {
 
 Common fields are `name`, `context_window`, `max_output`, `reasoning`, `efforts`, `input` (a list such as `{ "text", "image" }`) and `cost` (`input`, `output`, `cache_read`, per million tokens). A model that is not otherwise known gets a 128,000-token context window and 16,384 maximum output until you set them. The context window matters: [automatic compaction](sessions.md) triggers from it.
 
-## Adding an OpenAI-compatible provider
+## Adding a custom provider
 
-Any server that speaks the Chat Completions API can be added with `mare.provider`. A name that is not a built-in provider, plus a `base_url`, defines a new provider. Two accounts of one service are two names.
+Any server that speaks one of mare's built-in wire protocols can be added with `mare.provider`. A name that is not a built-in provider, plus a `base_url`, defines a new provider. Two accounts of one service are two names.
+
+Select the protocol with `wire_api` (defaults to `"chat"`):
+
+| `wire_api` | Wire name (`wire`) | Request endpoint | Native authentication header |
+| --- | --- | --- | --- |
+| `"chat"` (default) | `openai-chat` | `<base_url>/chat/completions` | `Authorization: Bearer <key>` |
+| `"responses"` | `openai-responses` | `<base_url>/responses` | `Authorization: Bearer <key>` |
+| `"anthropic"` | `anthropic-messages` | `<base_url>/v1/messages` (or `<base_url>/messages` if `base_url` already ends in `/v1`) | `x-api-key: <key>` + `anthropic-version` |
+| `"google"` | `google-generate` | `<base_url>/models/<model>:streamGenerateContent?alt=sse` | `x-goog-api-key: <key>` |
+
+Example — an OpenAI Chat Completions endpoint (`wire_api = "chat"`, the default):
 
 ```lua
 mare.provider("lab", {
@@ -148,11 +159,27 @@ mare.provider("lab", {
 })
 ```
 
-```sh
-mare -m lab/qwen3
+Example — an Anthropic Messages endpoint (`wire_api = "anthropic"`):
+
+```lua
+mare.provider("claude-proxy", {
+  wire_api = "anthropic",
+  base_url = "https://gateway.example.com/anthropic",
+  api_key = "CLAUDE_PROXY_API_KEY",
+  headers = { ["x-team"] = "infra" },
+  default_model = "claude-sonnet-5-5",
+  models = {
+    { model_id = "claude-sonnet-5-5", context_window = 200000, max_output = 32000, reasoning = true, adaptive = true },
+  },
+})
 ```
 
-Useful fields: `no_key = true` for a server without authentication, `list_models` to read the server's model list, `dialect` (`"deepseek"`, `"openrouter"`, `"kimi"`, `"cerebras"`, `"zai"`, `"together"`, `"qwen"`, …) to select protocol quirks without tying behaviour to the provider name, `effort_param` (`"reasoning_effort"` or `"openrouter"`), `reasoning_format`, `needs_reasoning_placeholder`, `key_prefixes`, `models_dev` (a models.dev provider id, or `false` to disable enrichment), `headers`, `query_params`, `retries`, `stream_idle_timeout_ms`, `connect_timeout_ms`, `drop_fields`, `transport` and `proxy`. Narrower fields (`reasoning_format`, `effort_param`, `cache_control_format`, `needs_reasoning_placeholder`) take precedence over `dialect`, which in turn takes precedence over host and model-id detection. `wire_api = "responses"` (or `wire = "openai-responses"`) moves a data-entry provider to the OpenAI Responses wire.
+```sh
+mare -m lab/qwen3
+mare -m claude-proxy/claude-sonnet-5-5
+```
+
+Common fields across all four wires: `no_key = true` for a server without authentication, `list_models = false` to disable catalog fetches (`GET /models` or `GET /v1/models`), `api_key` / `api_key_env`, `default_model`, `default_context`, `default_max_output`, `default_reasoning`, `key_prefixes`, `models_dev` (a models.dev provider id, or `false` to disable enrichment), `headers`, `query_params`, `retries`, `stream_idle_timeout_ms`, `connect_timeout_ms`, `drop_fields`, `transport` and `proxy`. For `anthropic` (`anthropic-messages`) endpoints, provider-level `auth` (`"x-api-key"` or `"bearer"`), `replay_unsigned_reasoning`, `fine_grained_tool_streaming`, `reasoning_budgets`, `reasoning_display`, `supports_long_cache_retention` and explicit `tool_update = "addition_only"` (off by default on custom endpoints) are also supported. For `chat` (`openai-chat`) endpoints, `dialect` (`"deepseek"`, `"openrouter"`, `"kimi"`, `"cerebras"`, `"zai"`, `"together"`, `"qwen"`, …), `effort_param` (`"reasoning_effort"` or `"openrouter"`), `reasoning_format`, `cache_control_format` and `needs_reasoning_placeholder` select protocol quirks without tying behaviour to the provider name; narrower fields take precedence over `dialect`, which in turn takes precedence over host and model-id detection.
 
 ### Overlays and regional endpoints
 

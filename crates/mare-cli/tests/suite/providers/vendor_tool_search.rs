@@ -5,8 +5,9 @@
 //!   `tool_result` batch.
 //! - Non-Kimi dialects and Kimi K2 models (without `defer_loading`) never emit tool-bearing
 //!   system messages.
-//! - DeepSeek preset stays on `openai-chat` without `defer_loading`; `anthropic-messages` does not
-//!   accept data-tier configured endpoints.
+//! - DeepSeek preset stays on `openai-chat` without `defer_loading`; third-party
+//!   `anthropic-messages` data-tier providers register cleanly without implicitly enabling
+//!   `tool_update`.
 
 use super::*;
 use crate::suite::kernel::write_plugin;
@@ -525,7 +526,7 @@ async fn non_kimi_and_non_deferred_kimi_do_not_emit_system_tools_messages() {
 }
 
 #[tokio::test]
-async fn deepseek_stays_on_openai_chat_and_anthropic_wire_rejects_data_provider() {
+async fn deepseek_stays_on_openai_chat_and_anthropic_wire_accepts_data_provider() {
     local(async {
         let mut env = TestEnv::new().await;
         env.set_var("DEEPSEEK_API_KEY", "test-deepseek");
@@ -551,29 +552,45 @@ async fn deepseek_stays_on_openai_chat_and_anthropic_wire_rejects_data_provider(
             .await;
         global(&h, "LLM", h.service_table("llm").unwrap());
 
-        let (ds_chat_defer, ds_reasoner_defer, ds_wire, da_state, da_reason): (bool, bool, String, String, String) =
-            eval(
-                &h,
-                r#"
+        let (ds_chat_defer, ds_reasoner_defer, ds_wire, da_state, da_wire, da_route, da_model_ok, da_defer): (
+            bool,
+            bool,
+            String,
+            String,
+            String,
+            String,
+            bool,
+            bool,
+        ) = eval(
+            &h,
+            r#"
                 local dc = assert(LLM:resolve("deepseek/deepseek-chat"))
                 local dr = assert(LLM:resolve("deepseek/deepseek-reasoner"))
                 local dp = assert(LLM:provider("deepseek"))
                 local st = require("llm.directory").status("deepseek-anthropic") or {}
+                local dap = assert(LLM:provider("deepseek-anthropic"))
+                local dam = LLM:resolve("deepseek-anthropic/deepseek-flash")
                 return dc.tool_update == "addition_only",
                   dr.tool_update == "addition_only",
                   tostring(dp.wire or ""),
                   tostring(st.state or ""),
-                  tostring(st.reason or "")
+                  tostring(dap.wire or ""),
+                  tostring(dap.route or ""),
+                  dam ~= nil,
+                  dam ~= nil and dam.tool_update == "addition_only"
                 "#,
-            )
-            .await;
+        )
+        .await;
         h.shutdown().await;
 
         assert!(!ds_chat_defer, "deepseek-chat on openai-chat must not enable tool_update");
         assert!(!ds_reasoner_defer, "deepseek-reasoner on openai-chat must not enable tool_update");
         assert_eq!(ds_wire, "openai-chat");
-        assert_eq!(da_state, "unresolved", "anthropic-messages has no data-tier provider factory yet");
-        assert!(da_reason.contains("does not accept configured endpoints"), "unexpected status reason: {da_reason}");
+        assert_eq!(da_state, "registered", "anthropic-messages must accept data-tier configured endpoints");
+        assert_eq!(da_wire, "anthropic-messages");
+        assert_eq!(da_route, "anthropic");
+        assert!(da_model_ok, "deepseek-anthropic/deepseek-flash must resolve");
+        assert!(!da_defer, "third-party anthropic-messages data providers must not implicitly enable tool_update");
     })
     .await
 }
