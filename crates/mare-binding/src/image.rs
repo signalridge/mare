@@ -49,6 +49,38 @@ pub struct Encoded {
     pub height: u32,
 }
 
+pub struct ValidatedImage {
+    pub data: String,
+    pub mime: &'static str,
+}
+
+/// Validate base64-encoded image bytes against magic bytes and bounded decode, returning the
+/// trimmed base64 alongside the real detected MIME type (`image/png`, `image/jpeg`, `image/gif`,
+/// or `image/webp`).
+pub fn validate_base64(data_b64: &str) -> Result<ValidatedImage, String> {
+    let trimmed = data_b64.trim();
+    if trimmed.is_empty() {
+        return Err("empty image data".into());
+    }
+    if trimmed.len() > MAX_INPUT_BYTES.div_ceil(3) * 4 + 4 {
+        return Err(format!("image payload exceeds {MAX_INPUT_BYTES} byte limit"));
+    }
+    let bytes = STANDARD.decode(trimmed).map_err(|e| format!("invalid base64 image data: {e}"))?;
+    if bytes.len() > MAX_INPUT_BYTES {
+        return Err(format!("image payload exceeds {MAX_INPUT_BYTES} byte limit"));
+    }
+    let format = image::guess_format(&bytes).map_err(|e| format!("unrecognized image format: {e}"))?;
+    let mime = match format {
+        ImageFormat::Png => "image/png",
+        ImageFormat::Jpeg => "image/jpeg",
+        ImageFormat::Gif => "image/gif",
+        ImageFormat::WebP => "image/webp",
+        other => return Err(format!("unsupported image format {other:?}; expected PNG, JPEG, GIF, or WebP")),
+    };
+    decode_limited(&bytes).map_err(|e| format!("corrupt or undecodable image: {e}"))?;
+    Ok(ValidatedImage { data: trimmed.to_string(), mime })
+}
+
 pub fn is_image_path(p: &Path) -> bool {
     p.extension().and_then(|e| e.to_str()).is_some_and(|e| IMAGE_EXTS.contains(&e.to_ascii_lowercase().as_str()))
 }
@@ -304,5 +336,27 @@ mod tests {
         assert!(noisy_bytes.len() <= 1_500_000);
         let noisy_img = image::load_from_memory(&noisy_bytes).unwrap();
         assert_eq!((noisy_img.width(), noisy_img.height()), (2000, 2000));
+    }
+
+    #[test]
+    fn validate_base64_detects_format_and_rejects_corrupt_pixels() {
+        let valid_b64 = encode_rgba_png_b64(4, 4, false);
+        let validated = validate_base64(&format!("  {valid_b64}\n")).expect("valid PNG must pass validate_base64");
+        assert_eq!(validated.mime, "image/png");
+        assert_eq!(validated.data, valid_b64);
+
+        // Keep PNG signature + valid IHDR (first 33 bytes), corrupt IDAT pixel bytes.
+        let mut corrupt = STANDARD.decode(&valid_b64).unwrap();
+        assert!(corrupt.len() > 45);
+        for b in &mut corrupt[37..45] {
+            *b ^= 0xff;
+        }
+        let corrupt_b64 = STANDARD.encode(&corrupt);
+        assert!(
+            validate_base64(&corrupt_b64).is_err(),
+            "PNG with valid header/dimensions but corrupt pixel data must be rejected"
+        );
+        assert!(validate_base64("SGVsbG8=").is_err(), "non-image bytes must be rejected");
+        assert!(validate_base64(&encode_rgba_png_b64(4500, 4500, false)).is_err(), "over-pixel PNG must be rejected");
     }
 }
