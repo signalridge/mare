@@ -263,7 +263,7 @@ async fn missing_credentials_say_how_to_log_in_headless() {
             r#"local function err(ref)
                  return LLM:stream({ model = LLM:resolve(ref), messages = { { role = "user", content = { { type = "text", text = "hi" } } } } }).error
                end
-               return err("google/gemini-2.5-pro"), err("anthropic/claude-sonnet-5-5")"#,
+               return err("google/gemini-4-argon"), err("anthropic/claude-sonnet-5-5")"#,
         )
         .await;
         assert!(g.contains("`mare login google` or set GEMINI_API_KEY"), "{g}");

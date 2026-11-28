@@ -341,7 +341,7 @@ return {
 			stream = stream,
 			-- Offline fallback seeds keep only fields absent from the bundled models.dev snapshot
 			-- (thinkingLevel vs thinkingBudget mode, effort lists, default_effort); names, limits,
-			-- modalities, reasoning flags and pricing come from preset/models_dev.json.gz (MIT).
+			-- modalities, reasoning flags and pricing come from preset/resources/models_dev.json.gz (MIT).
 			models = {
 				{
 					model_id = "gemini-4-argon",

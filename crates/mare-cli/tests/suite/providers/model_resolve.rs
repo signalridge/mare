@@ -464,7 +464,13 @@ async fn effort_sent_for_kimi_hidden_for_unmapped_provider_and_invalid_format_re
             &server,
             json!({
                 "providers": {
-                    "kimi": { "base_url": format!("{}/kimi", server.base) },
+                    "kimi": {
+                        "base_url": format!("{}/kimi", server.base),
+                        "models": [
+                            { "model_id": "kimi-k3", "reasoning": true, "efforts": ["low", "high", "max"] },
+                            { "model_id": "kimi-k2-thinking", "reasoning": true }
+                        ]
+                    },
                     "kimi-code": { "base_url": format!("{}/kimi-code", server.base) },
                     "groq": {
                         "wire": "openai-chat",

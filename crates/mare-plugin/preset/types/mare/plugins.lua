@@ -178,8 +178,13 @@ function mare.plugins.set_enabled(name, on, source) end
 function mare.plugins.fetch_catalog() end
 ---@return string text mare's NEWS.md
 function mare.plugins.mare_news() end
----@return string json bundled trimmed models.dev catalog snapshot JSON
-function mare.plugins.bundled_models_dev() end
+--- Read a UTF-8 read-only resource from an installed package's `resources/<path>` directory
+--- (in load order, or scoped to `opts.package`), falling back to built-in `preset/resources/<path>`.
+--- Files ending in `.gz` are transparently gunzipped. Returns `nil` when not found.
+---@param path string relative path inside `resources/` (no `..` or leading `/`)
+---@param opts? {package?: string}
+---@return string? text
+function mare.plugins.read_resource(path, opts) end
 --- Format version for `state/news.json`.
 ---@type integer
 mare.plugins.news_version = 1

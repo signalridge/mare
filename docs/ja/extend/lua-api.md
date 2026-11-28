@@ -1084,6 +1084,7 @@
 | `mare.plugins.set_enabled(name, on, source)` |  |
 | `mare.plugins.fetch_catalog()` |  |
 | `mare.plugins.mare_news()` |  |
+| `mare.plugins.read_resource(path, opts)` | Read a UTF-8 read-only resource from an installed package's `resources/<path>` directory (in load order, or scoped to `opts.package`), falling back to built-in `preset/resources/<path>`. Files ending in `.gz` are transparently gunzipped. Returns `nil` when not found. |
 | `mare.plugins.dirs(kind)` | The installed packages' `skills/`, `prompts/`, `themes/` or `types/` directories (or custom paths declared in `mare-plugin.toml`, or package roots when `kind` is omitted), in load order (`context` reads skills and prompts, `theme-default` reads themes). Empty under `--no-user-plugins` (`mare.no_user_plugins`): no package loads, nor its content. |
 
 ## mare.policy

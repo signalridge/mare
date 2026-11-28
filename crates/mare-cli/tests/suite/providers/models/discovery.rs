@@ -275,14 +275,14 @@ async fn chatgpt_model_discovery_refreshes_oauth_degrades_gracefully_and_guards_
             )
             .await;
 
-            let (err_msg, has_cached, has_static): (String, bool, bool) = eval(
+            let (err_msg, has_cached, pruned_by_cache): (String, bool, bool) = eval(
                 &h,
                 r#"
 mare.fs.write(mare.paths.auth, mare.json.encode({ version = 1,
   ["openai-codex"] = { type = "oauth", access = "stale-secret-tok", refresh = "old-secret-ref", expires = 0, account_id = "acct-secret-1" }
 }), { mode = 384 })
 local out = LLM:refresh_catalog({ name = "openai", force = true })
-return tostring(out.openai), LLM:resolve("openai/cached-codex") ~= nil, LLM:resolve("openai/gpt-6.1-terra") ~= nil
+return tostring(out.openai), LLM:resolve("openai/cached-codex") ~= nil, LLM:resolve("openai/gpt-6.1-terra") == nil
 "#,
             )
             .await;
@@ -292,12 +292,16 @@ return tostring(out.openai), LLM:resolve("openai/cached-codex") ~= nil, LLM:reso
                 assert!(!err_msg.contains(secret), "error leaked credential {secret}: {err_msg}");
             }
             assert!(has_cached, "cached model must survive failed refresh");
-            assert!(has_static, "static model must survive failed refresh");
+            assert!(pruned_by_cache, "non-empty cached live listing must prune omitted built-in seed");
 
             let req = server.requests().into_iter().find(|r| r.path.starts_with("/codex/codex/models")).unwrap();
             assert_eq!(req.header("authorization"), Some("Bearer fresh-secret-tok"), "must refresh expired OAuth token");
             let cache = std::fs::read_to_string(dir.join("openai.json")).unwrap();
             assert!(cache.contains("cached-codex"), "cache must not be wiped on error: {cache}");
+            std::fs::remove_file(dir.join("openai.json")).unwrap();
+            let restored_after_clear: bool =
+                eval(&h, r#"LLM:invalidate_catalog("openai"); return LLM:resolve("openai/gpt-6.1-terra") ~= nil"#).await;
+            assert!(restored_after_clear, "static seed must be restored once cache is cleared");
             h.shutdown().await;
         }
 
@@ -1316,7 +1320,7 @@ async fn live_models_endpoint_is_authoritative_over_static_seeds_with_offline_fa
                 Resp::status(500, r#"{"error":"offline"}"#),
                 Resp::status(200, r#"{"object":"list","data":[{"id":"deepseek-flash"},{"id":"deepseek-v5-live"}]}"#),
                 Resp::status(200, r#"{"object":"list","data":[]}"#),
-                Resp::status(200, r#"{"object":"list","data":[{"id":"deepseek-v5-only"}]}"#),
+                Resp::status(200, r#"{"object":"list","data":[{"id":"deepseek-v5-only"},{"id":"deepseek-a-second"}]}"#),
             ],
         );
         server.route("/myproxy/models", vec![Resp::status(200, r#"{"object":"list","data":[{"id":"server-only"}]}"#)]);
@@ -1435,10 +1439,10 @@ async fn live_models_endpoint_is_authoritative_over_static_seeds_with_offline_fa
             "curated static + bundled models.dev metadata must merge: {v}"
         );
         assert_eq!(v["flash_ctx"], 1_048_576, "{v}");
-        assert_eq!(v["only_ids"], json!(["deepseek-v5-only"]), "{v}");
+        assert_eq!(v["only_ids"], json!(["deepseek-a-second", "deepseek-v5-only"]), "{v}");
         assert_eq!(
-            v["current_ref"], "deepseek/deepseek-flash",
-            "LLM:current() must keep provider default_model rather than falling back alphabetically (P7): {v}"
+            v["current_ref"], "deepseek/deepseek-v5-only",
+            "LLM:current() auto-default must fall back to the first live-listed model when static default_model was pruned: {v}"
         );
         assert_eq!(
             v["after_logout_ids"],
@@ -1677,6 +1681,26 @@ async fn bundled_models_dev_snapshot_hydrates_seeds_prefers_limit_input_and_resp
                 .await;
         assert_eq!(fb_name, "GPT-6.2 Sol");
         assert_eq!(fb_ctx, 922_000, "corrupt disk models.dev.json must fall back to bundled snapshot");
+
+        // 4. Generic read_resource API reads built-in .gz assets, rejects path traversal, and returns nil when missing.
+        let (has_mdev, missing_nil, trav_ok, no_legacy): (bool, bool, bool, bool) = eval(
+            &h3,
+            r#"
+            local raw = mare.plugins.read_resource("models_dev.json.gz")
+            local dec = type(raw) == "string" and mare.json.decode(raw) or nil
+            local missing = mare.plugins.read_resource("no-such-asset.json")
+            local ok_trav = pcall(mare.plugins.read_resource, "../NEWS.md")
+            return type(dec) == "table" and type(dec.providers) == "table",
+                missing == nil,
+                ok_trav,
+                mare.plugins.bundled_models_dev == nil
+            "#,
+        )
+        .await;
+        assert!(has_mdev, "mare.plugins.read_resource must read built-in models_dev.json.gz");
+        assert!(missing_nil, "mare.plugins.read_resource must return nil for unknown resource");
+        assert!(!trav_ok, "mare.plugins.read_resource must reject path traversal");
+        assert!(no_legacy, "dedicated mare.plugins.bundled_models_dev binding must be removed");
         h3.shutdown().await;
     })
     .await;

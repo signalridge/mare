@@ -22,7 +22,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 COMPAT_PATH = ROOT / "crates/mare-plugin/preset/plugins/provider-openai-compat.lua"
-SNAPSHOT_PATH = ROOT / "crates/mare-plugin/preset/models_dev.json.gz"
+SNAPSHOT_PATH = ROOT / "crates/mare-plugin/preset/resources/models_dev.json.gz"
 STANDALONE_PROVIDERS: tuple[tuple[str, Path, str], ...] = (
     ("anthropic", ROOT / "crates/mare-plugin/preset/plugins/provider-anthropic.lua", "anthropic"),
     ("google", ROOT / "crates/mare-plugin/preset/plugins/provider-google.lua", "google"),

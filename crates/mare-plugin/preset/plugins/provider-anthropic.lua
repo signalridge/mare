@@ -478,7 +478,7 @@ return {
 			stream = stream,
 			-- Offline fallback seeds keep only fields absent from the bundled models.dev snapshot
 			-- (adaptive thinking mode, effort lists, default_effort); names, limits, modalities,
-			-- reasoning flags and pricing are hydrated from preset/models_dev.json.gz (MIT).
+			-- reasoning flags and pricing are hydrated from preset/resources/models_dev.json.gz (MIT).
 			models = {
 				{
 					model_id = "claude-fable-5-2",

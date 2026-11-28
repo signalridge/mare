@@ -7,7 +7,7 @@ local EFFORTS = { "low", "medium", "high" }
 local PRESETS = {
 	-- Offline fallback seeds keep only fields absent from the bundled models.dev snapshot
 	-- (effort lists, default_effort, effort_map, tool_update); names, limits, modalities,
-	-- reasoning flags and pricing are hydrated from preset/models_dev.json.gz (MIT).
+	-- reasoning flags and pricing are hydrated from preset/resources/models_dev.json.gz (MIT).
 	deepseek = {
 		label = "DeepSeek",
 		wire = "openai-responses",

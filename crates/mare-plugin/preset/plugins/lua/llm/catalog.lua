@@ -378,10 +378,10 @@ return function(D)
 			return bundled_mem
 		end
 		bundled_tried = true
-		if not (mare.plugins and type(mare.plugins.bundled_models_dev) == "function") then
+		if not (mare.plugins and type(mare.plugins.read_resource) == "function") then
 			return nil
 		end
-		local ok_raw, raw = pcall(mare.plugins.bundled_models_dev)
+		local ok_raw, raw = pcall(mare.plugins.read_resource, "models_dev.json.gz")
 		if not ok_raw or type(raw) ~= "string" or raw == "" then
 			return nil
 		end
@@ -708,11 +708,12 @@ return function(D)
 			end
 		end
 		local wfields = wire_model_fields(p)
-		for _, l in ipairs(list or {}) do
+		for idx, l in ipairs(list or {}) do
 			local ref = type(l) == "table" and type(l.id) == "string" and (p.name .. "/" .. l.id)
 			if ref and static_models[ref] then
 				local prev = models[ref]
 				local merged = merge_static_capabilities(p, static_models[ref], l, pm and pm[l.id])
+				merged.listed_index = idx
 				if model_changed(prev, merged) then
 					changed = changed + 1
 				end
@@ -746,6 +747,7 @@ return function(D)
 					provider = p.name,
 					ref = ref,
 					listed = true,
+					listed_index = idx,
 					hidden = l.hidden == true or nil,
 					context_window = listed_ctx or p.default_context or 128000,
 					max_output = tonumber(l.max_output) or p.default_max_output or 16384,

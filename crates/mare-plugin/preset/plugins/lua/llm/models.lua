@@ -645,6 +645,28 @@ return function(D)
 		return (resolve_ref_hydrated(caller, ref))
 	end
 
+	local function first_available_provider_model(p)
+		local best, best_idx
+		for _, m in pairs(models) do
+			if
+				m.provider == p.name
+				and not m.hidden
+				and not m.unavailable
+				and (not p.unavailable_for or not p.unavailable_for(m))
+			then
+				local idx = tonumber(m.listed_index)
+				if not best then
+					best, best_idx = m, idx
+				elseif idx and (not best_idx or idx < best_idx) then
+					best, best_idx = m, idx
+				elseif not idx and not best_idx and m.ref < best.ref then
+					best = m
+				end
+			end
+		end
+		return best
+	end
+
 	function llm.current(self, caller)
 		-- Only auto-select a provider default when no explicit model was specified.
 		if type(state.model) == "string" and state.model ~= "" then
@@ -653,12 +675,18 @@ return function(D)
 		if not D.startup_done then
 			return nil
 		end
-		-- fall back to the first provider that reports being configured
+		-- fall back to the first provider that reports being configured: prefer its static
+		-- default_model when still present in the catalog, else fall back to its first available
+		-- listed model (preserving endpoint listing order).
 		for _, p in ipairs(all_providers()) do
-			if p.default_model and (not p.is_configured or p.is_configured()) then
-				local m = self:resolve(caller, p.name .. "/" .. p.default_model)
+			if not p.is_configured or p.is_configured() then
+				local m = p.default_model and self:resolve(caller, p.name .. "/" .. p.default_model) or nil
 				if m and not m.unavailable and (not p.unavailable_for or not p.unavailable_for(m)) then
 					return m
+				end
+				local fallback = first_available_provider_model(p)
+				if fallback then
+					return fallback
 				end
 			end
 		end

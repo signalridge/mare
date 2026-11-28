@@ -100,21 +100,71 @@ pub fn news_text() -> std::borrow::Cow<'static, str> {
     }
 }
 
-/// Bundled trimmed `models.dev` snapshot (`preset/models_dev.json.gz`, MIT License),
-/// decompressed on demand for offline catalog fallback.
-pub fn bundled_models_dev_json() -> std::borrow::Cow<'static, str> {
+/// Maximum decompressed size of a read-only plugin resource (32 MiB).
+const MAX_PLUGIN_RESOURCE_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Validate a relative resource path (no leading slash, backslashes, NUL, or `..` components).
+pub(crate) fn validate_resource_path(rel: &str) -> Result<String, String> {
+    if rel.is_empty() || rel.starts_with('/') || rel.contains('\\') || rel.contains('\0') {
+        return Err(format!("invalid resource path: {rel:?}"));
+    }
+    let mut parts = Vec::new();
+    for comp in std::path::Path::new(rel).components() {
+        match comp {
+            std::path::Component::Normal(seg) => parts.push(seg.to_string_lossy().into_owned()),
+            _ => return Err(format!("invalid resource path: {rel:?}")),
+        }
+    }
+    if parts.is_empty() {
+        return Err(format!("invalid resource path: {rel:?}"));
+    }
+    Ok(parts.join("/"))
+}
+
+/// Decode raw resource bytes into UTF-8 text, transparently gunzipping `.gz` files.
+pub(crate) fn decode_resource_bytes(rel: &str, bytes: &[u8]) -> Result<String, String> {
     use std::io::Read as _;
+    if rel.ends_with(".gz") {
+        let decoder = flate2::read::GzDecoder::new(std::io::Cursor::new(bytes));
+        let mut buf = Vec::new();
+        decoder
+            .take(MAX_PLUGIN_RESOURCE_BYTES + 1)
+            .read_to_end(&mut buf)
+            .map_err(|e| format!("decompressing resource {rel}: {e}"))?;
+        if (buf.len() as u64) > MAX_PLUGIN_RESOURCE_BYTES {
+            return Err(format!("resource {rel} exceeds maximum decompressed size"));
+        }
+        String::from_utf8(buf).map_err(|e| format!("resource {rel} is not valid UTF-8: {e}"))
+    } else {
+        if (bytes.len() as u64) > MAX_PLUGIN_RESOURCE_BYTES {
+            return Err(format!("resource {rel} exceeds maximum size"));
+        }
+        String::from_utf8(bytes.to_vec()).map_err(|e| format!("resource {rel} is not valid UTF-8: {e}"))
+    }
+}
+
+/// Read a built-in read-only resource under `preset/resources/<rel>` (gunzipping `.gz` files
+/// transparently). Returns `Ok(None)` when the resource does not exist.
+pub fn read_builtin_resource(rel: &str) -> Result<Option<String>, String> {
+    let norm = validate_resource_path(rel)?;
     #[cfg(debug_assertions)]
-    let bytes = {
-        let p = std::path::Path::new(mare_macro::preset_dir!()).join("models_dev.json.gz");
-        std::fs::read(&p).unwrap_or_else(|e| panic!("reading preset/models_dev.json.gz: {e}"))
-    };
+    {
+        let root = std::path::Path::new(mare_macro::preset_dir!()).join("resources");
+        let path = root.join(&norm);
+        match std::fs::read(&path) {
+            Ok(bytes) => decode_resource_bytes(&norm, &bytes).map(Some),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("reading preset/resources/{norm}: {e}")),
+        }
+    }
     #[cfg(not(debug_assertions))]
-    let bytes: &[u8] = include_bytes!("../preset/models_dev.json.gz");
-    let mut decoder = flate2::read::GzDecoder::new(std::io::Cursor::new(bytes));
-    let mut out = String::new();
-    decoder.read_to_string(&mut out).expect("invalid embedded models_dev.json.gz");
-    std::borrow::Cow::Owned(out)
+    {
+        const BUILTIN_RESOURCES: &[(&str, &[u8])] = include!(concat!(env!("OUT_DIR"), "/builtin_resources.rs"));
+        match BUILTIN_RESOURCES.iter().find(|(k, _)| *k == norm.as_str()) {
+            Some((_, bytes)) => decode_resource_bytes(&norm, bytes).map(Some),
+            None => Ok(None),
+        }
+    }
 }
 /// LuaLS definitions, `(path under types/, text)`: the entry `mare.lua` (`---@class mare` and
 /// its scalar fields) and one `mare/<namespace>.lua` per namespace. A test keeps the list
@@ -1163,8 +1213,13 @@ mod tests {
         }
         // Verify runtime extraction sources (deflate-archived in release builds) also match disk.
         let preset_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("preset");
+        assert!(super::read_builtin_resource("../NEWS.md").is_err(), "path traversal must be rejected");
+        assert_eq!(super::read_builtin_resource("does-not-exist.json").unwrap(), None);
+        let bundled_mdev_text = super::read_builtin_resource("models_dev.json.gz")
+            .expect("read built-in models_dev.json.gz")
+            .expect("built-in models_dev.json.gz present");
         let bundled_mdev: serde_json::Value =
-            serde_json::from_str(super::bundled_models_dev_json().as_ref()).expect("valid bundled models_dev JSON");
+            serde_json::from_str(&bundled_mdev_text).expect("valid bundled models_dev JSON");
         assert_eq!(bundled_mdev["source"], "https://models.dev/api.json");
         assert!(bundled_mdev["license"].as_str().unwrap_or("").contains("MIT"));
         let providers = bundled_mdev["providers"].as_object().expect("providers map");

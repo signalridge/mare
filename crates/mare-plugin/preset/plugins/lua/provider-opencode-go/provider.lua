@@ -238,7 +238,7 @@ return function(D)
 		},
 		-- Offline fallback seeds keep only fields absent from the bundled models.dev snapshot
 		-- (params, effort lists, effort_map); names, limits, modalities, reasoning flags and
-		-- pricing are hydrated from preset/models_dev.json.gz (MIT). No `route`: built-in seeds
+		-- pricing are hydrated from preset/resources/models_dev.json.gz (MIT). No `route`: built-in seeds
 		-- stay on the default (responses) route unless routed via `model_routes` or `mare.model`.
 		models = {
 			{

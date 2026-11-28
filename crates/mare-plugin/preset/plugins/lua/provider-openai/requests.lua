@@ -1299,7 +1299,7 @@ return function(D)
 		-- Offline fallback seeds keep only fields absent from the bundled models.dev snapshot
 		-- (measured input windows, verbosity, truncation, reasoning_summary, efforts, default_effort,
 		-- tool_update); names, limits, modalities, reasoning flags and pricing come from
-		-- preset/models_dev.json.gz (MIT).
+		-- preset/resources/models_dev.json.gz (MIT).
 		models = {
 			{
 				model_id = "gpt-6.2-sol",
