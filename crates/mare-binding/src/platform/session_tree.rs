@@ -164,22 +164,55 @@ fn tree_alive_in(
     })
 }
 
-pub(super) fn signal(session: u32, signal: i32) -> io::Result<()> {
-    let groups = groups(session)?;
+fn signal_groups_with<Check, Send>(
+    groups: BTreeMap<i32, i32>,
+    exclude_pgid: Option<i32>,
+    mut still_in_group: Check,
+    mut send_signal: Send,
+) -> io::Result<()>
+where
+    Check: FnMut(i32, i32) -> bool,
+    Send: FnMut(i32) -> io::Result<()>,
+{
     let mut first_error = None;
     for (pgid, member) in groups {
-        // Recheck kernel identity immediately before each group signal.
-        if unsafe { libc::getsid(member) } != session as i32 || unsafe { libc::getpgid(member) } != pgid {
+        if exclude_pgid == Some(pgid) {
             continue;
         }
-        if unsafe { libc::kill(-pgid, signal) } != 0 {
-            let e = io::Error::last_os_error();
-            if e.raw_os_error() != Some(libc::ESRCH) {
-                first_error.get_or_insert(e);
-            }
+        // Recheck kernel identity immediately before each group signal.
+        if !still_in_group(member, pgid) {
+            continue;
+        }
+        if let Err(e) = send_signal(pgid)
+            && e.raw_os_error() != Some(libc::ESRCH)
+        {
+            first_error.get_or_insert(e);
         }
     }
     first_error.map_or(Ok(()), Err)
+}
+
+fn signal_groups(session: u32, signal: i32, exclude_pgid: Option<i32>) -> io::Result<()> {
+    let groups = groups(session)?;
+    signal_groups_with(
+        groups,
+        exclude_pgid,
+        |member, pgid| unsafe { libc::getsid(member) } == session as i32 && unsafe { libc::getpgid(member) } == pgid,
+        |pgid| {
+            if unsafe { libc::kill(-pgid, signal) } == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+        },
+    )
+}
+
+pub(super) fn signal(session: u32, signal: i32) -> io::Result<()> {
+    signal_groups(session, signal, None)
+}
+
+/// Signal every process group in `session` except the leader's own group (`pgid == session`).
+/// Callers that subsequently signal `-(session as i32)` directly use this so polite signals
+/// (`SIGINT`, `SIGTERM`, etc.) are delivered to the leader's group once instead of twice.
+pub(super) fn signal_other_groups(session: u32, signal: i32) -> io::Result<()> {
+    signal_groups(session, signal, i32::try_from(session).ok())
 }
 
 #[cfg(all(test, target_os = "linux"))]

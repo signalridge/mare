@@ -324,3 +324,128 @@ fn setsid_eperm_falls_back_to_setpgid_and_other_errors_fail() {
     assert_eq!(err.raw_os_error(), Some(libc::EINVAL));
     assert_eq!(pgid_calls, 1, "non-EPERM error must not fall back to setpgid");
 }
+
+#[test]
+fn signal_tree_delivers_polite_signal_once_to_leader_and_other_session_group() {
+    use std::io::BufRead;
+    use std::os::unix::net::UnixListener;
+
+    struct Guard {
+        child: Option<std::process::Child>,
+        other_pgid: Option<libc::pid_t>,
+        other_pgid_file: std::path::PathBuf,
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let own_pgrp = unsafe { libc::getpgrp() };
+            let other = self
+                .other_pgid
+                .or_else(|| std::fs::read_to_string(&self.other_pgid_file).ok()?.trim().parse::<libc::pid_t>().ok());
+            if let Some(pgid) = other.filter(|&p| p > 1 && p != own_pgrp) {
+                // SAFETY: `other_pgid` is the isolated child's own process group, never the test runner's.
+                unsafe { libc::kill(-pgid, libc::SIGKILL) };
+            }
+            if let Some(mut child) = self.child.take() {
+                signal_tree(Some(child.id()), Signal::Kill);
+                let _ = child.wait();
+            }
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let sock_path = dir.path().join("sig.sock");
+    let other_pgid_file = dir.path().join("other.pgid");
+    let listener = UnixListener::bind(&sock_path).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let script = dir.path().join("session_members.py");
+    std::fs::write(
+        &script,
+        r#"import os, signal, socket
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect('sig.sock')
+other_pgid = 0
+if os.getsid(0) == os.getpid():
+    r, w = os.pipe()
+    child = os.fork()
+    if child == 0:
+        os.close(r)
+        os.setpgid(0, 0)
+        signal.signal(signal.SIGINT, lambda *_: s.sendall(b'other\n'))
+        os.write(w, b'R')
+        os.close(w)
+        while True:
+            signal.pause()
+    os.close(w)
+    other_pgid = child
+    with open('other.pgid', 'w') as f:
+        f.write(str(other_pgid))
+    assert os.read(r, 1) == b'R'
+    os.close(r)
+signal.signal(signal.SIGINT, lambda *_: s.sendall(b'leader\n'))
+s.sendall(f'ready {other_pgid}\n'.encode())
+while True:
+    signal.pause()
+"#,
+    )
+    .unwrap();
+
+    let mut cmd = std::process::Command::new("python3");
+    cmd.arg(&script)
+        .current_dir(dir.path())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    isolate_std(&mut cmd);
+    let child = cmd.spawn().unwrap();
+    let pid = child.id();
+    let mut guard = Guard { child: Some(child), other_pgid: None, other_pgid_file };
+
+    let accept_deadline = Instant::now() + Duration::from_secs(10);
+    let stream = loop {
+        match listener.accept() {
+            Ok((stream, _)) => break stream,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if let Some(status) = guard.child.as_mut().unwrap().try_wait().unwrap() {
+                    panic!("session_members.py exited before connecting: {status}");
+                }
+                assert!(Instant::now() < accept_deadline, "timed out waiting for session_members.py to connect");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => panic!("listener.accept failed: {e}"),
+        }
+    };
+    stream.set_nonblocking(false).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let mut reader = std::io::BufReader::new(stream);
+    let mut ready = String::new();
+    reader.read_line(&mut ready).unwrap();
+    let other_pgid: libc::pid_t = ready
+        .strip_prefix("ready ")
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or_else(|| panic!("unexpected ready record: {ready:?}"));
+    if other_pgid > 0 {
+        guard.other_pgid = Some(other_pgid);
+    }
+
+    let expected: Vec<String> =
+        if other_pgid > 0 { vec!["leader\n".to_string(), "other\n".to_string()] } else { vec!["leader\n".to_string()] };
+    const ROUNDS: usize = 10;
+    for round in 0..ROUNDS {
+        signal_tree(Some(pid), Signal::Int);
+        let mut seen = Vec::with_capacity(expected.len());
+        for _ in 0..expected.len() {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            seen.push(line);
+        }
+        seen.sort();
+        assert_eq!(seen, expected, "round {round}: each session group must receive exactly one SIGINT");
+    }
+
+    signal_tree(Some(pid), Signal::Kill);
+    let _ = guard.child.take().unwrap().wait();
+    drop(guard);
+    let mut tail = String::new();
+    reader.read_to_string(&mut tail).unwrap();
+    assert!(tail.is_empty(), "duplicate SIGINT leaked after polite delivery: {tail:?}");
+}
