@@ -226,6 +226,9 @@ pub struct Renderer {
     cursor_visible: bool,
     /// absolute screen row (1-based) of the live area's top, when known
     top: Option<usize>,
+    /// visible committed-history rows currently occupying the viewport above the live area
+    /// (retained across `resize_bytes` while `top` is cleared awaiting a fresh CPR anchor)
+    visible_history_rows: Option<usize>,
     /// incremented whenever a frame or reset may shift the live area's absolute screen row
     position_epoch: u64,
     pub color: ColorMode,
@@ -247,6 +250,7 @@ impl Renderer {
             cursor: None,
             cursor_visible: true,
             top: None,
+            visible_history_rows: None,
             position_epoch: 0,
             color: ColorMode::detect(),
             width,
@@ -259,11 +263,26 @@ impl Renderer {
     /// `row - cursor_row` as of when the query was queued (no frame is drawn in between).
     pub fn anchor(&mut self, cursor_abs_row: usize) {
         self.top = cursor_abs_row.checked_sub(self.cursor_row).filter(|t| *t >= 1);
+        if let Some(top) = self.top {
+            self.visible_history_rows = Some(top.saturating_sub(1));
+        }
     }
 
     /// Absolute screen row (1-based) of the live area's top, when known.
     pub fn top(&self) -> Option<usize> {
         self.top
+    }
+
+    /// Committed history rows currently occupying the visible viewport above the live area,
+    /// derived from the renderer's anchored or pre-resize live-area boundary.
+    pub fn visible_history_rows(&self) -> usize {
+        if let Some(top) = self.top {
+            return top.saturating_sub(1);
+        }
+        if let Some(above) = self.visible_history_rows {
+            return above.min(self.height);
+        }
+        self.height.saturating_sub(self.prev.len())
     }
 
     /// Row of the live area the cursor is on now (to correlate a cursor-position query).
@@ -289,7 +308,16 @@ impl Renderer {
 
     pub fn resize_bytes(&mut self, width: usize, height: usize) -> Vec<u8> {
         let changed_w = width != self.width;
-        self.height = height.max(1);
+        let old_height = self.height;
+        let old_above = self
+            .top
+            .map(|t| t.saturating_sub(1))
+            .or(self.visible_history_rows)
+            .unwrap_or_else(|| old_height.saturating_sub(self.prev.len()));
+        let new_height = height.max(1);
+        let adjusted_above = old_above.saturating_sub(old_height.saturating_sub(new_height)).min(new_height);
+        self.height = new_height;
+        self.visible_history_rows = Some(adjusted_above);
         if !changed_w {
             // the terminal keeps content anchored in its own way: position unknown now
             self.top = None;
@@ -326,12 +354,23 @@ impl Renderer {
     /// down (`CSI H CSI J`, which unlike `CSI 2J` doesn't push the old screen into scrollback on
     /// VTE terminals), then the scrollback (`CSI 3J`).
     pub fn replay_bytes(&mut self, rows: &[Line]) -> Vec<u8> {
+        self.replay_bytes_with_scrollback(rows, true)
+    }
+
+    /// Replay `rows` on the visible viewport without clearing terminal scrollback (no `CSI 3J`).
+    /// Callers pass at most a screenful so redrawing the visible tail preserves older terminal
+    /// scrollback above the viewport.
+    pub fn replay_visible_bytes(&mut self, rows: &[Line]) -> Vec<u8> {
+        self.replay_bytes_with_scrollback(rows, false)
+    }
+
+    fn replay_bytes_with_scrollback(&mut self, rows: &[Line], clear_scrollback: bool) -> Vec<u8> {
         let w = self.width.max(1);
         let mut s = String::new();
         if self.caps.sync {
             s.push_str("\x1b[?2026h");
         }
-        s.push_str("\x1b[0m\x1b[H\x1b[J\x1b[3J");
+        s.push_str(if clear_scrollback { "\x1b[0m\x1b[H\x1b[J\x1b[3J" } else { "\x1b[0m\x1b[H\x1b[J" });
         for r in rows {
             s.push_str(&line_to_ansi(r, w, self.color));
             s.push_str("\x1b[0m\r\n");
@@ -347,6 +386,7 @@ impl Renderer {
         // rows that fit on screen leave the cursor at a known row; more scroll, and the position
         // is unknown again (the next commit uses the repaint-below fallback until re-anchored)
         self.top = (rows.len() < self.height).then_some(rows.len() + 1);
+        self.visible_history_rows = Some(rows.len().min(self.height));
         self.position_epoch = self.position_epoch.wrapping_add(1);
         s.into_bytes()
     }
@@ -361,6 +401,7 @@ impl Renderer {
         // Handoffs (`modes::leave`) restore `?25h`, so treat cursor visibility as shown until hidden again.
         self.cursor_visible = true;
         self.top = None;
+        self.visible_history_rows = None;
         self.position_epoch = self.position_epoch.wrapping_add(1);
     }
 
@@ -372,9 +413,11 @@ impl Renderer {
         }
         s.push_str("\r\x1b[0m\x1b[J");
         let top = self.top;
+        let visible_history_rows = self.visible_history_rows;
         self.invalidate();
         // the cursor is back at the live area's top: its absolute row is unchanged
         self.top = top;
+        self.visible_history_rows = visible_history_rows;
         crate::out::write(s.into_bytes());
     }
 
@@ -526,6 +569,8 @@ impl Renderer {
                         // the live area now starts `rows` rows lower (minus any scroll)
                         let bottom = t + rows; // row the cursor is on now
                         self.top = if bottom > h { Some(h) } else { Some(bottom) };
+                    } else if let Some(above) = self.visible_history_rows {
+                        self.visible_history_rows = Some((above + rows).min(h.saturating_sub(new_rows.len())));
                     }
                     for (i, slot) in new_rows.iter_mut().enumerate() {
                         if slot.is_none() && i < self.prev.len() {
@@ -550,6 +595,12 @@ impl Renderer {
         if new_rows.len() > have {
             // Growing the live area writes newlines that may scroll the terminal and shift `top`.
             self.position_epoch = self.position_epoch.wrapping_add(1);
+            if self.top.is_none()
+                && let Some(above) = self.visible_history_rows
+                && above + new_rows.len() > h
+            {
+                self.visible_history_rows = Some(h.saturating_sub(new_rows.len()));
+            }
         }
         for (i, slot) in new_rows.iter().enumerate() {
             let Some(row) = slot.as_deref() else {
@@ -642,6 +693,9 @@ impl Renderer {
         self.prev_theme_gen = tgen;
         self.prev_color = self.color;
         self.prev_has_raw = new_has_raw;
+        if let Some(top) = self.top {
+            self.visible_history_rows = Some(top.saturating_sub(1));
+        }
         s.into_bytes()
     }
 }

@@ -357,6 +357,106 @@ async fn the_dumb_terminal_session_is_plain_text() {
     .await
 }
 
+/// Repro #218: a width-triggered reflow emits CSI 3J (clearing all terminal scrollback) and
+/// replays only a capped tail (FALLBACK_MAX_ROWS = 1000), destroying older scrollback even when
+/// the terminal retained it. Also verifies preserve-mode visible replay derives the exact
+/// history/live boundary from the renderer layout so every row `1..=600` remains contiguous
+/// with zero gaps and zero duplicates (e.g. 20 visible history rows on a 24-row terminal).
+#[tokio::test]
+async fn repro_218_width_resize_wipes_scrollback_beyond_replay_cap() {
+    local(async {
+        let mut t = Term::new(json!([]), 80, 24).await;
+        t.until_vt("startup", |t| !t.vt.starting()).await;
+        // Dismiss startup toast so the live area is only 4 rows (editor + status), leaving
+        // ~20 visible committed rows above it — strictly more than `height / 2` (12).
+        t.vt.dismiss_notices();
+        t.step().await;
+
+        exec(
+            &t.vt.host,
+            r#"
+            for i = 1, 600 do
+                mare.ui.print(string.format("SCROLLBACK_ROW_%04d", i))
+            end
+            "#,
+        )
+        .await;
+        t.until_vt("all 600 blocks committed", |t| t.history().contains("SCROLLBACK_ROW_0600")).await;
+        let before = t.history();
+        assert!(
+            before.contains("SCROLLBACK_ROW_0001") && before.contains("SCROLLBACK_ROW_0600"),
+            "terminal retained full history before resize"
+        );
+
+        t.resize(70, 24).await;
+        let after = t.history();
+        let mut missing = Vec::new();
+        let mut duplicates = Vec::new();
+        for i in 1..=600 {
+            let marker = format!("SCROLLBACK_ROW_{i:04}");
+            let count = after.matches(&marker).count();
+            if count == 0 {
+                missing.push(i);
+            } else if count > 1 {
+                duplicates.push((i, count));
+            }
+        }
+        assert!(
+            missing.is_empty() && duplicates.is_empty(),
+            "preserve-mode resize must keep contiguous 1..=600 without gaps or duplicates: missing={missing:?}, duplicates={duplicates:?}"
+        );
+    })
+    .await
+}
+
+#[tokio::test]
+async fn resize_reflow_config_controls_mode_and_max_rows() {
+    local(async {
+        // 1) Explicit `mode = "full"` with `max_rows = 200` caps replay to the configured tail.
+        {
+            let mut t =
+                Term::with(json!([]), json!({ "terminal": { "reflow": { "mode": "full", "max_rows": 200 } } }), 80, 20)
+                    .await;
+            t.until_vt("startup", |t| !t.vt.starting()).await;
+            exec(&t.vt.host, r#"for i = 1, 250 do mare.ui.print(string.format("CAP_ROW_%04d", i)) end"#).await;
+            t.until_vt("250 blocks committed", |t| t.history().contains("CAP_ROW_0250")).await;
+            t.resize(70, 20).await;
+            let after = t.history();
+            assert!(after.contains("CAP_ROW_0250"), "recent tail must remain in full mode");
+            assert!(!after.contains("CAP_ROW_0001"), "explicit mode=full + max_rows=200 must cap replay");
+        }
+
+        // 2) Explicit `mode = "auto"` with `max_rows = 0` (unlimited) reflows all 600 blocks cleanly.
+        {
+            let mut t =
+                Term::with(json!([]), json!({ "terminal": { "reflow": { "mode": "auto", "max_rows": 0 } } }), 80, 20)
+                    .await;
+            t.until_vt("startup", |t| !t.vt.starting()).await;
+            exec(&t.vt.host, r#"for i = 1, 600 do mare.ui.print(string.format("UNLIM_ROW_%04d", i)) end"#).await;
+            t.until_vt("600 blocks committed", |t| t.history().contains("UNLIM_ROW_0600")).await;
+            t.resize(70, 20).await;
+            let after = t.history();
+            assert!(
+                after.contains("UNLIM_ROW_0001") && after.contains("UNLIM_ROW_0600"),
+                "max_rows=0 must replay the entire transcript without truncation"
+            );
+        }
+
+        // 3) Explicit `mode = "preserve"` never clears scrollback on width resize even for short history.
+        {
+            let mut t =
+                Term::with(json!([]), json!({ "terminal": { "reflow": { "mode": "preserve" } } }), 80, 20).await;
+            t.until_vt("startup", |t| !t.vt.starting()).await;
+            exec(&t.vt.host, r#"mare.ui.print("PRESERVE_ONLY_LINE")"#).await;
+            t.until_vt("line committed", |t| t.history().contains("PRESERVE_ONLY_LINE")).await;
+            t.resize(70, 20).await;
+            let after = t.history();
+            assert!(after.contains("PRESERVE_ONLY_LINE"), "mode=preserve must retain existing scrollback");
+        }
+    })
+    .await
+}
+
 /// "窗口缩放" (Codex): every resize clears the scrollback (CSI 3J) and replays the
 /// whole conversation at the new width — one copy of it in the terminal, however often the
 /// window changes (the old "visible" replay left a screenful behind per resize).

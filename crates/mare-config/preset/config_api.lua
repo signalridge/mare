@@ -333,6 +333,9 @@ mare.options = mare.options
 					enabled = true,
 					background = true,
 				},
+				reflow = {
+					mode = "auto",
+				},
 			},
 			fields = {
 				ambiwidth = {
@@ -365,8 +368,28 @@ mare.options = mare.options
 					},
 					desc = "startup terminal probe controls",
 				},
+				reflow = {
+					type = "table",
+					default = { mode = "auto" },
+					fields = {
+						mode = {
+							type = "enum",
+							choices = { "auto", "full", "preserve" },
+							default = "auto",
+							apply = "live",
+							desc = 'scrollback resize reflow: "auto" (reflow when history fits max_rows, preserve terminal scrollback when larger) | "full" (always clear scrollback and replay up to max_rows) | "preserve" (never clear terminal scrollback on width resize)',
+						},
+						max_rows = {
+							type = "integer",
+							min = 0,
+							apply = "live",
+							desc = "maximum rows replayed during resize reflow (0 = unlimited; unset = terminal default)",
+						},
+					},
+					desc = "scrollback resize reflow behavior and row cap",
+				},
 			},
-			desc = "terminal capability, probing, and ambiwidth configuration (`terminal.{ambiwidth,color,probe.{enabled,background}}`)",
+			desc = "terminal capability, probing, reflow, and ambiwidth configuration (`terminal.{ambiwidth,color,probe.{enabled,background},reflow.{mode,max_rows}}`)",
 		},
 		ui = {
 			type = "table",

@@ -824,7 +824,7 @@ pub(crate) async fn step_loop(
             let now = loop_now();
             if reflow_pending && now >= reflow_at {
                 match app.reflow.take_due(now, app.width) {
-                    Some(mare_tui::reflow::Due::Rebuild) => app.rebuild_history(),
+                    Some(mare_tui::reflow::Due::Rebuild) => app.rebuild_history_from_reflow(),
                     Some(mare_tui::reflow::Due::Repaint) => app.renderer.erase(),
                     None => {}
                 }
