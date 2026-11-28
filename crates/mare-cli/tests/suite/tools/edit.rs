@@ -477,3 +477,282 @@ async fn aborted_file_lock_waiter_does_not_leak_lock_ownership() {
     })
     .await
 }
+
+/// Issue #184: file edit locks live only in one Lua VM (`local locks = {}`), so two concurrent
+/// Mare runtimes editing the same file can both pass the freshness check, replace the file, and
+/// report success while silently losing one edit.
+#[test]
+fn concurrent_edits_across_two_runtimes_do_not_silently_overwrite() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
+    use std::time::{Duration, Instant};
+
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let env = rt.block_on(TestEnv::new());
+    let shared = env.cwd.join("shared.txt");
+    let opts1 = env.host().builtins(&["tools-apply-patch"]).no_session().opts;
+    let opts2 = env.host().builtins(&["tools-apply-patch"]).no_session().opts;
+
+    let rounds = 40usize;
+    let start_bar = Arc::new(Barrier::new(2));
+    let done_bar = Arc::new(Barrier::new(2));
+    let intent_count = Arc::new(AtomicUsize::new(0));
+    let silent_overwrites = Arc::new(AtomicUsize::new(0));
+
+    let spawn_worker = |id: usize,
+                        opts: mare_host::HostOptions,
+                        shared: std::path::PathBuf,
+                        start_bar: Arc<Barrier>,
+                        done_bar: Arc<Barrier>,
+                        intent_count: Arc<AtomicUsize>,
+                        silent_overwrites: Arc<AtomicUsize>| {
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            let ls = tokio::task::LocalSet::new();
+            ls.block_on(&rt, async move {
+                let h = mare_host::Host::new(opts).await.unwrap();
+                expose(&h);
+                let ic = intent_count.clone();
+                let sync_fn = h
+                    .lua()
+                    .create_function(move |_, ()| {
+                        let prev = ic.fetch_add(1, Ordering::SeqCst);
+                        let target = (prev / 2 + 1) * 2;
+                        let deadline = Instant::now() + Duration::from_millis(80);
+                        while ic.load(Ordering::SeqCst) < target && Instant::now() < deadline {
+                            std::thread::yield_now();
+                        }
+                        Ok(())
+                    })
+                    .unwrap();
+                h.lua().globals().set("REPRO_SYNC_INTENT", sync_fn).unwrap();
+                exec(
+                    &h,
+                    r#"
+                    C.cordis:get("policy"):voter("fs/edit-intent", function()
+                        REPRO_SYNC_INTENT()
+                        return nil
+                    end)
+                    "#,
+                )
+                .await;
+
+                for _ in 0..rounds {
+                    if id == 0 {
+                        std::fs::write(&shared, "line_a\nline_b\n").unwrap();
+                    }
+                    start_bar.wait();
+                    call(&h, "read", json!({ "path": "shared.txt" })).await;
+                    start_bar.wait();
+
+                    let (old_s, new_s) = if id == 0 { ("line_a", "LINE_A") } else { ("line_b", "LINE_B") };
+                    let res =
+                        call(&h, "edit", json!({ "path": "shared.txt", "old_string": old_s, "new_string": new_s }))
+                            .await;
+                    let ok = res["is_error"] != true;
+                    if !ok {
+                        let msg = text(&res);
+                        assert!(
+                            msg.contains("stale") || msg.contains("changed"),
+                            "conflicting runtime failed with unexpected error instead of stale-edit: {msg}"
+                        );
+                    }
+                    done_bar.wait();
+                    if id == 0 {
+                        let body = std::fs::read_to_string(&shared).unwrap();
+                        if ok && body != "LINE_A\nLINE_B\n" && body.contains("LINE_B") {
+                            silent_overwrites.fetch_add(1, Ordering::SeqCst);
+                        }
+                    } else if ok {
+                        let body = std::fs::read_to_string(&shared).unwrap();
+                        if body != "LINE_A\nLINE_B\n" && body.contains("LINE_A") {
+                            silent_overwrites.fetch_add(1, Ordering::SeqCst);
+                        }
+                    }
+                    done_bar.wait();
+                    if silent_overwrites.load(Ordering::SeqCst) > 0 {
+                        break;
+                    }
+                }
+                h.shutdown().await;
+            });
+        })
+    };
+
+    let t1 = spawn_worker(
+        0,
+        opts1,
+        shared.clone(),
+        start_bar.clone(),
+        done_bar.clone(),
+        intent_count.clone(),
+        silent_overwrites.clone(),
+    );
+    let t2 = spawn_worker(1, opts2, shared.clone(), start_bar, done_bar, intent_count, silent_overwrites.clone());
+    t1.join().unwrap();
+    t2.join().unwrap();
+
+    let overwrites = silent_overwrites.load(Ordering::SeqCst);
+    assert_eq!(
+        overwrites,
+        0,
+        "two concurrent Mare runtimes both reported edit success while one edit silently overwrote the other (overwrites={overwrites}, final={:?})",
+        std::fs::read_to_string(&shared).unwrap_or_default()
+    );
+}
+
+#[test]
+fn concurrent_edits_across_two_processes_with_different_mare_homes() {
+    use std::collections::BTreeMap;
+
+    let work = tempfile::tempdir().unwrap();
+    let home_a = tempfile::tempdir().unwrap();
+    let home_b = tempfile::tempdir().unwrap();
+    let shared = work.path().join("shared.txt");
+    std::fs::write(&shared, "line_a\nline_b\n").unwrap();
+
+    // Process A reads `shared.txt`, waits until Process B has also read it, then enters
+    // `edit` and holds the keyed file lock inside `fs/edit-intent` while Process B attempts
+    // its concurrent edit under a completely different `MARE_HOME`.
+    let plugins_a = home_a.path().join("config/plugins");
+    let plugins_b = home_b.path().join("config/plugins");
+    std::fs::create_dir_all(&plugins_a).unwrap();
+    std::fs::create_dir_all(&plugins_b).unwrap();
+    std::fs::write(
+        plugins_a.join("sync_a.lua"),
+        r#"
+        return {
+            name = "sync_a",
+            inject = { "policy" },
+            apply = function(ctx)
+                ctx:on("item/completed", function(ev)
+                    if ev and ev.item and ev.item.type == "tool_call" and ev.item.name == "read" then
+                        assert(mare.fs.write(mare.cwd .. "/a-read-done", "1"))
+                        for _ = 1, 500 do
+                            if mare.fs.stat(mare.cwd .. "/b-read-done") then break end
+                            mare.task.sleep(10)
+                        end
+                    end
+                end)
+                ctx.policy:voter("fs/edit-intent", function()
+                    assert(mare.fs.write(mare.cwd .. "/a-holding-lock", "1"))
+                    for _ = 1, 500 do
+                        if mare.fs.stat(mare.cwd .. "/b-attempting-edit") then break end
+                        mare.task.sleep(10)
+                    end
+                    -- Keep holding the OS lock briefly after B enters edit so B must block on it
+                    -- if and only if both MARE_HOME profiles share the same keyed lock namespace.
+                    mare.task.sleep(150)
+                    return nil
+                end)
+            end,
+        }
+        "#,
+    )
+    .unwrap();
+    std::fs::write(
+        plugins_b.join("sync_b.lua"),
+        r#"
+        return {
+            name = "sync_b",
+            inject = { "policy" },
+            apply = function(ctx)
+                ctx:on("item/completed", function(ev)
+                    if ev and ev.item and ev.item.type == "tool_call" and ev.item.name == "read" then
+                        assert(mare.fs.write(mare.cwd .. "/b-read-done", "1"))
+                        for _ = 1, 500 do
+                            if mare.fs.stat(mare.cwd .. "/a-holding-lock") then break end
+                            mare.task.sleep(10)
+                        end
+                    end
+                end)
+                ctx.policy:voter("tool/before", function(call)
+                    if call and call.name == "edit" then
+                        assert(mare.fs.write(mare.cwd .. "/b-attempting-edit", "1"))
+                    end
+                    return nil
+                end)
+            end,
+        }
+        "#,
+    )
+    .unwrap();
+
+    let script_a = home_a.path().join("faux_a.json");
+    let script_b = home_b.path().join("faux_b.json");
+    std::fs::write(
+        &script_a,
+        json!([
+            { "tool_calls": [{ "id": "ra", "name": "read", "arguments": { "path": "shared.txt" } }] },
+            { "tool_calls": [{ "id": "ea", "name": "edit", "arguments": { "path": "shared.txt", "old_string": "line_a", "new_string": "LINE_A" } }] },
+            { "text": "done-a" }
+        ])
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        &script_b,
+        json!([
+            { "tool_calls": [{ "id": "rb", "name": "read", "arguments": { "path": "shared.txt" } }] },
+            { "tool_calls": [{ "id": "eb", "name": "edit", "arguments": { "path": "shared.txt", "old_string": "line_b", "new_string": "LINE_B" } }] },
+            { "text": "done-b" }
+        ])
+        .to_string(),
+    )
+    .unwrap();
+
+    let run_proc =
+        |home: std::path::PathBuf, script: std::path::PathBuf, cwd: std::path::PathBuf, label: &'static str| {
+            std::thread::spawn(move || {
+                let env_map = BTreeMap::from([
+                    ("MARE_HOME".to_string(), home.display().to_string()),
+                    ("MARE_FAUX_SCRIPT".to_string(), script.display().to_string()),
+                ]);
+                let mut client =
+                    crate::common::rpc::RpcClient::spawn(&["--rpc", "--yolo", "--model", "faux/echo"], &env_map, &cwd);
+                let init = client.call("initialize", json!({ "protocol_version": "3.0" }));
+                let session_id = init["session"]["session_id"].as_str().expect("session_id").to_string();
+                client.call("events.subscribe", json!({ "session_id": session_id, "include": ["item/*", "turn/*"] }));
+                let turn = client.call("agent.prompt", json!({ "session_id": session_id, "input": label }));
+                assert_eq!(turn["status"], "started", "{turn}");
+                let _ = client.call("agent.wait", json!({ "session_id": session_id, "turn_id": turn["turn_id"] }));
+                let mut edit_error: Option<String> = None;
+                for ev in &client.events {
+                    if ev["type"] == "item/completed"
+                        && ev["data"]["item"]["type"] == "tool_call"
+                        && ev["data"]["item"]["name"] == "edit"
+                    {
+                        let data = &ev["data"];
+                        let is_err = data["item"]["message"]["is_error"] == true
+                            || data["status"].as_str().is_some_and(|s| s != "completed");
+                        if is_err {
+                            edit_error =
+                                Some(data["item"]["message"]["content"][0]["text"].as_str().unwrap_or("").to_string());
+                        }
+                    }
+                }
+                client.close_stdin();
+                let _ = client.drain_and_wait();
+                edit_error
+            })
+        };
+
+    let t_a = run_proc(home_a.path().to_path_buf(), script_a, work.path().to_path_buf(), "proc-a");
+    let t_b = run_proc(home_b.path().to_path_buf(), script_b, work.path().to_path_buf(), "proc-b");
+    let err_a = t_a.join().unwrap();
+    let err_b = t_b.join().unwrap();
+
+    assert!(err_a.is_none(), "process A holding the lock first should succeed, got error: {err_a:?}");
+    let err_b = err_b.expect(
+        "process B with a different MARE_HOME must serialize on the same OS lock and see stale file instead of silently overwriting process A",
+    );
+    assert!(
+        err_b.contains("stale") || err_b.contains("changed"),
+        "expected stale-edit error in process B, got: {err_b}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&shared).unwrap(),
+        "LINE_A\nline_b\n",
+        "process A's edit must not be silently overwritten by process B under a different MARE_HOME"
+    );
+}
