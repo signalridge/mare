@@ -712,3 +712,109 @@ async fn responses_output_index_present_absent_transitions_do_not_split_text() {
     })
     .await
 }
+
+#[tokio::test]
+async fn repro_308_filtered_compat_reply_must_not_dispatch_local_tool_call() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let server = MockServer::start().await;
+        let filtered_with_tool = compat_events(&[
+            json!({
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "call_filtered_308",
+                            "type": "function",
+                            "function": { "name": "probe_filtered_tool", "arguments": "{}" }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "content_filter"
+                }]
+            }),
+        ]);
+        let after_tool = compat_events(&[compat_text("done after unexpected tool"), compat_stop()]);
+        let normal_with_tool = compat_events(&[
+            json!({
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "call_normal_308",
+                            "type": "function",
+                            "function": { "name": "probe_filtered_tool", "arguments": "{}" }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "tool_calls"
+                }]
+            }),
+        ]);
+        let after_normal = compat_events(&[compat_text("normal tool completed"), compat_stop()]);
+        server.route("/compat", vec![Resp::sse(filtered_with_tool), Resp::sse(normal_with_tool), Resp::sse(after_normal), Resp::sse(after_tool)]);
+
+        let h = provider_host(
+            &mut env,
+            &server,
+            json!({
+                "model": "deepseek/deepseek-chat",
+                "plugins": { "llm": { "retries": 0 } }
+            }),
+        )
+        .await;
+        expose(&h);
+        exec(
+            &h,
+            r#"
+            FILTERED_TOOL_CALLS = 0
+            T:register("probe_filtered_tool", {
+                description = "probe",
+                parameters = { type = "object", properties = {} },
+                execute = function()
+                    FILTERED_TOOL_CALLS = FILTERED_TOOL_CALLS + 1
+                    return { content = "executed!" }
+                end,
+            })
+            "#,
+        )
+        .await;
+
+        let res = h.prompt("run probe", json!({})).await.unwrap();
+        let calls: i64 = eval(&h, "return FILTERED_TOOL_CALLS").await;
+        let msgs: String = eval(&h, "return mare.json.encode(A:list_messages().data)").await;
+
+        assert_eq!(
+            calls, 0,
+            "repro #308: local tool call was dispatched {calls} time(s) from a finish_reason=content_filter (stop_reason=filtered) reply; res={res}, msgs={msgs}"
+        );
+        assert!(
+            !msgs.contains("call_filtered_308"),
+            "unexecuted local tool call from filtered reply must be omitted from replayable history: {msgs}"
+        );
+
+        // Normal tool-use reply in the next turn still dispatches cleanly without orphaned filtered calls in history.
+        let res2 = h.prompt("run normal probe", json!({})).await.unwrap();
+        let calls2: i64 = eval(&h, "return FILTERED_TOOL_CALLS").await;
+        h.shutdown().await;
+        assert_eq!(calls2, 1, "normal tool_calls reply must dispatch tool once: {res2}");
+        assert_eq!(res2["text"], "normal tool completed", "{res2}");
+    })
+    .await
+}

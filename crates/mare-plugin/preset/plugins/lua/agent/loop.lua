@@ -299,8 +299,11 @@ return function(D)
 				})
 				goto continue
 			end
-			local calls, results, terminate =
-				tools_dispatch.dispatch_calls(msg, truncated, S.token, decl_holder, reservation.id)
+			local calls, results, terminate = {}, {}, false
+			if msg.stop_reason ~= "filtered" then
+				calls, results, terminate =
+					tools_dispatch.dispatch_calls(msg, truncated, S.token, decl_holder, reservation.id)
+			end
 			emit_step_completed({
 				turn_id = A.turn_id,
 				step_id = reservation.id,
