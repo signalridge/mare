@@ -27,6 +27,7 @@ function M.create(ctx, cfg, S)
 			args = { "status", "--porcelain=v1", "--untracked-files=normal" },
 			cwd = mare.cwd,
 			env_exclude = git_env_exclude,
+			sandbox = "current",
 			timeout_ms = timeout_ms,
 			max_output = 1024 * 1024,
 		})
@@ -94,6 +95,7 @@ function M.create(ctx, cfg, S)
 								cmd = "gh",
 								args = { "pr", "view", "--json", "number,url" },
 								cwd = mare.cwd,
+								sandbox = "current",
 								timeout_ms = cfg.pr_timeout_ms,
 								max_output = 64 * 1024,
 							})

@@ -39,11 +39,12 @@ mare.plugin("permissions", {
   preset = "auto",
   writable = { "~/.cache/pip", "/data/scratch" },   -- extra writable directories (must exist; use physical paths, not symlinks)
   deny_read = { "/home/alice/.ssh" },               -- literal absolute paths the sandbox hides from reads
+  accept_partial = { "fs_deny_read" },              -- required for deny_read; merges with default partial acceptances
   network = { default = "deny", allow = { "github.com", "*.npmjs.org" } },
 })
 ```
 
-相对路径的额外可写目录会按工作目录解析。不存在或不是目录的会被跳过并给出提示，`mare doctor` 会标出。已存在但本身是符号链接、或位于符号链接之后的目录，会被沙箱策略拒绝而不是跳过；请使用它的物理路径。`network` 可以是 `true`（开放）、`false`（阻止），或包含 `allow`、`deny`、`default` 和 `allow_local` 的表。表会通过本地过滤代理强制执行；见下文的网络策略。
+相对路径的额外可写目录会按工作目录解析。不存在或不是目录的会被跳过并给出提示，`mare doctor` 会标出。已存在但本身是符号链接、或位于符号链接之后的目录，会被沙箱策略拒绝而不是跳过；请使用它的物理路径。配置 `deny_read` 时需要同时设置 `accept_partial = { "fs_deny_read" }`，因为各后端尚未验证路径变更、别名或特殊挂载（在 Windows 上还需运行 `mare sandbox setup` 以通过增强层级 ACL 强制生效）。`network` 可以是 `true`（开放）、`false`（阻止），或包含 `allow`、`deny`、`default` 和 `allow_local` 的表。表会通过本地过滤代理强制执行；见下文的网络策略。
 
 ## 审批
 
@@ -145,7 +146,7 @@ mare 会按需探测每个后端并缓存实际可用的能力（`fs_read`、`fs
 mare.plugin("permissions", { accept_partial = { "network" } })
 ```
 
-显式的 `accept_partial = {}` 表示严格拒绝。运行 `mare doctor` 查看本机的后端和能力，或在会话中使用 `/permission caps`。
+显式的 `accept_partial = {}` 表示严格拒绝；非空的 `accept_partial` 列表会与上述默认豁免项合并。运行 `mare doctor` 查看本机的后端和能力，或在会话中使用 `/permission caps`。
 
 ### 网络策略
 
@@ -158,6 +159,6 @@ mare.plugin("permissions", { accept_partial = { "network" } })
 - `full-access` 以及经批准的非受限工具调用不经过沙箱。在 `auto` 下，运行在本地沙箱外的工具（如 MCP 工具）执行前会询问。
 - Landlock 和 Windows 默认层级不保护 `.git` 与 `.mare`；Windows 默认层级不控制读取和网络。
 - 沙箱不是虚拟机：它共享宿主机内核、用户与主目录。批准 `write:.git` 允许命令修改会在沙箱外执行的 git hooks。
-- 手动输入的 `!cmd` 命令不经过审批提示。
+- 手动输入的 `!cmd`（及 `!!cmd`）命令在沙箱外运行，且不经过审批提示。
 - 沙箱不能消除提示词注入：按 `y` 之前先核对审批内容。
 - shell 命令产生的副作用无法用 `/rewind` 撤销，见[会话](sessions.md)。

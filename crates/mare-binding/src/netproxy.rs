@@ -64,6 +64,10 @@ impl Upstream {
         let auth = i.basic_auth().and_then(|v| v.to_str().ok()).map(str::to_string);
         Some((addr, auth))
     }
+    /// Tunnel upstream policy (`CONNECT` / `SOCKS5`): never infer scheme from destination port.
+    pub(super) fn for_tunnel(&self, host: &str, port: u16) -> Option<(String, Option<String>)> {
+        self.for_target("https", host, port)
+    }
     fn route_for_via(via: Option<&(String, Option<String>)>) -> ProxyRoute {
         let Some((proxy, _)) = via else {
             return ProxyRoute::Direct;
@@ -357,7 +361,7 @@ async fn socks5(
         // only CONNECT
         return sock.write_all(&[5, 7, 0, 1, 0, 0, 0, 0, 0, 0]).await;
     }
-    let via = upstream.and_then(|u| u.for_target(if port == 80 { "http" } else { "https" }, &host, port));
+    let via = upstream.and_then(|u| u.for_tunnel(&host, port));
     let route = Upstream::route_for_via(via.as_ref());
     let target = match policy.authorize_target(&host, port, approver, route, policy.fake_ip).await {
         Ok(t) => t,
@@ -887,5 +891,145 @@ mod tests {
         s2.write_all(&[5, 1, 0, 1, 127, 0, 0, 1, chi, clo]).await.unwrap();
         s2.read_exact(&mut reply).await.unwrap();
         assert_eq!(reply, [5, 5, 0, 1, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[tokio::test]
+    async fn connect_uses_tunnel_upstream_and_forward_uses_http_upstream_regardless_of_port() {
+        let _guard = crate::netauth::RESOLVER_TEST_LOCK.lock().await;
+        crate::netauth::set_resolver_override(Some(std::collections::HashMap::from([(
+            "cross-port.test".to_string(),
+            vec!["93.184.216.34".parse().unwrap()],
+        )])));
+
+        async fn spawn_mock_upstream(
+            label: &'static str,
+        ) -> (u16, Arc<Mutex<Vec<String>>>, tokio::task::JoinHandle<()>) {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+            let seen_c = seen.clone();
+            let task = tokio::spawn(async move {
+                while let Ok((sock, _)) = listener.accept().await {
+                    let seen_c = seen_c.clone();
+                    tokio::spawn(async move {
+                        let mut r = BufReader::new(sock);
+                        let mut line = String::new();
+                        if r.read_line(&mut line).await.unwrap_or(0) == 0 {
+                            return;
+                        }
+                        seen_c.lock().unwrap().push(line.trim().to_string());
+                        loop {
+                            let mut h = String::new();
+                            if r.read_line(&mut h).await.unwrap_or(0) == 0 || h == "\r\n" {
+                                break;
+                            }
+                        }
+                        let mut sock = r.into_inner();
+                        let _ = sock.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await;
+                        let mut r = BufReader::new(sock);
+                        let mut first = String::new();
+                        let _ = r.read_line(&mut first).await;
+                        if first.starts_with("GET ") || first.starts_with("POST ") {
+                            loop {
+                                let mut h = String::new();
+                                if r.read_line(&mut h).await.unwrap_or(0) == 0 || h == "\r\n" {
+                                    break;
+                                }
+                            }
+                        }
+                        let mut sock = r.into_inner();
+                        let body = format!("via-{label}");
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = sock.write_all(resp.as_bytes()).await;
+                    });
+                }
+            });
+            (port, seen, task)
+        }
+
+        let (http_port, http_seen, http_task) = spawn_mock_upstream("http").await;
+        let (https_port, https_seen, https_task) = spawn_mock_upstream("https").await;
+
+        let upstream = Upstream(Arc::new(
+            hyper_util::client::proxy::matcher::Matcher::builder()
+                .http(format!("http://127.0.0.1:{http_port}"))
+                .https(format!("http://127.0.0.1:{https_port}"))
+                .build(),
+        ));
+        let policy = {
+            let lua = mlua::Lua::new();
+            let t: mlua::Table = lua.load(r#"return { allow = { "cross-port.test" } }"#).eval().unwrap();
+            NetPolicy::from_lua(&t).unwrap()
+        };
+        let proxy = ProxyHandle::start_with(policy, None, Some(upstream)).unwrap();
+
+        // 1. Plain HTTP absolute-URI request on port 443 must use HTTP_PROXY.
+        let mut s_http = TcpStream::connect(("127.0.0.1", proxy.port())).await.unwrap();
+        s_http
+            .write_all(b"GET http://cross-port.test:443/hello HTTP/1.1\r\nHost: cross-port.test:443\r\n\r\n")
+            .await
+            .unwrap();
+        let mut resp_http = String::new();
+        s_http.read_to_string(&mut resp_http).await.unwrap();
+        assert!(resp_http.ends_with("via-http"), "expected response body via-http, got: {resp_http:?}");
+        assert_eq!(http_seen.lock().unwrap().len(), 1, "http upstream should receive 1 request");
+        assert!(
+            https_seen.lock().unwrap().is_empty(),
+            "https upstream must receive none: {:?}",
+            https_seen.lock().unwrap()
+        );
+
+        // 2. HTTP CONNECT tunnel on port 80 must use the tunnel (HTTPS) upstream, not HTTP_PROXY.
+        let mut s_connect = TcpStream::connect(("127.0.0.1", proxy.port())).await.unwrap();
+        s_connect.write_all(b"CONNECT cross-port.test:80 HTTP/1.1\r\nHost: cross-port.test:80\r\n\r\n").await.unwrap();
+        let mut cr = BufReader::new(s_connect);
+        let mut head = String::new();
+        loop {
+            let mut line = String::new();
+            if cr.read_line(&mut line).await.unwrap() == 0 || line == "\r\n" {
+                break;
+            }
+            head.push_str(&line);
+        }
+        assert!(head.starts_with("HTTP/1.1 200 Connection Established"), "CONNECT failed: {head:?}");
+        let mut s_connect = cr.into_inner();
+        s_connect.write_all(b"GET /tunnel HTTP/1.1\r\nHost: cross-port.test:80\r\n\r\n").await.unwrap();
+        let mut resp_connect = String::new();
+        s_connect.read_to_string(&mut resp_connect).await.unwrap();
+        assert!(
+            resp_connect.ends_with("via-https"),
+            "expected tunneled response body via-https, got: {resp_connect:?}"
+        );
+        assert_eq!(http_seen.lock().unwrap().len(), 1, "http upstream must not receive CONNECT:80");
+        assert_eq!(https_seen.lock().unwrap().len(), 1, "https upstream should receive CONNECT:80");
+
+        // 3. SOCKS5 CONNECT tunnel on port 80 must also use the tunnel (HTTPS) upstream.
+        let mut s_socks = TcpStream::connect(("127.0.0.1", proxy.port())).await.unwrap();
+        s_socks.write_all(&[5, 1, 0]).await.unwrap();
+        let mut greeting = [0u8; 2];
+        s_socks.read_exact(&mut greeting).await.unwrap();
+        assert_eq!(greeting, [5, 0]);
+        let target = b"cross-port.test";
+        let mut req = vec![5, 1, 0, 3, target.len() as u8];
+        req.extend_from_slice(target);
+        req.extend_from_slice(&80u16.to_be_bytes());
+        s_socks.write_all(&req).await.unwrap();
+        let mut reply = [0u8; 10];
+        s_socks.read_exact(&mut reply).await.unwrap();
+        assert_eq!(reply, [5, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
+        s_socks.write_all(b"GET /socks HTTP/1.1\r\nHost: cross-port.test:80\r\n\r\n").await.unwrap();
+        let mut resp_socks = String::new();
+        s_socks.read_to_string(&mut resp_socks).await.unwrap();
+        assert!(resp_socks.ends_with("via-https"), "expected SOCKS5 response body via-https, got: {resp_socks:?}");
+        assert_eq!(http_seen.lock().unwrap().len(), 1, "http upstream must not receive SOCKS5:80");
+        assert_eq!(https_seen.lock().unwrap().len(), 2, "https upstream should receive SOCKS5:80");
+
+        http_task.abort();
+        https_task.abort();
+        drop(proxy);
+        crate::netauth::set_resolver_override(None);
     }
 }

@@ -7,7 +7,7 @@
 //!   and [`USER_ONLINE`] (for policies with an open network). Random passwords, stored DPAPI
 //!   (machine scope) in a setup file under `%ProgramData%\mare\sandbox`;
 //! - deny-read ACEs for the group on sensitive paths (SSH/cloud credentials, browser profiles,
-//!   mare's own `auth.json`; configurable: `sandbox.deny_read` / `sandbox.deny_read_defaults`);
+//!   mare's own `auth.json`; configurable: `plugins.permissions.deny_read` / `--no-default-deny-read`);
 //! - a copy of the `mare` executable in `%ProgramData%\mare\sandbox\bin` (the sandbox accounts
 //!   can't read the user's profile, where mare is usually installed) and a deny-read canary file.
 //!
@@ -130,7 +130,7 @@ pub struct SetupState {
     pub helper_sha256: String,
     /// paths that received a deny-read ACE
     pub deny_read: Vec<PathBuf>,
-    /// those of them the user configured (`sandbox.deny_read`, `--deny-read`), not the built-in
+    /// those of them the user configured (`plugins.permissions.deny_read`, `--deny-read`), not the built-in
     /// defaults; `None` = a setup from before the split ([`SetupState::user_deny_read`])
     pub deny_read_user: Option<Vec<PathBuf>>,
     /// file the accounts must not be able to read (self-test)

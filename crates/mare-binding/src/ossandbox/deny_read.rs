@@ -141,7 +141,7 @@ pub fn capability_line(b: Backend, caps: &[Cap]) -> (bool, String) {
     }
     if caps.contains(&Cap::FsRead) {
         let win = if b == Backend::WinUser {
-            "; so do they under deny-read entries you configured (sandbox.deny_read, not the built-in defaults)"
+            "; so do they under deny-read entries you configured (plugins.permissions.deny_read, not the built-in defaults)"
         } else {
             ""
         };

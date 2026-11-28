@@ -2306,3 +2306,105 @@ async fn statusline_external_and_git_trailing_rerun_and_pr_cache() {
     })
     .await
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn statusline_git_status_and_review_git_cannot_write_under_read_only_preset() {
+    use crate::suite::sandbox_expect::require_backend;
+    local(async {
+        let mut env = TestEnv::new().await;
+        assert!(fixture_git(&env.cwd).args(["init", "-q"]).status().expect("git").success());
+        std::fs::write(env.cwd.join("README.md"), "hi\n").unwrap();
+        assert!(fixture_git(&env.cwd).args(["add", "README.md"]).status().expect("git").success());
+
+        // Plant a fake `git` binary earlier in PATH that tries to write a marker file.
+        let fake_bin = env.home.path().join("fake-bin");
+        std::fs::create_dir_all(&fake_bin).unwrap();
+        let status_marker = env.cwd.join("statusline-wrote.txt");
+        let review_marker = env.cwd.join("review-wrote.txt");
+        let git_wrapper = fake_bin.join("git");
+        std::fs::write(
+            &git_wrapper,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"status\" ]; then\n  touch \"{}\"\nelif [ \"$1\" = \"rev-parse\" ]; then\n  touch \"{}\"\nfi\nexit 0\n",
+                status_marker.display(),
+                review_marker.display()
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&git_wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let orig_path = std::env::var("PATH").unwrap_or_default();
+        env.set_var("PATH", format!("{}:{}", fake_bin.display(), orig_path));
+
+        std::fs::create_dir_all(env.config_dir()).unwrap();
+        std::fs::write(
+            env.config_dir().join("init.lua"),
+            r#"
+            mare.setup {
+                model = "faux/echo",
+                logo = false,
+                plugins = {
+                    onboarding = { extras = false },
+                    permissions = { preset = "read-only" },
+                    statusline = { changed_files = true, pr = false },
+                },
+            }
+            "#,
+        )
+        .unwrap();
+
+        let mut b = env.host().user_config(true).no_session();
+        b.opts.mode = Mode::Tui;
+        let vt = OwnedVt::new(env, b.opts, 100, 16).await;
+        let mut t = Term { owned: vt, parser: vt100::Parser::new(nz(16), nz(100), 2000), ended: 0 };
+        t.until_vt("startup", |t| !t.vt.starting()).await;
+        if !require_backend(
+            &t.vt.host,
+            "statusline_git_status_and_review_git_cannot_write_under_read_only_preset",
+            mare_binding::ossandbox::expect::ANY,
+        )
+        .await
+        {
+            return;
+        }
+        let (level, review_ran): (String, bool) = eval(
+            &t.vt.host,
+            r#"
+            local r = require("review.git").run({ "rev-parse", "HEAD" })
+            return mare.proc.sandbox.current().level, r ~= nil
+            "#,
+        )
+        .await;
+        assert_eq!(level, "read-only");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!status_marker.exists(), "statusline git call wrote outside read-only sandbox");
+        assert!(!review_marker.exists(), "review.git call wrote outside read-only sandbox (review_ran={review_ran})");
+    })
+    .await
+}
+
+#[tokio::test]
+async fn review_git_propagates_sandbox_error_instead_of_returning_nil() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        env.set_var("MARE_SANDBOX_BACKEND", "none");
+        let h = env.host().builtins(&["review"]).no_session().build().await;
+        global(&h, "CWD", env.cwd.display().to_string());
+        let (ok, err): (bool, String) = eval(
+            &h,
+            r#"
+            mare.proc.sandbox.set_current({ fs_read = { "all" }, fs_write = { "none" } }, CWD)
+            local ok, res = pcall(require("review.git").run, { "status" })
+            return ok, tostring(res)
+            "#,
+        )
+        .await;
+        assert!(!ok, "review.git.run must propagate sandbox errors instead of returning nil: {err}");
+        assert!(err.contains("SANDBOX_UNAVAILABLE"), "expected SANDBOX_UNAVAILABLE error, got: {err}");
+        h.shutdown().await;
+    })
+    .await
+}

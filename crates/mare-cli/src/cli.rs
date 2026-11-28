@@ -272,7 +272,7 @@ pub(crate) enum SandboxCmd {
         /// Undo everything setup installed
         #[arg(long)]
         remove: bool,
-        /// Extra path that sandboxed commands must not read (repeatable; also `sandbox.deny_read`)
+        /// Extra path that sandboxed commands must not read (repeatable; also `plugins.permissions.deny_read`)
         #[arg(long = "deny-read", value_name = "PATH")]
         deny_read: Vec<std::path::PathBuf>,
         /// Don't apply the built-in deny-read list (credentials, browser profiles)
