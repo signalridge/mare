@@ -82,6 +82,9 @@ return function(D)
 		for name, update in pairs(pending_tools) do
 			updates[#updates + 1] = { name = name, update = update }
 		end
+		table.sort(updates, function(a, b)
+			return a.name < b.name
+		end)
 		pending_tools = {}
 		for _, u in ipairs(updates) do
 			local e = servers[u.name]
@@ -181,6 +184,7 @@ return function(D)
 			parameters = t.inputSchema,
 			unconfined = true,
 			exposure = exposure,
+			sort_key = e.name .. "\0" .. tostring(t.name) .. "\0" .. tname,
 			search = { aliases = { t.name }, text = e.name .. " " .. (e.srv.description or "") },
 			timeout_policy = "managed", -- native call owns cancellable idle/total active-time budgets
 			is_current = current,

@@ -32,13 +32,14 @@ return function(D)
 		local row = name and ctx.kernel:plugin_row(name) or 0
 		return row > 0 and row or math.huge -- not a row (a test or host ctx): after the rows, in arrival order
 	end
-	local function place(caller, name)
-		local key = { row_of(caller), def_seq }
+	local function place(caller, name, sort_key)
+		local has_key = type(sort_key) == "string" and sort_key ~= ""
+		local key = { row_of(caller), has_key and 1 or 0, has_key and sort_key or def_seq }
 		placed[name] = key
 		local at = #order + 1
 		for i, other in ipairs(order) do
 			local k = placed[other]
-			if k[1] > key[1] or (k[1] == key[1] and k[2] > key[2]) then
+			if k[1] > key[1] or (k[1] == key[1] and (k[2] > key[2] or (k[2] == key[2] and k[3] > key[3]))) then
 				at = i
 				break
 			end
@@ -262,12 +263,14 @@ return function(D)
 			def._output_validator = mare.schema.compile_value(def.output_schema)
 			def.output_schema = def._output_validator:value()
 		end
+		local sort_key = not is_rpc and def.sort_key or nil
+		def.sort_key = nil
 		normalize(def)
 		local st = stacks[name]
 		if not st then
 			st = {}
 			stacks[name] = st
-			place(caller, name)
+			place(caller, name, sort_key)
 		end
 		table.insert(st, def)
 		def_seq = def_seq + 1
