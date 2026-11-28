@@ -60,6 +60,15 @@ enum AcpErr {
         session_id: String,
         message: String,
     },
+    /// A session restore (`session/resume` or `session/load`) targets an occupied session
+    /// (already active in this process, or locked by another writer process): keeps `-32602`
+    /// Invalid params while attaching structured machine-readable busy data alongside the
+    /// human-readable message.
+    SessionBusy {
+        session_id: String,
+        reason: &'static str,
+        message: String,
+    },
     Internal(String),
     Scoped(Box<Self>, Vec<WireProjector>),
 }
@@ -84,6 +93,15 @@ impl AcpErr {
                 agent_client_protocol::ErrorCode::from(agent_client_protocol::v1::schema::ErrorCode::ResourceNotFound),
             )
             .data(serde_json::json!({ "sessionId": session_id, "message": message })),
+            Self::SessionBusy { session_id, reason, message } => {
+                agent_client_protocol::Error::invalid_params().data(serde_json::json!({
+                    "code": "session_busy",
+                    "reason": reason,
+                    "busy": true,
+                    "sessionId": session_id,
+                    "message": message,
+                }))
+            }
             Self::Internal(msg) => agent_client_protocol::Error::internal_error().data(msg),
             Self::Scoped(error, projectors) => wire::project_error(error.into_rpc(), &projectors),
         }
@@ -578,12 +596,12 @@ async fn start_host(
     base_opts: &HostOptions,
     cwd: PathBuf,
     mcp_servers: Map<String, J>,
-    resume: Option<&str>,
+    resume: Option<(&str, &str)>,
     strict_config: bool,
     orchestrator: Rc<mare_host::SessionOrchestrator>,
 ) -> Result<Arc<Host>, AcpErr> {
     let trusted = session_trust(base_opts, &cwd);
-    let args = session_args(base_opts, &cwd, trusted, resume);
+    let args = session_args(base_opts, &cwd, trusted, resume.map(|(_, path)| path));
     let o = HostOptions {
         cwd,
         mode: Mode::Acp,
@@ -610,10 +628,15 @@ async fn start_host(
         host.shutdown().await;
         return Err(err);
     }
-    if resume.is_some()
-        && let Some(err) = crate::headless::resume_error(&host).await
+    if let Some((session_id, _)) = resume
+        && let Some((err, code)) = crate::headless::resume_error_details(&host).await
     {
-        let err = AcpErr::InvalidParams(err).with_projector(&host);
+        let err = if code.as_deref() == Some("busy") {
+            AcpErr::SessionBusy { session_id: session_id.to_string(), reason: "locked", message: err }
+        } else {
+            AcpErr::InvalidParams(err)
+        }
+        .with_projector(&host);
         host.shutdown().await;
         return Err(err);
     }
@@ -998,7 +1021,8 @@ pub async fn run(opts: HostOptions, strict_config: bool) -> Result<i32> {
                 let lookup_sid = aliases.borrow().resolve_internal(&session_id);
                 match manager.session(&lookup_sid) {
                     Ok(entry) => {
-                        let error = AcpErr::InvalidParams(SessionError::AlreadyLoaded(session_id).to_string())
+                        let message = SessionError::AlreadyLoaded(session_id.clone()).to_string();
+                        let error = AcpErr::SessionBusy { session_id, reason: "already_loaded", message }
                             .with_projector(&entry.host);
                         let _ = reply.send(Err(error));
                         continue;
@@ -1032,7 +1056,15 @@ pub async fn run(opts: HostOptions, strict_config: bool) -> Result<i32> {
                     }
                 };
                 let path_str = persisted.path.to_string_lossy().into_owned();
-                match start_host(&opts, cwd, mcp, Some(&path_str), strict_config, manager.orchestrator().clone()).await
+                match start_host(
+                    &opts,
+                    cwd,
+                    mcp,
+                    Some((session_id.as_str(), path_str.as_str())),
+                    strict_config,
+                    manager.orchestrator().clone(),
+                )
+                .await
                 {
                     Ok(host) => {
                         if reply.is_closed() {
@@ -1057,6 +1089,16 @@ pub async fn run(opts: HostOptions, strict_config: bool) -> Result<i32> {
                         let projector = mare_shared::wire_projection::hook(host.lua());
                         let rt = match manager.register_host(host, Some(&session_id), false).await {
                             Ok(rt) => rt,
+                            Err(SessionError::AlreadyLoaded(sid)) => {
+                                let message = SessionError::AlreadyLoaded(sid.clone()).to_string();
+                                let _ = reply.send(Err(AcpErr::SessionBusy {
+                                    session_id: sid,
+                                    reason: "already_loaded",
+                                    message,
+                                }
+                                .with_hook(projector.clone())));
+                                continue;
+                            }
                             Err(SessionError::SessionIdMismatch { .. }) => {
                                 let _ = reply
                                     .send(Err(AcpErr::Internal("resumed session id mismatch".into())
@@ -1398,6 +1440,23 @@ mod tests {
             let other = session_args(&opts, other_ws.path(), false, None);
             assert_eq!(other.get("trust_source").and_then(|v| v.as_str()), Some("undecided"));
             assert_eq!(other.get("trust").and_then(|v| v.as_str()), Some("undecided"));
+        }
+    }
+
+    #[test]
+    fn session_busy_error_carries_structured_data_and_message() {
+        for (reason, msg) in [
+            ("already_loaded", "session is already active: s-1"),
+            ("locked", "busy: this session is open in another mare process"),
+        ] {
+            let rpc = AcpErr::SessionBusy { session_id: "s-1".into(), reason, message: msg.into() }.into_rpc();
+            assert_eq!(rpc.code, agent_client_protocol::ErrorCode::INVALID_PARAMS);
+            let data = rpc.data.expect("structured error data");
+            assert_eq!(data["code"], "session_busy");
+            assert_eq!(data["reason"], reason);
+            assert_eq!(data["busy"], true);
+            assert_eq!(data["sessionId"], "s-1");
+            assert_eq!(data["message"], msg);
         }
     }
 }

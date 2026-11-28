@@ -208,14 +208,23 @@ pub fn parse_duration(s: &str) -> Result<std::time::Duration, String> {
     Ok(std::time::Duration::from_millis((n * mul_ms as f64) as u64))
 }
 
-/// Why `-c` / `--resume` found no session (the session plugin's `info().resume_error`).
-pub(crate) async fn resume_error(host: &Host) -> Option<String> {
+/// Why `-c` / `--resume` found no session (`info().resume_error` and `info().resume_error_code`).
+pub(crate) async fn resume_error_details(host: &Host) -> Option<(String, Option<String>)> {
     let s = host.service_table("session")?;
     let info = s.get::<mlua::Function>("info").ok()?;
     match info.call_async::<mlua::Value>(s).await {
-        Ok(mlua::Value::Table(t)) => t.get::<Option<String>>("resume_error").ok().flatten(),
+        Ok(mlua::Value::Table(t)) => {
+            let msg = t.get::<Option<String>>("resume_error").ok().flatten()?;
+            let code = t.get::<Option<String>>("resume_error_code").ok().flatten();
+            Some((msg, code))
+        }
         _ => None,
     }
+}
+
+/// Why `-c` / `--resume` found no session (the session plugin's `info().resume_error`).
+pub(crate) async fn resume_error(host: &Host) -> Option<String> {
+    resume_error_details(host).await.map(|(msg, _)| msg)
 }
 
 /// Whether a public event goes to the `--json` stream (`--stream-deltas` includes ignorable
