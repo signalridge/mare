@@ -693,6 +693,142 @@ sanitize_node = function(node, d)
 	return s
 end
 
+local function is_flattenable_object_branch(b)
+	if type(b) ~= "table" then
+		return false
+	end
+	if b.type ~= nil and b.type ~= "object" then
+		return false
+	end
+	if b.oneOf ~= nil or b.anyOf ~= nil or b.allOf ~= nil or b["not"] ~= nil or b["$ref"] ~= nil then
+		return false
+	end
+	return true
+end
+
+local function adapt_anthropic_root_combinator(s, keyword)
+	local branches = s[keyword]
+	if branches == nil then
+		return
+	end
+	if (s.type ~= nil and s.type ~= "object") or type(branches) ~= "table" or #branches == 0 then
+		error("Anthropic Messages does not support top-level " .. keyword .. " on non-object or empty tool schemas")
+	end
+	for _, b in ipairs(branches) do
+		if not is_flattenable_object_branch(b) then
+			error(
+				"Anthropic Messages does not support top-level "
+					.. keyword
+					.. " with non-object or nested combinator branches"
+			)
+		end
+	end
+	local merged_props = type(s.properties) == "table" and shallow_copy(s.properties) or {}
+	local synthetic_anyof = {}
+	for _, b in ipairs(branches) do
+		if type(b.properties) == "table" then
+			for k, prop in pairs(b.properties) do
+				local existing = merged_props[k]
+				if existing == nil then
+					merged_props[k] = prop
+				elseif not json_eq(existing, prop) then
+					if synthetic_anyof[k] then
+						local dup = false
+						for _, v in ipairs(existing.anyOf) do
+							if json_eq(v, prop) then
+								dup = true
+								break
+							end
+						end
+						if not dup then
+							existing.anyOf[#existing.anyOf + 1] = prop
+						end
+					else
+						merged_props[k] = { anyOf = { existing, prop } }
+						synthetic_anyof[k] = true
+					end
+				end
+			end
+		end
+	end
+	local req_out, req_seen = {}, {}
+	if type(s.required) == "table" then
+		for _, k in ipairs(s.required) do
+			if type(k) == "string" and not req_seen[k] then
+				req_seen[k] = true
+				req_out[#req_out + 1] = k
+			end
+		end
+	end
+	if keyword == "allOf" then
+		for _, b in ipairs(branches) do
+			if type(b.required) == "table" then
+				for _, k in ipairs(b.required) do
+					if type(k) == "string" and not req_seen[k] then
+						req_seen[k] = true
+						req_out[#req_out + 1] = k
+					end
+				end
+			end
+		end
+	else
+		local first_req = branches[1].required
+		if type(first_req) == "table" then
+			for _, k in ipairs(first_req) do
+				if type(k) == "string" and not req_seen[k] then
+					local in_all = true
+					for i = 2, #branches do
+						if not has_required_key(branches[i], k) then
+							in_all = false
+							break
+						end
+					end
+					if in_all then
+						req_seen[k] = true
+						req_out[#req_out + 1] = k
+					end
+				end
+			end
+		end
+	end
+	if s.additionalProperties == nil then
+		local all_false = true
+		for _, b in ipairs(branches) do
+			if b.additionalProperties ~= false then
+				all_false = false
+				break
+			end
+		end
+		if all_false then
+			s.additionalProperties = false
+		end
+	end
+	if keyword ~= "allOf" then
+		local summaries = {}
+		for _, b in ipairs(branches) do
+			if type(b.required) == "table" and #b.required > 0 then
+				summaries[#summaries + 1] = "required: " .. table.concat(b.required, ", ")
+			elseif type(b.properties) == "table" and next(b.properties) ~= nil then
+				local keys = {}
+				for k in pairs(b.properties) do
+					keys[#keys + 1] = tostring(k)
+				end
+				table.sort(keys)
+				summaries[#summaries + 1] = "fields: " .. table.concat(keys, ", ")
+			else
+				summaries[#summaries + 1] = "empty object"
+			end
+		end
+		local prefix = keyword == "oneOf" and "Must match exactly one variant: ("
+			or "Must match at least one variant: ("
+		append_constraint_notes(s, { prefix .. table.concat(summaries, ") | (") .. ")" })
+	end
+	s.type = "object"
+	s.properties = merged_props
+	s.required = #req_out > 0 and req_out or nil
+	s[keyword] = nil
+end
+
 --- Sanitize one JSON schema for the given dialect (table or dialect/base_url/model descriptor).
 --- Returns a fresh sanitized table without mutating `schema`.
 function M.sanitize(schema, dialect, base_url, model_id, opts)
@@ -701,6 +837,11 @@ function M.sanitize(schema, dialect, base_url, model_id, opts)
 	end
 	local d = type(dialect) == "table" and dialect or M.detect_dialect(dialect, base_url, model_id, opts)
 	local out = sanitize_node(schema, d)
+	if d.anthropic and not d.output_schema then
+		adapt_anthropic_root_combinator(out, "allOf")
+		adapt_anthropic_root_combinator(out, "oneOf")
+		adapt_anthropic_root_combinator(out, "anyOf")
+	end
 	mare.json.copy_metadata(schema, out)
 	return out
 end

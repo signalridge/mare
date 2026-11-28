@@ -340,17 +340,58 @@ function M.convert_messages(messages, no_cache, opts)
 	return out
 end
 
+local function adapt_tool_schema(t, sanitize, dialect)
+	if not sanitize then
+		return true, t.parameters
+	end
+	return pcall(sanitize, t.parameters, dialect)
+end
+
+local function warn_omitted_tool(name, reason)
+	if mare and mare.log then
+		mare.log(
+			"warn",
+			("provider-anthropic: omitting tool %s with incompatible input_schema: %s"):format(
+				tostring(name),
+				tostring(reason)
+			)
+		)
+	end
+end
+
+function M.filter_tools(tools, dialect)
+	local out = {}
+	local sanitize = dialect and require("mare_lib.schema_sanitize").sanitize or nil
+	for _, t in ipairs(tools or {}) do
+		if t.type == "hosted" then
+			out[#out + 1] = t
+		else
+			local ok, params = adapt_tool_schema(t, sanitize, dialect)
+			if not ok then
+				warn_omitted_tool(t.name, params)
+			else
+				out[#out + 1] = t
+			end
+		end
+	end
+	return out
+end
+
 function M.convert_tools(tools, dialect)
 	local out = {}
 	local sanitize = dialect and require("mare_lib.schema_sanitize").sanitize or nil
 	for _, t in ipairs(tools or {}) do
 		if t.type ~= "hosted" then
-			local params = sanitize and sanitize(t.parameters, dialect) or t.parameters
-			local entry = { name = t.name, description = t.description, input_schema = params }
-			if t.defer_loading then
-				entry.defer_loading = true
+			local ok, params = adapt_tool_schema(t, sanitize, dialect)
+			if not ok then
+				warn_omitted_tool(t.name, params)
+			else
+				local entry = { name = t.name, description = t.description, input_schema = params }
+				if t.defer_loading then
+					entry.defer_loading = true
+				end
+				out[#out + 1] = entry
 			end
-			out[#out + 1] = entry
 		end
 	end
 	return out

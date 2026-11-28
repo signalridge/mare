@@ -183,6 +183,18 @@ return function(D)
 		return false
 	end
 
+	local function filter_tools(tools, req, meta)
+		local schema_sanitize = require("mare_lib.schema_sanitize")
+		local model = (req and req.model) or (meta and meta.model)
+		local dialect = schema_sanitize.detect_dialect(
+			meta and meta.dialect,
+			meta and meta.base_url,
+			model and model.id,
+			{ route = "anthropic" }
+		)
+		return M.filter_tools(tools, dialect)
+	end
+
 	return {
 		name = "anthropic-messages",
 		config = cfg,
@@ -190,6 +202,7 @@ return function(D)
 		path = "/v1/messages",
 		auth = { "x-api-key", "bearer" },
 		encode = encode,
+		filter_tools = filter_tools,
 		finalize = finalize,
 		error = extract,
 		retry = retry,
