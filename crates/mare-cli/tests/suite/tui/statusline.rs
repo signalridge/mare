@@ -2424,8 +2424,11 @@ async fn statusline_git_status_and_review_git_cannot_write_under_read_only_prese
         std::fs::write(env.cwd.join("README.md"), "hi\n").unwrap();
         assert!(fixture_git(&env.cwd).args(["add", "README.md"]).status().expect("git").success());
 
-        // Plant a fake `git` binary earlier in PATH that tries to write a marker file.
-        let fake_bin = env.home.path().join("fake-bin");
+        // Plant a fake `git` binary earlier in PATH that skips leading global options (such as
+        // `--no-optional-locks`) before checking the subcommand, tries to write a marker file,
+        // and reports via stdout whether the write attempt was blocked by the sandbox so the
+        // assertion cannot pass vacuously.
+        let fake_bin = env.cwd.join(".git").join("fake-bin");
         std::fs::create_dir_all(&fake_bin).unwrap();
         let status_marker = env.cwd.join("statusline-wrote.txt");
         let review_marker = env.cwd.join("review-wrote.txt");
@@ -2433,7 +2436,7 @@ async fn statusline_git_status_and_review_git_cannot_write_under_read_only_prese
         std::fs::write(
             &git_wrapper,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = \"status\" ]; then\n  touch \"{}\"\nelif [ \"$1\" = \"rev-parse\" ]; then\n  touch \"{}\"\nfi\nexit 0\n",
+                "#!/bin/sh\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    --no-optional-locks|-*) shift ;;\n    *) break ;;\n  esac\ndone\nif [ \"$1\" = \"status\" ]; then\n  if touch \"{}\" 2>/dev/null; then\n    printf '?? WROTE\\n'\n  else\n    printf '?? blocked-1\\n?? blocked-2\\n'\n  fi\nelif [ \"$1\" = \"rev-parse\" ]; then\n  if touch \"{}\" 2>/dev/null; then\n    printf 'WROTE\\n'\n  else\n    printf 'BLOCKED_WRITE\\n'\n  fi\nfi\nexit 0\n",
                 status_marker.display(),
                 review_marker.display()
             ),
@@ -2465,8 +2468,8 @@ async fn statusline_git_status_and_review_git_cannot_write_under_read_only_prese
 
         let mut b = env.host().user_config(true).no_session();
         b.opts.mode = Mode::Tui;
-        let vt = OwnedVt::new(env, b.opts, 100, 16).await;
-        let mut t = Term::from_vt(vt, vt100::Parser::new(nz(16), nz(100), 2000));
+        let vt = OwnedVt::new(env, b.opts, 120, 16).await;
+        let mut t = Term::from_vt(vt, vt100::Parser::new(nz(16), nz(120), 2000));
         t.until_vt("startup", |t| !t.vt.starting()).await;
         if !require_backend(
             &t.vt.host,
@@ -2477,18 +2480,27 @@ async fn statusline_git_status_and_review_git_cannot_write_under_read_only_prese
         {
             return;
         }
-        let (level, review_ran): (String, bool) = eval(
+        let (level, review_out): (String, String) = eval(
             &t.vt.host,
             r#"
             local r = require("review.git").run({ "rev-parse", "HEAD" })
-            return mare.proc.sandbox.current().level, r ~= nil
+            return mare.proc.sandbox.current().level, type(r) == "string" and r or ""
             "#,
         )
         .await;
         assert_eq!(level, "read-only");
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            review_out.contains("BLOCKED_WRITE"),
+            "review.git fake wrapper must have attempted write and been blocked by sandbox: {review_out:?}"
+        );
+        // Wait until the statusline probe has actually executed the `status` branch of the fake
+        // `git` wrapper (which prints 2 porcelain lines only when `touch` failed under sandbox).
+        t.until("statusline probe blocked write under read-only sandbox", |s| {
+            s.contains("±2") || s.contains("± 2") || s.contains("+- 2") || s.contains("+-2")
+        })
+        .await;
         assert!(!status_marker.exists(), "statusline git call wrote outside read-only sandbox");
-        assert!(!review_marker.exists(), "review.git call wrote outside read-only sandbox (review_ran={review_ran})");
+        assert!(!review_marker.exists(), "review.git call wrote outside read-only sandbox");
     })
     .await
 }
@@ -2512,6 +2524,62 @@ async fn review_git_propagates_sandbox_error_instead_of_returning_nil() {
         assert!(!ok, "review.git.run must propagate sandbox errors instead of returning nil: {err}");
         assert!(err.contains("SANDBOX_UNAVAILABLE"), "expected SANDBOX_UNAVAILABLE error, got: {err}");
         h.shutdown().await;
+    })
+    .await
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn repro_231_statusline_git_probe_avoids_optional_index_lock() {
+    use std::os::unix::fs::MetadataExt;
+
+    local(async {
+        let before_ino = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let before_ino_setup = before_ino.clone();
+        let prepare = move |env: &TestEnv| {
+            let git = |args: &[&str]| {
+                let out = fixture_git(&env.cwd).args(args).output().expect("run git");
+                assert!(out.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+            };
+            git(&["init", "-q", "-b", "trunk"]);
+            git(&["config", "user.email", "repro@example.com"]);
+            git(&["config", "user.name", "repro"]);
+            std::fs::write(env.cwd.join("tracked.txt"), "hello\n").unwrap();
+            git(&["add", "tracked.txt"]);
+            git(&["commit", "-q", "-m", "init"]);
+            std::fs::write(env.cwd.join("untracked.txt"), "new\n").unwrap();
+
+            // Bump tracked.txt mtime without changing its contents so `git status` considers the
+            // index stat-dirty and acquires `.git/index.lock` to rewrite `.git/index` unless
+            // `--no-optional-locks` is passed. Use portable Rust `File::set_modified` instead of
+            // GNU-specific `touch -d`.
+            std::fs::File::options()
+                .write(true)
+                .open(env.cwd.join("tracked.txt"))
+                .expect("open tracked.txt")
+                .set_modified(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_893_456_000))
+                .expect("set_modified tracked.txt");
+
+            let ino = std::fs::metadata(env.cwd.join(".git/index")).unwrap().ino();
+            before_ino_setup.store(ino, std::sync::atomic::Ordering::SeqCst);
+        };
+
+        let cfg = json!({
+            "icons": "ascii",
+            "plugins": {
+                "permissions": { "enabled": false },
+                "statusline": { "changed_files": true, "pr": false },
+            }
+        });
+        let mut t = Term::build(json!([]), cfg, json!({}), 120, 16, prepare).await;
+        t.until("statusline changed-file count", |s| s.contains("@ trunk") && s.contains("+- 1")).await;
+
+        let before = before_ino.load(std::sync::atomic::Ordering::SeqCst);
+        let after = std::fs::metadata(t._env.cwd.join(".git/index")).unwrap().ino();
+        assert_eq!(
+            after, before,
+            "background statusline git probe acquired .git/index.lock and rewrote .git/index (inode {before} -> {after}); expected --no-optional-locks"
+        );
     })
     .await
 }
