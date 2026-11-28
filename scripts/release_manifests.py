@@ -16,6 +16,98 @@ import unittest
 
 STABLE_SEMVER_RE = re.compile(r"^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 SLSA_SUFFIXES = (".tar.gz", ".zip", ".deb", ".rpm")
+CHANNEL_SECTION_START = "<!-- mare-install-channels:start -->"
+CHANNEL_SECTION_END = "<!-- mare-install-channels:end -->"
+VALID_CHANNEL_STATUSES = frozenset({"pending", "published", "skipped", "failed"})
+CHANNEL_ORDER = ("container", "homebrew", "scoop", "aur", "nur")
+
+
+def render_release_notes_install_section(
+    *,
+    tag: str,
+    version: str,
+    channels: dict[str, str],
+) -> str:
+    """Render the marker-bounded installation & channel availability section for a GitHub Release."""
+    for name in CHANNEL_ORDER:
+        status = channels.get(name, "pending")
+        if status not in VALID_CHANNEL_STATUSES:
+            raise ValueError(f"invalid status {status!r} for channel {name!r}")
+
+    def channel_line(key: str, label: str, published_text: str) -> str:
+        status = channels.get(key, "pending")
+        if status == "published":
+            return f"- {label} (available): {published_text}"
+        if status == "pending":
+            return (
+                f"- {label} (pending): publishing in progress; use the direct archives "
+                "or quick install above until channel sync finishes."
+            )
+        if status == "skipped":
+            return f"- {label} (not published): not published for this release."
+        return (
+            f"- {label} (sync failed): automated publication failed for this release; "
+            "use the direct archives or quick install above."
+        )
+
+    lines = [
+        CHANNEL_SECTION_START,
+        "Installation: https://signalridge.github.io/mare/en/get-started/installation/",
+        "",
+        "### Available now",
+        "- Quick install (macOS / Linux): `curl -fsSL https://signalridge.github.io/mare/install.sh | sh`",
+        "- Quick install (Windows): `irm https://signalridge.github.io/mare/install.ps1 | iex`",
+        f"- Nix Flake: `nix run github:signalridge/mare/{tag}`",
+        "- Linux packages (`.deb` / `.rpm`), direct archives, SPDX SBOMs, "
+        "Cosign bundle (`checksums.txt.sigstore.json`), and SLSA provenance are attached to this release.",
+        "",
+        "### Package managers and container image",
+        channel_line(
+            "container",
+            "Container (GHCR)",
+            f"`docker pull ghcr.io/signalridge/mare:{version}`",
+        ),
+        channel_line(
+            "homebrew",
+            "Homebrew (macOS / Linux)",
+            "`brew tap signalridge/tap && brew trust signalridge/tap && brew install signalridge/tap/mare` "
+            "(Upgrading from the earlier cask: `brew uninstall --cask mare && brew install signalridge/tap/mare`)",
+        ),
+        channel_line(
+            "scoop",
+            "Scoop (Windows)",
+            "`scoop bucket add signalridge https://github.com/signalridge/scoop-bucket` "
+            "then `scoop install signalridge/mare`",
+        ),
+        channel_line(
+            "nur",
+            "Nix (NUR)",
+            "`nix profile install github:signalridge/nur-packages#mare`",
+        ),
+        channel_line(
+            "aur",
+            "Arch Linux (AUR)",
+            "`yay -S mare-bin`",
+        ),
+        CHANNEL_SECTION_END,
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def upsert_release_notes_section(existing_body: str, section: str) -> str:
+    """Replace the marker-bounded channel section in-place, preserving surrounding release notes."""
+    block = section.strip()
+    start_idx = existing_body.find(CHANNEL_SECTION_START)
+    end_idx = existing_body.find(CHANNEL_SECTION_END)
+    if start_idx != -1 and end_idx != -1 and end_idx >= start_idx:
+        before = existing_body[:start_idx].rstrip()
+        after = existing_body[end_idx + len(CHANNEL_SECTION_END) :].lstrip()
+        parts = [p for p in (before, block, after) if p]
+        return "\n\n".join(parts) + "\n"
+    trimmed = existing_body.strip()
+    if not trimmed:
+        return block + "\n"
+    return trimmed + "\n\n" + block + "\n"
 
 
 def parse_checksums(checksums_text: str) -> dict[str, str]:
@@ -457,6 +549,73 @@ class ReleaseManifestsSelfTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 generate_manifests(tag="v1.0.0", version="1.0.0", dist_dir=dist, manifests_dir=root / "m")
 
+    def test_release_notes_initial_marks_downstream_channels_pending(self):
+        initial = render_release_notes_install_section(
+            tag="v1.2.3",
+            version="1.2.3",
+            channels={c: "pending" for c in CHANNEL_ORDER},
+        )
+        self.assertIn(CHANNEL_SECTION_START, initial)
+        self.assertIn(CHANNEL_SECTION_END, initial)
+        self.assertIn("curl -fsSL https://signalridge.github.io/mare/install.sh | sh", initial)
+        self.assertIn("nix run github:signalridge/mare/v1.2.3", initial)
+        self.assertIn("Homebrew (macOS / Linux) (pending):", initial)
+        self.assertIn("Scoop (Windows) (pending):", initial)
+        self.assertIn("Arch Linux (AUR) (pending):", initial)
+        self.assertIn("Nix (NUR) (pending):", initial)
+        self.assertIn("Container (GHCR) (pending):", initial)
+        self.assertNotIn("brew install signalridge/tap/mare", initial)
+        self.assertNotIn("scoop install signalridge/mare", initial)
+        self.assertNotIn("yay -S mare-bin", initial)
+        self.assertNotIn("docker pull ghcr.io/signalridge/mare:1.2.3", initial)
+
+    def test_release_notes_update_reflects_channel_results_and_preserves_changelog(self):
+        initial = render_release_notes_install_section(
+            tag="v1.2.3",
+            version="1.2.3",
+            channels={c: "pending" for c in CHANNEL_ORDER},
+        )
+        release_body = "## What's Changed\n- Fix thing (#42)\n\n" + initial
+        updated_section = render_release_notes_install_section(
+            tag="v1.2.3",
+            version="1.2.3",
+            channels={
+                "container": "published",
+                "homebrew": "published",
+                "scoop": "failed",
+                "aur": "skipped",
+                "nur": "published",
+            },
+        )
+        updated = upsert_release_notes_section(release_body, updated_section)
+        self.assertIn("## What's Changed\n- Fix thing (#42)", updated)
+        self.assertIn("Container (GHCR) (available): `docker pull ghcr.io/signalridge/mare:1.2.3`", updated)
+        self.assertIn("Homebrew (macOS / Linux) (available):", updated)
+        self.assertIn("brew install signalridge/tap/mare", updated)
+        self.assertIn("Nix (NUR) (available):", updated)
+        self.assertIn("Scoop (Windows) (sync failed):", updated)
+        self.assertNotIn("scoop install signalridge/mare", updated)
+        self.assertIn("Arch Linux (AUR) (not published):", updated)
+        self.assertNotIn("yay -S mare-bin", updated)
+        # Idempotent on repeated updates.
+        self.assertEqual(upsert_release_notes_section(updated, updated_section), updated)
+
+
+def _parse_channel_statuses(items: list[str]) -> dict[str, str]:
+    statuses: dict[str, str] = {}
+    for item in items:
+        if "=" not in item:
+            raise ValueError(f"expected channel=status, got {item!r}")
+        key, val = item.split("=", 1)
+        key = key.strip()
+        val = val.strip()
+        if key not in CHANNEL_ORDER:
+            raise ValueError(f"unknown channel {key!r}")
+        if val not in VALID_CHANNEL_STATUSES:
+            raise ValueError(f"invalid status {val!r} for channel {key!r}")
+        statuses[key] = val
+    return statuses
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -467,6 +626,15 @@ def main() -> int:
     parser.add_argument("--registry", default=os.environ.get("REGISTRY", "ghcr.io"))
     parser.add_argument("--image-name", default=os.environ.get("IMAGE_NAME", "signalridge/mare"))
     parser.add_argument("--github-output", type=pathlib.Path)
+    parser.add_argument("--write-initial-notes", type=pathlib.Path, help="Write initial release notes section")
+    parser.add_argument("--update-release-body", type=pathlib.Path, help="Existing release body file to update")
+    parser.add_argument("--output-body", type=pathlib.Path, help="Destination file for updated release body")
+    parser.add_argument(
+        "--channel-status",
+        action="append",
+        default=[],
+        help="Channel publication status as name=pending|published|skipped|failed",
+    )
     parser.add_argument("--self-test", action="store_true", help="Run internal unit tests")
     args = parser.parse_args()
 
@@ -481,6 +649,16 @@ def main() -> int:
         print("--tag and --version (or TAG_NAME and VERSION env vars) are required", file=sys.stderr)
         return 2
 
+    if args.update_release_body is not None:
+        if args.output_body is None:
+            print("--output-body is required with --update-release-body", file=sys.stderr)
+            return 2
+        statuses = _parse_channel_statuses(args.channel_status)
+        existing = args.update_release_body.read_text(encoding="utf-8")
+        section = render_release_notes_install_section(tag=tag, version=version, channels=statuses)
+        args.output_body.write_text(upsert_release_notes_section(existing, section), encoding="utf-8")
+        return 0
+
     existing_tags = list_git_tags(pathlib.Path.cwd())
     outputs = generate_manifests(
         tag=tag,
@@ -491,6 +669,14 @@ def main() -> int:
         image_name=args.image_name,
         existing_tags=existing_tags,
     )
+    if args.write_initial_notes is not None:
+        args.write_initial_notes.parent.mkdir(parents=True, exist_ok=True)
+        initial = render_release_notes_install_section(
+            tag=tag,
+            version=version,
+            channels={c: "pending" for c in CHANNEL_ORDER},
+        )
+        args.write_initial_notes.write_text(initial, encoding="utf-8")
     out_path = args.github_output or (pathlib.Path(os.environ["GITHUB_OUTPUT"]) if "GITHUB_OUTPUT" in os.environ else None)
     if out_path is not None:
         write_github_outputs(out_path, outputs)
