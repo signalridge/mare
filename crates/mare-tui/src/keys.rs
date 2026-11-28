@@ -18,8 +18,16 @@ pub fn base_layout_fallback(ev: &KeyEvent) -> Option<char> {
 
 /// The reserved interrupt key, independent of the configured keymap.
 pub fn is_ctrl_c(ev: &KeyEvent) -> bool {
-    let is_c = ev.code == KeyCode::Char('c') || base_layout_fallback(ev).is_some_and(|b| b.eq_ignore_ascii_case(&'c'));
-    is_c && ev.modifiers.contains(Modifiers::CONTROL) && !ev.modifiers.contains(Modifiers::ALT)
+    let mut mods = ev.modifiers;
+    if let KeyCode::Char(c) = ev.code
+        && c.is_uppercase()
+    {
+        mods |= Modifiers::SHIFT;
+    }
+    if mods != Modifiers::CONTROL {
+        return false;
+    }
+    ev.code == KeyCode::Char('c') || base_layout_fallback(ev).is_some_and(|b| b.eq_ignore_ascii_case(&'c'))
 }
 
 /// Printable character without Control or Alt modifiers (`Shift` and `Super` are preserved).
@@ -271,5 +279,35 @@ mod tests {
         assert_eq!(normalize_key("<lt>"), "<");
         assert_eq!(normalize_key("<gt>"), ">");
         assert_eq!(normalize_key("<C-lt>"), "ctrl+<");
+    }
+
+    #[test]
+    fn repro_222_modified_copy_shortcuts_do_not_trigger_ctrl_c() {
+        // Plain Ctrl+C (ASCII and non-Latin base-layout fallback) must still match.
+        assert!(is_ctrl_c(&k(KeyCode::Char('c'), Modifiers::CONTROL)));
+        assert!(is_ctrl_c(&KeyEvent::new(KeyCode::Char('с'), Modifiers::CONTROL).with_base_layout_key(Some('c'))));
+
+        // Forwarded Shift/Super copy chords must NOT activate the reserved Ctrl+C action.
+        let ctrl_shift_c = k(KeyCode::Char('c'), Modifiers::CONTROL | Modifiers::SHIFT);
+        let ctrl_super_c = k(KeyCode::Char('c'), Modifiers::CONTROL | Modifiers::SUPER);
+        let cyrillic_ctrl_shift_c =
+            KeyEvent::new(KeyCode::Char('С'), Modifiers::CONTROL | Modifiers::SHIFT).with_base_layout_key(Some('c'));
+
+        assert!(!is_ctrl_c(&ctrl_shift_c), "Ctrl+Shift+C must not trigger reserved Ctrl+C");
+        assert!(!is_ctrl_c(&ctrl_super_c), "Ctrl+Super+C must not trigger reserved Ctrl+C");
+        assert!(!is_ctrl_c(&cyrillic_ctrl_shift_c), "Cyrillic Ctrl+Shift+C must not trigger reserved Ctrl+C");
+
+        // Also check decoded Kitty CSI-u sequence for Ctrl+Shift+c (`99;6u`) and Ctrl+Super+c (`99;13u`).
+        #[cfg(unix)]
+        {
+            let mut dec = crate::live_input::LiveDecoder::default();
+            let mut out = Vec::new();
+            dec.feed(b"\x1b[99;6u\x1b[99;13u\x1b[1089::99;6u", false, &mut out);
+            for ev in out {
+                if let crate::tty::Event::Key(ke) = ev {
+                    assert!(!is_ctrl_c(&ke), "decoded modified chord {ke:?} must not trigger reserved Ctrl+C");
+                }
+            }
+        }
     }
 }
