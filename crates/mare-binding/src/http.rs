@@ -443,6 +443,10 @@ enum Redirect {
     SameOrigin,
 }
 
+pub(crate) fn same_origin_redirect_policy() -> reqwest::redirect::Policy {
+    redirect_policy(Redirect::SameOrigin, MAX_REDIRECTS)
+}
+
 fn redirect_policy(mode: Redirect, max: usize) -> reqwest::redirect::Policy {
     reqwest::redirect::Policy::custom(move |attempt| {
         if offline_guard_active() && !is_loopback_url(attempt.url()) {
