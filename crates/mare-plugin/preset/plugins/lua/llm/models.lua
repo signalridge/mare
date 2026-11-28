@@ -640,7 +640,7 @@ return function(D)
 		if not ref or ref == "" then
 			return nil
 		end
-		return (resolve_ref(caller, ref))
+		return (resolve_ref_hydrated(caller, ref))
 	end
 
 	function llm.current(self, caller)

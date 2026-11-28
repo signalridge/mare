@@ -156,7 +156,7 @@ function M:describe_wire(name) end
 ---@return string|nil
 function M:effort() end
 
---- Return every effort value defined for `model` (built-in levels plus rule additions), or nil.
+--- Return the effort values offered for `model` on its active route (same source as `param_list`), or nil.
 ---@param model? mare.Model
 ---@return string[]|nil
 function M:effort_options(model) end
