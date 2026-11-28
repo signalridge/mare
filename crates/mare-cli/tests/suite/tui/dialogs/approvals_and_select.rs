@@ -1029,12 +1029,28 @@ async fn long_bash_approval_shows_tail_marker_cwd_exact_scope_and_generic_tool_a
         assert!(compact.contains("work-sub"), "working directory must be visible before approval:\n{screen}");
 
         // Narrow & short terminal (76x10) must still show the approval preview (never drop it).
+        // With `max_h = 9` the preview interior is 1 row, so a long CI/TMPDIR `cwd:` line may wrap
+        // `work-sub` onto row 2; verify `Preview` + `cwd:` at 76x10 and `work-sub` when scrolled or
+        // given 1 row more (`76x12`).
         t.resize(76, 10).await;
         t.step().await;
         let tiny_screen = t.screen();
         assert!(
-            tiny_screen.contains("Preview") && tiny_screen.contains("work-sub"),
-            "narrow+short approval modal must still render Preview pane with cwd/command:\n{tiny_screen}"
+            tiny_screen.contains("Preview") && tiny_screen.contains("cwd:"),
+            "narrow+short approval modal must still render Preview pane with cwd:\n{tiny_screen}"
+        );
+        t.resize(76, 14).await;
+        t.step().await;
+        let narrow_screen = t.screen();
+        let narrow_compact: String = narrow_screen
+            .lines()
+            .filter(|l| l.contains('│'))
+            .map(|l| l.trim_matches(|c: char| c == ' ' || c == '│').trim())
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(
+            narrow_screen.contains("Preview") && narrow_compact.contains("work-sub"),
+            "narrow stacked approval modal must render Preview pane with full cwd:\n{narrow_screen}"
         );
         t.resize(110, 30).await;
         t.step().await;
