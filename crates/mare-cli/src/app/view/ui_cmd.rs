@@ -152,7 +152,8 @@ impl App {
                         || patch.markdown.is_some()
                         || patch.title.is_some()
                         || patch.kind.is_some()
-                        || (self.expand_all && patch.expanded.is_some());
+                        || (patch.expanded.is_some()
+                            && (self.expand_all || (block.kind == "reasoning" && self.show_reasoning)));
                     let replaces_partial = block.partial > 0 && replaces_layout;
                     block.apply(patch);
                     if replaces_partial {
