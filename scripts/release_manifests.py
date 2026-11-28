@@ -221,6 +221,8 @@ pkgname = mare-bin
   lib,
   stdenv,
   fetchurl,
+  git,
+  makeBinaryWrapper,
 }}:
 
 let
@@ -261,9 +263,13 @@ stdenv.mkDerivation {{
   dontBuild = true;
   dontConfigure = true;
 
+  nativeBuildInputs = [ makeBinaryWrapper ];
+
   installPhase = ''
     runHook preInstall
     install -Dm755 mare "$out/bin/mare"
+    wrapProgram "$out/bin/mare" \\
+      --suffix PATH : ${{lib.makeBinPath [ git ]}}
     install -Dm644 LICENSE "$out/share/licenses/mare/LICENSE"
     install -Dm644 THIRD_PARTY_NOTICES.md "$out/share/licenses/mare/THIRD_PARTY_NOTICES.md"
     install -Dm644 licenses/cordis-LICENSE "$out/share/licenses/mare/cordis-LICENSE"
@@ -401,6 +407,8 @@ class ReleaseManifestsSelfTests(unittest.TestCase):
             self.assertIn("unknown-linux-musl", nur_text)
             self.assertNotIn("unknown-linux-gnu", nur_text)
             self.assertNotIn("autoPatchelfHook", nur_text)
+            self.assertIn("makeBinaryWrapper", nur_text)
+            self.assertIn("--suffix PATH : ${lib.makeBinPath [ git ]}", nur_text)
 
             decoded = base64.b64decode(outputs["hashes"]).decode("utf-8")
             self.assertIn("mare_1.2.3_linux_amd64.deb", decoded)

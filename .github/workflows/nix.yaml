@@ -60,8 +60,25 @@ jobs:
         run: nix build .#mare
       - name: Test binary
         run: |
+          set -euo pipefail
           ./result/bin/mare --version
           ./result/bin/mare --help >/dev/null
+      - name: Test plugin sync with clean PATH (fallback git)
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          mkdir -p "$tmp/repo/plugins/smoke" "$tmp/home/config"
+          printf 'return { name = "smoke" }\n' > "$tmp/repo/plugins/smoke/init.lua"
+          git -C "$tmp/repo" init -q -b main
+          git -C "$tmp/repo" config user.name test
+          git -C "$tmp/repo" config user.email test@example.invalid
+          git -C "$tmp/repo" add -A
+          git -C "$tmp/repo" -c commit.gpgsign=false commit -q -m init
+          printf 'mare.plugins.add { { "local/smoke", url = "%s" } }\n' "$tmp/repo" > "$tmp/home/config/init.lua"
+          env -i HOME="$tmp/home" MARE_HOME="$tmp/home" PATH="/nonexistent" \
+            "$PWD/result/bin/mare" plugin sync
+          grep -F '"local/smoke"' "$tmp/home/config/mare-lock.json"
 
   devshell:
     name: Dev Shell

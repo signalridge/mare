@@ -46,11 +46,14 @@
               pkgs.pkg-config
               pkgs.cmake
               pkgs.perl
+              pkgs.makeBinaryWrapper
             ];
             dontUseCmakeConfigure = true;
             dontCargoUseSystemLibs = true;
 
             postInstall = ''
+              wrapProgram "$out/bin/mare" \
+                --suffix PATH : ${pkgs.lib.makeBinPath [ pkgs.git ]}
               install -Dm644 LICENSE "$out/share/licenses/mare/LICENSE"
               install -Dm644 THIRD_PARTY_NOTICES.md "$out/share/licenses/mare/THIRD_PARTY_NOTICES.md"
               install -Dm644 crates/mare-kernel/lua/cordis/LICENSE "$out/share/licenses/mare/cordis-LICENSE"
