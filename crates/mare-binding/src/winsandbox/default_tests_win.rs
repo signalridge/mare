@@ -1,8 +1,15 @@
 //! Unit tests for the Windows default sandbox tier (restricted token, NUL ACL, environment, pipe stdio).
 
-use super::acl::{ACCESS_ALLOWED_ACE_TYPE, allow_null_device, has_exact};
+use super::acl::{ACCESS_ALLOWED_ACE_TYPE, allow_null_device, has_exact, query_volume_acl_support};
 use super::token::restricted_token;
 use super::*;
+
+#[test]
+fn query_volume_acl_support_reports_persistent_acls_on_local_temp_volume() {
+    let dir = tempfile::tempdir().unwrap();
+    let info = query_volume_acl_support(dir.path()).expect("local temp dir must resolve volume info");
+    assert!(info.persistent_acls, "local temp volume {:?} should support FILE_PERSISTENT_ACLS", info.fs_name);
+}
 
 mod enhanced_token_tests {
     use super::*;

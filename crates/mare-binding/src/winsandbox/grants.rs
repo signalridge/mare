@@ -135,9 +135,168 @@ fn grant_once(path: &Path, sid: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Volume ACL capability metadata queried via `GetVolumeInformationW`.
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VolumeAclInfo {
+    pub fs_name: String,
+    pub persistent_acls: bool,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn normalized_win_path(path: &Path) -> String {
+    path.to_string_lossy().replace('/', "\\").to_ascii_lowercase()
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn is_wsl_path(path: &Path) -> bool {
+    let p = normalized_win_path(path);
+    p.starts_with(r"\\wsl.localhost\")
+        || p.starts_with(r"\\wsl$\")
+        || p.starts_with(r"\\?\unc\wsl.localhost\")
+        || p.starts_with(r"\\?\unc\wsl$\")
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn is_unc_path(path: &Path) -> bool {
+    let p = normalized_win_path(path);
+    (p.starts_with(r"\\") && !p.starts_with(r"\\?\") && !p.starts_with(r"\\.\")) || p.starts_with(r"\\?\unc\")
+}
+
+/// Win32 error codes that explicitly mean the target volume/filesystem does not support
+/// the requested Windows DACL or mandatory integrity label operation (as opposed to invalid
+/// owner/ACL/parameter or access-denied errors on a share that does support persistent ACLs).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn is_explicit_unsupported_fs_rc(rc: u32) -> bool {
+    matches!(
+        rc,
+        1    // ERROR_INVALID_FUNCTION
+        | 50 // ERROR_NOT_SUPPORTED
+    )
+}
+
+/// Format an explicit failure when a volume reports `FILE_PERSISTENT_ACLS == 0`.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn format_unsupported_volume_error(path: &Path, vol: &VolumeAclInfo) -> String {
+    let fs = if vol.fs_name.is_empty() { "unknown" } else { vol.fs_name.as_str() };
+    if is_wsl_path(path) {
+        return format!(
+            "filesystem {fs:?} for {} does not support persistent Windows ACLs (FILE_PERSISTENT_ACLS) required by the \
+             Windows sandbox; use a writable root on a local NTFS volume or run mare inside WSL with the Linux sandbox \
+             (error 50: ERROR_NOT_SUPPORTED)",
+            path.display(),
+        );
+    }
+    format!(
+        "filesystem {fs:?} for {} does not support persistent Windows ACLs (FILE_PERSISTENT_ACLS) required by the \
+         Windows sandbox; move the workspace to a local NTFS volume or choose a writable root on a supported volume \
+         (error 50: ERROR_NOT_SUPPORTED)",
+        path.display(),
+    )
+}
+
+/// Enrich a Win32 ACL error (`GetNamedSecurityInfoW` / `SetNamedSecurityInfoW`) with an
+/// unsupported-filesystem explanation ONLY when the OS volume capability query reports
+/// `FILE_PERSISTENT_ACLS == 0` or the Win32 call returned an explicit unsupported-operation code
+/// (`ERROR_INVALID_FUNCTION` = 1 / `ERROR_NOT_SUPPORTED` = 50). All other failures (such as
+/// `ERROR_INVALID_OWNER`, `ERROR_INVALID_ACL`, `ERROR_INVALID_SECURITY_DESCR`,
+/// `ERROR_INVALID_PARAMETER`, or `ERROR_ACCESS_DENIED`) preserve the original Win32 error without
+/// assuming the filesystem or UNC share lacks ACL support.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn diagnose_acl_failure(op: &str, path: &Path, rc: u32, vol: Option<&VolumeAclInfo>) -> String {
+    let raw = format!("{op}({}) failed: {rc}", path.display());
+    if let Some(v) = vol {
+        if !v.persistent_acls {
+            let fs = if v.fs_name.is_empty() { "unknown" } else { v.fs_name.as_str() };
+            if is_wsl_path(path) {
+                return format!(
+                    "{raw}: filesystem {fs:?} on this WSL share does not support persistent Windows ACLs \
+                     (FILE_PERSISTENT_ACLS) or mandatory labels required by the Windows sandbox; use a writable root \
+                     on a local NTFS volume or run mare inside WSL with the Linux sandbox"
+                );
+            }
+            return format!(
+                "{raw}: filesystem {fs:?} does not support persistent Windows ACLs (FILE_PERSISTENT_ACLS) or mandatory \
+                 labels required by the Windows sandbox; use a writable root on a local NTFS volume"
+            );
+        }
+        // Volume explicitly reports FILE_PERSISTENT_ACLS == 1: only treat explicit
+        // ERROR_INVALID_FUNCTION / ERROR_NOT_SUPPORTED as an unsupported ACL/label operation;
+        // never blame the filesystem for owner/ACL/parameter/access errors.
+        if is_explicit_unsupported_fs_rc(rc) {
+            let fs = if v.fs_name.is_empty() { "unknown" } else { v.fs_name.as_str() };
+            return format!(
+                "{raw}: volume {fs:?} rejected the required Windows DACL or mandatory integrity label operation as \
+                 unsupported; use a writable root on a local NTFS volume"
+            );
+        }
+        return raw;
+    }
+    if is_explicit_unsupported_fs_rc(rc) {
+        if is_wsl_path(path) {
+            return format!(
+                "{raw}: WSL filesystem shares (\\\\wsl.localhost\\ / \\\\wsl$\\) do not support the persistent \
+                 Windows DACLs and mandatory integrity labels required by the Windows sandbox; use a writable root on \
+                 a local NTFS volume or run mare inside WSL with the Linux sandbox"
+            );
+        }
+        if is_unc_path(path) {
+            return format!(
+                "{raw}: this UNC/network share rejected the required persistent Windows DACL or mandatory integrity \
+                 label operation as unsupported; use a writable root on a local NTFS volume"
+            );
+        }
+        return format!(
+            "{raw}: the target filesystem does not support the persistent Windows DACLs or mandatory integrity labels \
+             required by the Windows sandbox; use a writable root on a local NTFS volume"
+        );
+    }
+    raw
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnose_acl_failure_explains_wsl_unc_and_non_ntfs_while_keeping_error_code() {
+        let wsl_err =
+            diagnose_acl_failure("GetNamedSecurityInfoW", Path::new(r"\\wsl.localhost\Ubuntu\home\dev\repo"), 1, None);
+        assert!(wsl_err.contains("GetNamedSecurityInfoW(") && wsl_err.contains("failed: 1"), "{wsl_err}");
+        assert!(wsl_err.contains("WSL filesystem shares") && wsl_err.contains("local NTFS volume"), "{wsl_err}");
+
+        let wsl_dollar =
+            diagnose_acl_failure("SetNamedSecurityInfoW", Path::new(r"\\?\UNC\wsl$\Ubuntu\repo"), 50, None);
+        assert!(wsl_dollar.contains("failed: 50") && wsl_dollar.contains("WSL filesystem shares"), "{wsl_dollar}");
+
+        let exfat = VolumeAclInfo { fs_name: "exFAT".into(), persistent_acls: false };
+        let exfat_err = diagnose_acl_failure("SetNamedSecurityInfoW", Path::new(r"E:\proj"), 50, Some(&exfat));
+        assert!(exfat_err.contains("failed: 50") && exfat_err.contains("exFAT"), "{exfat_err}");
+        assert!(exfat_err.contains("FILE_PERSISTENT_ACLS") && exfat_err.contains("local NTFS volume"), "{exfat_err}");
+
+        let unc_unsupported = diagnose_acl_failure("GetNamedSecurityInfoW", Path::new(r"\\nas\share\repo"), 50, None);
+        assert!(
+            unc_unsupported.contains("failed: 50") && unc_unsupported.contains("UNC/network share"),
+            "{unc_unsupported}"
+        );
+
+        // A UNC/SMB share supporting persistent ACLs returning invalid-owner/ACL/descriptor/param
+        // errors must keep its original Win32 code without misdiagnosing the filesystem as unsupported.
+        let ntfs = VolumeAclInfo { fs_name: "NTFS".into(), persistent_acls: true };
+        for rc in [5u32, 87, 124, 1307, 1336, 1338] {
+            let smb_err =
+                diagnose_acl_failure("SetNamedSecurityInfoW", Path::new(r"\\fileserver\share\repo"), rc, Some(&ntfs));
+            assert_eq!(smb_err, format!(r"SetNamedSecurityInfoW(\\fileserver\share\repo) failed: {rc}"));
+
+            let unknown_unc_err =
+                diagnose_acl_failure("SetNamedSecurityInfoW", Path::new(r"\\fileserver\share\repo"), rc, None);
+            assert_eq!(unknown_unc_err, format!(r"SetNamedSecurityInfoW(\\fileserver\share\repo) failed: {rc}"));
+        }
+
+        // Access denied (5) on local NTFS must not be misdiagnosed as an unsupported filesystem.
+        let denied = diagnose_acl_failure("SetNamedSecurityInfoW", Path::new(r"C:\proj"), 5, Some(&ntfs));
+        assert_eq!(denied, r"SetNamedSecurityInfoW(C:\proj) failed: 5");
+    }
 
     #[test]
     fn readonly_sid_validation_and_persistence_reuse_valid_sid() {
