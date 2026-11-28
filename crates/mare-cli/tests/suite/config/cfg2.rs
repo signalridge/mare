@@ -1,7 +1,7 @@
 //! Configuration conventions:
 //! - Presets as data + single resolver (`mare.config_resolve_preset`, `ui.working`, `permissions`, `plugins.preset`).
 //! - Schema `env`, `choices_from`, `nullable` + plugin option env layer (`MARE_APPROVAL_POLICY`).
-//! - `ui.working` default back to `combined`/`swell`.
+//! - `ui.working` default back to `combined`/`ember`.
 //! - `lua_memory_mb` is `invocation_only = true`; `slow_callback_ms` defaults to 1000 ms (1 s).
 //! - Per-plugin generated LuaLS definitions (`types/mare/plugin_options.gen.lua`).
 
@@ -81,7 +81,7 @@ async fn presets_as_data_single_resolver_works_for_ui_working_permissions_and_pl
         assert_eq!(resolved_label, "foam");
         assert!(cycle_err.contains("cycle"), "expected cycle error, got: {cycle_err}");
         assert!(unknown_err.contains("did you mean") && unknown_err.contains("combined"), "{unknown_err}");
-        assert_eq!(default_working, "swell/glint", "default ui.working must be combined/swell");
+        assert_eq!(default_working, "ember/glint", "default ui.working must be combined/ember");
 
         // Unknown permissions preset is caught by schema `choices_from = "presets"` with did-you-mean.
         let validate = mare_shared::lua::core::config::validate_options_fn(h.lua()).unwrap();

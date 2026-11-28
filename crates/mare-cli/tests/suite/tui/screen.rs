@@ -250,7 +250,7 @@ async fn reduce_motion_holds_the_spinner_still() {
         let mut t =
             Term::with(json!([{ "text": slow, "delay_ms": 30 }]), json!({ "reduce_motion": true }), 80, 16).await;
         t.submit("go").await;
-        t.until("the working line", |s| s.lines().any(|l| l.contains("▂▃▅▃") && l.contains("Esc to interrupt"))).await;
+        t.until("the working line", |s| s.lines().any(|l| l.contains("● ") && l.contains("Esc to interrupt"))).await;
         let spinning = |s: &str| s.chars().any(|c| mare_shared::style::SPINNER_FRAMES.iter().any(|g| g.starts_with(c)));
         assert!(!spinning(&t.screen()), "no braille spinner:\n{}", t.screen());
         t.idle().await;
@@ -662,21 +662,25 @@ async fn degraded_narrow_width_preserves_editor_and_keep_status() {
     .await
 }
 
-/// default working line renders through Lua (`combined`: `swell` + `glint`), `stopping` routes
+/// default working line renders through Lua (`combined`: `ember` + `glint`), `stopping` routes
 /// through `mare.ui.Working:render(info)`, unknown preset/glyph emits `did you mean` warnings,
 /// and `nil`/error falls back through the generic fallback with a single warning notice.
 #[tokio::test]
-async fn working_line_defaults_to_combined_swell_stopping_via_lua_and_fallback() {
+async fn working_line_defaults_to_combined_ember_stopping_via_lua_and_fallback() {
     local(async {
-        // 1. Default working line renders Lua `swell` + `glint` (not Rust braille) and `ui.working.*` works.
+        // 1. Default working line renders Lua `ember` + `glint` (not swell bars or Rust braille) and `ui.working.*` works.
         let slow: String = "word ".repeat(80);
         {
             let mut t = Term::with(json!([{ "text": slow.clone(), "delay_ms": 30 }]), json!({}), 80, 16).await;
             t.submit("go").await;
-            t.until("default swell glyph in working line", |s| {
+            t.until("default ember bullet glyph in working line", |s| {
                 s.contains("Responding…")
-                    && s.lines()
-                        .any(|l| l.contains("Responding…") && l.chars().any(|c| matches!(c, '▁' | '▂' | '▃' | '▅')))
+                    && s.lines().any(|l| {
+                        l.contains("Responding…")
+                            && l.chars().any(|c| matches!(c, '·' | '∙' | '•' | '●' | '◉'))
+                            && !l.chars().any(|c| matches!(c, '▁' | '▂' | '▃' | '▅'))
+                            && !l.chars().any(|c| ('\u{2800}'..='\u{28ff}').contains(&c))
+                    })
             })
             .await;
             let stop_rendered: String = eval(
@@ -1091,7 +1095,7 @@ async fn ui_working_presets_glyphs_tail_leaves_and_spinners() {
             "#,
         )
         .await;
-        assert_eq!(default_look, "swell/glint");
+        assert_eq!(default_look, "ember/glint");
         assert!(phase_still.contains('◐'), "phase still frame mismatch: {phase_still}");
         assert!(wave_ascii.contains(".-^-"), "wave ascii still frame mismatch: {wave_ascii}");
         assert_eq!(suppressed_tail.trim(), "NONE", "off leaves must suppress elapsed/tokens/interrupt_hint: {suppressed_tail}");

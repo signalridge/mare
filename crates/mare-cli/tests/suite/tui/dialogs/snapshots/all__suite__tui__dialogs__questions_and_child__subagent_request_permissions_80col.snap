@@ -17,7 +17,7 @@ expression: snap
   │ Deny, and tell the model why (n) — affects only this subagent            │
   │ Deny and stop this turn (ctrl+c) — stops only this subagent              │
   ╰───────────────────────────────────────────────────────────────── 1 of 3 ─╯
-▂▃▅▃ 测试权限选择器 · Waiting for approval… (Ns · Esc to interrupt)
+● 测试权限选择器 · Waiting for approval… (Ns · Esc to interrupt)
 ╭──────────────────────────────────────────────────────────────────────────────╮
 │ ❯ Queue a message… (Ctrl+S steer now · Esc interrupt)                        │
 ╰──────────────────────────────────────────────────────────────────────────────╯

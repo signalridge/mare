@@ -377,7 +377,7 @@ mare.options = mare.options
 				},
 				working = {
 					preset = "combined",
-					glyph = "swell",
+					glyph = "ember",
 					label = "glint",
 					elapsed = "auto",
 					tokens = true,
@@ -403,7 +403,7 @@ mare.options = mare.options
 					type = "table",
 					default = {
 						preset = "combined",
-						glyph = "swell",
+						glyph = "ember",
 						label = "glint",
 						elapsed = "auto",
 						tokens = true,
@@ -428,8 +428,8 @@ mare.options = mare.options
 						},
 						glyph = {
 							type = "string",
-							default = "swell",
-							desc = "working glyph name (`swell|ember|braille|moon|phase|wave|sail|bullet|pulse|none` or custom name in `glyphs`)",
+							default = "ember",
+							desc = "working glyph name (`ember|swell|braille|moon|phase|wave|sail|bullet|pulse|none` or custom name in `glyphs`)",
 						},
 						label = {
 							type = "enum",

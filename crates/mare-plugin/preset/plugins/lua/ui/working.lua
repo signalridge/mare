@@ -198,7 +198,7 @@ function M.resolve(o)
 				near and (" — did you mean `" .. near .. "`?") or ""
 			)
 		)
-		out.glyph = "swell"
+		out.glyph = "ember"
 	end
 	if ui_opt and type(ui_opt.stopping) == "table" and ui_opt.stopping.spinner ~= nil then
 		out.stopping_spinner = ui_opt.stopping.spinner

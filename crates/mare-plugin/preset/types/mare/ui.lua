@@ -974,7 +974,7 @@ function ui.image_id() end
 ---@class mare.UiWorkingOpts
 ---@field preset? string Working-line preset name (`"combined"|"mare"|"spinner"|"codex"|"cc"|"kimi"|"shimmer"|"pulse"|"dots"|"wave"|"foam"|"sail"|"sea"` or custom key in `presets`, default `"combined"`).
 ---@field presets? table<string, table> Named custom working-line presets (may declare `like = "<preset>"` to inherit from another preset).
----@field glyph? string Glyph animation name (`"swell"|"ember"|"braille"|"moon"|"phase"|"wave"|"sail"|"bullet"|"pulse"|"none"` or custom key in `glyphs`, default `"swell"`).
+---@field glyph? string Glyph animation name (`"ember"|"swell"|"braille"|"moon"|"phase"|"wave"|"sail"|"bullet"|"pulse"|"none"` or custom key in `glyphs`, default `"ember"`).
 ---@field label? "accent"|"shimmer"|"glint"|"foam"|"dots" Label animation treatment (default `"glint"`).
 ---@field elapsed? "auto"|"seconds"|"off" Elapsed time display mode (default `"auto"`).
 ---@field tokens? boolean Show detail/token count (`~1.2k` format, default `true`).
