@@ -153,6 +153,7 @@ local model = object({
 	unavailable_reason = string,
 	ready = boolean,
 	ready_reason = string,
+	unlisted = boolean,
 	efforts = { type = "array", items = string },
 	default_effort = string,
 	parameters = { type = "array", items = model_parameter },

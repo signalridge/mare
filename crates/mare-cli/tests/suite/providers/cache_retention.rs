@@ -548,7 +548,7 @@ async fn openai_compat_cache_retention_and_openrouter_anthropic() {
             &h,
             r#"
             local ds = assert(LLM:resolve("deepseek/deepseek-reasoner"))
-            local or_anth = assert(LLM:resolve("openrouter/anthropic/claude-sonnet-4-5"))
+            local or_anth = assert(LLM:resolve("openrouter/anthropic/claude-sonnet-5-5"))
             local work_or = assert(LLM:resolve("work-openrouter/anthropic/claude-sonnet-4-5"))
             local oac = assert(LLM:resolve("oac/gpt-4o"))
             local oac_nokey = assert(LLM:resolve("oac/no-key-model"))

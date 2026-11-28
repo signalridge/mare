@@ -42,6 +42,7 @@ local PRESETS = {
 		models_dev = "moonshotai",
 		base_url = "https://api.moonshot.ai/v1",
 		api_key_env = "MOONSHOT_API_KEY",
+		max_tokens_key = "max_completion_tokens",
 		default_model = "kimi-k2-0905-preview",
 		models = {
 			{
@@ -57,7 +58,6 @@ local PRESETS = {
 				context_window = 256000,
 				max_output = 32768,
 				reasoning = true,
-				efforts = { "high" },
 				cost = { input = 0.6, output = 2.5, cache_read = 0.15 },
 			},
 			{
@@ -66,7 +66,8 @@ local PRESETS = {
 				context_window = 262144,
 				max_output = 131072,
 				reasoning = true,
-				efforts = EFFORTS,
+				-- Moonshot Kimi K3 docs: always-on thinking, top-level reasoning_effort = low | high | max.
+				efforts = { "low", "high", "max" },
 				tool_update = "addition_only",
 				cost = { input = 3, output = 15, cache_read = 0.3 },
 			},
@@ -79,6 +80,7 @@ local PRESETS = {
 		models_dev = "kimi-for-coding",
 		base_url = "https://api.kimi.com/coding/v1",
 		api_key_env = "KIMI_API_KEY",
+		max_tokens_key = "max_completion_tokens",
 		default_model = "kimi-for-coding",
 		models = {
 			{
@@ -87,7 +89,6 @@ local PRESETS = {
 				context_window = 262144,
 				max_output = 32768,
 				reasoning = true,
-				efforts = { "high" },
 			},
 		},
 	},
@@ -152,11 +153,12 @@ end
 table.sort(PRESET_PROVIDERS)
 
 local PROVIDER_FIELDS = {
-	effort_param = "string",
-	reasoning_format = "string",
+	effort_param = "enum:openrouter|reasoning_effort",
+	reasoning_format = "enum:openrouter|reasoning_effort|deepseek|kimi|zai|together|qwen|qwen-chat-template|chat-template",
 	reasoning_budget_field = "string",
 	reasoning_budgets = "table",
 	supports_reasoning_effort = "boolean",
+	max_tokens_key = "enum:max_tokens|max_completion_tokens",
 	cache_control_format = "string",
 	supports_long_cache_retention = "boolean",
 	supports_prompt_cache_key = "boolean",
@@ -170,6 +172,7 @@ local MODEL_FIELDS = {
 	supports_prompt_cache_key = "boolean",
 	cache_control_format = "string",
 	markup_healing = "string",
+	structured_output = "boolean",
 }
 
 return {
@@ -336,19 +339,37 @@ return {
 					end
 				end
 				if req.max_tokens then
-					body.max_tokens = req.max_tokens
+					local max_key = ep_cfg.max_tokens_key
+						or (type(prov_cfg) == "table" and prov_cfg.max_tokens_key)
+						or "max_tokens"
+					local body_map = body --[[@as table<string, any>]]
+					body_map[max_key] = req.max_tokens
 				end
 				if req.output_schema ~= nil then
-					local out_dialect =
-						schema_sanitize.detect_dialect(ep.dialect, compat_base, model.id, { output_schema = true })
-					body.response_format = {
-						type = "json_schema",
-						json_schema = {
-							name = "mare_output_schema",
-							strict = true,
-							schema = schema_sanitize.sanitize(req.output_schema, out_dialect),
-						},
-					}
+					if
+						model and (model --[[@as table]]).structured_output == false
+					then
+						body.response_format = { type = "json_object" }
+						if llm.note_param then
+							llm:note_param(model, {
+								param = "response_format",
+								from = "json_schema",
+								to = "json_object",
+								kind = "downgrade",
+							})
+						end
+					else
+						local out_dialect =
+							schema_sanitize.detect_dialect(ep.dialect, compat_base, model.id, { output_schema = true })
+						body.response_format = {
+							type = "json_schema",
+							json_schema = {
+								name = "mare_output_schema",
+								strict = true,
+								schema = schema_sanitize.sanitize(req.output_schema, out_dialect),
+							},
+						}
+					end
 				end
 				local headers = { accept = "text/event-stream" }
 				-- OpenRouter session affinity for sticky routing

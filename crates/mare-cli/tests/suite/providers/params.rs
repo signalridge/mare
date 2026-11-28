@@ -400,9 +400,9 @@ async fn custom_options_map_to_fields_and_functions_per_route() {
         assert_eq!(body["reasoning"]["effort"], "xhigh", "{body}");
         assert!(body.get("parallel_tool_calls").is_none(), "removed by `false`: {body}");
         assert_eq!(body["max_output_tokens"], 200000, "at_least raised the default cap (128000)");
-        // another Anthropic model doesn't define deep: a level it doesn't know clamps to the
-        // middle (medium), and the adjustment is recorded for /profile
-        exec(&h, r#"LLM:set_model("anthropic/claude-sonnet-5-5", { save = false }) LLM:set_effort("deep", { save = false })"#).await;
+        // another Anthropic model doesn't define deep: a restored level it doesn't know clamps
+        // to the middle (medium), and the adjustment is recorded for /profile
+        exec(&h, r#"LLM:set_model("anthropic/claude-sonnet-5-5", { save = false }) LLM:restore_selection({ effort = "deep" })"#).await;
         let body = send(&h, &server, "anthropic/claude-sonnet-5-5").await;
         assert_eq!(body["output_config"]["effort"], "medium", "{body}");
         let log: String = eval(
@@ -430,7 +430,7 @@ async fn unsupported_options_clamp_error_or_pass_as_is() {
               { match = "opencode-go/glm-*", remove = { effort = { "high" } }, on_unsupported = "error" },
             }
             LLM:set_model("opencode-go/glm-5.3-flash", { save = false })
-            LLM:set_effort("xhigh", { save = false })"#,
+            LLM:restore_selection({ effort = "xhigh" })"#,
         )
         .await;
         let levels: String =
@@ -455,7 +455,7 @@ async fn unsupported_options_clamp_error_or_pass_as_is() {
         let body = send(&h, &server, "opencode-go/glm-5.3-flash").await;
         assert_eq!(body["reasoning"]["effort"], "xhigh", "{body}");
         // ... the Anthropic adaptive route has no "$value" mapping: clamped, and noted
-        exec(&h, r#"mare.config.param_rules = { { route = "anthropic", on_unsupported = "as_is" } } LLM:set_model("anthropic/claude-sonnet-5-5", { save = false }) LLM:set_effort("max", { save = false })"#)
+        exec(&h, r#"mare.config.param_rules = { { route = "anthropic", on_unsupported = "as_is" } } LLM:set_model("anthropic/claude-sonnet-5-5", { save = false }) LLM:restore_selection({ effort = "max" })"#)
             .await;
         let body = send(&h, &server, "anthropic/claude-sonnet-5-5").await;
         assert_eq!(body["output_config"]["effort"], "max", "max clamped to xhigh (sent as max): {body}");
@@ -1254,11 +1254,11 @@ async fn google_thinking_level_maps_minimal_medium_xhigh_and_clamps_to_model_eff
             for _, eff in ipairs({ "minimal", "low", "medium", "high", "xhigh" }) do
                 LLM:stream({ model = flash, system = "S", messages = msgs, effort = eff }, function() end)
             end
-            -- gemini-3-pro-preview only supports { "low", "high" }: session medium clamps to low, session xhigh clamps to high
+            -- gemini-3-pro-preview only supports { "low", "high" }: restored session medium ties up to high, xhigh clamps to high
             LLM:set_model("google/gemini-3-pro-preview", { save = false })
-            LLM:set_effort("medium", { save = false })
+            LLM:restore_selection({ effort = "medium" })
             LLM:stream({ model = pro, system = "S", messages = msgs }, function() end)
-            LLM:set_effort("xhigh", { save = false })
+            LLM:restore_selection({ effort = "xhigh" })
             LLM:stream({ model = pro, system = "S", messages = msgs }, function() end)
             "#,
         )
@@ -1277,7 +1277,7 @@ async fn google_thinking_level_maps_minimal_medium_xhigh_and_clamps_to_model_eff
             .collect();
         assert_eq!(
             levels,
-            vec!["minimal", "low", "medium", "high", "xhigh", "low", "high"],
+            vec!["minimal", "low", "medium", "high", "xhigh", "high", "high"],
             "google thinkingLevel must map minimal/low/medium/high/xhigh directly and clamp per model efforts: {levels:?}"
         );
         h.shutdown().await;

@@ -18,7 +18,7 @@ for _, c in ipairs(cases) do
     max_tokens = c.max_tokens, no_fallback = true }
   if c.mode == "session" then
     LLM:set_model(c.ref, { save = false })
-    LLM:set_effort(c.effort, { save = false })
+    LLM:restore_selection({ effort = c.effort })
   elseif c.mode == "request" then
     req.effort = c.effort
   end
@@ -1150,6 +1150,157 @@ mare.provider("tuned-ant", {{
             adaptive_body["thinking"]["display"], "omitted",
             "provider reasoning_display must win for adaptive model: {adaptive_body}"
         );
+    })
+    .await
+}
+
+/// Issue #87: `openai-chat` data-declared quirks:
+/// - provider field `max_tokens_key` (`"max_tokens"` | `"max_completion_tokens"`, enum-validated)
+/// - model field `structured_output` (default true -> `json_schema`; false -> `json_object` + `note_param`)
+#[tokio::test]
+async fn openai_chat_max_tokens_key_and_structured_output_downgrade() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        env.set_var("MOONSHOT_API_KEY", "test-kimi");
+
+        let server = MockServer::start().await;
+        let base = &server.base;
+        let compat = Resp::sse(compat_events(&[compat_text(r#"{"ok":true}"#), compat_stop()]));
+        for path in ["/mt-default/chat/completions", "/mt-comp/chat/completions", "/kimi/chat/completions"] {
+            server.route(path, vec![compat.clone(), compat.clone()]);
+        }
+
+        let h = env
+            .host()
+            .no_session()
+            .config(json!({
+                "providers": {
+                    "kimi": {
+                        "base_url": format!("{base}/kimi"),
+                    },
+                    "mt-default": {
+                        "wire": "openai-chat",
+                        "base_url": format!("{base}/mt-default"),
+                        "no_key": true,
+                        "list_models": false,
+                        "max_tokens_key": "max_tokens",
+                        "models": [
+                            { "model_id": "strict-m", "context_window": 64000, "max_output": 4096 },
+                            { "model_id": "json-only-m", "context_window": 64000, "max_output": 4096, "structured_output": false },
+                        ],
+                    },
+                    "mt-comp": {
+                        "wire": "openai-chat",
+                        "base_url": format!("{base}/mt-comp"),
+                        "no_key": true,
+                        "list_models": false,
+                        "max_tokens_key": "max_completion_tokens",
+                        "models": [
+                            { "model_id": "comp-m", "context_window": 64000, "max_output": 4096 },
+                        ],
+                    },
+                    "mt-bad": {
+                        "wire": "openai-chat",
+                        "base_url": format!("{base}/mt-bad"),
+                        "no_key": true,
+                        "list_models": false,
+                        "max_tokens_key": "max_output_tokens",
+                        "models": [
+                            { "model_id": "bad-m", "context_window": 64000, "max_output": 4096 },
+                        ],
+                    },
+                },
+                "plugins": {
+                    "llm": { "retries": 0 },
+                },
+            }))
+            .build()
+            .await;
+        global(&h, "LLM", h.service_table("llm").unwrap());
+
+        let out_json: String = eval(
+            &h,
+            r#"
+            local bus = C and C.cordis and C.cordis:get("bus")
+            local schema = {
+              type = "object",
+              properties = { ok = { type = "boolean" } },
+              required = { "ok" },
+              additionalProperties = false,
+            }
+            local msgs = { { role = "user", content = { { type = "text", text = "hi" } } } }
+
+            local m_strict = assert(LLM:resolve("mt-default/strict-m"))
+            local r1 = LLM:stream({ model = m_strict, messages = msgs, max_tokens = 256, output_schema = schema, no_fallback = true }, function() end)
+            assert(not r1.error, tostring(r1.error))
+
+            local m_downgrade = assert(LLM:resolve("mt-default/json-only-m"))
+            local r2 = LLM:stream({ model = m_downgrade, messages = msgs, max_tokens = 128, output_schema = schema, no_fallback = true }, function() end)
+            assert(not r2.error, tostring(r2.error))
+
+            local m_comp = assert(LLM:resolve("mt-comp/comp-m"))
+            local r3 = LLM:stream({ model = m_comp, messages = msgs, max_tokens = 512, no_fallback = true }, function() end)
+            assert(not r3.error, tostring(r3.error))
+
+            local m_kimi = assert(LLM:resolve("kimi/kimi-k3"))
+            local r4 = LLM:stream({ model = m_kimi, messages = msgs, max_tokens = 700, no_fallback = true }, function() end)
+            assert(not r4.error, tostring(r4.error))
+
+            local bad_status = require("llm.directory").status("mt-bad") or {}
+            local log = LLM:params_log() or {}
+            return mare.json.encode({
+              bad_state = bad_status.state,
+              bad_reason = bad_status.reason,
+              params_log = mare.json.array(log),
+            })
+            "#,
+        )
+        .await;
+        h.shutdown().await;
+
+        let meta: Value = serde_json::from_str(&out_json).unwrap();
+        assert_eq!(meta["bad_state"], "unresolved", "invalid max_tokens_key must fail enum validation: {meta}");
+        assert!(
+            meta["bad_reason"].as_str().unwrap_or("").contains("max_tokens_key"),
+            "invalid reason must name max_tokens_key: {meta}"
+        );
+
+        let log = meta["params_log"].as_array().unwrap();
+        assert!(
+            log.iter().any(|n| {
+                n["model"] == "mt-default/json-only-m"
+                    && n["param"] == "response_format"
+                    && n["from"] == "json_schema"
+                    && n["to"] == "json_object"
+                    && n["kind"] == "downgrade"
+            }),
+            "structured_output=false must record response_format downgrade via note_param: {log:?}"
+        );
+
+        let reqs = server.requests();
+        assert_eq!(reqs.len(), 4, "expected 4 requests, got {}", reqs.len());
+
+        // 1. max_tokens_key="max_tokens" + default structured_output (true -> json_schema strict)
+        let b1 = reqs[0].json();
+        assert_eq!(b1["max_tokens"], 256, "{b1}");
+        assert!(b1.get("max_completion_tokens").is_none(), "{b1}");
+        assert_eq!(b1["response_format"]["type"], "json_schema", "{b1}");
+        assert_eq!(b1["response_format"]["json_schema"]["strict"], true, "{b1}");
+
+        // 2. structured_output=false -> response_format downgraded to json_object
+        let b2 = reqs[1].json();
+        assert_eq!(b2["max_tokens"], 128, "{b2}");
+        assert_eq!(b2["response_format"], json!({ "type": "json_object" }), "{b2}");
+
+        // 3. max_tokens_key="max_completion_tokens"
+        let b3 = reqs[2].json();
+        assert_eq!(b3["max_completion_tokens"], 512, "{b3}");
+        assert!(b3.get("max_tokens").is_none(), "{b3}");
+
+        // 4. built-in kimi preset uses max_completion_tokens
+        let b4 = reqs[3].json();
+        assert_eq!(b4["max_completion_tokens"], 700, "{b4}");
+        assert!(b4.get("max_tokens").is_none(), "{b4}");
     })
     .await
 }

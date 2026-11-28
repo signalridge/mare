@@ -20,7 +20,7 @@ POST /anthropic/v1/messages
 
 # google/gemini-3-pro-preview default
 POST /google/models/gemini-3-pro-preview:streamGenerateContent?alt=sse
-{"contents":[{"parts":[{"text":"hi"}],"role":"user"}],"generationConfig":{"maxOutputTokens":65536,"thinkingConfig":{"includeThoughts":true,"thinkingLevel":"low"}},"systemInstruction":{"parts":[{"text":"S"}]}}
+{"contents":[{"parts":[{"text":"hi"}],"role":"user"}],"generationConfig":{"maxOutputTokens":65536,"thinkingConfig":{"includeThoughts":true,"thinkingLevel":"high"}},"systemInstruction":{"parts":[{"text":"S"}]}}
 
 # google/gemini-2.5-pro default
 POST /google/models/gemini-2.5-pro:streamGenerateContent?alt=sse
@@ -116,7 +116,7 @@ POST /openai/responses
 
 # google/gemini-3-pro-preview session medium
 POST /google/models/gemini-3-pro-preview:streamGenerateContent?alt=sse
-{"contents":[{"parts":[{"text":"hi"}],"role":"user"}],"generationConfig":{"maxOutputTokens":65536,"thinkingConfig":{"includeThoughts":true,"thinkingLevel":"low"}},"systemInstruction":{"parts":[{"text":"S"}]}}
+{"contents":[{"parts":[{"text":"hi"}],"role":"user"}],"generationConfig":{"maxOutputTokens":65536,"thinkingConfig":{"includeThoughts":true,"thinkingLevel":"high"}},"systemInstruction":{"parts":[{"text":"S"}]}}
 
 # opencode-go/deepseek-v4.1-flash session xhigh
 POST /og/responses

@@ -203,6 +203,7 @@ async fn non_native_vendors_keep_tools_and_system_byte_stable_across_three_searc
             .host()
             .user_plugins()
             .config(json!({
+                "models": { "openai/gpt-5.3": {} },
                 "providers": {
                     "deepseek": { "base_url": format!("{base}/deepseek") },
                     "glm-test": {

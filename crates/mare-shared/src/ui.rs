@@ -265,6 +265,9 @@ pub struct SelectReply {
     pub key: Option<char>,
     /// the search text at that moment, so a picker re-opened after an action keeps it
     pub filter: String,
+    /// `item_id` of the chosen item as rendered by the frontend, so callers using `sel:update`
+    /// resolve by identity even when the frontend did not apply a concurrent update
+    pub item_id: Option<String>,
 }
 
 /// How a select's list and its preview pane share a wide popup (`mare.ui.select{ split = {

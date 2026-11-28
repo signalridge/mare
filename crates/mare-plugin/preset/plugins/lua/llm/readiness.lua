@@ -46,7 +46,22 @@ function M.new(env)
 		if not env.active() then
 			return
 		end
-		local m = (type(event) == "table" and event.model) or env.current()
+		local cur = env.current()
+		local m = (type(event) == "table" and event.model) or cur
+		local sel = env.selected_model and env.selected_model() or nil
+		local is_primary = type(event) ~= "table"
+			or event.model == nil
+			or event.model == cur
+			or (cur ~= nil and event.model.ref == cur.ref)
+		if is_primary and env.ensure_loaded and type(sel) == "string" and sel ~= "" then
+			local prov = string.match(sel, "^([^/]+)/")
+			if env.ensure_loaded(prov and env.provider(prov) and prov or nil) then
+				m = env.current()
+				if type(event) == "table" then
+					event.model = m
+				end
+			end
+		end
 		if not m or not m.ref then
 			return
 		end
@@ -62,6 +77,9 @@ function M.new(env)
 					end
 				end
 			end
+		end
+		if m.unlisted and env.warn_unlisted then
+			env.warn_unlisted(m)
 		end
 		refused[m.ref] = nil
 		local p = not m.unavailable and env.provider(m.provider)
@@ -80,7 +98,8 @@ function M.new(env)
 		end
 		local m = (type(req) == "table" and req.model) or env.current()
 		if not m then
-			return { decision = "deny", reason = M.no_model() }
+			local unresolved = env.unresolved_model and env.unresolved_model() or nil
+			return { decision = "deny", reason = unresolved or M.no_model() }
 		end
 		local p = env.provider(m.provider)
 		local why = m.unavailable
