@@ -18,9 +18,15 @@ use mare_host::Host;
 
 fn acp_tool_kind(info: &J) -> ToolKind {
     match super::helpers::acp_tool_kind_str(info) {
-        "execute" => ToolKind::Execute,
         "read" => ToolKind::Read,
         "edit" => ToolKind::Edit,
+        "delete" => ToolKind::Delete,
+        "move" => ToolKind::Move,
+        "search" => ToolKind::Search,
+        "execute" => ToolKind::Execute,
+        "think" => ToolKind::Think,
+        "fetch" => ToolKind::Fetch,
+        "switch_mode" => ToolKind::SwitchMode,
         _ => ToolKind::Other,
     }
 }

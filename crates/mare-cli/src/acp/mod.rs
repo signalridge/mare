@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
 use agent_client_protocol::schema::ProtocolVersion;
@@ -318,6 +319,7 @@ async fn serve(
     tx: mpsc::Sender<Req>,
     cancels: TurnCancels,
     cancel_tx: mpsc::Sender<(String, u64)>,
+    client_compaction: Arc<AtomicBool>,
     proto_stdout: std::fs::File,
 ) -> agent_client_protocol::Result<()> {
     let prompt_cancels = cancels.clone();
@@ -334,6 +336,9 @@ async fn serve(
         .name("mare")
         .on_receive_request(
             async move |init: InitializeRequest, responder, _conn| {
+                let supports_compaction =
+                    init.client_capabilities.session.as_ref().and_then(|s| s.compaction.as_ref()).is_some();
+                client_compaction.store(supports_compaction, Ordering::Relaxed);
                 let caps = AgentCapabilities::new()
                     .load_session(true)
                     .mcp_capabilities(McpCapabilities::new().http(true))
@@ -685,12 +690,13 @@ async fn open_session_forwarder(
     cancel: &CancellationToken,
     forwarders: &SessionForwarders,
     start_after: Option<oneshot::Receiver<()>>,
+    compaction_updates: bool,
 ) -> Vec<SessionConfigOption> {
     let cfg_opts = config_options(host).await;
     let cfg_json = serde_json::to_value(&cfg_opts).unwrap_or(J::Null);
     let cursor = host.kernel.open_cursor(std::sync::Arc::new(|name| helpers::handles_event(name).then_some(true)));
     let projector = mare_shared::wire_projection::hook(host.lua());
-    let config_sync = ConfigSync::install(host, cfg_json);
+    let config_sync = ConfigSync::install(host, cfg_json, compaction_updates);
     forwarders.open(
         session_id,
         ForwarderTarget {
@@ -705,6 +711,7 @@ async fn open_session_forwarder(
     cfg_opts
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn finish_acp_session(
     manager: &std::rc::Rc<HostManager>,
     rt: &mare_host::SessionRuntime,
@@ -712,13 +719,16 @@ async fn finish_acp_session(
     cancels: &TurnCancels,
     forwarders: &SessionForwarders,
     start_after: Option<oneshot::Receiver<()>>,
+    compaction_updates: bool,
 ) -> std::result::Result<Vec<SessionConfigOption>, AcpErr> {
     if let Err(e) = approvals::install(&rt.host, &rt.session_id, conn, rt.cancel.clone()) {
         let err = AcpErr::Internal(e.to_string()).with_projector(&rt.host);
         let _ = manager.close_session(&rt.session_id).await;
         return Err(err);
     }
-    let cfg_opts = open_session_forwarder(&rt.host, &rt.session_id, conn, &rt.cancel, forwarders, start_after).await;
+    let cfg_opts =
+        open_session_forwarder(&rt.host, &rt.session_id, conn, &rt.cancel, forwarders, start_after, compaction_updates)
+            .await;
     cancels.open(&rt.session_id);
     Ok(cfg_opts)
 }
@@ -730,6 +740,7 @@ struct AcpSessionExt {
     aliases: Rc<RefCell<AcpSessionAliases>>,
     pending_aborts: Rc<RefCell<HashMap<String, tokio::task::JoinHandle<()>>>>,
     conn: Rc<RefCell<Option<ConnectionTo<Client>>>>,
+    client_compaction: Arc<AtomicBool>,
 }
 
 impl OrchestratorExt for AcpSessionExt {
@@ -800,8 +811,10 @@ impl OrchestratorExt for AcpSessionExt {
                 let host = Arc::clone(&rt.host);
                 let cancel = rt.cancel.clone();
                 let forwarders = self.forwarders.clone();
+                let compaction_updates = self.client_compaction.load(Ordering::Relaxed);
                 return Box::pin(async move {
-                    let _ = open_session_forwarder(&host, &sid, &conn, &cancel, &forwarders, None).await;
+                    let _ = open_session_forwarder(&host, &sid, &conn, &cancel, &forwarders, None, compaction_updates)
+                        .await;
                 });
             }
         }
@@ -849,10 +862,12 @@ pub async fn run(opts: HostOptions, strict_config: bool) -> Result<i32> {
     let (cancel_tx, mut cancel_rx) = mpsc::channel::<(String, u64)>(256);
     let cancels = TurnCancels::default();
     let proto_cancels = cancels.clone();
+    let client_compaction = Arc::new(AtomicBool::new(false));
+    let proto_compaction = Arc::clone(&client_compaction);
     let proto_stdout = crate::clone_protocol_stdout()?;
     let proto = std::thread::Builder::new().name("mare-acp".into()).spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("acp runtime");
-        if let Err(e) = rt.block_on(serve(tx, proto_cancels, cancel_tx, proto_stdout)) {
+        if let Err(e) = rt.block_on(serve(tx, proto_cancels, cancel_tx, proto_compaction, proto_stdout)) {
             eprintln!("mare acp: {e:?}");
         }
     })?;
@@ -870,6 +885,7 @@ pub async fn run(opts: HostOptions, strict_config: bool) -> Result<i32> {
         aliases: Rc::clone(&aliases),
         pending_aborts: Rc::clone(&pending_aborts),
         conn: Rc::clone(&active_conn),
+        client_compaction: Arc::clone(&client_compaction),
     }));
     let in_flight_prompts: Rc<RefCell<HashMap<String, u64>>> = Rc::new(RefCell::new(HashMap::new()));
     let rekey_aliases = Rc::clone(&aliases);
@@ -984,11 +1000,13 @@ pub async fn run(opts: HostOptions, strict_config: bool) -> Result<i32> {
                                 continue;
                             }
                         };
-                        let res = finish_acp_session(&manager, &rt, &conn, &cancels, &forwarders, None).await.map(
-                            |cfg_opts| {
-                                (rt.session_id.clone(), cfg_opts, mare_shared::wire_projection::hook(rt.host.lua()))
-                            },
-                        );
+                        let compaction_updates = client_compaction.load(Ordering::Relaxed);
+                        let res =
+                            finish_acp_session(&manager, &rt, &conn, &cancels, &forwarders, None, compaction_updates)
+                                .await
+                                .map(|cfg_opts| {
+                                    (rt.session_id.clone(), cfg_opts, mare_shared::wire_projection::hook(rt.host.lua()))
+                                });
                         if reply.is_closed() || reply.send(res).is_err() {
                             let ext_sid = aliases.borrow_mut().remove_by_internal(&rt.session_id);
                             forwarders.close(&ext_sid);
@@ -1110,11 +1128,15 @@ pub async fn run(opts: HostOptions, strict_config: bool) -> Result<i32> {
                                 continue;
                             }
                         };
+                        let compaction_updates = client_compaction.load(Ordering::Relaxed);
                         let updates = if replay {
                             let tool_info = helpers::tool_metadata_map(&rt.host).await;
-                            match call_service(&rt.host, "agent", "messages", vec![]).await {
-                                Ok(J::Array(msgs)) => helpers::messages_to_updates_with_info(&msgs, &tool_info),
-                                Ok(_) => Vec::new(),
+                            match helpers::collect_replay_messages(&rt.host).await {
+                                Ok(msgs) => helpers::messages_to_updates_with_context(
+                                    &msgs,
+                                    &tool_info,
+                                    helpers::TranslateOpts { cwd: Some(rt.host.cwd()), compaction_updates },
+                                ),
                                 Err(e) => {
                                     let err = AcpErr::Internal(e.to_string()).with_projector(&rt.host);
                                     let _ = manager.close_session(&rt.session_id).await;
@@ -1131,14 +1153,22 @@ pub async fn run(opts: HostOptions, strict_config: bool) -> Result<i32> {
                         } else {
                             (None, None)
                         };
-                        let res = finish_acp_session(&manager, &rt, &conn, &cancels, &forwarders, start_after)
-                            .await
-                            .map(|cfg_opts| RestoredSession {
-                                config_options: cfg_opts,
-                                updates,
-                                projector: mare_shared::wire_projection::hook(rt.host.lua()),
-                                replay_done,
-                            });
+                        let res = finish_acp_session(
+                            &manager,
+                            &rt,
+                            &conn,
+                            &cancels,
+                            &forwarders,
+                            start_after,
+                            compaction_updates,
+                        )
+                        .await
+                        .map(|cfg_opts| RestoredSession {
+                            config_options: cfg_opts,
+                            updates,
+                            projector: mare_shared::wire_projection::hook(rt.host.lua()),
+                            replay_done,
+                        });
                         if reply.is_closed() || reply.send(res).is_err() {
                             let ext_sid = aliases.borrow_mut().remove_by_internal(&rt.session_id);
                             forwarders.close(&ext_sid);
