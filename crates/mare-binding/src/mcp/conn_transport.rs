@@ -101,6 +101,49 @@ fn response_session_id(resp: &StreamableHttpPostResponse) -> Option<&str> {
     }
 }
 
+/// Legacy Streamable HTTP MCP servers often reject expired or evicted sessions with HTTP 400
+/// carrying an explicit missing/invalid/expired session message instead of HTTP 404.
+fn is_explicit_session_expiry_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    const PATTERNS: &[&str] = &[
+        "no valid session id",
+        "invalid session id",
+        "invalid mcp-session-id",
+        "missing session id",
+        "missing mcp-session-id",
+        "unknown session id",
+        "unknown session",
+        "session not found",
+        "session has expired",
+        "session expired",
+        "expired session",
+    ];
+    PATTERNS.iter().any(|p| lower.contains(p))
+}
+
+fn normalize_legacy_session_expiry(
+    result: Result<StreamableHttpPostResponse, StreamableHttpError<reqwest::Error>>,
+    session_was_attached: bool,
+    is_init: bool,
+) -> Result<StreamableHttpPostResponse, StreamableHttpError<reqwest::Error>> {
+    if !session_was_attached || is_init {
+        return result;
+    }
+    match result {
+        Ok(StreamableHttpPostResponse::Json(rmcp::model::ServerJsonRpcMessage::Error(ref err_msg), _))
+            if is_explicit_session_expiry_message(&err_msg.error.message) =>
+        {
+            Err(StreamableHttpError::SessionExpired)
+        }
+        Err(StreamableHttpError::UnexpectedServerResponse(ref msg))
+            if msg.contains("400") && is_explicit_session_expiry_message(msg) =>
+        {
+            Err(StreamableHttpError::SessionExpired)
+        }
+        other => other,
+    }
+}
+
 /// Keep a server's reply to a client response out of the JSON-RPC dispatcher.
 /// The guard sits below AuthClient so both authenticated and plain requests use it.
 #[derive(Clone)]
@@ -162,12 +205,14 @@ impl StreamableHttpClient for ReplyGuard {
         ) {
             self.post_message_with_max_sse_event_size(uri, message, session_id, auth, headers, 0).await
         } else {
-            let track = is_initialize_request(&message).then(|| (uri.clone(), auth.clone(), headers.clone()));
-            let resp = self
-                .client
-                .post_message(uri, message, session_id, auth, headers)
-                .await
-                .map_err(reclassify_forbidden)?;
+            let session_was_attached = session_id.is_some();
+            let is_init = is_initialize_request(&message);
+            let track = is_init.then(|| (uri.clone(), auth.clone(), headers.clone()));
+            let resp = normalize_legacy_session_expiry(
+                self.client.post_message(uri, message, session_id, auth, headers).await.map_err(reclassify_forbidden),
+                session_was_attached,
+                is_init,
+            )?;
             if let Some((u, a, h)) = track
                 && let Some(sid) = response_session_id(&resp)
             {
@@ -188,12 +233,17 @@ impl StreamableHttpClient for ReplyGuard {
     ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
         use rmcp::model::ClientJsonRpcMessage;
         if !matches!(message, ClientJsonRpcMessage::Response(_) | ClientJsonRpcMessage::Error(_)) {
-            let track = is_initialize_request(&message).then(|| (uri.clone(), auth.clone(), headers.clone()));
-            let resp = self
-                .client
-                .post_message_with_max_sse_event_size(uri, message, session_id, auth, headers, max_size)
-                .await
-                .map_err(reclassify_forbidden)?;
+            let session_was_attached = session_id.is_some();
+            let is_init = is_initialize_request(&message);
+            let track = is_init.then(|| (uri.clone(), auth.clone(), headers.clone()));
+            let resp = normalize_legacy_session_expiry(
+                self.client
+                    .post_message_with_max_sse_event_size(uri, message, session_id, auth, headers, max_size)
+                    .await
+                    .map_err(reclassify_forbidden),
+                session_was_attached,
+                is_init,
+            )?;
             if let Some((u, a, h)) = track
                 && let Some(sid) = response_session_id(&resp)
             {
@@ -238,6 +288,19 @@ impl StreamableHttpClient for ReplyGuard {
                     tok.cancel();
                 }
                 Err(StreamableHttpError::SessionExpired)
+            }
+            reqwest::StatusCode::BAD_REQUEST if session_was_attached => {
+                let body = response.text().await.unwrap_or_default();
+                if is_explicit_session_expiry_message(&body) {
+                    if let Some(tok) = &self.reply_expired {
+                        tok.cancel();
+                    }
+                    Err(StreamableHttpError::SessionExpired)
+                } else {
+                    Err(StreamableHttpError::UnexpectedServerResponse(
+                        format!("MCP reply POST expected 202 or 204, got HTTP {status}").into(),
+                    ))
+                }
             }
             status => Err(StreamableHttpError::UnexpectedServerResponse(
                 format!("MCP reply POST expected 202 or 204, got HTTP {status}").into(),
