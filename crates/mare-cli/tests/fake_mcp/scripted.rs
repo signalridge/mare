@@ -109,7 +109,8 @@ pub fn run(cfg_text: &str) {
         let p = &m["params"];
         let r = match meth.as_str() {
             "initialize" => {
-                let mut caps = json!({ "tools": { "listChanged": true } });
+                let mut caps =
+                    cfg.get("capabilities").cloned().unwrap_or_else(|| json!({ "tools": { "listChanged": true } }));
                 if truthy(cfg.get("rich")) {
                     caps["resources"] = json!({});
                     caps["prompts"] = json!({});
@@ -148,6 +149,12 @@ pub fn run(cfg_text: &str) {
                 }
             }
             "tools/list" => {
+                if truthy(cfg.get("tools_method_not_found")) {
+                    print_line(
+                        &json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": "Method not found" } }),
+                    );
+                    continue;
+                }
                 if changed && truthy(cfg.get("fail_refresh")) {
                     print_line(
                         &json!({ "jsonrpc":"2.0", "id":id, "error":{"code":-32603,"message":"refresh failed"} }),

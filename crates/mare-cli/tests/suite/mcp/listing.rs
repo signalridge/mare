@@ -351,3 +351,112 @@ fn mcp_cli_list_tools_disable_and_login_rejection() {
     assert!(listed.status.success(), "{listed_out}");
     assert!(listed_out.contains("cli") && listed_out.contains("disabled"), "{listed_out}");
 }
+
+/// Servers that omit `capabilities.tools` (even while advertising other capabilities like
+/// `prompts`) still get `tools/list` called (matching Codex `rmcp_client.rs:1374`) so their
+/// tools are discovered and callable.
+#[tokio::test]
+async fn mcp_server_omitting_tools_capability_still_lists_tools() {
+    local(async {
+        let env = TestEnv::new().await;
+        let fake = Fake::new(&env, "no-tools-cap");
+        let entry = with(
+            fake.entry(json!({ "capabilities": { "prompts": {} }, "tools": ["echo"] })),
+            json!({ "tier": "direct" }),
+        );
+        let h = env.host().builtins(&["mcp"]).config(servers(json!({ "fake": entry }))).no_session().build().await;
+        expose(&h);
+        global(&h, "M", h.service_table("mcp").unwrap());
+        wait_until(15, "fake server settles", || {
+            let h = h.clone();
+            async move {
+                eval::<bool>(
+                    &h,
+                    r#"local s = M:list_servers().data[1]
+                       return s ~= nil and s.state ~= "connecting" and s.state ~= "idle""#,
+                )
+                .await
+            }
+        })
+        .await;
+        let (state, count, has_tool, call_out): (String, i64, bool, String) = eval(
+            &h,
+            r#"local s = M:list_servers().data[1]
+               local t = T:get("mcp__fake__echo")
+               local out = ""
+               if t then
+                 local r = T:execute({ id = "c1", name = "mcp__fake__echo", arguments = { text = "ok" } }, {})
+                 out = type(r.content) == "table" and r.content[1].text or tostring(r.content)
+               end
+               return s.state, s.tools, t ~= nil, out"#,
+        )
+        .await;
+        assert_eq!(state, "connected");
+        assert_eq!(count, 1, "expected 1 tool when server omits capabilities.tools");
+        assert!(has_tool, "mcp__fake__echo must be registered");
+        assert_eq!(call_out, "echo: ok");
+        assert!(fake.count("tools/list") >= 1, "client must call tools/list even without capabilities.tools");
+        h.shutdown().await;
+    })
+    .await
+}
+
+/// Servers that omit `capabilities.tools` and return JSON-RPC `-32601 Method not found` to
+/// `tools/list` (such as rmcp 3.12 default ServerHandler) still connect with 0 tools and show a
+/// visible hint in `/mcp` / `mare mcp list`, whereas a server advertising `tools` that returns
+/// `-32601` still fails.
+#[test]
+fn mcp_zero_tools_without_capability_connects_with_hint_and_advertised_method_not_found_fails() {
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let ok_log = home.path().join("ok.log");
+    let bad_log = home.path().join("bad.log");
+    std::fs::create_dir_all(home.path().join("config")).unwrap();
+    let ok_entry = json!({
+        "command": fake_mcp_bin(),
+        "args": [
+            "scripted",
+            json!({ "log": ok_log, "capabilities": { "prompts": {} }, "tools_method_not_found": true }).to_string()
+        ]
+    });
+    let bad_entry = json!({
+        "command": fake_mcp_bin(),
+        "args": [
+            "scripted",
+            json!({ "log": bad_log, "capabilities": { "tools": {} }, "tools_method_not_found": true }).to_string()
+        ]
+    });
+    std::fs::write(
+        home.path().join("config/mcp.json"),
+        json!({ "mcpServers": { "prompts_only": ok_entry, "broken_tools": bad_entry } }).to_string(),
+    )
+    .unwrap();
+
+    let listed = mare_cmd().args(["mcp", "list"]).current_dir(work.path()).env("MARE_HOME", home.path()).run_output();
+    let out = String::from_utf8_lossy(&listed.stdout);
+    assert!(listed.status.success(), "{out}\n{}", String::from_utf8_lossy(&listed.stderr));
+    let prompts_line = out.lines().find(|l| l.contains("prompts_only")).expect("prompts_only row");
+    assert!(
+        prompts_line.contains("connected")
+            && prompts_line.contains("0 tools")
+            && prompts_line.contains("no tools exposed"),
+        "expected connected + 0 tools + hint on prompts_only row:\n{out}"
+    );
+    let broken_line = out.lines().find(|l| l.contains("broken_tools")).expect("broken_tools row");
+    assert!(
+        broken_line.contains("error"),
+        "server advertising capabilities.tools that rejects tools/list must fail:\n{out}"
+    );
+
+    let lt = mare_cmd()
+        .args(["mcp", "list-tools", "prompts_only"])
+        .current_dir(work.path())
+        .env("MARE_HOME", home.path())
+        .run_output();
+    let lt_out = String::from_utf8_lossy(&lt.stdout);
+    assert!(lt.status.success(), "{lt_out}\n{}", String::from_utf8_lossy(&lt.stderr));
+    assert!(
+        lt_out.contains("0 tools") && lt_out.contains("no tools exposed"),
+        "expected connected 0-tools hint in list-tools:\n{lt_out}"
+    );
+}

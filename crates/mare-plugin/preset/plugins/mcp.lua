@@ -416,8 +416,12 @@ return {
 			end,
 		})
 		local find, state_of, transport_of = forward("find"), forward("state_of"), forward("transport_of")
-		local sorted_entries, summary_line, tools_lines, tools_text =
-			forward("sorted_entries"), forward("summary_line"), forward("tools_lines"), forward("tools_text")
+		local sorted_entries, summary_line, zero_tools_hint, tools_lines, tools_text =
+			forward("sorted_entries"),
+			forward("summary_line"),
+			forward("zero_tools_hint"),
+			forward("tools_lines"),
+			forward("tools_text")
 
 		-- ---- /mcp ---------------------------------------------------------------------
 
@@ -436,6 +440,7 @@ return {
 						transport_of = transport_of,
 						sorted_entries = sorted_entries,
 						summary_line = summary_line,
+						zero_tools_hint = zero_tools_hint,
 						tools_lines = tools_lines,
 						tools_text = tools_text,
 					}, args)
