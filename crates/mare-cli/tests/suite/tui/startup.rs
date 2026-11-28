@@ -284,6 +284,178 @@ async fn the_welcome_banner_is_shown_once_with_the_model() {
     .await
 }
 
+/// `/new` clears the previous session's screen/scrollback and renders the same welcome banner
+/// (pixel logo, version, cwd, model, key hints) as a fresh startup.
+#[tokio::test]
+async fn new_session_clears_screen_and_redraws_startup_welcome_banner() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        env.color_terminal();
+        let script = json!([{ "text": "reply before new" }, { "text": "reply after new" }]);
+        let mut opts = env.host().faux(script).opts;
+        opts.mode = Mode::Tui;
+        let vt = OwnedVt::new(env, opts, 100, 40).await;
+        let mut t = Term { owned: vt, parser: vt100::Parser::new(nz(40), nz(100), 2000), ended: 0 };
+        t.until("startup welcome banner", |s| {
+            s.contains("/model · /help · @ file · ! bash") && s.contains("faux/echo") && s.contains('▀')
+        })
+        .await;
+        let startup_banner = t.screen();
+        assert!(startup_banner.contains(concat!("mare ", env!("CARGO_PKG_VERSION"))), "{startup_banner}");
+
+        t.submit("hello before new").await;
+        t.until("first turn reply", |s| s.contains("reply before new")).await;
+        t.idle().await;
+
+        t.submit("/new").await;
+        t.until("fresh welcome banner after /new", |s| {
+            !s.contains("reply before new")
+                && s.contains("/model · /help · @ file · ! bash")
+                && s.contains("faux/echo")
+                && s.contains('▀')
+        })
+        .await;
+        let after_new = t.history();
+        assert!(!after_new.contains("hello before new"), "old prompt should be cleared:\n{after_new}");
+        assert!(!after_new.contains("reply before new"), "old reply should be cleared:\n{after_new}");
+        assert!(after_new.contains(concat!("mare ", env!("CARGO_PKG_VERSION"))), "{after_new}");
+        assert_eq!(after_new.matches("/model · /help · @ file · ! bash").count(), 1, "one banner:\n{after_new}");
+
+        t.submit("hello after new").await;
+        t.until("reply in new session", |s| s.contains("reply after new")).await;
+        t.idle().await;
+
+        // `/archive` takes the same `session/new` path: clears prior turns, keeps the fresh
+        // welcome banner, and shows the archive notice below it.
+        t.submit("/archive").await;
+        t.until("fresh welcome banner and archive notice after /archive", |s| {
+            !s.contains("reply after new")
+                && s.contains("Archived ")
+                && s.contains("/model · /help · @ file · ! bash")
+                && s.contains("faux/echo")
+                && s.contains('▀')
+        })
+        .await;
+        let after_archive = t.history();
+        assert!(!after_archive.contains("hello after new"), "old prompt should be cleared:\n{after_archive}");
+        assert_eq!(
+            after_archive.matches("/model · /help · @ file · ! bash").count(),
+            1,
+            "one banner:\n{after_archive}"
+        );
+    })
+    .await
+}
+
+/// `/new` from a resumed session (`-c`) switches to the full startup banner (not stuck in compact
+/// resume mode), and `logo = false` still shows a minimal new-session divider without a logo.
+#[tokio::test]
+async fn new_session_respects_logo_config_and_lifts_resumed_compact_mode() {
+    // 1. Resumed session (`continue = true`) starts with compact banner; `/new` renders full logo.
+    local(async {
+        let mut env = TestEnv::new().await;
+        env.color_terminal();
+        let h = env.host().faux(json!([{ "text": "saved reply" }])).build().await;
+        h.prompt("saved prompt", json!({})).await.unwrap();
+        h.shutdown().await;
+
+        let mut opts = env.host().faux(json!([])).args(json!({ "continue": true })).opts;
+        opts.mode = Mode::Tui;
+        let vt = OwnedVt::new(env, opts, 100, 40).await;
+        let mut t = Term { owned: vt, parser: vt100::Parser::new(nz(40), nz(100), 2000), ended: 0 };
+        t.until("resumed session history", |s| s.contains("saved reply")).await;
+        assert!(!t.history().contains('▀'), "resumed startup must use compact banner");
+
+        t.submit("/new").await;
+        t.until("full welcome banner after /new from resumed", |s| {
+            !s.contains("saved reply")
+                && s.contains('▀')
+                && s.contains("/model · /help · @ file · ! bash")
+                && s.contains("faux/echo")
+        })
+        .await;
+        assert_eq!(t.history().matches("/model · /help · @ file · ! bash").count(), 1);
+    })
+    .await;
+
+    // 2. With `logo = false`, `/new` clears the screen and shows only the minimal divider.
+    local(async {
+        let mut t2 = Term::with(json!([{ "text": "bye" }]), json!({ "logo": false }), 80, 24).await;
+        t2.submit("hi").await;
+        t2.until("turn reply", |s| s.contains("bye")).await;
+        t2.idle().await;
+        t2.submit("/new").await;
+        t2.until("new session divider without logo", |s| !s.contains("bye") && s.contains("⎯ New session ⎯")).await;
+        assert!(!t2.history().contains('▀') && !t2.history().contains("/model · /help"));
+    })
+    .await;
+}
+
+/// If `/new` runs before `app/ready` (for example, while startup is blocked on a failing trusted
+/// `init.lua`), the freshly drawn banner marks `ui.welcomed` so a subsequent `/reload` (reloading
+/// UI plugins) does not push a duplicate welcome banner.
+#[tokio::test]
+async fn new_session_before_app_ready_followed_by_reload_draws_single_banner() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        env.color_terminal();
+        std::fs::create_dir_all(env.config_dir()).unwrap();
+        let init_lua = env.config_dir().join("init.lua");
+        std::fs::write(&init_lua, "error('BROKEN trust init')").unwrap();
+        let mut opts = env
+            .host()
+            .user_config(false)
+            .faux(json!([]))
+            .config(json!({ "trust_default": "trust" }))
+            .args(json!({ "trust_pending": true }))
+            .opts;
+        opts.mode = Mode::Tui;
+        let vt = OwnedVt::new(env, opts, 100, 40).await;
+        let mut t = Term { owned: vt, parser: vt100::Parser::new(nz(40), nz(100), 2000), ended: 0 };
+        t.until("blocked startup before app/ready", |s| s.contains("Startup blocked")).await;
+        expose(&t.vt.host);
+        assert!(
+            !eval::<bool>(&t.vt.host, "return mare.g['ui.welcomed'] == true").await,
+            "app/ready must not have set ui.welcomed while trust init failed"
+        );
+
+        exec(&t.vt.host, "NEW_SEEN = 0; C.cordis:on('session/new', function() NEW_SEEN = NEW_SEEN + 1 end)").await;
+        t.submit("/new").await;
+        let new_deadline = tokio::time::Instant::now() + WAIT;
+        while eval::<i64>(&t.vt.host, "return NEW_SEEN").await == 0 {
+            assert!(tokio::time::Instant::now() < new_deadline, "timed out waiting for session/new");
+            t.step().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        t.until("fresh welcome banner after /new while startup blocked", |s| {
+            s.contains("/model · /help · @ file · ! bash") && s.contains('▀')
+        })
+        .await;
+        assert!(
+            eval::<bool>(&t.vt.host, "return mare.g['ui.welcomed'] == true").await,
+            "/new must mark ui.welcomed so subsequent UI reloads do not duplicate the banner"
+        );
+
+        std::fs::write(&init_lua, "mare.setup { model = 'faux/echo' }\nmare.plugin('provider-faux', {})").unwrap();
+        t.submit("/reload").await;
+        t.until("reload completes after fixing init.lua", |s| {
+            s.contains("Startup unblocked") || s.contains("Reloaded")
+        })
+        .await;
+        for _ in 0..5 {
+            t.step().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let all = t.history();
+        assert_eq!(
+            all.matches("/model · /help · @ file · ! bash").count(),
+            1,
+            "exactly one welcome banner after pre-ready /new + /reload:\n{all}"
+        );
+    })
+    .await
+}
+
 /// A startup refusal can remain in scrollback while a retry Enter is already completing a
 /// different, config-blocked request. A channel holds that request's real `turn/completed` boundary.
 #[tokio::test]

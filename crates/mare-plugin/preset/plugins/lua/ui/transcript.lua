@@ -1023,7 +1023,13 @@ return function(D)
 
 	on("session/new", function()
 		presentation_views, turn_documents = {}, {}
-		push_done("info", { node = ui.Line({ ui.Span("⎯ New session ⎯"):hl("MareDim") }) })
+		U.clear()
+		group = nil -- its block went with the clear
+		interrupted_shown = false
+		local banner = D.new_session_banner and D.new_session_banner()
+		push_done("info", {
+			node = banner or ui.Line({ ui.Span("⎯ New session ⎯"):hl("MareDim") }),
+		})
 	end)
 
 	return { push_done = push_done, dispatch = dispatch }
