@@ -176,15 +176,20 @@ pub fn finish_process(code: i32) -> ! {
     mare_binding::platform::exit(code)
 }
 
-/// Force exit after process-tree cleanup, without flushing stdio or waiting for Tokio.
-/// This is never called in a native signal callback because tree cleanup takes locks.
+/// Force exit after process-tree cleanup and bounded Mare-owned terminal restore, without
+/// flushing stdio or waiting for Tokio. Never called in a native signal callback.
 pub fn force_exit_now(code: i32) -> ! {
+    const FORCE_TERM_CLEANUP_TIMEOUT: Duration = Duration::from_millis(100);
     let stage = SHUTDOWN_STAGE.load(Ordering::SeqCst);
     let skipped = skipped_steps_from(stage);
     tracing::warn!(code, stage, skipped = ?skipped, "forced exit: skipping remaining shutdown steps");
     mare_binding::trees::force_cleanup();
     #[cfg(unix)]
     crate::askpass::force_cleanup();
+    if crate::TUI_ACTIVE.swap(false, Ordering::SeqCst) && !mare_tui::modes::handed_off() {
+        mare_tui::modes::force_leave(FORCE_TERM_CLEANUP_TIMEOUT);
+        mare_tui::tty::leave_raw_best_effort();
+    }
     let code = forced_exit_code(code);
     #[cfg(unix)]
     // SAFETY: _exit is async-signal-safe and deliberately skips destructors and stdio flushing.

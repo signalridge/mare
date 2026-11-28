@@ -150,6 +150,16 @@ pub fn leave_raw() {
     }
 }
 
+/// Non-blocking cooked-mode restore for watchdog forced exit (never deadlocks if another thread
+/// holds the terminal mutex).
+pub fn leave_raw_best_effort() {
+    if let Ok(mut guard) = TERM.try_lock()
+        && let Some(t) = guard.as_mut()
+    {
+        let _ = t.enter_cooked_mode();
+    }
+}
+
 /// Give the terminal up for good (exit): cooked mode, and on Windows the console modes and code
 /// pages as they were. An [`Events`] still alive keeps reading from its own handle.
 pub fn close() {
