@@ -1052,3 +1052,354 @@ fn rapid_pty_burst_input_preserves_character_order() {
     p.send(b"/exit\r");
     p.wait_exit(15);
 }
+
+/// Issue #176: after Ctrl+Z (SIGTSTP) and resuming in the foreground (SIGCONT), Mare should
+/// re-query the terminal background (OSC 11) so `flavor = "auto"` updates when the terminal
+/// switched between dark and light while suspended.
+#[cfg(unix)]
+#[test]
+fn resume_from_sigtstp_requeries_terminal_background() {
+    use std::fs::File;
+    use std::io::{Read as _, Write as _};
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+    use std::os::unix::process::CommandExt as _;
+    use std::process::Stdio;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let work = dir.path().join("work");
+    let bg_log = dir.path().join("bg.log");
+    std::fs::create_dir_all(home.join("config")).unwrap();
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(
+        home.join("config/init.lua"),
+        r#"
+local log_path = os.getenv("MARE_REPRO_BG_LOG")
+local function append(line)
+    local f = io.open(log_path, "a")
+    if f then
+        f:write(line .. "\n")
+        f:close()
+    end
+end
+mare.on("ui/background", function(ev)
+    append(string.format("bg:%s:%d,%d,%d", tostring(ev.dark), ev.r, ev.g, ev.b))
+end)
+mare.on("ui/resume", function()
+    append("resumed")
+end)
+"#,
+    )
+    .unwrap();
+
+    let (mut master, mut slave) = (-1, -1);
+    let mut size = libc::winsize { ws_row: 30, ws_col: 100, ws_xpixel: 0, ws_ypixel: 0 };
+    // SAFETY: openpty initializes both descriptors from a valid winsize pointer.
+    assert_eq!(
+        unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::addr_of_mut!(size),
+            )
+        },
+        0
+    );
+    // SAFETY: openpty returned two owned descriptors.
+    let (mut master, slave) = unsafe { (File::from_raw_fd(master), File::from_raw_fd(slave)) };
+    for fd in [master.as_raw_fd(), slave.as_raw_fd()] {
+        // SAFETY: fd is valid; mark close-on-exec so only duplicated stdio fds cross exec.
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) }, 0);
+    }
+
+    let mut cmd = crate::common::mare_cmd();
+    for (k, _) in std::env::vars_os() {
+        if (k.to_string_lossy().starts_with("MARE_") && k != "MARE_TEST_OFFLINE")
+            || matches!(k.to_str(), Some("GIT_DIR" | "GIT_WORK_TREE" | "GIT_INDEX_FILE"))
+        {
+            cmd.env_remove(k);
+        }
+    }
+    cmd.args([
+        "--model",
+        "faux/echo",
+        "--no-session",
+        "--no-trust",
+        "--set",
+        "plugins.onboarding.plugins=false",
+        "--set",
+        "flavor=auto",
+    ])
+    .current_dir(&work)
+    .env("MARE_HOME", &home)
+    .env("MARE_REPRO_BG_LOG", &bg_log)
+    .env("TERM", "xterm-256color")
+    .process_group(0)
+    .stdin(Stdio::from(slave.try_clone().unwrap()))
+    .stdout(Stdio::from(slave.try_clone().unwrap()))
+    .stderr(Stdio::from(slave.try_clone().unwrap()));
+    // SAFETY: resetting SIGTSTP to SIG_DFL is async-signal-safe in pre_exec.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::signal(libc::SIGTSTP, libc::SIG_DFL) == libc::SIG_ERR {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    struct ChildGuard(std::process::Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let child = ChildGuard(cmd.spawn().unwrap());
+    drop(cmd);
+    let mare_pid = child.0.id() as libc::pid_t;
+
+    let read_some = |master: &mut File, out: &mut Vec<u8>| {
+        let mut pfd = libc::pollfd { fd: master.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        // SAFETY: pfd points to one valid descriptor.
+        if unsafe { libc::poll(&mut pfd, 1, 25) } > 0 && (pfd.revents & libc::POLLIN) != 0 {
+            let mut buf = [0u8; 8192];
+            if let Ok(n) = master.read(&mut buf) {
+                out.extend_from_slice(&buf[..n]);
+            }
+        }
+    };
+
+    let mut out = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !String::from_utf8_lossy(&out).contains("\x1b]11;?") {
+        assert!(Instant::now() < deadline, "timed out waiting for startup OSC 11 query");
+        read_some(&mut master, &mut out);
+    }
+
+    // Answer startup probe with a dark terminal background and DA1 fence.
+    master.write_all(b"\x1b]11;rgb:0000/0000/0000\x1b\\\x1b[?62;22c").unwrap();
+    master.flush().unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !String::from_utf8_lossy(&out).contains(INPUT_BOX)
+        || !std::fs::read_to_string(&bg_log).unwrap_or_default().contains("bg:true:0,0,0")
+    {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for startup dark theme; log={:?}",
+            std::fs::read_to_string(&bg_log).ok()
+        );
+        read_some(&mut master, &mut out);
+    }
+
+    // Suspend mare with Ctrl+Z.
+    let before_suspend = out.len();
+    master.write_all(b"\x1a").unwrap();
+    master.flush().unwrap();
+    let stop_deadline = Instant::now() + Duration::from_secs(10);
+    let mut stopped = false;
+    while Instant::now() < stop_deadline {
+        let mut status: libc::c_int = 0;
+        // SAFETY: mare_pid is our direct child process.
+        let rc = unsafe { libc::waitpid(mare_pid, &mut status, libc::WUNTRACED | libc::WNOHANG) };
+        if rc == mare_pid && libc::WIFSTOPPED(status) && libc::WSTOPSIG(status) == libc::SIGTSTP {
+            stopped = true;
+            break;
+        }
+        read_some(&mut master, &mut out);
+    }
+    assert!(stopped, "mare did not stop on Ctrl+Z");
+
+    // Resume mare in the foreground (`fg` / SIGCONT) after the terminal switched to light mode.
+    // SAFETY: -mare_pid is our stopped child process group.
+    assert_eq!(unsafe { libc::kill(-mare_pid, libc::SIGCONT) }, 0);
+    let resume_deadline = Instant::now() + Duration::from_secs(15);
+    while !std::fs::read_to_string(&bg_log).unwrap_or_default().contains("resumed") {
+        assert!(
+            Instant::now() < resume_deadline,
+            "timed out waiting for ui/resume; log={:?}",
+            std::fs::read_to_string(&bg_log).ok()
+        );
+        read_some(&mut master, &mut out);
+    }
+    // Also deliver FocusIn in case focus-triggered probing would fire.
+    master.write_all(b"\x1b[I").unwrap();
+    master.flush().unwrap();
+
+    // Wait briefly for a post-resume OSC 11 query; if one arrives, reply with a light background.
+    let probe_deadline = Instant::now() + Duration::from_millis(600);
+    let mut saw_resume_osc11 = false;
+    while Instant::now() < probe_deadline {
+        read_some(&mut master, &mut out);
+        if String::from_utf8_lossy(&out[before_suspend..]).contains("\x1b]11;?") {
+            saw_resume_osc11 = true;
+            master.write_all(b"\x1b]11;rgb:ffff/ffff/ffff\x1b\\").unwrap();
+            master.flush().unwrap();
+            break;
+        }
+    }
+    if saw_resume_osc11 {
+        let light_deadline = Instant::now() + Duration::from_secs(5);
+        while !std::fs::read_to_string(&bg_log).unwrap_or_default().contains("bg:false:255,255,255")
+            && Instant::now() < light_deadline
+        {
+            read_some(&mut master, &mut out);
+        }
+    }
+
+    let log_contents = std::fs::read_to_string(&bg_log).unwrap_or_default();
+    assert!(
+        saw_resume_osc11 && log_contents.contains("bg:false:255,255,255"),
+        "expected OSC 11 re-query and light ui/background after resume; saw_resume_osc11={saw_resume_osc11}, log={log_contents:?}"
+    );
+}
+
+/// Issue #176: explicit `flavor=dark` must suppress post-resume OSC 11 queries.
+#[cfg(unix)]
+#[test]
+fn resume_from_sigtstp_skips_osc11_when_flavor_is_explicit() {
+    use std::fs::File;
+    use std::io::{Read as _, Write as _};
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+    use std::os::unix::process::CommandExt as _;
+    use std::process::Stdio;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let work = dir.path().join("work");
+    let bg_log = dir.path().join("bg.log");
+    std::fs::create_dir_all(home.join("config")).unwrap();
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(
+        home.join("config/init.lua"),
+        r#"
+local log_path = os.getenv("MARE_REPRO_BG_LOG")
+mare.on("ui/resume", function()
+    local f = io.open(log_path, "a")
+    if f then f:write("resumed\n"); f:close() end
+end)
+"#,
+    )
+    .unwrap();
+
+    let (mut master, mut slave) = (-1, -1);
+    let mut size = libc::winsize { ws_row: 30, ws_col: 100, ws_xpixel: 0, ws_ypixel: 0 };
+    assert_eq!(
+        unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::addr_of_mut!(size),
+            )
+        },
+        0
+    );
+    let (mut master, slave) = unsafe { (File::from_raw_fd(master), File::from_raw_fd(slave)) };
+    for fd in [master.as_raw_fd(), slave.as_raw_fd()] {
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) }, 0);
+    }
+
+    let mut cmd = crate::common::mare_cmd();
+    for (k, _) in std::env::vars_os() {
+        if (k.to_string_lossy().starts_with("MARE_") && k != "MARE_TEST_OFFLINE")
+            || matches!(k.to_str(), Some("GIT_DIR" | "GIT_WORK_TREE" | "GIT_INDEX_FILE"))
+        {
+            cmd.env_remove(k);
+        }
+    }
+    cmd.args([
+        "--model",
+        "faux/echo",
+        "--no-session",
+        "--no-trust",
+        "--set",
+        "plugins.onboarding.plugins=false",
+        "--set",
+        "flavor=dark",
+    ])
+    .current_dir(&work)
+    .env("MARE_HOME", &home)
+    .env("MARE_REPRO_BG_LOG", &bg_log)
+    .env("TERM", "xterm-256color")
+    .process_group(0)
+    .stdin(Stdio::from(slave.try_clone().unwrap()))
+    .stdout(Stdio::from(slave.try_clone().unwrap()))
+    .stderr(Stdio::from(slave.try_clone().unwrap()));
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::signal(libc::SIGTSTP, libc::SIG_DFL) == libc::SIG_ERR {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    struct ChildGuard(std::process::Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let child = ChildGuard(cmd.spawn().unwrap());
+    drop(cmd);
+    let mare_pid = child.0.id() as libc::pid_t;
+
+    let read_some = |master: &mut File, out: &mut Vec<u8>| {
+        let mut pfd = libc::pollfd { fd: master.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        if unsafe { libc::poll(&mut pfd, 1, 25) } > 0 && (pfd.revents & libc::POLLIN) != 0 {
+            let mut buf = [0u8; 8192];
+            if let Ok(n) = master.read(&mut buf) {
+                out.extend_from_slice(&buf[..n]);
+            }
+        }
+    };
+
+    let mut out = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !String::from_utf8_lossy(&out).contains("\x1b[c") {
+        assert!(Instant::now() < deadline, "timed out waiting for startup DA1 query");
+        read_some(&mut master, &mut out);
+    }
+    master.write_all(b"\x1b[?62;22c").unwrap();
+    master.flush().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !String::from_utf8_lossy(&out).contains(INPUT_BOX) {
+        assert!(Instant::now() < deadline, "timed out waiting for input box");
+        read_some(&mut master, &mut out);
+    }
+
+    let before_suspend = out.len();
+    master.write_all(b"\x1a").unwrap();
+    master.flush().unwrap();
+    let stop_deadline = Instant::now() + Duration::from_secs(10);
+    let mut stopped = false;
+    while Instant::now() < stop_deadline {
+        let mut status: libc::c_int = 0;
+        let rc = unsafe { libc::waitpid(mare_pid, &mut status, libc::WUNTRACED | libc::WNOHANG) };
+        if rc == mare_pid && libc::WIFSTOPPED(status) && libc::WSTOPSIG(status) == libc::SIGTSTP {
+            stopped = true;
+            break;
+        }
+        read_some(&mut master, &mut out);
+    }
+    assert!(stopped, "mare did not stop on Ctrl+Z");
+
+    assert_eq!(unsafe { libc::kill(-mare_pid, libc::SIGCONT) }, 0);
+    let resume_deadline = Instant::now() + Duration::from_secs(15);
+    while !std::fs::read_to_string(&bg_log).unwrap_or_default().contains("resumed") {
+        assert!(Instant::now() < resume_deadline, "timed out waiting for ui/resume");
+        read_some(&mut master, &mut out);
+    }
+    let drain_deadline = Instant::now() + Duration::from_millis(300);
+    while Instant::now() < drain_deadline {
+        read_some(&mut master, &mut out);
+    }
+    assert!(
+        !String::from_utf8_lossy(&out[before_suspend..]).contains("\x1b]11;?"),
+        "explicit flavor=dark must not emit OSC 11 on resume"
+    );
+}
