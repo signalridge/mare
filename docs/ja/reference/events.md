@@ -880,6 +880,7 @@ Session token usage and cost totals changed.
 | `last_cache_read` | `integer` | はい |  |
 | `last_context` | `integer` | はい |  |
 | `output` | `integer` | はい |  |
+| `reasoning` | `integer` |  |  |
 | `requests` | `integer` | はい |  |
 | `side_requests` | `integer` | はい |  |
 | `subscription_requests` | `integer` | はい |  |
