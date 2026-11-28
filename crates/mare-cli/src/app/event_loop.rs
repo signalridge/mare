@@ -502,6 +502,9 @@ pub(in crate::app) fn handle_app_msg(app: &mut App, msg: AppMsg) {
         AppMsg::CommitReady(id, lines) => app.commit_ready(id, lines),
         AppMsg::Completions(seq, items, hint) => app.apply_completions(seq, items, hint),
         AppMsg::CopyResult { chars, bytes, result } => app.handle_copy_result(chars, bytes, result),
+        AppMsg::ClipboardPasteReady { target, report_error, result } => {
+            app.handle_clipboard_paste_result(target, report_error, result);
+        }
     }
 }
 

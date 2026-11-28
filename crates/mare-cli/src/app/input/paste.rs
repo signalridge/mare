@@ -2,9 +2,18 @@
 
 use crate::app::*;
 
-enum ClipboardPaste {
+pub(in crate::app) enum ClipboardPaste {
     Image(mare_binding::image::Encoded),
     Text(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::app) enum PasteTarget {
+    MainEditor { clear_count: usize },
+    ModalInput,
+    ModalSelect,
+    ModalHelp,
+    Ignored,
 }
 
 fn choose_clipboard_paste(
@@ -18,14 +27,69 @@ fn choose_clipboard_paste(
 }
 
 impl App {
-    pub(super) fn paste_clipboard(&mut self) -> bool {
-        match choose_clipboard_paste(|| mare_binding::image::from_clipboard(2000), mare_binding::clipboard::read_text) {
-            Ok(Some(ClipboardPaste::Image(img))) => self.attach(img),
-            Ok(Some(ClipboardPaste::Text(text))) => self.handle_paste(&text),
-            Ok(None) => return false,
-            Err(e) => self.push_notice((format!("clipboard: {e}"), "warning".into(), Instant::now())),
+    fn capture_paste_target(&self) -> PasteTarget {
+        match &self.modal {
+            None => PasteTarget::MainEditor { clear_count: self.clear_count },
+            Some(Modal::Input { .. }) => PasteTarget::ModalInput,
+            Some(Modal::Select { kind, allow_search, .. }) if kind != "confirm" && *allow_search => {
+                PasteTarget::ModalSelect
+            }
+            Some(Modal::Help { .. }) => PasteTarget::ModalHelp,
+            Some(_) => PasteTarget::Ignored,
         }
+    }
+
+    fn paste_target_matches(&self, target: PasteTarget) -> bool {
+        match target {
+            PasteTarget::MainEditor { clear_count } => self.modal.is_none() && self.clear_count == clear_count,
+            PasteTarget::ModalInput => matches!(self.modal, Some(Modal::Input { .. })),
+            PasteTarget::ModalSelect => {
+                matches!(&self.modal, Some(Modal::Select { kind, allow_search, .. }) if kind != "confirm" && *allow_search)
+            }
+            PasteTarget::ModalHelp => matches!(self.modal, Some(Modal::Help { .. })),
+            PasteTarget::Ignored => false,
+        }
+    }
+
+    pub(super) fn paste_clipboard(&mut self) -> bool {
+        let target = self.capture_paste_target();
+        let app_tx = self.app_tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let result = choose_clipboard_paste(
+                || mare_binding::image::from_clipboard(2000),
+                mare_binding::clipboard::read_text,
+            )
+            .map_err(|e| e.to_string());
+            let _ = app_tx.send(AppMsg::ClipboardPasteReady { target, report_error: true, result });
+        });
         true
+    }
+
+    pub(in crate::app) fn handle_clipboard_paste_result(
+        &mut self,
+        target: PasteTarget,
+        report_error: bool,
+        result: std::result::Result<Option<ClipboardPaste>, String>,
+    ) {
+        match result {
+            Ok(Some(ClipboardPaste::Image(img))) => {
+                if matches!(target, PasteTarget::MainEditor { .. }) && self.paste_target_matches(target) {
+                    self.record_editor_activity(app_now());
+                    self.attach(img);
+                }
+            }
+            Ok(Some(ClipboardPaste::Text(text))) => {
+                if !text.is_empty() && self.paste_target_matches(target) {
+                    self.handle_paste(&text);
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                if report_error {
+                    self.push_notice((format!("clipboard: {e}"), "warning".into(), app_now()));
+                }
+            }
+        }
     }
     /// Images live in the input as an atomic `[Image #N]` marker; deleting the marker drops the
     /// attachment. The marker stays in the text so the model can refer to it.
@@ -163,11 +227,16 @@ impl App {
             Some(Modal::Info { .. }) => {}
             None => {
                 // Cmd+V of a copied image: many terminals deliver an *empty* bracketed paste —
-                // fall back to reading the system clipboard for an image
+                // fall back to reading the system clipboard for an image off the event loop
                 if text.is_empty() {
-                    if let Ok(Some(img)) = mare_binding::image::from_clipboard(2000) {
-                        self.attach(img);
-                    }
+                    let target = PasteTarget::MainEditor { clear_count: self.clear_count };
+                    let app_tx = self.app_tx.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let result = mare_binding::image::from_clipboard(2000)
+                            .map(|img| img.map(ClipboardPaste::Image))
+                            .map_err(|e| e.to_string());
+                        let _ = app_tx.send(AppMsg::ClipboardPasteReady { target, report_error: false, result });
+                    });
                     return;
                 }
                 // terminals paste dropped files as (quoted / backslash-escaped / file://) paths,
@@ -216,5 +285,142 @@ mod clipboard_tests {
         let result = choose_clipboard_paste(|| Ok(None), || Ok(Some("pasted text".into()))).unwrap();
         assert!(matches!(result, Some(ClipboardPaste::Text(ref text)) if text == "pasted text"));
         assert!(choose_clipboard_paste(|| Err(anyhow::anyhow!("clipboard failure")), || Ok(None)).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn repro_227_clipboard_paste_blocks_tui_event_loop_synchronously() {
+        use std::net::TcpListener;
+        use std::time::Duration;
+
+        // Bind a local X11 display TCP port (6000 + N) that accepts a client and stalls 300ms
+        // before closing, simulating a slow X11 clipboard owner without needing an external display.
+        let (listener, display_num) = (100u16..200)
+            .find_map(|n| TcpListener::bind(("127.0.0.1", 6000 + n)).ok().map(|l| (l, n)))
+            .expect("bind local X11 display port");
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                if let Ok((stream, _)) = listener.accept() {
+                    std::thread::sleep(Duration::from_millis(300));
+                    drop(stream);
+                }
+            }
+        });
+
+        let prev_display = std::env::var_os("DISPLAY");
+        let prev_wayland = std::env::var_os("WAYLAND_DISPLAY");
+        unsafe {
+            std::env::set_var("DISPLAY", format!("127.0.0.1:{display_num}"));
+            std::env::remove_var("WAYLAND_DISPLAY");
+        }
+        struct RestoreEnv(Option<std::ffi::OsString>, Option<std::ffi::OsString>);
+        impl Drop for RestoreEnv {
+            fn drop(&mut self) {
+                unsafe {
+                    match &self.0 {
+                        Some(v) => std::env::set_var("DISPLAY", v),
+                        None => std::env::remove_var("DISPLAY"),
+                    }
+                    match &self.1 {
+                        Some(v) => std::env::set_var("WAYLAND_DISPLAY", v),
+                        None => std::env::remove_var("WAYLAND_DISPLAY"),
+                    }
+                }
+            }
+        }
+        let _restore = RestoreEnv(prev_display, prev_wayland);
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let tmp = tempfile::tempdir().unwrap();
+                let opts = mare_host::HostOptions {
+                    cwd: tmp.path().to_path_buf(),
+                    mode: mare_shared::ui::Mode::Tui,
+                    config: serde_json::json!({}),
+                    load_init: false,
+                    project_trusted: false,
+                    args: serde_json::json!({ "no_session": true }),
+                    no_user_plugins: true,
+                };
+                let ui = UiShared::new();
+                let host = mare_host::Host::with_ui(opts, ui.clone()).await.unwrap();
+                let (app_tx, _app_rx) = tokio::sync::mpsc::unbounded_channel();
+                let mut app = App::new(host.clone(), ui, app_tx, 80, 24);
+
+                let t0 = std::time::Instant::now();
+                app.handle_paste_at("", Instant::now());
+                let empty_paste_elapsed = t0.elapsed();
+
+                let t1 = std::time::Instant::now();
+                let _ = app.paste_clipboard();
+                let paste_action_elapsed = t1.elapsed();
+
+                host.shutdown().await;
+                assert!(
+                    empty_paste_elapsed < Duration::from_millis(100)
+                        && paste_action_elapsed < Duration::from_millis(100),
+                    "clipboard paste must not block the TUI event loop synchronously \
+                     (empty_paste={empty_paste_elapsed:?}, paste_clipboard={paste_action_elapsed:?})"
+                );
+            })
+            .await;
+        let _ = server.join();
+    }
+
+    #[tokio::test]
+    async fn async_clipboard_paste_result_delivers_image_text_error_and_drops_stale_target() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let tmp = tempfile::tempdir().unwrap();
+                let opts = mare_host::HostOptions {
+                    cwd: tmp.path().to_path_buf(),
+                    mode: mare_shared::ui::Mode::Tui,
+                    config: serde_json::json!({}),
+                    load_init: false,
+                    project_trusted: false,
+                    args: serde_json::json!({ "no_session": true }),
+                    no_user_plugins: true,
+                };
+                let ui = UiShared::new();
+                let host = mare_host::Host::with_ui(opts, ui.clone()).await.unwrap();
+                let (app_tx, _app_rx) = tokio::sync::mpsc::unbounded_channel();
+                let mut app = App::new(host.clone(), ui, app_tx, 80, 24);
+                let target = PasteTarget::MainEditor { clear_count: app.clear_count };
+
+                // Text delivery inserts into the main editor.
+                app.handle_clipboard_paste_result(target, true, Ok(Some(ClipboardPaste::Text("hello".into()))));
+                assert_eq!(app.ed().text(), "hello");
+
+                // Image delivery attaches an [Image #1] marker and stores the payload.
+                app.handle_clipboard_paste_result(
+                    target,
+                    false,
+                    Ok(Some(ClipboardPaste::Image(mare_binding::image::Encoded {
+                        mime: "image/png",
+                        data: "AAAA".into(),
+                        width: 1,
+                        height: 1,
+                    }))),
+                );
+                assert!(app.ed().text().contains("[Image #1]"), "editor={:?}", app.ed().text());
+                assert_eq!(app.attachments.len(), 1);
+
+                // Stale target (clear_count moved) is ignored safely.
+                app.clear_count += 1;
+                app.handle_clipboard_paste_result(target, true, Ok(Some(ClipboardPaste::Text("stale".into()))));
+                assert!(!app.ed().text().contains("stale"));
+
+                // Error notice is pushed only when report_error is true.
+                let notices_before = app.notices.iter().count();
+                app.handle_clipboard_paste_result(target, false, Err("silent failure".into()));
+                assert_eq!(app.notices.iter().count(), notices_before);
+                app.handle_clipboard_paste_result(target, true, Err("visible failure".into()));
+                assert_eq!(app.notices.iter().count(), notices_before + 1);
+
+                host.shutdown().await;
+            })
+            .await;
     }
 }
