@@ -363,7 +363,7 @@ local STOPS = {
 	stop_sequence = "stop",
 	tool_use = "tool_use",
 	max_tokens = "length",
-	model_context_window_exceeded = "length",
+	model_context_window_exceeded = "error",
 	pause_turn = "paused",
 	refusal = "filtered",
 	sensitive = "filtered",
@@ -753,6 +753,10 @@ function M.new_parser(sink, on_error, opts)
 			-- show the refusal; there may be no text at all
 			msg.error = P.stop_explanation or ("the model declined to answer (%s)"):format(P.raw_stop or "refusal")
 			msg.raw_stop_reason = P.raw_stop
+		elseif P.raw_stop == "model_context_window_exceeded" then
+			msg.raw_stop_reason = P.raw_stop
+			msg.error_kind = "context_overflow"
+			msg.error = P.stop_explanation or "model context window exceeded"
 		elseif P.stop == "other" then
 			msg.raw_stop_reason = P.raw_stop
 		end

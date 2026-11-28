@@ -973,6 +973,9 @@ function M.new_parser(sink, on_error, opts)
 			DataInspectionFailed = true,
 			censorship_blocked = true,
 		}
+		local CONTEXT_OVERFLOW_REASONS = {
+			model_context_window_exceeded = true,
+		}
 		local NORMAL_REASONS = {
 			stop = true,
 			["end"] = true,
@@ -986,6 +989,11 @@ function M.new_parser(sink, on_error, opts)
 		end
 		if P.finish == "length" then
 			msg.stop_reason = "length"
+		elseif CONTEXT_OVERFLOW_REASONS[P.finish] then
+			msg.stop_reason = "error"
+			msg.raw_stop_reason = P.finish
+			msg.error_kind = "context_overflow"
+			msg.error = "model context window exceeded"
 		elseif FILTERED_REASONS[P.finish] or (P.refused and NORMAL_REASONS[P.finish]) then
 			msg.stop_reason = "filtered"
 			msg.raw_stop_reason = P.finish

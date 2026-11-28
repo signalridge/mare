@@ -141,6 +141,121 @@ async fn compat_refusals_streamed_non_streamed_and_finish_reason_refusal() {
     .await
 }
 
+#[tokio::test]
+async fn repro_267_zai_context_window_stop_reasons_route_to_overflow_recovery() {
+    local(async {
+        // 1) Anthropic wire: stop_reason = "model_context_window_exceeded"
+        {
+            let mut env = TestEnv::new().await;
+            let server = MockServer::start().await;
+            let overflow_sse = sse_events(&[
+                json!({"type": "message_start", "message": {"id": "msg_ov", "type": "message", "role": "assistant", "content": [], "model": "claude-sonnet-5-5", "stop_reason": null, "usage": {"input_tokens": 500, "output_tokens": 1}}}),
+                json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+                json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "partial"}}),
+                json!({"type": "content_block_stop", "index": 0}),
+                json!({"type": "message_delta", "delta": {"stop_reason": "model_context_window_exceeded"}, "usage": {"output_tokens": 10}}),
+                json!({"type": "message_stop"}),
+            ]);
+            let ok_sse = fixture("anthropic.sse");
+            server.route("/anthropic", vec![Resp::sse(overflow_sse), Resp::sse(ok_sse)]);
+            let h = provider_host(
+                &mut env,
+                &server,
+                json!({
+                    "model": "anthropic/claude-sonnet-5-5",
+                    "plugins": { "llm": { "retries": 0 } }
+                }),
+            )
+            .await;
+            expose(&h);
+            exec(
+                &h,
+                r#"COMPACTED = 0
+                C.cordis:on("compact/overflow", function() COMPACTED = COMPACTED + 1 return { handled = true, succeeded = true, res = { status = "compacted", tokens_before = 0, tokens_after = 0 } } end, { prepend = true })"#,
+            )
+            .await;
+            let result = h.prompt("go", json!({})).await.unwrap();
+            let compacted: i64 = eval(&h, "return COMPACTED").await;
+            h.shutdown().await;
+            assert_eq!(
+                compacted, 1,
+                "Anthropic stop_reason=model_context_window_exceeded must trigger overflow recovery: {result}"
+            );
+        }
+    })
+    .await
+}
+
+#[tokio::test]
+async fn repro_267_compat_model_context_window_exceeded_classifies_as_context_overflow() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let server = MockServer::start().await;
+        let overflow_sse = compat_events(&[
+            compat_text("partial"),
+            json!({"choices":[{"index":0,"delta":{},"finish_reason":"model_context_window_exceeded"}],"usage":{"prompt_tokens":500,"completion_tokens":10}}),
+        ]);
+        server.route("/compat", vec![Resp::sse(overflow_sse)]);
+        let h = provider_host(&mut env, &server, json!({ "plugins": { "llm": { "retries": 0 } } })).await;
+        let msg = stream(&h, "deepseek/deepseek-chat").await;
+        h.shutdown().await;
+        assert_eq!(
+            msg["error_kind"], "context_overflow",
+            "Chat finish_reason=model_context_window_exceeded must classify as context_overflow, not malformed_response: {msg}"
+        );
+        assert_eq!(msg["stop_reason"], "error", "{msg}");
+        assert_eq!(msg["raw_stop_reason"], "model_context_window_exceeded", "{msg}");
+    })
+    .await
+}
+
+#[tokio::test]
+async fn compat_model_context_window_exceeded_routes_to_overflow_recovery_while_length_stays_length() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let server = MockServer::start().await;
+        let overflow_sse = compat_events(&[
+            compat_text("partial"),
+            json!({"choices":[{"index":0,"delta":{},"finish_reason":"model_context_window_exceeded"}],"usage":{"prompt_tokens":500,"completion_tokens":10}}),
+        ]);
+        let ok_sse = compat_events(&[
+            compat_text("recovered"),
+            json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":5}}),
+        ]);
+        let length_sse = compat_events(&[
+            compat_text("truncated"),
+            json!({"choices":[{"index":0,"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":100,"completion_tokens":4096}}),
+        ]);
+        server.route("/compat", vec![Resp::sse(overflow_sse), Resp::sse(ok_sse), Resp::sse(length_sse)]);
+        let h = provider_host(
+            &mut env,
+            &server,
+            json!({
+                "model": "deepseek/deepseek-chat",
+                "plugins": { "llm": { "retries": 0 } }
+            }),
+        )
+        .await;
+        expose(&h);
+        exec(
+            &h,
+            r#"COMPACTED = 0
+            C.cordis:on("compact/overflow", function() COMPACTED = COMPACTED + 1 return { handled = true, succeeded = true, res = { status = "compacted", tokens_before = 0, tokens_after = 0 } } end, { prepend = true })"#,
+        )
+        .await;
+        let result = h.prompt("go", json!({})).await.unwrap();
+        let compacted: i64 = eval(&h, "return COMPACTED").await;
+        assert_eq!(compacted, 1, "compat model_context_window_exceeded must trigger overflow recovery: {result}");
+
+        // Ordinary finish_reason="length" still maps to stop_reason="length", not context_overflow.
+        let len_msg = stream(&h, "deepseek/deepseek-chat").await;
+        assert_eq!(len_msg["stop_reason"], "length", "{len_msg}");
+        assert!(len_msg["error_kind"].is_null(), "{len_msg}");
+        h.shutdown().await;
+    })
+    .await
+}
+
 /// Google finish reasons: `IMAGE_SAFETY` / `IMAGE_PROHIBITED_CONTENT` -> `filtered`;
 /// `MALFORMED_FUNCTION_CALL`, `UNEXPECTED_TOOL_CALL`, `TOO_MANY_TOOL_CALLS`, `OTHER`, `LANGUAGE`,
 /// `NO_IMAGE`, `FINISH_REASON_UNSPECIFIED` -> `error` preserving `raw_stop_reason`, even with empty
