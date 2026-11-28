@@ -645,3 +645,150 @@ async fn web_fetch_blocks_ssrf_even_under_auto_open_network() {
     })
     .await
 }
+
+/// `web_fetch` under an open-network preset (`preset = "auto"`, `Network::Open`) must honour
+/// `net.fake_ip`: `"off"` rejects `198.18.0.0/15` as private, whereas `"auto"` authorizes direct
+/// hostnames resolving to `198.18.0.0/15` while keeping literal fake-IPs, loopback rebinding,
+/// local-proxy routing (without `allow_local`), and remote-proxy routing rejected.
+#[tokio::test]
+async fn web_fetch_honors_net_fake_ip_off_vs_auto_under_open_network() {
+    local(async {
+        let server = MockServer::start().await;
+        let port = host_port(&server.base);
+        server.route("/plain", vec![resp_with(200, "text/plain; charset=utf-8", "should-not-reach")]);
+
+        let loopback: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+        let fake_ip: std::net::IpAddr = "198.18.0.5".parse().unwrap();
+
+        // 1. net.fake_ip = "off" (default): hostname resolving to 198.18.0.5 is blocked as private.
+        {
+            let env = TestEnv::new().await;
+            let _guard = ResolverGuard;
+            mare_binding::netauth::set_resolver_override(Some(std::collections::HashMap::from([(
+                "fake-open.test".to_string(),
+                vec![fake_ip],
+            )])));
+            let _env_guard = EnvVarGuard::set(&[("HTTP_PROXY", ""), ("HTTPS_PROXY", ""), ("NO_PROXY", "")]);
+            let script = json!([
+                { "tool_calls": [{ "name": "web_fetch", "arguments": { "url": format!("http://fake-open.test:{port}/plain") } }] },
+                { "text": "done-off" }
+            ]);
+            let mut b = env
+                .host()
+                .builtins(&["web", "web-fetch-http"])
+                .faux(script)
+                .args(json!({ "no_session": true }))
+                .config(json!({
+                    "net": { "fake_ip": "off" },
+                    "plugins": {
+                        "permissions": { "enabled": true, "preset": "auto" },
+                        "approvals": { "policy": "never" }
+                    }
+                }));
+            b.opts.project_trusted = true;
+            let h = b.build().await;
+            let r = h.prompt("fake-off", json!({})).await.unwrap().to_string();
+            assert!(
+                r.contains("WEB_BLOCKED_URL") && r.contains("local/private"),
+                "net.fake_ip=off must reject 198.18.x.x under open network: {r}"
+            );
+            h.shutdown().await;
+        }
+
+        // 2. net.fake_ip = "auto": direct hostname resolving to 198.18.0.5 passes authorization
+        // (reaching the offline non-loopback guard instead of WEB_BLOCKED_URL), while literal
+        // 198.18.0.5, loopback DNS rebinding, local proxy, and remote proxy stay rejected.
+        {
+            let env = TestEnv::new().await;
+            let _guard = ResolverGuard;
+            mare_binding::netauth::set_resolver_override(Some(std::collections::HashMap::from([
+                ("fake-open.test".to_string(), vec![fake_ip]),
+                ("rebind-open.test".to_string(), vec![loopback]),
+            ])));
+            let _env_guard = EnvVarGuard::set(&[("HTTP_PROXY", ""), ("HTTPS_PROXY", ""), ("NO_PROXY", "")]);
+            let script = json!([
+                { "tool_calls": [{ "name": "web_fetch", "arguments": { "url": format!("http://fake-open.test:{port}/plain") } }] },
+                { "text": "done-auto-direct" },
+                { "tool_calls": [{ "name": "web_fetch", "arguments": { "url": format!("http://198.18.0.5:{port}/plain") } }] },
+                { "text": "done-auto-literal" },
+                { "tool_calls": [{ "name": "web_fetch", "arguments": { "url": format!("http://rebind-open.test:{port}/plain") } }] },
+                { "text": "done-auto-rebind" }
+            ]);
+            let mut b = env
+                .host()
+                .builtins(&["web", "web-fetch-http"])
+                .faux(script)
+                .args(json!({ "no_session": true }))
+                .config(json!({
+                    "net": { "fake_ip": "auto" },
+                    "plugins": {
+                        "permissions": { "enabled": true, "preset": "auto" },
+                        "approvals": { "policy": "never" }
+                    }
+                }));
+            b.opts.project_trusted = true;
+            let h = b.build().await;
+
+            let r_direct = h.prompt("auto-direct", json!({})).await.unwrap().to_string();
+            assert!(
+                !r_direct.contains("local/private") && r_direct.contains("offline test guard"),
+                "net.fake_ip=auto must authorize direct fake-IP hostname under open network: {r_direct}"
+            );
+
+            let r_literal = h.prompt("auto-literal", json!({})).await.unwrap().to_string();
+            assert!(
+                r_literal.contains("WEB_BLOCKED_URL") && r_literal.contains("local/private"),
+                "literal 198.18.0.5 must stay blocked even with net.fake_ip=auto: {r_literal}"
+            );
+
+            let r_rebind = h.prompt("auto-rebind", json!({})).await.unwrap().to_string();
+            assert!(
+                r_rebind.contains("WEB_BLOCKED_URL") && r_rebind.contains("local/private"),
+                "loopback rebind must stay blocked even with net.fake_ip=auto: {r_rebind}"
+            );
+            h.shutdown().await;
+        }
+
+        // 3. net.fake_ip = "auto" via local proxy (allow_local = false on block_private_open) and
+        // via remote proxy must keep their existing authorization denials unchanged.
+        for (label, proxy_url, expected_fragment) in [
+            ("local proxy", "http://127.0.0.1:18080", "by-name local proxy routing requires allow_local = true"),
+            ("remote proxy", "http://198.51.100.10:8080", "cannot be routed through a non-local proxy"),
+        ] {
+            let mut env = TestEnv::new().await;
+            env.set_var("MARE_TEST_ALLOW_LIVE", "1");
+            let _guard = ResolverGuard;
+            mare_binding::netauth::set_resolver_override(Some(std::collections::HashMap::from([(
+                "fake-open.test".to_string(),
+                vec![fake_ip],
+            )])));
+            let _env_guard =
+                EnvVarGuard::set(&[("HTTP_PROXY", proxy_url), ("HTTPS_PROXY", proxy_url), ("NO_PROXY", "")]);
+            let script = json!([
+                { "tool_calls": [{ "name": "web_fetch", "arguments": { "url": format!("http://fake-open.test:{port}/plain") } }] },
+                { "text": "done-proxy" }
+            ]);
+            let mut b = env
+                .host()
+                .builtins(&["web", "web-fetch-http"])
+                .faux(script)
+                .args(json!({ "no_session": true }))
+                .config(json!({
+                    "net": { "fake_ip": "auto" },
+                    "plugins": {
+                        "permissions": { "enabled": true, "preset": "auto" },
+                        "approvals": { "policy": "never" }
+                    }
+                }));
+            b.opts.project_trusted = true;
+            let h = b.build().await;
+            let r = h.prompt(label, json!({})).await.unwrap().to_string();
+            assert!(
+                r.contains("WEB_BLOCKED_URL") && r.contains(expected_fragment),
+                "{label} fake-IP authorization rule must stay unchanged: {r}"
+            );
+            h.shutdown().await;
+        }
+    })
+    .await
+}

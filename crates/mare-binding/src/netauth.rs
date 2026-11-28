@@ -264,8 +264,8 @@ pub struct NetPolicy {
 
 impl NetPolicy {
     /// Open network with private/local IP blocking enforced (`web_fetch` SSRF guard).
-    pub fn block_private_open() -> Self {
-        Self { allow: Vec::new(), deny: Vec::new(), default_allow: true, allow_local: false, fake_ip: FakeIpMode::Off }
+    pub fn block_private_open(fake_ip: FakeIpMode) -> Self {
+        Self { allow: Vec::new(), deny: Vec::new(), default_allow: true, allow_local: false, fake_ip }
     }
 }
 
