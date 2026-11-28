@@ -157,6 +157,8 @@ jobs:
     needs: [validate-tag, gate, rust-notices]
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    env:
+      CARGO_TARGET_X86_64_APPLE_DARWIN_RUSTFLAGS: -C link-arg=-Wl,-adhoc_codesign
     strategy:
       fail-fast: false
       matrix:
@@ -246,6 +248,15 @@ jobs:
           else
             shasum -a 256 "$dir.tar.gz"
           fi > "$dir.tar.gz.sha256"
+      - name: Verify macOS binary signature
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          dir="mare-${{ needs.validate-tag.outputs.tag_name }}-${{ matrix.target }}"
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          tar -xzf "$dir.tar.gz" -C "$tmp"
+          codesign -v --strict "$tmp/$dir/mare"
       - name: Package archive (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -442,7 +453,7 @@ jobs:
           COSIGN_EXPERIMENTAL: "1"
         run: |
           cosign sign-blob --bundle=dist/checksums.txt.sigstore.json dist/checksums.txt --yes
-      - name: Generate Homebrew cask, Scoop manifest, and release outputs
+      - name: Generate Homebrew formula, Scoop manifest, and release outputs
         id: metadata
         shell: bash
         env:
@@ -482,7 +493,8 @@ jobs:
             - Quick install (macOS / Linux): `curl -fsSL https://signalridge.github.io/mare/install.sh | sh`
             - Quick install (Windows): `irm https://signalridge.github.io/mare/install.ps1 | iex`
             - Homebrew (macOS / Linux):
-              `brew tap signalridge/tap && brew trust signalridge/tap && brew install --cask mare`
+              `brew tap signalridge/tap && brew trust signalridge/tap && brew install signalridge/tap/mare`
+              (Upgrading from the earlier cask: `brew uninstall --cask mare && brew install signalridge/tap/mare`)
             - Scoop (Windows): `scoop bucket add signalridge https://github.com/signalridge/scoop-bucket`
               then `scoop install signalridge/mare`
             - Nix Flake / NUR:
@@ -583,16 +595,16 @@ jobs:
           repository: signalridge/homebrew-tap
           token: ${{ secrets.GH_PAT }}
           path: tap
-      - name: Publish verified Homebrew cask
+      - name: Publish verified Homebrew formula
         env:
           TAG_NAME: ${{ needs.release.outputs.tag_name }}
         run: |
           set -euo pipefail
-          mkdir -p tap/Casks
-          cp manifests/Casks/mare.rb tap/Casks/mare.rb
-          git -C tap add Casks/mare.rb
+          cp manifests/Formula/mare.rb tap/mare.rb
+          git -C tap add mare.rb
+          git -C tap rm -f --ignore-unmatch Casks/mare.rb
           if git -C tap diff --cached --quiet; then
-            echo "Homebrew cask is already current."
+            echo "Homebrew formula is already current."
             exit 0
           fi
           git -C tap config user.name "github-actions[bot]"
@@ -745,17 +757,28 @@ jobs:
           mare --help >/dev/null
 
   verify-homebrew:
-    name: Verify Homebrew (optional)
-    runs-on: macos-latest
+    name: Verify Homebrew (${{ matrix.os }}, optional)
+    runs-on: ${{ matrix.os }}
     needs: [release, publish-homebrew]
     if: needs.release.outputs.gh_pat_available == 'true' && needs.publish-homebrew.outputs.published == 'true'
     continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-24.04]
     steps:
+      - name: Ensure Homebrew is on PATH
+        if: runner.os == 'Linux'
+        run: |
+          if ! command -v brew >/dev/null 2>&1 && [ -x /home/linuxbrew/.linuxbrew/bin/brew ]; then
+            echo "/home/linuxbrew/.linuxbrew/bin" >> "$GITHUB_PATH"
+            echo "/home/linuxbrew/.linuxbrew/sbin" >> "$GITHUB_PATH"
+          fi
       - name: Install via Homebrew
         run: |
           brew tap signalridge/tap
           brew trust signalridge/tap
-          brew install --cask mare
+          brew install signalridge/tap/mare
       - name: Verify installation
         env:
           EXPECTED_VERSION: ${{ needs.release.outputs.version }}
@@ -763,6 +786,7 @@ jobs:
           mare --version | tee version.txt
           grep -F "mare ${EXPECTED_VERSION}" version.txt
           mare --help >/dev/null
+          brew test mare
 
   verify-scoop:
     name: Verify Scoop (optional)

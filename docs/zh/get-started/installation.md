@@ -8,10 +8,10 @@
 
 | 平台 | 目标 | 产物类型 |
 | --- | --- | --- |
-| macOS，Apple silicon | `aarch64-apple-darwin` | `.tar.gz`、Homebrew cask、Nix |
-| macOS，Intel | `x86_64-apple-darwin` | `.tar.gz`、Homebrew cask、Nix |
-| Linux，x86-64（静态 musl） | `x86_64-unknown-linux-musl` | `.tar.gz`、`.deb`、`.rpm`、Homebrew cask、AUR、Nix、GHCR 容器 |
-| Linux，ARM64（静态 musl） | `aarch64-unknown-linux-musl` | `.tar.gz`、`.deb`、`.rpm`、Homebrew cask、AUR、Nix、GHCR 容器 |
+| macOS，Apple silicon | `aarch64-apple-darwin` | `.tar.gz`、Homebrew formula、Nix |
+| macOS，Intel | `x86_64-apple-darwin` | `.tar.gz`、Homebrew formula、Nix |
+| Linux，x86-64（静态 musl） | `x86_64-unknown-linux-musl` | `.tar.gz`、`.deb`、`.rpm`、Homebrew formula、AUR、Nix、GHCR 容器 |
+| Linux，ARM64（静态 musl） | `aarch64-unknown-linux-musl` | `.tar.gz`、`.deb`、`.rpm`、Homebrew formula、AUR、Nix、GHCR 容器 |
 | Windows，x86-64 | `x86_64-pc-windows-msvc` | `.zip`、Scoop 清单 |
 | Windows，ARM64 | `aarch64-pc-windows-msvc` | `.zip`、Scoop 清单 |
 
@@ -29,12 +29,12 @@ curl -fsSL https://signalridge.github.io/mare/install.sh | sh
 
 默认安装到 `~/.local/bin`，可通过 `MARE_INSTALL_DIR` 指定安装目录，或通过 `MARE_VERSION=vX.Y.Z` 指定版本。
 
-### Homebrew cask
+### Homebrew
 
 ```sh
 brew tap signalridge/tap
 brew trust signalridge/tap
-brew install --cask mare
+brew install signalridge/tap/mare
 ```
 
 ### Nix（Flake 与 NUR）
@@ -68,6 +68,8 @@ else
   false
 fi
 ```
+
+如果通过浏览器下载压缩包，运行前请先清除 macOS 隔离属性：`xattr -d com.apple.quarantine ./mare`。
 
 ## Linux
 
@@ -111,7 +113,7 @@ yay -S mare-bin
 ```sh
 brew tap signalridge/tap
 brew trust signalridge/tap
-brew install --cask mare
+brew install signalridge/tap/mare
 ```
 
 ### Nix（Flake 与 NUR）
@@ -279,7 +281,7 @@ mare completion fish > ~/.config/fish/completions/mare.fish
 
 mare 不会替换自己的二进制文件。要更新时：
 
-- 如果你通过包管理器安装，请直接使用对应包管理器更新（例如 `brew upgrade --cask mare`、`scoop update mare`、`yay -Syu mare-bin`、`nix profile upgrade mare`）。
+- 如果你通过包管理器安装，请直接使用对应包管理器更新（例如 `brew upgrade mare`、`scoop update mare`、`yay -Syu mare-bin`、`nix profile upgrade mare`）。
 - 否则，重新运行一键安装脚本（`install.sh` / `install.ps1`），或按上文方式下载新压缩包校验后覆盖旧的 `mare` 二进制文件。
 
 发布构建的 TUI 默认每 24 小时检查一次 GitHub 发布版本（`update-check.interval_hours` 可调整间隔；调试构建跳过自动检查），如有新版本就打印一行提示。请求中除 `mare/<version>` 外不带任何标识。可以在 `init.lua` 中关闭检查：
@@ -306,7 +308,7 @@ mare.setup { update_check = false }
 ## 卸载
 
 1. 可选：用 `mare logout` 删除已保存的凭据；provider 支持时会同时吊销令牌。不带 provider 名称时，只有恰好登录了一个 provider 才能执行；否则请指定名称，例如 `mare logout openai`。
-2. 通过包管理器卸载（例如 `brew uninstall --cask mare` 或 `scoop uninstall mare`），或直接删除 `mare` 二进制文件。
+2. 通过包管理器卸载（例如 `brew uninstall mare` 或 `scoop uninstall mare`），或直接删除 `mare` 二进制文件。
 3. 如果想不留痕迹，再删除上面列出的目录。删除状态目录会清除所有已保存的会话。
 
 ```sh

@@ -43,7 +43,7 @@ curl -fsSL https://signalridge.github.io/mare/install.sh | sh
 
 # Homebrew (macOS / Linux)
 brew tap signalridge/tap && brew trust signalridge/tap
-brew install --cask mare
+brew install signalridge/tap/mare
 
 # Nix (Flake / NUR)
 nix run github:signalridge/mare
