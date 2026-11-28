@@ -858,3 +858,110 @@ async fn subagent_shell_command_marks_parent_turn_and_persists_across_reopen() {
     })
     .await
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn repro_233_rewind_warns_when_later_turn_in_suffix_ran_shell() {
+    local(async {
+        let env = TestEnv::new().await;
+        let fa = env.cwd.join("a.txt");
+        let shell_out = env.cwd.join("shell-only.txt");
+        std::fs::write(&fa, "v1\n").unwrap();
+
+        let script = json!([
+            // Turn 1: file tool edit only (no shell commands).
+            { "tool_calls": [{ "name": "read", "arguments": { "path": "a.txt" } }] },
+            { "tool_calls": [{ "name": "write", "arguments": { "path": "a.txt", "content": "turn1\n" } }] },
+            { "text": "turn 1 done" },
+            // Turn 2: shell-only turn with unrecorded disk edit (no file tools -> filtered from changes:turns()).
+            { "tool_calls": [{ "name": "bash", "arguments": { "command": "printf 'from-shell\\n' > shell-only.txt" } }] },
+            { "text": "turn 2 done" }
+        ]);
+        let h = env.host().builtins(&["changes", "commands"]).faux(script).build_exposed().await;
+        h.prompt("first edit only", json!({})).await.unwrap();
+        h.prompt("second turn side effect", json!({})).await.unwrap();
+
+        assert_eq!(std::fs::read_to_string(&fa).unwrap(), "turn1\n");
+        assert_eq!(std::fs::read_to_string(&shell_out).unwrap(), "from-shell\n");
+
+        global(&h, "CMD", h.service_table("commands").unwrap());
+        global(&h, "CH", h.service_table("changes").unwrap());
+        let (turn_menu, mode_menu, confirm_msgs, direct_confirm_msg, notes): (
+            String,
+            String,
+            Vec<String>,
+            String,
+            Vec<String>,
+        ) = eval(
+            &h,
+            r#"
+            local notes = {}
+            local menus = {}
+            local confirms = {}
+            local step = 0
+            local allow_confirm = false
+            mare.ui.connected = function() return true end
+            mare.ui.notify = function(msg, level)
+                notes[#notes + 1] = tostring(level or "info") .. ":" .. tostring(msg)
+            end
+            mare.ui.select = function(opts)
+                step = step + 1
+                local labels = {}
+                for _, it in ipairs(opts.items or {}) do
+                    labels[#labels + 1] = (it.label or "") .. "|" .. (it.detail or "")
+                end
+                menus[step] = table.concat(labels, "\n")
+                return 1 -- Turn 1, then "Restore files"
+            end
+            mare.ui.confirm = function(msg)
+                confirms[#confirms + 1] = tostring(msg)
+                return allow_confirm
+            end
+            -- 1. Interactive /rewind: pre-restore confirmation warns about shell modifications and
+            --    declining leaves tracked files untouched.
+            CMD:run("/rewind")
+            assert(mare.fs.read(mare.cwd .. "/a.txt") == "turn1\n", "declining shell confirm must not modify a.txt")
+
+            -- 2. Direct /rewind <turn> (skips turn menu): still warns BEFORE restoring files.
+            local t1 = CH:turns()[1].turn
+            local direct_msg = ""
+            mare.ui.confirm = function(msg)
+                direct_msg = tostring(msg)
+                return false
+            end
+            CMD:run("/rewind " .. t1)
+            assert(mare.fs.read(mare.cwd .. "/a.txt") == "turn1\n", "declining direct /rewind <turn> must not modify a.txt")
+
+            -- 3. Confirming direct /rewind <turn> restores tracked files while shell-only file remains.
+            mare.ui.confirm = function(msg)
+                confirms[#confirms + 1] = tostring(msg)
+                return true
+            end
+            CMD:run("/rewind " .. t1)
+            return menus[1] or "", menus[2] or "", confirms, direct_msg, notes
+            "#,
+        )
+        .await;
+
+        assert_eq!(std::fs::read_to_string(&fa).unwrap(), "v1\n");
+        assert!(shell_out.exists(), "unrecorded shell-only edit remains on disk after rewind");
+        assert!(
+            turn_menu.to_ascii_lowercase().contains("shell") && mode_menu.to_ascii_lowercase().contains("shell"),
+            "expected turn and mode pickers to warn about later shell-only turn; turn_menu={turn_menu:?}, mode_menu={mode_menu:?}"
+        );
+        assert!(
+            confirm_msgs.iter().any(|m| m.to_ascii_lowercase().contains("shell") && m.contains("remain on disk")),
+            "expected pre-restore confirmation warning before file restore; confirm_msgs={confirm_msgs:?}"
+        );
+        assert!(
+            direct_confirm_msg.to_ascii_lowercase().contains("shell") && direct_confirm_msg.contains("remain on disk"),
+            "expected direct /rewind <turn> to show pre-restore shell warning; direct_confirm_msg={direct_confirm_msg:?}"
+        );
+        assert!(
+            notes.iter().any(|n| n.contains("Rewind cancelled")),
+            "expected cancel notice when declining shell confirmation; notes={notes:?}"
+        );
+        h.shutdown().await;
+    })
+    .await
+}
