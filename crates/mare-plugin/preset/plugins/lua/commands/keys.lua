@@ -105,7 +105,7 @@ function M.groups()
 	end
 	local function when_mask(when)
 		local all, none = 0, 0
-		local bits = { editor_empty = 1, completion_open = 2, paste_burst = 4, working = 8 }
+		local bits = { editor_empty = 1, completion_open = 2, paste_burst = 4, working = 8, kitty_keyboard = 16 }
 		local items = type(when) == "string" and { when } or (type(when) == "table" and when or {})
 		for _, w in ipairs(items) do
 			if type(w) == "string" then
@@ -121,7 +121,7 @@ function M.groups()
 			end
 		end
 		local mask = 0
-		for s = 0, 15 do
+		for s = 0, 31 do
 			if (s & all) == all and (s & none) == 0 then
 				mask = mask | (1 << s)
 			end
@@ -153,7 +153,7 @@ function M.groups()
 				if ok_global and not (printable_done and is_print) then
 					local cov = blocked[k.key] or 0
 					local sm = when_mask(k.when)
-					if (sm & (~cov & 0xFFFF)) ~= 0 then
+					if (sm & (~cov & 0xFFFFFFFF)) ~= 0 then
 						if k.context ~= "text" and k.action ~= "editor.submit" then
 							bound[#bound + 1] = { M.pretty(k.key), k.desc or "" }
 						end

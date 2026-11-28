@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::future::Future;
 use std::task::{Context, Poll, Waker};
 
-use mare_shared::bindings::{COMPLETION_OPEN, EDITOR_EMPTY, PASTE_BURST, WORKING};
+use mare_shared::bindings::{COMPLETION_OPEN, EDITOR_EMPTY, KITTY_KEYBOARD, PASTE_BURST, WORKING};
 
 use crate::app::*;
 
@@ -70,10 +70,13 @@ impl App {
     /// The `when` predicates that hold now, as bits (`mare_shared::bindings`).
     pub(in crate::app) fn key_state(&self) -> u8 {
         let bit = |on: bool, b: u8| if on { b } else { 0 };
+        let kitty_keyboard =
+            self.ui.caps.read().unwrap().get("kitty_keyboard").and_then(|v| v.as_bool()).unwrap_or(false);
         bit(self.ed().is_empty(), EDITOR_EMPTY)
             | bit(self.completion.is_open(), COMPLETION_OPEN)
             | bit(self.burst_enabled && self.burst.active(mare_tui::render::clock_now()), PASTE_BURST)
             | bit(self.working.is_some(), WORKING)
+            | bit(kitty_keyboard, KITTY_KEYBOARD)
     }
 
     /// An action that isn't a core one: a Lua action (`mare.keymap.action`, or a function bound
