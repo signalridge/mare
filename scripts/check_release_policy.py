@@ -364,6 +364,20 @@ def check_companion_workflows_and_files(root: pathlib.Path) -> list[str]:
     if not (root / "scripts" / "release_manifests.py").is_file():
         errors.append("missing scripts/release_manifests.py")
 
+    flake_nix = root / "flake.nix"
+    if not flake_nix.is_file():
+        errors.append("missing flake.nix")
+    else:
+        flake_text = flake_nix.read_text(encoding="utf-8")
+        for needle, label in (
+            ("makeBinaryWrapper", "makeBinaryWrapper in flake.nix"),
+            ("wrapProgram", "wrapProgram in flake.nix"),
+            ("--suffix PATH", "fallback PATH suffix in flake.nix"),
+            ("pkgs.git", "pkgs.git runtime fallback in flake.nix"),
+        ):
+            if needle not in flake_text:
+                errors.append(f"flake.nix missing {label} ({needle!r})")
+
     install_sh = root / "install.sh"
     site_install_sh = root / "docs-site" / "public" / "install.sh"
     if not install_sh.is_file():
@@ -921,6 +935,14 @@ class ReleasePolicySelfTests(unittest.TestCase):
             (wf_dir / "release.yaml").write_text(rel_text.replace("-Wl,-adhoc_codesign", ""), encoding="utf-8")
             errs = check_release_workflow(root)
             self.assertTrue(any("-Wl,-adhoc_codesign" in e for e in errs), errs)
+
+    def test_flake_nix_requires_git_fallback_wrapper(self):
+        flake_text = (self._repo_root() / "flake.nix").read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "flake.nix").write_text(flake_text.replace("wrapProgram", "true"), encoding="utf-8")
+            errs = check_companion_workflows_and_files(root)
+            self.assertTrue(any("wrapProgram" in e for e in errs), errs)
 
 
 def main() -> int:
