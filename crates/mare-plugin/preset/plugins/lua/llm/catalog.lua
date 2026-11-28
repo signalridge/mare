@@ -42,11 +42,8 @@ return function(D)
 		return out
 	end
 
-	local MIN_CONTEXT_WINDOW = 2048
-	local function valid_window(n)
-		n = tonumber(n)
-		return (n and n >= MIN_CONTEXT_WINDOW) and n or nil
-	end
+	local mdev = require("llm.mdev")
+	local valid_window = mdev.valid_window
 
 	local function init_sources(ref, m, base_source, p)
 		local src = {}
@@ -105,6 +102,9 @@ return function(D)
 		end
 		if m.tool_update == false then
 			m.tool_update = nil
+		end
+		if m.hidden == false then
+			m.hidden = nil
 		end
 		local derived = D.lib.model_images(m)
 		if derived ~= nil then
@@ -370,8 +370,36 @@ return function(D)
 	local mdev_path = catalog_dir .. "/models.dev.json"
 	local mdev_mem
 	local mdev_disk_checked = false
+	local mdev_retry_ms = 0
+	local mdev_next_retry_at = 0
 	local bundled_mem
 	local bundled_tried = false
+
+	local function wants_models_dev(p)
+		if type(p) ~= "table" or p.models_dev == false then
+			return false
+		end
+		if type(p.models_dev) == "string" and p.models_dev ~= "" then
+			return true
+		end
+		return not p.no_key and has_catalog(p)
+	end
+
+	local function has_missing_registered_provider(c)
+		if type(c) ~= "table" or type(c.providers) ~= "table" then
+			return true
+		end
+		local absent = type(c.absent_providers) == "table" and c.absent_providers or {}
+		for _, p in pairs(providers) do
+			if wants_models_dev(p) then
+				local pid = models_dev_id(p)
+				if pid and c.providers[pid] == nil and not absent[pid] then
+					return true
+				end
+			end
+		end
+		return false
+	end
 
 	local function load_bundled_models_dev()
 		if bundled_tried then
@@ -421,55 +449,86 @@ return function(D)
 		local c = load_local_models_dev()
 		local delta = c and (os.time() - (tonumber(c.fetched_at) or 0)) or nil
 		local age = (delta and delta >= 0) and (delta * 1000) or math.huge
+		local missing = has_missing_registered_provider(c)
+		local needs_fetch = force or age >= (cfg.catalog_refresh_ms or 0) or missing
+		local now_ms = mare.task.now()
+		local backoff_active = not force and mdev_next_retry_at > 0 and now_ms < mdev_next_retry_at
 		-- development builds (tests) don't reach the real models.dev unless pointed elsewhere
 		local default_url = cfg.models_dev_url == "https://models.dev/api.json"
-		if
-			mare.mode ~= "child"
-			and (force or age >= (cfg.catalog_refresh_ms or 0))
-			and not (mare.debug_build and default_url)
-		then
+		if mare.mode ~= "child" and needs_fetch and not backoff_active and not (mare.debug_build and default_url) then
 			local ok, r =
 				pcall(mare.http.request, { method = "GET", url = cfg.models_dev_url, timeout_ms = timeout_ms or 15000 })
-			local j = ok and r.ok and r:json()
-			if type(j) == "table" then
+			local ok_json, j
+			if ok and r and r.ok then
+				ok_json, j = pcall(r.json, r)
+			end
+			if ok_json and type(j) == "table" then
 				local trimmed = {}
+				local absent = {}
 				for _, p in pairs(providers) do
-					local pid = models_dev_id(p)
-					local pv = pid and j[pid] or nil
-					if type(pv) == "table" and type(pv.models) == "table" then
-						local ms = {}
-						for id, e in pairs(pv.models) do
-							if type(e) == "table" then
-								-- a model's own `provider.npm` overrides the provider's
-								local npm = type(e.provider) == "table" and e.provider.npm or pv.npm
-								ms[id] = {
-									protocol = NPM_PROTOCOL[npm or ""],
-									name = e.name,
-									reasoning = e.reasoning,
-									interleaved = e.interleaved,
-									dynamically_loaded_tools = e.dynamically_loaded_tools,
-									limit = e.limit,
-									input = type(e.modalities) == "table" and e.modalities.input or nil,
-									cost = e.cost,
-								}
+					if wants_models_dev(p) then
+						local pid = models_dev_id(p)
+						local pv = pid and j[pid] or nil
+						if type(pv) == "table" and type(pv.models) == "table" then
+							local ms = {}
+							for id, e in pairs(pv.models) do
+								if type(e) == "table" then
+									-- a model's own `provider.npm` overrides the provider's
+									local npm = type(e.provider) == "table" and e.provider.npm or pv.npm
+									local row = {
+										protocol = NPM_PROTOCOL[npm or ""],
+										name = e.name,
+										family = type(e.family) == "string" and e.family ~= "" and e.family or nil,
+										release_date = type(e.release_date) == "string"
+												and e.release_date ~= ""
+												and e.release_date
+											or nil,
+										status = type(e.status) == "string" and e.status ~= "" and e.status or nil,
+										type = type(e.type) == "string" and e.type ~= "" and e.type or nil,
+										reasoning = e.reasoning,
+										reasoning_options = type(e.reasoning_options) == "table"
+												and e.reasoning_options
+											or nil,
+										interleaved = e.interleaved,
+										dynamically_loaded_tools = e.dynamically_loaded_tools,
+										limit = e.limit,
+										input = type(e.modalities) == "table" and e.modalities.input or nil,
+										cost = e.cost,
+									}
+									if type(e.tool_call) == "boolean" then
+										row.tool_call = e.tool_call
+									end
+									ms[id] = row
+								end
 							end
+							trimmed[pid] = ms
+						elseif pid then
+							absent[pid] = true
 						end
-						trimmed[pid] = ms
 					end
 				end
-				c = { fetched_at = os.time(), providers = trimmed }
+				mdev_retry_ms = 0
+				mdev_next_retry_at = 0
+				c = {
+					fetched_at = os.time(),
+					providers = trimmed,
+					absent_providers = next(absent) ~= nil and absent or nil,
+				}
 				if mare.mode ~= "child" then
 					pcall(mare.fs.write, mdev_path, mare.json.encode(c), { atomic = true, mode = 384 })
 				end
-			elseif not ok or not (r and r.ok) then
-				mare.log("info", "models.dev: " .. tostring(ok and r.status or r))
+			else
+				mdev_retry_ms = mdev.next_retry_ms(mdev_retry_ms)
+				mdev_next_retry_at = mare.task.now() + mdev_retry_ms
+				local detail = ok and (r and (r.ok and tostring(j) or r.status) or "empty response") or tostring(r)
+				mare.log("info", "models.dev: " .. tostring(detail))
 			end
 		end
 		mdev_mem = c
 		return c
 	end
 	--- fill what a listing didn't say from a models.dev entry (never overriding the listing)
-	local function enrich(p, l, e, src_map)
+	local function enrich(p, l, e, src_map, md_prov, matched_id, is_provider_entry)
 		if type(e) ~= "table" then
 			return
 		end
@@ -484,9 +543,7 @@ return function(D)
 			mark("name")
 		end
 		if valid_window(l.context_window) == nil then
-			local lim_ctx = valid_window(lim.context)
-			local lim_in = valid_window(lim.input)
-			local win = (lim_in and (not lim_ctx or lim_in <= lim_ctx)) and lim_in or lim_ctx
+			local win = mdev.window_of_limit(lim)
 			if win then
 				l.context_window = win
 				mark("context_window")
@@ -510,6 +567,31 @@ return function(D)
 		if l.reasoning == nil and e.reasoning ~= nil then
 			l.reasoning = e.reasoning == true
 			mark("reasoning")
+		end
+		if l.efforts == nil and l.reasoning ~= false then
+			local derived_efforts
+			if is_provider_entry then
+				derived_efforts = mdev.levels_for_entry(md_prov, matched_id, e, p and p.reasoning_toggle_off == true)
+			elseif type(e.efforts) == "table" and #e.efforts > 0 then
+				derived_efforts = e.efforts
+			end
+			if type(derived_efforts) == "table" and #derived_efforts > 0 then
+				local copy = {}
+				for i = 1, #derived_efforts do
+					copy[i] = derived_efforts[i]
+				end
+				l.efforts = copy
+				mark("efforts")
+			end
+		end
+		if
+			l.hidden == nil
+			and (not src_map or src_map.hidden == nil)
+			and is_provider_entry
+			and mdev.is_hidden_signal(e)
+		then
+			l.hidden = true
+			mark("hidden")
 		end
 		for _, ws in ipairs(wire_specs_of(p)) do
 			if type(ws) == "table" and type(ws.enrich_model) == "function" then
@@ -539,11 +621,11 @@ return function(D)
 		end
 	end
 
-	local function merge_static_capabilities(p, base, l, md_entry)
+	local function merge_static_capabilities(p, base, l, md_table)
 		local m = clone_model(base)
 		local src = init_sources(m.ref, base, "static", p)
 		if type(l.hidden) == "boolean" then
-			m.hidden = l.hidden or nil
+			m.hidden = l.hidden
 			src.hidden = "server"
 		end
 		local server_ctx = valid_window(l.context_window)
@@ -647,8 +729,10 @@ return function(D)
 				src[k] = "server"
 			end
 		end
+		local pid = models_dev_id(p)
+		local md_entry, matched_id, md_prov, is_prov = mdev.lookup(md_table, pid, l.id)
 		if type(md_entry) == "table" then
-			enrich(p, m, md_entry, src)
+			enrich(p, m, md_entry, src, md_prov, matched_id, is_prov)
 		end
 		return apply_overrides(m, src)
 	end
@@ -659,7 +743,7 @@ return function(D)
 	--- When `replace` is true and the live listing is non-empty, the live list is authoritative:
 	--- static seed entries omitted by the provider are pruned (unless pinned by user overrides)
 	--- and act only as an offline fallback.
-	local function add_listed(p, list, replace, pm)
+	local function add_listed(p, list, replace, md_table)
 		if has_catalog(p) and active_scopes[p.name] == nil and not replace then
 			active_scopes[p.name] = catalog_scope(p)
 		end
@@ -712,7 +796,7 @@ return function(D)
 			local ref = type(l) == "table" and type(l.id) == "string" and (p.name .. "/" .. l.id)
 			if ref and static_models[ref] then
 				local prev = models[ref]
-				local merged = merge_static_capabilities(p, static_models[ref], l, pm and pm[l.id])
+				local merged = merge_static_capabilities(p, static_models[ref], l, md_table)
 				merged.listed_index = idx
 				if model_changed(prev, merged) then
 					changed = changed + 1
@@ -748,7 +832,7 @@ return function(D)
 					ref = ref,
 					listed = true,
 					listed_index = idx,
-					hidden = l.hidden == true or nil,
+					hidden = type(l.hidden) == "boolean" and l.hidden or nil,
 					context_window = listed_ctx or p.default_context or 128000,
 					max_output = tonumber(l.max_output) or p.default_max_output or 16384,
 					max_output_default = tonumber(l.max_output) == nil or nil,
@@ -833,11 +917,9 @@ return function(D)
 			local c = read_catalog(name, scope)
 			if same_refresh_state(name, p, inv_gen, scope) then
 				active_scopes[name] = scope
-				local pid = models_dev_id(p, name)
 				local md_local = load_local_models_dev()
-				local pm = pid and md_local and md_local.providers and md_local.providers[pid] or nil
 				local has_cached = type(c) == "table" and type(c.models) == "table" and #c.models > 0
-				local added, removed, updated = add_listed(p, c and c.models, has_cached, pm)
+				local added, removed, updated = add_listed(p, c and c.models, has_cached, md_local)
 				if added > 0 or removed > 0 or updated > 0 then
 					changed = true
 				end
@@ -1045,7 +1127,6 @@ return function(D)
 			return 0
 		end
 		local pid = models_dev_id(p, name)
-		local pm = pid and md and md.providers[pid] or nil
 		local disk_list = {}
 		for i, l in ipairs(list) do
 			if type(l) == "table" and type(l.id) == "string" then
@@ -1062,7 +1143,8 @@ return function(D)
 							l._sources[k] = "server"
 						end
 					end
-					enrich(p, l, pm and pm[l.id], l._sources)
+					local md_entry, matched_id, md_prov, is_prov = mdev.lookup(md, pid, l.id)
+					enrich(p, l, md_entry, l._sources, md_prov, matched_id, is_prov)
 				end
 				local clean = {}
 				for k, v in pairs(l) do
@@ -1085,7 +1167,7 @@ return function(D)
 			end
 			pending_catalog[name] = nil
 			active_scopes[name] = scope
-			local added, removed, changed = add_listed(p, list, true, pm)
+			local added, removed, changed = add_listed(p, list, true, md)
 			if added > 0 or removed > 0 or changed > 0 then
 				hydrated_gen[name] = (hydrated_gen[name] or 0) + 1
 				ctx.bus:emit("llm/providers-changed")
@@ -1150,14 +1232,9 @@ return function(D)
 		local src = init_sources(ref, m, "static", p)
 		if p and p._builtin_seeds ~= false then
 			local pid = models_dev_id(p)
-			local entry = pid
-					and md_table
-					and md_table.providers
-					and md_table.providers[pid]
-					and md_table.providers[pid][m.id]
-				or nil
+			local entry, matched_id, md_prov, is_prov = mdev.lookup(md_table, pid, m.id)
 			if type(entry) == "table" then
-				enrich(p, m, entry, src)
+				enrich(p, m, entry, src, md_prov, matched_id, is_prov)
 			end
 		end
 		local saved_src = {}
@@ -1177,13 +1254,12 @@ return function(D)
 			return false
 		end
 		local md_disk = load_disk_models_dev()
-		local pm = md_disk and md_disk.providers and md_disk.providers[pid] or nil
-		if type(pm) ~= "table" then
+		if type(md_disk) ~= "table" or type(md_disk.providers) ~= "table" then
 			return false
 		end
 		local changed = false
 		for ref, raw_seed in pairs(raw_seeds) do
-			if raw_seed.provider == pname and type(pm[raw_seed.id]) == "table" then
+			if raw_seed.provider == pname and mdev.lookup(md_disk, pid, raw_seed.id) ~= nil then
 				local rebuilt, src = build_static_model(ref, raw_seed, cur_p, md_disk)
 				static_models[ref] = rebuilt
 				local cur_m = models[ref]
@@ -1268,11 +1344,9 @@ return function(D)
 			local any_changed = disk_md_changed
 			if c and c.models then
 				active_scopes[pname] = scope
-				local pid = models_dev_id(cur_p, pname)
 				local md_local = load_local_models_dev()
-				local pm = pid and md_local and md_local.providers and md_local.providers[pid] or nil
 				local has_cached = type(c.models) == "table" and #c.models > 0
-				local added, removed, changed = add_listed(cur_p, c.models, has_cached, pm)
+				local added, removed, changed = add_listed(cur_p, c.models, has_cached, md_local)
 				if added > 0 or removed > 0 or changed > 0 then
 					any_changed = true
 				end

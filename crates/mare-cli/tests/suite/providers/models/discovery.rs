@@ -1705,3 +1705,488 @@ async fn bundled_models_dev_snapshot_hydrates_seeds_prefers_limit_input_and_resp
     })
     .await;
 }
+
+/// Issue #86: models.dev `reasoning_options` -> `efforts` (with verified toggle-off scoped strictly
+/// to declaring providers and family-kin inheritance), normalised metadata lookup + cross-provider
+/// consensus (metadata only, never model resolution), missing-provider refetch + failure backoff,
+/// and hidden signals (`status=deprecated`, `type!=chat`, `tool_call=false`).
+#[tokio::test]
+async fn models_dev_reasoning_options_normalised_lookup_hidden_signals_and_missing_refetch() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let server = MockServer::start().await;
+
+        // Dated models.dev-style fixture exercising every rule:
+        // - verified-toggle provider (`deepseek`) vs non-verified provider (`other-prov`)
+        // - `none` -> `off` mapping
+        // - family-kin inheritance (new model without reasoning_options borrows from newest kin <= release_date;
+        //   budgeted model does not borrow; newer kin after release_date is ignored)
+        // - normalised lookup: exact, bare after `/`, same-model key (dots/p/date suffix)
+        // - cross-provider majority consensus for a provider absent from models.dev (without leaking toggle-off)
+        // - hidden signals: deprecated, non-chat type, tool_call=false (overridable by live listing hidden=false)
+        let mdev_payload = json!({
+            "deepseek": {
+                "npm": "@ai-sdk/openai-compatible",
+                "models": {
+                    "ds-toggled": {
+                        "name": "DeepSeek Toggled",
+                        "family": "ds-fam",
+                        "release_date": "2026-09-01",
+                        "reasoning": true,
+                        "reasoning_options": [
+                            { "type": "toggle" },
+                            { "type": "effort", "values": ["low", "high", "max"] }
+                        ],
+                        "limit": { "context": 128000, "output": 16384 }
+                    },
+                    "ds-new-kin": {
+                        "name": "DeepSeek New Kin",
+                        "family": "ds-fam",
+                        "release_date": "2026-10-15",
+                        "reasoning": true,
+                        "limit": { "context": 256000, "output": 32768 }
+                    },
+                    "ds-future-kin": {
+                        "name": "DeepSeek Future Kin",
+                        "family": "ds-fam",
+                        "release_date": "2026-11-30",
+                        "reasoning": true,
+                        "reasoning_options": [
+                            { "type": "effort", "values": ["minimal", "xhigh"] }
+                        ],
+                        "limit": { "context": 256000, "output": 32768 }
+                    },
+                    "ds-budgeted": {
+                        "name": "DeepSeek Budgeted",
+                        "family": "ds-fam",
+                        "release_date": "2026-10-20",
+                        "reasoning": true,
+                        "reasoning_options": [
+                            { "type": "budget_tokens", "min": 1024, "max": 32768 }
+                        ],
+                        "limit": { "context": 128000, "output": 16384 }
+                    },
+                    "ds-none-mapped": {
+                        "name": "DeepSeek None Mapped",
+                        "reasoning": true,
+                        "reasoning_options": [
+                            { "type": "effort", "values": ["none", "low", "high", "null"] }
+                        ],
+                        "limit": { "context": 128000, "output": 16384 }
+                    },
+                    "ds-live-wins": {
+                        "name": "DeepSeek Live Wins",
+                        "reasoning": true,
+                        "reasoning_options": [
+                            { "type": "effort", "values": ["low", "high", "max"] }
+                        ],
+                        "limit": { "context": 128000, "output": 16384 }
+                    },
+                    "deepseek-v4.1": {
+                        "name": "DeepSeek V4.1 Canonical",
+                        "reasoning": true,
+                        "reasoning_options": [
+                            { "type": "effort", "values": ["low", "high"] }
+                        ],
+                        "limit": { "context": 262144, "output": 32768 },
+                        "modalities": { "input": ["text", "image"] }
+                    },
+                    "ds-deprecated": {
+                        "name": "Old Model",
+                        "status": "deprecated",
+                        "type": "chat",
+                        "tool_call": true,
+                        "limit": { "context": 64000, "output": 8192 }
+                    },
+                    "ds-embed": {
+                        "name": "Embed Model",
+                        "type": "embedding",
+                        "limit": { "context": 32000, "output": 4096 }
+                    },
+                    "ds-no-tools": {
+                        "name": "No Tool Model",
+                        "type": "chat",
+                        "tool_call": false,
+                        "limit": { "context": 64000, "output": 8192 }
+                    },
+                    "shared-consensus-model": {
+                        "name": "Shared Majority",
+                        "reasoning": true,
+                        "reasoning_options": [
+                            { "type": "toggle" },
+                            { "type": "effort", "values": ["low", "high"] }
+                        ],
+                        "limit": { "context": 200000, "output": 32000 },
+                        "modalities": { "input": ["text", "image"] }
+                    }
+                }
+            },
+            "other-prov": {
+                "npm": "@ai-sdk/openai-compatible",
+                "models": {
+                    "other-toggled": {
+                        "name": "Other Toggled",
+                        "reasoning": true,
+                        "reasoning_options": [
+                            { "type": "toggle" },
+                            { "type": "effort", "values": ["low", "high", "max"] }
+                        ],
+                        "limit": { "context": 128000, "output": 16384 }
+                    },
+                    "other-live-wins": {
+                        "name": "Other Live Wins",
+                        "reasoning": true,
+                        "reasoning_options": [
+                            { "type": "effort", "values": ["low", "high", "max"] }
+                        ],
+                        "limit": { "context": 128000, "output": 16384 }
+                    },
+                    "shared-consensus-model": {
+                        "name": "Shared Majority",
+                        "reasoning": true,
+                        "reasoning_options": [
+                            { "type": "effort", "values": ["low", "high"] }
+                        ],
+                        "limit": { "context": 200000, "output": 32000 },
+                        "modalities": { "input": ["text", "image"] }
+                    }
+                }
+            },
+            "third-prov": {
+                "npm": "@ai-sdk/openai-compatible",
+                "models": {
+                    "vendor/shared-consensus-model": {
+                        "name": "Minority Name",
+                        "reasoning": false,
+                        "limit": { "context": 64000, "output": 8192 },
+                        "modalities": { "input": ["text"] }
+                    }
+                }
+            },
+            "late-prov": {
+                "npm": "@ai-sdk/openai-compatible",
+                "models": {
+                    "late-one": {
+                        "name": "Late Provider Model",
+                        "reasoning": true,
+                        "reasoning_options": [
+                            { "type": "effort", "values": ["low", "medium", "high"] }
+                        ],
+                        "limit": { "context": 300000, "output": 32768 }
+                    },
+                    "late-visible": {
+                        "name": "Late Deprecated Overridden",
+                        "status": "deprecated",
+                        "limit": { "context": 128000, "output": 16384 }
+                    }
+                }
+            }
+        });
+
+        server.route(
+            "/models-dev.json",
+            vec![
+                Resp::status(200, mdev_payload.to_string()),
+                Resp::status(500, r#"{"error":"temporary failure"}"#),
+                Resp::status(200, mdev_payload.to_string()),
+            ],
+        );
+        server.route(
+            "/compat/models",
+            vec![Resp::status(
+                200,
+                json!({
+                    "data": [
+                        { "id": "ds-toggled" },
+                        { "id": "ds-new-kin" },
+                        { "id": "ds-budgeted" },
+                        { "id": "ds-none-mapped" },
+                        { "id": "ds-live-wins", "think_efforts": { "valid_efforts": ["medium"] } },
+                        { "id": "gateway/ds-none-mapped" },
+                        { "id": "deepseek-v4p1-260910" },
+                        { "id": "ds-deprecated" },
+                        { "id": "ds-embed" },
+                        { "id": "ds-no-tools" }
+                    ]
+                })
+                .to_string(),
+            )],
+        );
+        server.route(
+            "/other/models",
+            vec![Resp::status(
+                200,
+                json!({
+                    "data": [
+                        { "id": "other-toggled" },
+                        { "id": "other-live-wins", "think_efforts": { "valid_efforts": ["medium"] } }
+                    ]
+                })
+                .to_string(),
+            )],
+        );
+        server.route(
+            "/relay/models",
+            vec![Resp::status(
+                200,
+                json!({
+                    "data": [
+                        { "id": "org/shared-consensus-model-20260801" }
+                    ]
+                })
+                .to_string(),
+            )],
+        );
+        server.route(
+            "/late/models",
+            vec![
+                Resp::status(200, json!({ "data": [{ "id": "late-one" }] }).to_string()),
+                Resp::status(200, json!({ "data": [{ "id": "late-one" }] }).to_string()),
+                Resp::status(200, json!({ "data": [{ "id": "late-one" }] }).to_string()),
+            ],
+        );
+
+        let h = provider_host(
+            &mut env,
+            &server,
+            json!({
+                "providers": {
+                    "other-prov": {
+                        "wire": "openai-chat",
+                        "base_url": format!("{}/other", server.base),
+                        "api_key": "sk-other",
+                        "models_dev": "other-prov"
+                    },
+                    "third-prov": {
+                        "wire": "openai-chat",
+                        "base_url": format!("{}/other", server.base),
+                        "api_key": "sk-third",
+                        "models_dev": "third-prov",
+                        "list_models": false
+                    },
+                    "relay-prov": {
+                        "wire": "openai-chat",
+                        "base_url": format!("{}/relay", server.base),
+                        "api_key": "sk-relay",
+                        "models_dev": "absent-from-mdev"
+                    }
+                },
+                "plugins": {
+                    "llm": {
+                        "catalog_refresh_ms": 86400000,
+                        "models_dev_url": format!("{}/models-dev.json", server.base)
+                    }
+                }
+            }),
+        )
+        .await;
+
+        let out_json: String = eval(
+            &h,
+            r#"
+            -- 1. Refresh deepseek, other-prov, relay-prov (triggers initial models.dev fetch).
+            LLM:refresh_catalog({ name = "deepseek", force = true })
+            LLM:refresh_catalog({ name = "other-prov" })
+            LLM:refresh_catalog({ name = "relay-prov" })
+
+            local function info(ref)
+              local m = LLM:resolve(ref)
+              local s = m and LLM:model_sources(ref) or nil
+              return {
+                found = m ~= nil,
+                unlisted = m and m.unlisted == true or false,
+                name = m and m.name or nil,
+                ctx = m and m.context_window or nil,
+                out = m and m.max_output or nil,
+                reasoning = m and m.reasoning or nil,
+                efforts = m and m.efforts and mare.json.array(m.efforts) or nil,
+                hidden = m and m.hidden == true or false,
+                images = m and m.images == true or false,
+                src_efforts = s and s.efforts or nil,
+                src_hidden = s and s.hidden or nil,
+              }
+            end
+
+            -- Verify that metadata normalisation NEVER turns an unlisted alias into a resolved catalog model.
+            local unlisted_alias = info("deepseek/deepseek-v4.1")
+
+            -- Verify built-in anthropic/claude-sonnet-4-5 stays visible because its seed sets hidden = false.
+            local sonnet45 = info("anthropic/claude-sonnet-4-5")
+
+            -- Verify backoff math (2m -> 4m -> 8m -> 16m -> 32m -> 60m -> 60m).
+            local mdev = require("llm.mdev")
+            local seq = {}
+            local cur = 0
+            for i = 1, 7 do
+              cur = mdev.next_retry_ms(cur)
+              seq[i] = cur
+            end
+
+            return mare.json.encode({
+              ds_toggled = info("deepseek/ds-toggled"),
+              ds_new_kin = info("deepseek/ds-new-kin"),
+              ds_budgeted = info("deepseek/ds-budgeted"),
+              ds_none_mapped = info("deepseek/ds-none-mapped"),
+              other_live_wins = info("other-prov/other-live-wins"),
+              ds_bare_slash = info("deepseek/gateway/ds-none-mapped"),
+              ds_same_model = info("deepseek/deepseek-v4p1-260910"),
+              ds_deprecated = info("deepseek/ds-deprecated"),
+              ds_embed = info("deepseek/ds-embed"),
+              ds_no_tools = info("deepseek/ds-no-tools"),
+              other_toggled = info("other-prov/other-toggled"),
+              relay_consensus = info("relay-prov/org/shared-consensus-model-20260801"),
+              unlisted_alias = unlisted_alias,
+              sonnet45 = sonnet45,
+              backoff_seq = mare.json.array(seq),
+            })
+            "#,
+        )
+        .await;
+        let v: Value = serde_json::from_str(&out_json).unwrap();
+
+        // Part 1: reasoning_options -> efforts, verified toggle-off scoped to declaring provider, family kin.
+        assert_eq!(
+            v["ds_toggled"]["efforts"],
+            json!(["off", "low", "high", "max"]),
+            "verified toggle-off provider (deepseek) must prepend 'off': {v}"
+        );
+        assert_eq!(v["ds_toggled"]["src_efforts"], "models_dev");
+        assert_eq!(
+            v["other_toggled"]["efforts"],
+            json!(["low", "high", "max"]),
+            "unverified provider must NOT prepend 'off' from toggle: {v}"
+        );
+        assert_eq!(
+            v["ds_new_kin"]["efforts"],
+            json!(["off", "low", "high", "max"]),
+            "new same-family model must borrow from newest kin released on or before its release_date (ignoring future kin): {v}"
+        );
+        assert!(
+            v["ds_budgeted"]["efforts"].is_null(),
+            "budgeted model must not borrow family effort levels: {v}"
+        );
+        assert_eq!(
+            v["ds_none_mapped"]["efforts"],
+            json!(["off", "low", "high"]),
+            "'none' must map to 'off' and 'null' must be filtered: {v}"
+        );
+        assert_eq!(
+            v["other_live_wins"]["efforts"],
+            json!(["medium"]),
+            "live listing efforts must still win over models.dev reasoning_options: {v}"
+        );
+        assert_eq!(v["other_live_wins"]["src_efforts"], "server");
+
+        // Part 2: normalised metadata lookup (bare after '/', same-model key, cross-provider majority consensus).
+        assert_eq!(v["ds_bare_slash"]["efforts"], json!(["off", "low", "high"]));
+        assert_eq!(v["ds_same_model"]["name"], "DeepSeek V4.1 Canonical");
+        assert_eq!(v["ds_same_model"]["ctx"], 262_144);
+        assert_eq!(v["ds_same_model"]["efforts"], json!(["low", "high"]));
+        assert_eq!(v["ds_same_model"]["images"], true);
+        assert_eq!(
+            v["relay_consensus"]["name"], "Shared Majority",
+            "absent provider must take cross-provider majority metadata: {v}"
+        );
+        assert_eq!(v["relay_consensus"]["ctx"], 200_000);
+        assert_eq!(v["relay_consensus"]["out"], 32_000);
+        assert_eq!(v["relay_consensus"]["reasoning"], true);
+        assert_eq!(v["relay_consensus"]["images"], true);
+        assert_eq!(
+            v["relay_consensus"]["efforts"],
+            json!(["low", "high"]),
+            "consensus must NOT leak deepseek's verified toggle-off into other providers: {v}"
+        );
+        assert_eq!(
+            v["unlisted_alias"]["unlisted"], true,
+            "normalised metadata lookup must NEVER affect model resolution: {v}"
+        );
+
+        // Part 4: hidden signals + explicit seed hidden=false override.
+        assert_eq!(v["ds_deprecated"]["hidden"], true);
+        assert_eq!(v["ds_deprecated"]["src_hidden"], "models_dev");
+        assert_eq!(v["ds_embed"]["hidden"], true);
+        assert_eq!(v["ds_no_tools"]["hidden"], true);
+        assert_eq!(
+            v["sonnet45"]["hidden"], false,
+            "seed declaring hidden=false must stay visible despite models.dev deprecated status: {v}"
+        );
+
+        // Part 3: backoff sequence + missing-provider refetch ignoring 24h TTL + backoff suppressing immediate retry.
+        assert_eq!(
+            v["backoff_seq"],
+            json!([120_000, 240_000, 480_000, 960_000, 1_920_000, 3_600_000, 3_600_000])
+        );
+        let fetches_before = server.count("/models-dev.json");
+        assert_eq!(fetches_before, 1, "initial refresh should have fetched models.dev once");
+
+        let late_json: String = eval(
+            &h,
+            &format!(
+                r#"
+                -- Register a new provider whose models_dev id (`late-prov`) was NOT in the trimmed disk cache
+                -- (fetched seconds ago, well within the 24h TTL).
+                LLM:register_provider({{
+                  provider = "late-prov",
+                  wire = "openai-chat",
+                  route = "chat",
+                  models_dev = "late-prov",
+                  stream = function() error("unused") end,
+                  is_configured = function() return true end,
+                  catalog = function()
+                    return {{
+                      label = "late-prov GET /models",
+                      url = "{base}/late/models",
+                      auth = "bearer",
+                      key = "sk-late",
+                      decode = function(raw)
+                        local items = require("mare_lib").decode_models_envelope(raw, "data", "id", "late")
+                        local out = {{}}
+                        for _, m in ipairs(items) do out[#out + 1] = {{ id = m.id }} end
+                        out[#out + 1] = {{ id = "late-visible", hidden = false }}
+                        return out
+                      end,
+                    }}
+                  end,
+                }})
+                -- First refresh: missing provider triggers immediate models.dev refetch -> mock returns HTTP 500 -> backoff starts.
+                LLM:refresh_models("late-prov")
+                local after_fail = LLM:resolve("late-prov/late-one")
+                -- Second immediate refresh (non-force): must NOT hit models.dev again due to 2-min backoff.
+                LLM:refresh_models("late-prov")
+                -- Third refresh with force=true: bypasses backoff, mock returns HTTP 200 -> late-one gets enriched.
+                LLM:refresh_models("late-prov", {{ force = true }})
+                local after_ok = LLM:resolve("late-prov/late-one")
+                local after_vis = LLM:resolve("late-prov/late-visible")
+                return mare.json.encode({{
+                  fail_ctx = after_fail and after_fail.context_window or nil,
+                  ok_name = after_ok and after_ok.name or nil,
+                  ok_ctx = after_ok and after_ok.context_window or nil,
+                  ok_efforts = after_ok and after_ok.efforts and mare.json.array(after_ok.efforts) or nil,
+                  vis_hidden = after_vis and after_vis.hidden == true or false,
+                  vis_name = after_vis and after_vis.name or nil,
+                }})
+                "#,
+                base = server.base
+            ),
+        )
+        .await;
+        let late_v: Value = serde_json::from_str(&late_json).unwrap();
+        assert_eq!(
+            server.count("/models-dev.json"),
+            3,
+            "expected 3 models.dev fetches total (initial + missing-provider 500 + forced recovery; immediate retry blocked by backoff)"
+        );
+        assert_eq!(late_v["fail_ctx"], 128_000, "on 500 failure, model falls back to default context");
+        assert_eq!(late_v["ok_name"], "Late Provider Model");
+        assert_eq!(late_v["ok_ctx"], 300_000);
+        assert_eq!(late_v["ok_efforts"], json!(["low", "medium", "high"]));
+        assert_eq!(late_v["vis_name"], "Late Deprecated Overridden");
+        assert_eq!(
+            late_v["vis_hidden"], false,
+            "live listing hidden=false must override models.dev status=deprecated: {late_v}"
+        );
+
+        h.shutdown().await;
+    })
+    .await;
+}

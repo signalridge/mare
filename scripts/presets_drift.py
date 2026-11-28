@@ -196,6 +196,27 @@ def _trim_limit(raw: Any) -> dict[str, int] | None:
     return out or None
 
 
+def _trim_reasoning_options(raw: Any) -> list[dict[str, Any]] | None:
+    if not isinstance(raw, list):
+        return None
+    out: list[dict[str, Any]] = []
+    for opt in raw:
+        if not isinstance(opt, dict) or not isinstance(opt.get("type"), str) or not opt["type"]:
+            continue
+        item: dict[str, Any] = {"type": opt["type"]}
+        vals = opt.get("values")
+        if isinstance(vals, list):
+            clean = [v for v in vals if isinstance(v, str) and v and v != "null"]
+            if clean:
+                item["values"] = clean
+        for k in ("min", "max"):
+            v = opt.get(k)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                item[k] = int(v)
+        out.append(item)
+    return out or None
+
+
 def trim_catalog(catalog: dict[str, Any], provider_ids: list[str]) -> dict[str, dict[str, dict[str, Any]]]:
     """Trim a full models.dev payload down to tracked providers and fields used by mare."""
     providers: dict[str, dict[str, dict[str, Any]]] = {}
@@ -217,8 +238,21 @@ def trim_catalog(catalog: dict[str, Any], provider_ids: list[str]) -> dict[str, 
                 entry["protocol"] = proto
             if isinstance(e.get("name"), str) and e["name"]:
                 entry["name"] = e["name"]
+            if isinstance(e.get("family"), str) and e["family"]:
+                entry["family"] = e["family"]
+            if isinstance(e.get("release_date"), str) and e["release_date"]:
+                entry["release_date"] = e["release_date"]
+            if isinstance(e.get("status"), str) and e["status"]:
+                entry["status"] = e["status"]
+            if isinstance(e.get("type"), str) and e["type"]:
+                entry["type"] = e["type"]
+            if isinstance(e.get("tool_call"), bool):
+                entry["tool_call"] = e["tool_call"]
             if isinstance(e.get("reasoning"), bool):
                 entry["reasoning"] = e["reasoning"]
+            ro = _trim_reasoning_options(e.get("reasoning_options"))
+            if ro:
+                entry["reasoning_options"] = ro
             il = e.get("interleaved")
             if isinstance(il, (bool, str, dict)):
                 entry["interleaved"] = il
@@ -348,7 +382,16 @@ def _self_test() -> int:
             "models": {
                 "a1": {
                     "name": "Alpha One",
+                    "family": "alpha",
+                    "release_date": "2026-10-01",
+                    "status": "active",
+                    "type": "chat",
+                    "tool_call": True,
                     "reasoning": True,
+                    "reasoning_options": [
+                        {"type": "toggle"},
+                        {"type": "effort", "values": ["none", "low", "high", "null"]},
+                    ],
                     "limit": {"context": 1050000, "input": 922000, "output": 128000},
                     "modalities": {"input": ["text", "image", "pdf"]},
                     "cost": {"input": 1.0, "output": 5.0, "cache_read": 0.1},
@@ -357,8 +400,15 @@ def _self_test() -> int:
         }
     }
     snap = build_snapshot(catalog, ["alpha-dev"], fetched_at=1700000000)
-    assert snap["providers"]["alpha-dev"]["a1"]["protocol"] == "responses"
-    assert snap["providers"]["alpha-dev"]["a1"]["input"] == ["text", "image"]
+    a1 = snap["providers"]["alpha-dev"]["a1"]
+    assert a1["protocol"] == "responses"
+    assert a1["input"] == ["text", "image"]
+    assert a1["family"] == "alpha" and a1["release_date"] == "2026-10-01"
+    assert a1["status"] == "active" and a1["type"] == "chat" and a1["tool_call"] is True
+    assert a1["reasoning_options"] == [
+        {"type": "toggle"},
+        {"type": "effort", "values": ["none", "low", "high"]},
+    ], a1["reasoning_options"]
     assert check_drift(parsed, catalog, snap, extra_providers=()) == []
 
     drifted_catalog = {

@@ -504,7 +504,8 @@ return {
 				},
 				{
 					model_id = "claude-sonnet-4-5",
-					-- Legacy budget-thinking tier (non-adaptive).
+					-- Legacy budget-thinking tier (non-adaptive); kept visible despite models.dev deprecated status.
+					hidden = false,
 					efforts = { "off", "minimal", "low", "medium", "high", "xhigh" },
 				},
 			},
