@@ -128,6 +128,7 @@ return function(D)
 			turn_id = A.turn_id,
 			step_id = step_id,
 			turn = S.turns,
+			no_images = S.no_images or nil,
 			output_schema = S.compiled_output_schema and S.compiled_output_schema:value() or nil,
 		}
 		req = ctx.bus:waterfall_checked("request/build", req) or req
@@ -528,13 +529,17 @@ return function(D)
 			S.overflow_rounds = 0
 			S.image_rounds = 0
 		end
-		-- too many / too large images: drop the failed reply, offload images to
-		-- files (the older ones first, then every one) and send again; nothing left to offload
-		-- → the error stands
-		local KI = msg.stop_reason == "error"
+		-- too many / too large / unsupported images: drop the failed reply, offload images to
+		-- files (or text references if compact is unavailable) and send again; nothing left to
+		-- remove → the error stands
+		local is_image_err = msg.stop_reason == "error"
 			and (msg.error_kind == "image_limit" or msg.error_kind == "payload_too_large")
 			and S.image_rounds < 2
-			and D.follow.compact()
+		local image_unsupported = is_image_err
+			and msg.error_kind == "image_limit"
+			and type(msg.error_data) == "table"
+			and msg.error_data.image_unsupported == true
+		local KI = is_image_err and D.follow.compact() or nil
 		if KI and KI.offload_images ~= nil and not require("mare_lib").callable(KI.offload_images) then
 			ctx.bus:emit(
 				"host/notice",
@@ -544,7 +549,11 @@ return function(D)
 			local n = 0
 			while S.image_rounds < 2 and n == 0 do
 				S.image_rounds = S.image_rounds + 1
-				n = KI:offload_images({ keep = S.image_rounds > 1 and 0 or nil }) or 0
+				local keep = (image_unsupported or S.image_rounds > 1) and 0 or nil
+				n = KI:offload_images({ keep = keep }) or 0
+				if image_unsupported then
+					break
+				end
 			end
 			if n > 0 then
 				ctx.bus:emit("host/notice", {
@@ -552,6 +561,34 @@ return function(D)
 					text = ("the provider refused the images (%s); %d moved to files, sending again"):format(
 						tostring(msg.error),
 						n
+					),
+				})
+				S.turns = S.turns - 1
+				return "retry"
+			end
+		end
+		if image_unsupported and not S.no_images then
+			local has_images = false
+			for _, m in ipairs(A.messages or {}) do
+				if m.role ~= "assistant" then
+					for _, b in ipairs(m.content or {}) do
+						if type(b) == "table" and b.type == "image" then
+							has_images = true
+							break
+						end
+					end
+				end
+				if has_images then
+					break
+				end
+			end
+			if has_images then
+				S.no_images = true
+				S.image_rounds = S.image_rounds + 1
+				ctx.bus:emit("host/notice", {
+					level = "info",
+					text = ("the provider refused the images (%s); replacing inline images with text references and sending again"):format(
+						tostring(msg.error)
 					),
 				})
 				S.turns = S.turns - 1

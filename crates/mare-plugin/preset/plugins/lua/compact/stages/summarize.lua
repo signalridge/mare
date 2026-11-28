@@ -42,8 +42,152 @@ return function(D)
 		return not S.target_model and cfg.summary_model and ctx.llm:resolve(cfg.summary_model) or ctx.llm:current()
 	end
 
-	--- one summary request; checks the result (empty / truncated / longer than its input)
-	local function request(req, input_tokens)
+	-- Acknowledgement-only replies that models sometimes emit instead of a summary.
+	local ACK_ONLY = {
+		ack = true,
+		acknowledged = true,
+		ok = true,
+		okay = true,
+		done = true,
+		understood = true,
+		["got it"] = true,
+		sure = true,
+		yes = true,
+		yep = true,
+		yeah = true,
+		noted = true,
+		confirmed = true,
+		ready = true,
+		copy = true,
+		["copy that"] = true,
+		roger = true,
+		["roger that"] = true,
+		["will do"] = true,
+		["sounds good"] = true,
+		["all set"] = true,
+		["no problem"] = true,
+		thanks = true,
+		["thank you"] = true,
+		compacted = true,
+		["summary complete"] = true,
+		["compaction complete"] = true,
+		["i understand"] = true,
+		["i'll do that"] = true,
+		["i will do that"] = true,
+		good = true,
+		fine = true,
+		alright = true,
+		["all right"] = true,
+		right = true,
+		great = true,
+		perfect = true,
+		cool = true,
+		["n/a"] = true,
+		none = true,
+		["好的"] = true,
+		["收到"] = true,
+		["明白"] = true,
+		["知道了"] = true,
+		["了解"] = true,
+		["完成"] = true,
+		["没问题"] = true,
+		["确认"] = true,
+	}
+
+	local function normalize_ack_clause(s)
+		s = s:gsub("^[%s%p]+", ""):gsub("[%s%p]+$", "")
+		s = s:gsub("[%s]+", " ")
+		return s:lower()
+	end
+
+	local function strip_body_prefix(line)
+		local s = line:match("^%s*(.-)%s*$")
+		-- Strip markdown bullet/numbered list and task checkbox prefixes.
+		s = s:gsub("^[-*+]%s+", "")
+		s = s:gsub("^%d+[.)]%s+", "")
+		s = s:gsub("^%[[xX%s]%]%s+", "")
+		return s:match("^%s*(.-)%s*$")
+	end
+
+	local function is_ack_only_line(line)
+		local stripped = strip_body_prefix(line)
+		if stripped == "" then
+			return true
+		end
+		-- Literal template placeholders like "[Completed tasks/changes]" are not substantive.
+		if stripped:match("^%[[^%]]+%]$") then
+			return true
+		end
+		local norm = normalize_ack_clause(stripped)
+		if norm == "" then
+			return true
+		end
+		if ACK_ONLY[norm] then
+			return true
+		end
+		-- Handle chained short acknowledgements like "OK, understood." or "Got it, thanks!"
+		local clauses, matched = 0, 0
+		for part in stripped:gmatch("[^,!.;:]+") do
+			local c = normalize_ack_clause(part)
+			if c ~= "" then
+				clauses = clauses + 1
+				if ACK_ONLY[c] then
+					matched = matched + 1
+				end
+			end
+		end
+		return clauses > 0 and clauses == matched
+	end
+
+	--- Validate that a summary response contains substantive body content (not empty,
+	--- headings-only, or acknowledgement-only lines such as "ACK\nOK" or "## Goal\nOK")
+	--- against the selected summary prompt.
+	local function validate_summary(text, instruction)
+		if type(text) ~= "string" or not text:find("%S") then
+			return false, "summary came back empty"
+		end
+		local trimmed = text:match("^%s*(.-)%s*$")
+		if not trimmed:find("[%w\128-\255]") then
+			return false, "summary contained no substantive content"
+		end
+		local has_heading = false
+		local body_lines = {}
+		for line in trimmed:gmatch("[^\r\n]+") do
+			if line:match("^%s*#+%s+%S") or line:match("^%s*#+%s*$") then
+				has_heading = true
+			elseif line:find("[%w\128-\255]") then
+				body_lines[#body_lines + 1] = line
+			end
+		end
+		if #body_lines == 0 then
+			return false,
+				has_heading and "summary contained headings with no substantive body"
+					or "summary contained no substantive content"
+		end
+		local has_substantive_body = false
+		for _, line in ipairs(body_lines) do
+			if not is_ack_only_line(line) then
+				has_substantive_body = true
+				break
+			end
+		end
+		if not has_substantive_body then
+			return false, "summary was an acknowledgement instead of a substantive summary"
+		end
+		if not has_heading then
+			local expects_sections = type(instruction) == "string" and instruction:find("\n## ", 1, true) ~= nil
+			if expects_sections and #body_lines == 1 then
+				local _, words = body_lines[1]:gsub("%S+", "")
+				if words <= 1 and #body_lines[1] < 8 then
+					return false, "summary was too short to satisfy the structured summary prompt"
+				end
+			end
+		end
+		return true
+	end
+
+	--- one summary request; checks the result (empty / truncated / degenerate / longer than its input)
+	local function request(req, input_tokens, instruction)
 		req.model = req.model or summary_model()
 		req.purpose = "compact" -- llm/usage: counted apart from the conversation
 		req.cancel = S.token
@@ -58,7 +202,8 @@ return function(D)
 			if kind == "retry_delay_too_long" and res.original_error_kind then
 				kind = res.original_error_kind
 			end
-			return nil, res.error or "summarization failed", kind, res.fallback_worthy
+			local img_unsupported = type(res.error_data) == "table" and res.error_data.image_unsupported == true
+			return nil, res.error or "summarization failed", kind, res.fallback_worthy, img_unsupported
 		end
 		if res.stop_reason == "length" then
 			return nil, "summary hit the token cap and is incomplete"
@@ -78,8 +223,9 @@ return function(D)
 				res.stop_reason
 		end
 		local text = ctx.llm:text_of(res)
-		if not text or not text:find("%S") then
-			return nil, "summary came back empty"
+		local valid, verr = validate_summary(text, instruction)
+		if not valid then
+			return nil, verr, "invalid_summary"
 		end
 		if input_tokens and tokens(text) > input_tokens then
 			return nil, "summary is longer than what it summarizes", "nonshrinking"
@@ -254,6 +400,7 @@ return function(D)
 		rate_limit = true,
 		quota = true,
 		usage_limit = true,
+		invalid_summary = true,
 	}
 
 	local function strip_images(m)
@@ -274,14 +421,21 @@ return function(D)
 		return c
 	end
 
+	local function has_images_in_messages(msgs)
+		for _, m in ipairs(msgs or {}) do
+			for _, b in ipairs(m.content or {}) do
+				if type(b) == "table" and b.type == "image" then
+					return true
+				end
+			end
+		end
+		return false
+	end
+
 	local function has_images_in_units(units)
 		for _, u in ipairs(units) do
-			for _, m in ipairs(u) do
-				for _, b in ipairs(m.content or {}) do
-					if type(b) == "table" and b.type == "image" then
-						return true
-					end
-				end
+			if has_images_in_messages(u) then
+				return true
 			end
 		end
 		return false
@@ -306,7 +460,10 @@ return function(D)
 		local dropped, without_tools, trimmed, images_stripped = {}, false, false, false
 		local live_overflow_step = 0
 		while true do
-			local msgs = table.copy(prefix)
+			local msgs = {}
+			for _, m in ipairs(prefix) do
+				msgs[#msgs + 1] = images_stripped and strip_images(m) or m
+			end
 			for _, m in ipairs(flatten(units)) do
 				local msg_out = m
 				if trimmed then
@@ -324,7 +481,7 @@ return function(D)
 			msgs[#msgs + 1] = instr
 			local extra = tokens(system or "") + (#tools > 0 and tokens(tools) or 0)
 			local need = estimate(msgs) + extra
-			local s, err, kind, worthy
+			local s, err, kind, worthy, image_unsupported
 			local preflight_overflow = false
 			if need > input_budget then
 				preflight_overflow = true
@@ -332,7 +489,7 @@ return function(D)
 				err = "the summary request is longer than the window"
 			else
 				local input_limit = not (opts and opts.allow_expansion) and (need - extra) or nil
-				s, err, kind, worthy = request({
+				s, err, kind, worthy, image_unsupported = request({
 					model = model,
 					system = system,
 					tools = tools,
@@ -340,14 +497,19 @@ return function(D)
 					max_tokens = out_cap,
 					no_fallback = allow_fallback or nil,
 					messages = msgs,
-				}, input_limit)
+				}, input_limit, instruction)
 			end
 			if s then
 				return s, dropped
 			end
-			local media_overflow = kind == "image_limit"
-				or (kind == "payload_too_large" and not images_stripped and has_images_in_units(units))
-			local is_overflow = kind == "context_overflow" or kind == "payload_too_large" or kind == "image_limit"
+			image_unsupported = kind == "image_limit" and image_unsupported == true
+			local has_images = has_images_in_messages(prefix) or has_images_in_units(units)
+			local media_overflow = (kind == "image_limit" or kind == "payload_too_large")
+				and not images_stripped
+				and has_images
+			local is_overflow = kind == "context_overflow"
+				or kind == "payload_too_large"
+				or (kind == "image_limit" and not image_unsupported)
 			if kind == "tool_call" and #tools > 0 and not without_tools then
 				tools, without_tools = {}, true
 			elseif media_overflow and not images_stripped then
@@ -432,7 +594,7 @@ return function(D)
 		end
 		local alt =
 			ctx.bus:waterfall("compact/summary-error", { error = dropped, kind = kind, messages = flatten(units) })
-		if type(alt) == "table" and type(alt.summary) == "string" and alt.summary:find("%S") then
+		if type(alt) == "table" and validate_summary(alt.summary, instruction) then
 			return alt.summary, {}
 		end
 		return nil, dropped, kind

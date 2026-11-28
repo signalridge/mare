@@ -213,6 +213,8 @@ return {
 					return w.OVERFLOW
 				elseif k == "image_limit" then
 					return w.IMAGE_LIMIT
+				elseif k == "image_unsupported" then
+					return w.IMAGE_UNSUPPORTED
 				end
 			end,
 		})

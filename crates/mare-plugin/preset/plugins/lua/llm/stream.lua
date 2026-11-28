@@ -202,8 +202,16 @@ return function(D)
 				describe = resolved and resolved.describe,
 				stream = resolved and resolved.stream,
 			}
-			copy.messages =
-				transform_messages(req.messages or {}, model, req.tools, p.tool_id_policy, route, p.route, wire_route)
+			copy.messages = transform_messages(
+				req.messages or {},
+				model,
+				req.tools,
+				p.tool_id_policy,
+				route,
+				p.route,
+				wire_route,
+				req.no_images == true
+			)
 			-- every request of a session carries its id, auxiliary ones (summaries, titles)
 			-- included: providers key per-session headers on it (e.g. `x-opencode-session`)
 			if copy.session_id == nil then
@@ -283,6 +291,7 @@ return function(D)
 			provider = true,
 			request_id = true,
 			source = true,
+			image_unsupported = true,
 		}
 		local function is_scalar(v)
 			local tv = type(v)
@@ -358,6 +367,9 @@ return function(D)
 				end
 				if err_data.source == nil and is_scalar(t.source) then
 					err_data.source = t.source
+				end
+				if err_data.image_unsupported == nil and t.image_unsupported == true then
+					err_data.image_unsupported = true
 				end
 			end
 			err_data.provider = model.provider
