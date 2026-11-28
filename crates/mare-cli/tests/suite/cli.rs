@@ -2581,3 +2581,80 @@ fn repro_258_deleted_inherited_cwd_emits_json_settled_error() {
         "expected actionable working-directory diagnostic in plain mode stderr: {plain_err:?}"
     );
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn repro_237_headless_non_broken_pipe_stdout_error_reports_diagnostic() {
+    let home = tempfile::tempdir().unwrap();
+    let script = home.path().join("faux.json");
+    std::fs::write(&script, json!([{ "text": "hello stdout" }]).to_string()).unwrap();
+    let dev_full = std::fs::OpenOptions::new().write(true).open("/dev/full").unwrap();
+    let mut cmd = mare_cmd();
+    cmd.args(["--model", "faux/echo", "--no-session", "go"])
+        .env("MARE_HOME", home.path())
+        .env("MARE_FAUX_SCRIPT", &script)
+        .current_dir(home.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(dev_full))
+        .stderr(Stdio::piped());
+    let child = ChildGroup::spawn(&mut cmd).unwrap();
+    let out = wait_output_timeout(child, Duration::from_secs(15));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "ENOSPC on /dev/full must fail with exit code 1 (not broken-pipe 141); stderr={err:?}"
+    );
+    assert!(
+        err.contains("failed to write stdout"),
+        "ENOSPC on /dev/full must report failed stdout write diagnostic; stderr={err:?}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn headless_closed_pty_slave_stdout_reports_io_error_not_broken_pipe() {
+    use std::os::fd::FromRawFd;
+
+    let home = tempfile::tempdir().unwrap();
+    let script = home.path().join("faux.json");
+    // Delay slightly so the turn loop's `pipe_check` ticks while the PTY master is already closed.
+    std::fs::write(&script, json!([{ "text": "hello pty", "delay_ms": 250 }]).to_string()).unwrap();
+
+    let mut master: libc::c_int = -1;
+    let mut slave: libc::c_int = -1;
+    // SAFETY: valid out pointers; null termios/winsize requests defaults.
+    let rc =
+        unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null(), std::ptr::null()) };
+    assert_eq!(rc, 0, "openpty failed: {}", std::io::Error::last_os_error());
+    let master_file = unsafe { std::fs::File::from_raw_fd(master) };
+    let slave_file = unsafe { std::fs::File::from_raw_fd(slave) };
+
+    // Close the master side BEFORE spawning so the child never inherits `master` (openpty does not
+    // set FD_CLOEXEC) and the child's PTY slave stdout immediately observes POLLHUP on `poll` and
+    // fails with EIO on `write` (not BrokenPipe).
+    drop(master_file);
+
+    let mut cmd = mare_cmd();
+    cmd.args(["-p", "--model", "faux/echo", "--no-session", "go"])
+        .env("MARE_HOME", home.path())
+        .env("MARE_FAUX_SCRIPT", &script)
+        .current_dir(home.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(slave_file))
+        .stderr(Stdio::piped());
+    let child = ChildGroup::spawn(&mut cmd).unwrap();
+
+    let out = wait_output_timeout(child, Duration::from_secs(15));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_ne!(
+        out.status.code(),
+        Some(141),
+        "closed PTY slave stdout (EIO) must not be misclassified as broken-pipe exit 141; stderr={err:?}"
+    );
+    assert_eq!(out.status.code(), Some(1), "closed PTY slave stdout must exit 1; stderr={err:?}");
+    assert!(
+        err.contains("failed to write stdout"),
+        "closed PTY slave stdout must report failed stdout write diagnostic; stderr={err:?}"
+    );
+}
