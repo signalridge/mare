@@ -185,12 +185,39 @@ def check_release_workflow(root: pathlib.Path) -> list[str]:
             errors.append("release.yaml softprops release step must set append_body: true")
         if "draft: false" not in release_block:
             errors.append("release.yaml softprops release step must publish draft release with draft: false")
-        if "steps.metadata.outputs.docker_tags" not in release_block:
-            errors.append("release.yaml container build must use conditional steps.metadata.outputs.docker_tags")
+        if "--write-initial-notes" not in release_block or "body_path: manifests/release-notes-initial.md" not in release_block:
+            errors.append(
+                "release.yaml release job must generate pending-channel notes via --write-initial-notes and body_path"
+            )
+        if "brew install signalridge/tap/mare" in release_block or "yay -S mare-bin" in release_block:
+            errors.append(
+                "release.yaml release job must not advertise optional channels before publish-* jobs complete"
+            )
+        if "release_created: ${{ steps.create-release.outcome == 'success' }}" not in release_block:
+            errors.append("release.yaml release job must expose release_created output from create-release step")
+        if "docker_tags: ${{ steps.metadata.outputs.docker_tags }}" not in release_block:
+            errors.append("release.yaml release job must expose conditional steps.metadata.outputs.docker_tags")
         if "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" in release_block:
             errors.append("release.yaml must not unconditionally push GHCR :latest")
         if "unknown-linux-gnu" in release_block:
             errors.append("release.yaml release job must package *-unknown-linux-musl, not *-unknown-linux-gnu")
+
+    publish_container = extract_job_block(text, "publish-container")
+    if not publish_container:
+        errors.append("release.yaml missing publish-container job")
+    else:
+        if "needs: [validate-tag, release]" not in publish_container:
+            errors.append("release.yaml publish-container must need [validate-tag, release]")
+        if "if: always() && needs.release.outputs.release_created == 'true'" not in publish_container:
+            errors.append("release.yaml publish-container must run whenever release_created is true")
+        if "needs.release.outputs.docker_tags" not in publish_container:
+            errors.append("release.yaml publish-container must use conditional needs.release.outputs.docker_tags")
+        if "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" in publish_container:
+            errors.append("release.yaml must not unconditionally push GHCR :latest")
+        if "cosign sign" not in publish_container:
+            errors.append("release.yaml publish-container must sign the pushed container image with cosign")
+        if "published=true" not in publish_container:
+            errors.append("release.yaml publish-container must emit published=true output")
 
     verify_binary = extract_job_block(text, "verify-binary")
     if not verify_binary:
@@ -239,10 +266,30 @@ def check_release_workflow(root: pathlib.Path) -> list[str]:
         errors.append("release.yaml verify-scoop must clone pinned ScoopInstaller/Scoop.git commit")
 
     verify_container = extract_job_block(text, "verify-container")
+    if "needs: [release, publish-container]" not in verify_container:
+        errors.append("release.yaml verify-container must need [release, publish-container]")
     if "aquasecurity/trivy-action@" not in verify_container:
         errors.append("release.yaml verify-container must scan image with Trivy")
     if "security-events: write" not in verify_container:
         errors.append("release.yaml verify-container must request security-events: write for Trivy SARIF")
+
+    update_notes = extract_job_block(text, "update-release-notes")
+    if not update_notes:
+        errors.append("release.yaml missing update-release-notes job")
+    else:
+        if (
+            "needs: [release, publish-container, publish-homebrew, publish-scoop, publish-aur, publish-nur]"
+            not in update_notes
+        ):
+            errors.append("release.yaml update-release-notes must depend on release and all publish-* jobs")
+        if "if: always() && needs.release.outputs.release_created == 'true'" not in update_notes:
+            errors.append("release.yaml update-release-notes must run whenever release_created is true")
+        if "container=published" in update_notes:
+            errors.append("release.yaml update-release-notes must not hardcode container=published")
+        if 'container=${container}' not in update_notes:
+            errors.append("release.yaml update-release-notes must pass computed container channel status")
+        if "gh release edit" not in update_notes:
+            errors.append("release.yaml update-release-notes must update the release via gh release edit")
 
     return errors
 
@@ -935,6 +982,30 @@ class ReleasePolicySelfTests(unittest.TestCase):
             (wf_dir / "release.yaml").write_text(rel_text.replace("-Wl,-adhoc_codesign", ""), encoding="utf-8")
             errs = check_release_workflow(root)
             self.assertTrue(any("-Wl,-adhoc_codesign" in e for e in errs), errs)
+
+            (wf_dir / "release.yaml").write_text(
+                rel_text.replace("  update-release-notes:", "  disabled-update-notes:"),
+                encoding="utf-8",
+            )
+            errs = check_release_workflow(root)
+            self.assertTrue(any("update-release-notes" in e for e in errs), errs)
+
+            (wf_dir / "release.yaml").write_text(
+                rel_text.replace("container=${container}", "container=published"),
+                encoding="utf-8",
+            )
+            errs = check_release_workflow(root)
+            self.assertTrue(any("container=published" in e for e in errs), errs)
+
+            (wf_dir / "release.yaml").write_text(
+                rel_text.replace(
+                    "if: always() && needs.release.outputs.release_created == 'true'",
+                    "if: always() && needs.release.result == 'success'",
+                ),
+                encoding="utf-8",
+            )
+            errs = check_release_workflow(root)
+            self.assertTrue(any("release_created" in e for e in errs), errs)
 
     def test_flake_nix_requires_git_fallback_wrapper(self):
         flake_text = (self._repo_root() / "flake.nix").read_text(encoding="utf-8")

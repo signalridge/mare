@@ -288,12 +288,13 @@ jobs:
       attestations: write
       contents: write
       id-token: write
-      packages: write
     outputs:
       version: ${{ needs.validate-tag.outputs.version }}
       tag_name: ${{ needs.validate-tag.outputs.tag_name }}
       commit_oid: ${{ needs.validate-tag.outputs.commit_oid }}
       hashes: ${{ steps.metadata.outputs.hashes }}
+      docker_tags: ${{ steps.metadata.outputs.docker_tags }}
+      release_created: ${{ steps.create-release.outcome == 'success' }}
       gh_pat_available: ${{ steps.optional-secrets.outputs.gh_pat_available }}
       aur_key_available: ${{ steps.optional-secrets.outputs.aur_key_available }}
       deb_asset: ${{ steps.metadata.outputs.deb_asset }}
@@ -466,7 +467,8 @@ jobs:
             --dist-dir dist \
             --manifests-dir manifests \
             --registry "${REGISTRY}" \
-            --image-name "${IMAGE_NAME}"
+            --image-name "${IMAGE_NAME}" \
+            --write-initial-notes manifests/release-notes-initial.md
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: package-manifests
@@ -479,7 +481,9 @@ jobs:
           name: sbom
           path: dist/*.sbom.spdx.json
           retention-days: 30
-      - uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3
+      - name: Publish GitHub Release
+        id: create-release
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3
         with:
           tag_name: ${{ needs.validate-tag.outputs.tag_name }}
           draft: false
@@ -487,22 +491,7 @@ jobs:
           make_latest: ${{ steps.metadata.outputs.make_latest }}
           generate_release_notes: true
           append_body: true
-          body: |
-            Installation: https://signalridge.github.io/mare/en/get-started/installation/
-
-            - Quick install (macOS / Linux): `curl -fsSL https://signalridge.github.io/mare/install.sh | sh`
-            - Quick install (Windows): `irm https://signalridge.github.io/mare/install.ps1 | iex`
-            - Homebrew (macOS / Linux):
-              `brew tap signalridge/tap && brew trust signalridge/tap && brew install signalridge/tap/mare`
-              (Upgrading from the earlier cask: `brew uninstall --cask mare && brew install signalridge/tap/mare`)
-            - Scoop (Windows): `scoop bucket add signalridge https://github.com/signalridge/scoop-bucket`
-              then `scoop install signalridge/mare`
-            - Nix Flake / NUR:
-              `nix run github:signalridge/mare` or `nix profile install github:signalridge/nur-packages#mare`
-            - Arch Linux (AUR): `yay -S mare-bin`
-            - Container (GHCR): `docker pull ghcr.io/signalridge/mare:${{ needs.validate-tag.outputs.version }}`
-            - Linux packages (`.deb` / `.rpm`), direct archives, SPDX SBOMs,
-              Cosign bundle (`checksums.txt.sigstore.json`), and SLSA provenance are attached to this release.
+          body_path: manifests/release-notes-initial.md
           files: |
             dist/mare-*.tar.gz
             dist/mare-*.tar.gz.sha256
@@ -514,6 +503,31 @@ jobs:
             dist/mare_*.rpm
             dist/checksums.txt
             dist/checksums.txt.sigstore.json
+
+  publish-container:
+    name: Publish Container Image
+    needs: [validate-tag, release]
+    if: always() && needs.release.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    outputs:
+      published: ${{ steps.publish-status.outputs.published }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.validate-tag.outputs.commit_oid }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          path: dist
+          pattern: build-*-unknown-linux-musl
+          merge-multiple: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: rust-notices
+          path: licenses
       - name: Stage multi-arch container build context
         env:
           TAG_NAME: ${{ needs.validate-tag.outputs.tag_name }}
@@ -546,7 +560,7 @@ jobs:
           file: Dockerfile.release
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.metadata.outputs.docker_tags }}
+          tags: ${{ needs.release.outputs.docker_tags }}
           labels: |
             org.opencontainers.image.title=mare
             org.opencontainers.image.description=Hyperextensible AI coding agent harness (Rust core, Lua 5.5 plugins)
@@ -554,11 +568,17 @@ jobs:
             org.opencontainers.image.licenses=Apache-2.0
             org.opencontainers.image.version=${{ needs.validate-tag.outputs.version }}
             org.opencontainers.image.revision=${{ needs.validate-tag.outputs.commit_oid }}
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
       - name: Sign container image with cosign
         env:
           COSIGN_EXPERIMENTAL: "1"
           IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.docker-build.outputs.digest }}
         run: cosign sign --yes "$IMAGE_REF"
+      - name: Mark container publication successful
+        id: publish-status
+        if: success()
+        run: echo 'published=true' >> "$GITHUB_OUTPUT"
 
   provenance:
     name: Generate SLSA Provenance
@@ -969,7 +989,7 @@ jobs:
   verify-container:
     name: Verify Container
     runs-on: ubuntu-latest
-    needs: [release]
+    needs: [release, publish-container]
     permissions:
       contents: read
       packages: read
@@ -1063,3 +1083,64 @@ jobs:
           env -i HOME="$tmp/home" MARE_HOME="$tmp/home" PATH="/nonexistent" \
             "$PWD/result/bin/mare" plugin sync
           grep -F '"local/smoke"' "$tmp/home/config/mare-lock.json"
+
+  update-release-notes:
+    name: Update Release Channel Status
+    runs-on: ubuntu-latest
+    needs: [release, publish-container, publish-homebrew, publish-scoop, publish-aur, publish-nur]
+    if: always() && needs.release.outputs.release_created == 'true'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.release.outputs.commit_oid }}
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - name: Update release notes with published channel status
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ needs.release.outputs.tag_name }}
+          VERSION: ${{ needs.release.outputs.version }}
+          CONTAINER_RESULT: ${{ needs.publish-container.result }}
+          CONTAINER_PUBLISHED: ${{ needs.publish-container.outputs.published }}
+          HOMEBREW_RESULT: ${{ needs.publish-homebrew.result }}
+          HOMEBREW_PUBLISHED: ${{ needs.publish-homebrew.outputs.published }}
+          SCOOP_RESULT: ${{ needs.publish-scoop.result }}
+          SCOOP_PUBLISHED: ${{ needs.publish-scoop.outputs.published }}
+          AUR_RESULT: ${{ needs.publish-aur.result }}
+          AUR_PUBLISHED: ${{ needs.publish-aur.outputs.published }}
+          NUR_RESULT: ${{ needs.publish-nur.result }}
+          NUR_PUBLISHED: ${{ needs.publish-nur.outputs.published }}
+        run: |
+          set -euo pipefail
+          channel_status() {
+            local res="$1" pub="$2"
+            if [ "$pub" = "true" ]; then
+              printf 'published'
+            elif [ "$res" = "skipped" ]; then
+              printf 'skipped'
+            else
+              printf 'failed'
+            fi
+          }
+          container="$(channel_status "$CONTAINER_RESULT" "$CONTAINER_PUBLISHED")"
+          hb="$(channel_status "$HOMEBREW_RESULT" "$HOMEBREW_PUBLISHED")"
+          scoop="$(channel_status "$SCOOP_RESULT" "$SCOOP_PUBLISHED")"
+          aur="$(channel_status "$AUR_RESULT" "$AUR_PUBLISHED")"
+          nur="$(channel_status "$NUR_RESULT" "$NUR_PUBLISHED")"
+          current="${RUNNER_TEMP}/release-body-current.md"
+          updated="${RUNNER_TEMP}/release-body-updated.md"
+          gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --json body --jq .body > "$current"
+          python3 scripts/release_manifests.py \
+            --tag "$TAG_NAME" \
+            --version "$VERSION" \
+            --update-release-body "$current" \
+            --output-body "$updated" \
+            --channel-status "container=${container}" \
+            --channel-status "homebrew=${hb}" \
+            --channel-status "scoop=${scoop}" \
+            --channel-status "aur=${aur}" \
+            --channel-status "nur=${nur}"
+          gh release edit "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --notes-file "$updated"
