@@ -54,6 +54,270 @@ async fn thinking_signature_replays_signed_and_redacted_and_drops_empty_or_missi
 }
 
 #[tokio::test]
+async fn repro_225_projected_anthropic_thinking_block_does_not_replay_stale_signature() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let server = MockServer::start().await;
+        let sse_turn1 = [
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-5-5\",\"stop_reason\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"using key sk-proj-secret-225 here\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig_orig_225\"}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"done 1\"}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        ]
+        .concat();
+        server.route("/anthropic", vec![Resp::sse(sse_turn1), Resp::sse(fixture("anthropic-text.sse"))]);
+        let h = provider_host(&mut env, &server, json!({})).await;
+        exec(&h, r#"KEEP_225 = mare.projection.register("sk-proj-secret-225")"#).await;
+
+        let turn1 = stream_with_history(
+            &h,
+            "anthropic/claude-sonnet-5-5",
+            json!([{ "role": "user", "content": [{ "type": "text", "text": "step 1" }] }]),
+            None,
+        )
+        .await;
+        assert_eq!(turn1["stop_reason"], "stop", "{turn1}");
+        // Verify projection did mutate the thinking block text (protecting the secret).
+        let projected_thinking = turn1["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["type"] == "reasoning")
+            .expect("reasoning block")["text"]
+            .as_str()
+            .unwrap();
+        assert!(!projected_thinking.contains("sk-proj-secret-225"), "projection must redact secret: {projected_thinking}");
+
+        // Replay turn 1's projected assistant message in turn 2.
+        let history2 = json!([
+            { "role": "user", "content": [{ "type": "text", "text": "step 1" }] },
+            turn1,
+            { "role": "user", "content": [{ "type": "text", "text": "step 2" }] }
+        ]);
+        let turn2 = stream_with_history(&h, "anthropic/claude-sonnet-5-5", history2, None).await;
+        assert_eq!(turn2["stop_reason"], "stop", "{turn2}");
+
+        let body = server.requests().pop().unwrap().json();
+        let asst = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("assistant message in turn 2 request");
+        let stale_replayed = asst["content"].as_array().unwrap().iter().any(|b| {
+            b["type"] == "thinking"
+                && b["signature"].as_str() == Some("sig_orig_225")
+                && b["thinking"].as_str() != Some("using key sk-proj-secret-225 here")
+        });
+        assert!(
+            !stale_replayed,
+            "Anthropic adapter replayed mutated thinking text with stale original signature: {}",
+            asst["content"]
+        );
+        h.shutdown().await;
+    })
+    .await
+}
+
+#[tokio::test]
+async fn anthropic_thinking_unmutated_replays_and_active_tool_continuation_recovers_on_mutation() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let server = MockServer::start().await;
+        let sse_clean = [
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m_clean\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-5-5\",\"stop_reason\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"clean reasoning\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig_clean_225\"}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok clean\"}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        ]
+        .concat();
+        let sse_tool_secret = [
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m_tool\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-5-5\",\"stop_reason\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"secret sk-tool-secret-225 in active turn\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig_tool_225\"}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_225\",\"name\":\"read\",\"input\":{}}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"a.txt\\\"}\"}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":8}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        ]
+        .concat();
+        let strict_reject_missing_thinking = Resp::status(
+            400,
+            r#"{"error":{"type":"invalid_request_error","message":"messages.1.content.0: Expected `thinking` or `redacted_thinking`, but found `tool_use`. When `thinking` is enabled, a final `assistant` message must start with a thinking block."}}"#,
+        );
+        server.route(
+            "/anthropic",
+            vec![
+                Resp::sse(sse_clean),
+                Resp::sse(fixture("anthropic-text.sse")),
+                Resp::sse(sse_tool_secret),
+                // Strict endpoint rejects an active tool continuation missing its original thinking block.
+                strict_reject_missing_thinking,
+                // Next user turn (new turn boundary) succeeds with the invalidated block omitted.
+                Resp::sse(fixture("anthropic-text.sse")),
+                // Legacy pre-upgrade projected block without text_hash at a completed turn boundary.
+                Resp::sse(fixture("anthropic-text.sse")),
+            ],
+        );
+        let h = provider_host(
+            &mut env,
+            &server,
+            json!({ "plugins": { "llm": { "retries": 0 } } }),
+        )
+        .await;
+        exec(&h, r#"KEEP_225_TOOL = mare.projection.register("sk-tool-secret-225")"#).await;
+
+        // 1. Unmutated signed thinking block streamed through provider-anthropic replays cleanly.
+        let clean_turn = stream_with_history(
+            &h,
+            "anthropic/claude-sonnet-5-5",
+            json!([{ "role": "user", "content": [{ "type": "text", "text": "hello" }] }]),
+            None,
+        )
+        .await;
+        let _ = stream_with_history(
+            &h,
+            "anthropic/claude-sonnet-5-5",
+            json!([
+                { "role": "user", "content": [{ "type": "text", "text": "hello" }] },
+                clean_turn,
+                { "role": "user", "content": [{ "type": "text", "text": "next" }] }
+            ]),
+            None,
+        )
+        .await;
+        let req_clean = server.requests().pop().unwrap().json();
+        let asst_clean = req_clean["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .unwrap();
+        assert!(
+            asst_clean["content"].as_array().unwrap().iter().any(|b| {
+                b["type"] == "thinking"
+                    && b["thinking"] == "clean reasoning"
+                    && b["signature"] == "sig_clean_225"
+            }),
+            "unmutated streamed thinking block must still replay with its valid signature: {}",
+            asst_clean["content"]
+        );
+
+        // 2. Active tool-use continuation with a projected (mutated) thinking block against a
+        //    strict fixture that rejects missing thinking blocks:
+        //    - never replays the stale signature or leaks the secret,
+        //    - sends explicit `thinking = { type = "disabled" }` instead of silently deleting `body.thinking`,
+        //    - surfaces a clear non-retryable recoverable error when the strict endpoint rejects it,
+        //    - and recovers cleanly once a new user turn begins (legal turn boundary).
+        let tool_turn = stream_with_history(
+            &h,
+            "anthropic/claude-sonnet-5-5",
+            json!([{ "role": "user", "content": [{ "type": "text", "text": "read a.txt" }] }]),
+            Some(read_tool_decl()),
+        )
+        .await;
+        assert_eq!(tool_turn["stop_reason"], "tool_use", "{tool_turn}");
+        let cont_history = json!([
+            { "role": "user", "content": [{ "type": "text", "text": "read a.txt" }] },
+            tool_turn.clone(),
+            { "role": "tool_result", "tool_call_id": "toolu_225", "tool_name": "read", "content": [{ "type": "text", "text": "file contents" }] }
+        ]);
+        let cont = stream_with_history(&h, "anthropic/claude-sonnet-5-5", cont_history, Some(read_tool_decl())).await;
+        assert_eq!(cont["stop_reason"], "error", "strict endpoint rejection must surface explicit error: {cont}");
+        assert_eq!(cont["error_kind"], "invalid", "{cont}");
+        assert!(
+            cont["error"].as_str().is_some_and(|e| e.contains("active tool turn") && e.contains("new user message")),
+            "expected actionable recovery message, got: {cont}"
+        );
+        let req_cont = server.requests().pop().unwrap();
+        assert!(
+            !req_cont.body.contains("sk-tool-secret-225"),
+            "continuation request must never leak projected secret: {}",
+            req_cont.body
+        );
+        let req_cont_json = req_cont.json();
+        let asst_cont = req_cont_json["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .unwrap();
+        assert!(
+            !asst_cont["content"].as_array().unwrap().iter().any(|b| b["type"] == "thinking"),
+            "mutated thinking block in active continuation must be omitted: {}",
+            asst_cont["content"]
+        );
+        assert_eq!(
+            req_cont_json["thinking"],
+            json!({ "type": "disabled" }),
+            "continuation request must explicitly disable thinking instead of omitting the field: {req_cont_json}"
+        );
+
+        // Next user turn moves turn_start past the invalidated tool turn -> legal boundary, recovers cleanly.
+        let recovered_history = json!([
+            { "role": "user", "content": [{ "type": "text", "text": "read a.txt" }] },
+            tool_turn,
+            { "role": "tool_result", "tool_call_id": "toolu_225", "tool_name": "read", "content": [{ "type": "text", "text": "file contents" }] },
+            { "role": "user", "content": [{ "type": "text", "text": "continue from fresh turn" }] }
+        ]);
+        let recovered =
+            stream_with_history(&h, "anthropic/claude-sonnet-5-5", recovered_history, Some(read_tool_decl())).await;
+        assert_eq!(recovered["stop_reason"], "stop", "new user turn must recover cleanly: {recovered}");
+        let req_rec = server.requests().pop().unwrap().json();
+        let asst_rec = req_rec["messages"].as_array().unwrap().iter().find(|m| m["role"] == "assistant").unwrap();
+        assert!(
+            !asst_rec["content"].as_array().unwrap().iter().any(|b| b["type"] == "thinking"),
+            "invalidated prior-turn thinking block must stay omitted: {}",
+            asst_rec["content"]
+        );
+
+        // 3. Legacy pre-upgrade persisted session: projected thinking block with NO text_hash
+        //    must still be detected and omitted at a legal turn boundary without replaying its stale signature.
+        let legacy_history = json!([
+            { "role": "user", "content": [{ "type": "text", "text": "legacy turn 1" }] },
+            {
+                "role": "assistant",
+                "provider_id": "anthropic",
+                "model_id": "claude-sonnet-5-5",
+                "content": [
+                    {
+                        "type": "reasoning",
+                        "text": "using secret [[mare-value:1]] here",
+                        "native": { "anthropic-messages": { "signature": "sig_legacy_stale" } }
+                    },
+                    { "type": "text", "text": "legacy done" }
+                ]
+            },
+            { "role": "user", "content": [{ "type": "text", "text": "legacy turn 2" }] }
+        ]);
+        let legacy_res = stream_with_history(&h, "anthropic/claude-sonnet-5-5", legacy_history, None).await;
+        assert_eq!(legacy_res["stop_reason"], "stop", "{legacy_res}");
+        let legacy_req = server.requests().pop().unwrap().body;
+        assert!(
+            !legacy_req.contains("sig_legacy_stale"),
+            "legacy pre-upgrade projected thinking block without text_hash must not replay stale signature: {legacy_req}"
+        );
+        h.shutdown().await;
+    })
+    .await
+}
+
+#[tokio::test]
 async fn thinking_signature_cross_provider_strips_foreign_signatures() {
     local(async {
         let mut env = TestEnv::new().await;
