@@ -209,7 +209,7 @@ return {
 		end)
 		ctx:on("item/completed", function(ev)
 			local m = ev and ev.item and ev.item.message
-			if m and m.role == "assistant" and m.usage then
+			if m and m.role == "assistant" and mare_lib.has_usage_counts(m.usage) then
 				S.usage_version = S.version
 				S.usage_model = type(m.provider_id) == "string"
 						and type(m.model_id) == "string"
@@ -243,7 +243,7 @@ return {
 				local msgs = (ev and ev.messages) or ctx.agent:messages()
 				for i = #msgs, 1, -1 do
 					local m = msgs[i] --[[@as table<string, any>]]
-					if m.role == "assistant" and m.usage then
+					if m.role == "assistant" and mare_lib.has_usage_counts(m.usage) then
 						if type(m.provider_id) == "string" and type(m.model_id) == "string" then
 							S.usage_model = m.provider_id .. "/" .. m.model_id
 						end

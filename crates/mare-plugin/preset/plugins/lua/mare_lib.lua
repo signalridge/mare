@@ -1411,6 +1411,18 @@ function M.anthropic_cache_control(retention, supports_long, read_only)
 	return { type = "ephemeral" }
 end
 
+--- True when a provider usage table reports at least one non-zero token count.
+function M.has_usage_counts(u)
+	if type(u) ~= "table" then
+		return false
+	end
+	local input = tonumber(u.input) or 0
+	local output = tonumber(u.output) or 0
+	local cache_read = tonumber(u.cache_read) or 0
+	local cache_write = tonumber(u.cache_write) or 0
+	return (input + output + cache_read + cache_write) > 0
+end
+
 --- True when the last assistant message's provider-reported usage on `path`/`entries` is
 --- stale (predates the latest compaction on the branch, a projection/prune of its active
 --- context, or an in-memory compaction during load).
@@ -1433,7 +1445,7 @@ function M.path_usage_stale(path, entries, compacted)
 			and e.type == "message"
 			and e.message
 			and e.message.role == "assistant"
-			and type(e.message.usage) == "table"
+			and M.has_usage_counts(e.message.usage)
 		then
 			ast_idx = i
 		end
