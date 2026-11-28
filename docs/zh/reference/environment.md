@@ -48,8 +48,11 @@ provider 按以下顺序读取密钥：`init.lua` 中的 `api_key` 选项、`mar
 | `GEMINI_API_KEY`、`GOOGLE_API_KEY` | Google（先检查 `GEMINI_API_KEY`） |
 | `OPENCODE_API_KEY` | opencode Go |
 | `DEEPSEEK_API_KEY` | DeepSeek |
-| `MOONSHOT_API_KEY` | Moonshot（`kimi`） |
-| `KIMI_API_KEY` | Kimi Code（`kimi-code`） |
+| `MOONSHOT_API_KEY` | Moonshot（`kimi`、`kimi-cn`） |
+| `KIMI_API_KEY` | Kimi Code（`kimi-code`、`kimi-code-cn`） |
+| `MINIMAX_API_KEY` | MiniMax（`minimax`、`minimax-cn`） |
+| `ZAI_API_KEY` | Z.ai（`zai`） |
+| `ZHIPU_API_KEY` | 智谱 GLM（`zhipu-cn`） |
 | `OPENROUTER_API_KEY` | OpenRouter |
 
 你定义的与 OpenAI 兼容的 provider 可以用 `api_key_env` 指定自己的变量。值为环境变量名的 `api_key` 选项会从该变量读取。MCP 服务器配置也可以从环境中取值：字符串中的 `${VAR}`、`${env:VAR}` 和 `${VAR:-default}`，以及 `bearer_token_env_var` 和 `env_http_headers`。

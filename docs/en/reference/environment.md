@@ -48,8 +48,11 @@ A provider reads its key from, in order: the `api_key` option in `init.lua`, the
 | `GEMINI_API_KEY`, `GOOGLE_API_KEY` | Google (`GEMINI_API_KEY` is checked first) |
 | `OPENCODE_API_KEY` | opencode Go |
 | `DEEPSEEK_API_KEY` | DeepSeek |
-| `MOONSHOT_API_KEY` | Moonshot (`kimi`) |
-| `KIMI_API_KEY` | Kimi Code (`kimi-code`) |
+| `MOONSHOT_API_KEY` | Moonshot (`kimi`, `kimi-cn`) |
+| `KIMI_API_KEY` | Kimi Code (`kimi-code`, `kimi-code-cn`) |
+| `MINIMAX_API_KEY` | MiniMax (`minimax`, `minimax-cn`) |
+| `ZAI_API_KEY` | Z.ai (`zai`) |
+| `ZHIPU_API_KEY` | Zhipu GLM (`zhipu-cn`) |
 | `OPENROUTER_API_KEY` | OpenRouter |
 
 An OpenAI-compatible provider you define can name its own variable with `api_key_env`. An `api_key` option that is the name of an environment variable is read from that variable. MCP server configuration can also pull values from the environment: `${VAR}`, `${env:VAR}` and `${VAR:-default}` in strings, `bearer_token_env_var`, and `env_http_headers`.

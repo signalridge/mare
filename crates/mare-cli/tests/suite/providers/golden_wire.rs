@@ -327,7 +327,7 @@ async fn wire_bodies_for_kimi_code_and_lmstudio_presets() {
             "#,
         )
         .await;
-        assert_eq!(kc_mdev, "kimi-code-plan-cn");
+        assert_eq!(kc_mdev, "kimi-code-plan-global");
         assert_eq!(kc_def, "kimi-for-coding");
         assert!(lm_no_key, "lmstudio must be keyless");
 
@@ -1159,6 +1159,98 @@ mare.provider("tuned-ant", {{
             adaptive_body["thinking"]["display"], "omitted",
             "provider reasoning_display must win for adaptive model: {adaptive_body}"
         );
+    })
+    .await
+}
+
+/// Issue #90: China-region presets (`kimi-cn`, `kimi-code-cn`, `minimax-cn`, `zhipu-cn`) and
+/// their global counterparts (`kimi`, `kimi-code`, `minimax`, `zai`) register as independent
+/// built-in providers with distinct endpoints and `models_dev` IDs, hydrating offline from the
+/// bundled `models_dev.json.gz` snapshot without any region toggle mechanism.
+#[tokio::test]
+async fn china_region_presets_register_independently_with_bundled_models_dev_hydration() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        env.set_var("MOONSHOT_API_KEY", "k-moon");
+        env.set_var("KIMI_API_KEY", "k-kimi");
+        env.set_var("MINIMAX_API_KEY", "k-mm");
+        env.set_var("ZAI_API_KEY", "");
+        env.set_var("ZHIPU_API_KEY", "k-zhipu");
+        let h = env.host().user_config(false).no_session().build().await;
+        global(&h, "LLM", h.service_table("llm").unwrap());
+
+        let summary_json: String = eval(
+            &h,
+            r#"
+            local out = {}
+            local cases = {
+              { "kimi", "kimi-k3.1-pro" },
+              { "kimi-cn", "kimi-k3.1-pro" },
+              { "kimi-code", "kimi-for-coding" },
+              { "kimi-code-cn", "kimi-for-coding" },
+              { "minimax", "MiniMax-M3.1-Flash" },
+              { "minimax-cn", "MiniMax-M3.1-Flash" },
+              { "zai", "glm-5.3" },
+              { "zhipu-cn", "glm-5.3" },
+            }
+            for _, c in ipairs(cases) do
+              local pid, mid = c[1], c[2]
+              local p = assert(LLM:provider(pid), "missing preset " .. pid)
+              local m = assert(LLM:resolve(pid .. "/" .. mid), "missing model " .. pid .. "/" .. mid)
+              out[pid] = {
+                models_dev = p.models_dev,
+                base_url = p.warm_url and p.warm_url() or nil,
+                configured = p.is_configured and p.is_configured() == true or false,
+                default_model = p.default_model,
+                ctx = m.context_window,
+                max_out = m.max_output,
+                reasoning = m.reasoning == true,
+              }
+            end
+            return mare.json.encode(out)
+            "#,
+        )
+        .await;
+        let v: Value = serde_json::from_str(&summary_json).unwrap();
+
+        let expected = [
+            ("kimi", "moonshotai", "https://api.moonshot.ai/v1", true, "kimi-k3.1-pro", 1_048_576, 131_072),
+            ("kimi-cn", "moonshotai-cn", "https://api.moonshot.cn/v1", true, "kimi-k3.1-pro", 1_048_576, 131_072),
+            (
+                "kimi-code",
+                "kimi-code-plan-global",
+                "https://api.kimi.ai/coding/v1",
+                true,
+                "kimi-for-coding",
+                1_048_576,
+                32_768,
+            ),
+            (
+                "kimi-code-cn",
+                "kimi-code-plan-cn",
+                "https://api.kimi.com/coding/v1",
+                true,
+                "kimi-for-coding",
+                1_048_576,
+                32_768,
+            ),
+            ("minimax", "minimax", "https://api.minimax.io/v1", true, "MiniMax-M3.1-Flash", 1_000_000, 524_288),
+            ("minimax-cn", "minimax-cn", "https://api.minimaxi.com/v1", true, "MiniMax-M3.1-Flash", 1_000_000, 524_288),
+            ("zai", "zai", "https://api.z.ai/api/paas/v4", false, "glm-5.3", 1_000_000, 131_072),
+            ("zhipu-cn", "zhipuai", "https://open.bigmodel.cn/api/paas/v4", true, "glm-5.3", 1_000_000, 131_072),
+        ];
+        for (pid, mdev, base_url, configured, default_model, ctx, max_out) in expected {
+            let row = &v[pid];
+            assert_eq!(row["models_dev"], mdev, "{pid}: {row}");
+            assert_eq!(row["base_url"], base_url, "{pid}: {row}");
+            assert_eq!(row["configured"], configured, "{pid}: {row}");
+            assert_eq!(row["default_model"], default_model, "{pid}: {row}");
+            assert_eq!(row["ctx"], ctx, "{pid}: {row}");
+            assert_eq!(row["max_out"], max_out, "{pid}: {row}");
+            assert_eq!(row["reasoning"], true, "{pid}: {row}");
+        }
+
+        h.shutdown().await;
     })
     .await
 }

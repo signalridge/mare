@@ -14,7 +14,13 @@
 | `opencode-go` | `provider-opencode-go` | opencode Go API 密钥 | `OPENCODE_API_KEY` |
 | `deepseek` | `provider-openai-compat` | API 密钥 | `DEEPSEEK_API_KEY` |
 | `kimi` | `provider-openai-compat` | Moonshot API 密钥 | `MOONSHOT_API_KEY` |
+| `kimi-cn` | `provider-openai-compat` | Moonshot 中国区 API 密钥 | `MOONSHOT_API_KEY` |
 | `kimi-code` | `provider-openai-compat` | Kimi Code API 密钥 | `KIMI_API_KEY` |
+| `kimi-code-cn` | `provider-openai-compat` | Kimi Code 中国区 API 密钥 | `KIMI_API_KEY` |
+| `minimax` | `provider-openai-compat` | MiniMax API 密钥 | `MINIMAX_API_KEY` |
+| `minimax-cn` | `provider-openai-compat` | MiniMax 中国区 API 密钥 | `MINIMAX_API_KEY` |
+| `zai` | `provider-openai-compat` | Z.ai API 密钥 | `ZAI_API_KEY` |
+| `zhipu-cn` | `provider-openai-compat` | 智谱 GLM 中国区 API 密钥 | `ZHIPU_API_KEY` |
 | `openrouter` | `provider-openai-compat` | API 密钥 | `OPENROUTER_API_KEY` |
 | `ollama` | `provider-openai-compat` | 无（`http://localhost:11434/v1`） | |
 | `lmstudio` | `provider-openai-compat` | 无（`http://localhost:1234/v1`） | |

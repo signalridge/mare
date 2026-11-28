@@ -1228,10 +1228,16 @@ mod tests {
             "deepseek",
             "google",
             "kimi-code-plan-cn",
+            "kimi-code-plan-global",
+            "minimax",
+            "minimax-cn",
             "moonshotai",
+            "moonshotai-cn",
             "openai",
             "opencode-go",
             "openrouter",
+            "zai",
+            "zhipuai",
         ] {
             assert!(providers.contains_key(pid), "bundled models.dev snapshot missing `{pid}`");
         }

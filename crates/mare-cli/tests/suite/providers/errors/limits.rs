@@ -480,3 +480,120 @@ async fn llm_errors_classify_stream_stalled_slow_down_and_402_billing_vs_in_flig
     })
     .await
 }
+
+/// Issue #90: HTTP 400 effort refusals preserve the vendor's `"Supported values are …"` wording
+/// and append a `/effort` guidance hint without mutating model capabilities (no automatic
+/// learning), while non-effort parameter refusals (`text.verbosity`, unrelated values) are left
+/// untouched.
+#[tokio::test]
+async fn effort_400_refusal_surfaces_supported_values_without_mutating_model() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let server = MockServer::start().await;
+        server.route(
+            "/compat",
+            vec![
+                // 1) OpenAI-style 400 with param=reasoning.effort and inline "Supported values are"
+                Resp::status(
+                    400,
+                    json!({
+                        "error": {
+                            "message": "Unsupported value: 'high' is not supported with the 'gpt-6-luna' model. Supported values are: 'none', 'low', and 'medium'.",
+                            "type": "invalid_request_error",
+                            "param": "reasoning.effort",
+                            "code": "unsupported_value"
+                        }
+                    })
+                    .to_string(),
+                ),
+                // 2) Vendor puts "Supported values are" only in another JSON field (raw body), not error.message
+                Resp::status(
+                    400,
+                    json!({
+                        "error": {
+                            "message": "Invalid reasoning_effort value",
+                            "param": "reasoning_effort"
+                        },
+                        "detail": "Supported values are: 'low', 'medium'."
+                    })
+                    .to_string(),
+                ),
+                // 3) Plan restriction on reasoning.effort without "Supported values are"
+                Resp::status(
+                    400,
+                    json!({
+                        "error": {
+                            "message": "reasoning.effort 'xhigh' is not available on your plan",
+                            "param": "reasoning.effort"
+                        }
+                    })
+                    .to_string(),
+                ),
+                // 4) Non-effort param (text.verbosity) with identical "Unsupported value" wording -> NOT effort refusal
+                Resp::status(
+                    400,
+                    json!({
+                        "error": {
+                            "message": "Unsupported value: 'high' is not supported. Supported values are: 'low', 'medium'.",
+                            "param": "text.verbosity"
+                        }
+                    })
+                    .to_string(),
+                ),
+                // 5) Missing param with non-effort value -> NOT effort refusal
+                Resp::status(
+                    400,
+                    json!({
+                        "error": {
+                            "message": "Unsupported value: 'xml' is not supported with this model."
+                        }
+                    })
+                    .to_string(),
+                ),
+            ],
+        );
+
+        let h = provider_host(&mut env, &server, json!({})).await;
+        global(&h, "LLM", h.service_table("llm").unwrap());
+
+        let efforts_before: String =
+            eval(&h, r#"return mare.json.encode(LLM:resolve("compat/reasoner-model").efforts)"#).await;
+
+        let m1 = stream(&h, "compat/reasoner-model").await;
+        assert_eq!(m1["stop_reason"], "error", "{m1}");
+        assert_eq!(m1["error_kind"], "invalid", "{m1}");
+        let e1 = m1["error"].as_str().unwrap_or("");
+        assert!(e1.contains("Supported values are: 'none', 'low', and 'medium'"), "must keep supported values: {e1}");
+        assert!(e1.contains("/effort"), "must append /effort hint: {e1}");
+
+        // Must NOT mutate model efforts (no automatic learning).
+        let efforts_after: String =
+            eval(&h, r#"return mare.json.encode(LLM:resolve("compat/reasoner-model").efforts)"#).await;
+        assert_eq!(efforts_after, efforts_before, "400 effort refusal must not mutate model efforts");
+
+        let m2 = stream(&h, "compat/reasoner-model").await;
+        assert_eq!(m2["error_kind"], "invalid", "{m2}");
+        let e2 = m2["error"].as_str().unwrap_or("");
+        assert!(e2.contains("Supported values are: 'low', 'medium'"), "must surface supported values from body: {e2}");
+        assert!(e2.contains("/effort"), "must append /effort hint: {e2}");
+
+        let m3 = stream(&h, "compat/reasoner-model").await;
+        assert_eq!(m3["error_kind"], "invalid", "{m3}");
+        let e3 = m3["error"].as_str().unwrap_or("");
+        assert!(e3.contains("/effort"), "must append /effort hint on plan refusal: {e3}");
+
+        let m4 = stream(&h, "compat/reasoner-model").await;
+        assert_eq!(m4["error_kind"], "invalid", "{m4}");
+        let e4 = m4["error"].as_str().unwrap_or("");
+        assert!(!e4.contains("/effort"), "text.verbosity refusal must not get /effort hint: {e4}");
+
+        let m5 = stream(&h, "compat/reasoner-model").await;
+        assert_eq!(m5["error_kind"], "invalid", "{m5}");
+        let e5 = m5["error"].as_str().unwrap_or("");
+        assert!(!e5.contains("/effort"), "non-effort value refusal must not get /effort hint: {e5}");
+
+        assert_eq!(server.count("/compat"), 5, "400 effort refusals must not retry");
+        h.shutdown().await;
+    })
+    .await
+}

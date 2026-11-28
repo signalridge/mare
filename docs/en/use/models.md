@@ -14,7 +14,13 @@ A model is named `provider/id`, for example `openai/gpt-6-luna`. The providers a
 | `opencode-go` | `provider-opencode-go` | opencode Go API key | `OPENCODE_API_KEY` |
 | `deepseek` | `provider-openai-compat` | API key | `DEEPSEEK_API_KEY` |
 | `kimi` | `provider-openai-compat` | Moonshot API key | `MOONSHOT_API_KEY` |
+| `kimi-cn` | `provider-openai-compat` | Moonshot China API key | `MOONSHOT_API_KEY` |
 | `kimi-code` | `provider-openai-compat` | Kimi Code API key | `KIMI_API_KEY` |
+| `kimi-code-cn` | `provider-openai-compat` | Kimi Code China API key | `KIMI_API_KEY` |
+| `minimax` | `provider-openai-compat` | MiniMax API key | `MINIMAX_API_KEY` |
+| `minimax-cn` | `provider-openai-compat` | MiniMax China API key | `MINIMAX_API_KEY` |
+| `zai` | `provider-openai-compat` | Z.ai API key | `ZAI_API_KEY` |
+| `zhipu-cn` | `provider-openai-compat` | Zhipu GLM China API key | `ZHIPU_API_KEY` |
 | `openrouter` | `provider-openai-compat` | API key | `OPENROUTER_API_KEY` |
 | `ollama` | `provider-openai-compat` | none (`http://localhost:11434/v1`) | |
 | `lmstudio` | `provider-openai-compat` | none (`http://localhost:1234/v1`) | |

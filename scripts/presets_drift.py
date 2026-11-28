@@ -29,8 +29,8 @@ STANDALONE_PROVIDERS: tuple[tuple[str, Path, str], ...] = (
     ("openai", ROOT / "crates/mare-plugin/preset/plugins/lua/provider-openai/requests.lua", "openai"),
     ("opencode-go", ROOT / "crates/mare-plugin/preset/plugins/lua/provider-opencode-go/provider.lua", "opencode-go"),
 )
-# Additional models.dev provider ids bundled alongside built-in presets (e.g. global mirror).
-EXTRA_SNAPSHOT_PROVIDERS: tuple[str, ...] = ("kimi-code-plan-global",)
+# Additional models.dev provider ids bundled alongside built-in presets, if any.
+EXTRA_SNAPSHOT_PROVIDERS: tuple[str, ...] = ()
 MODELS_DEV_URL = "https://models.dev/api.json"
 MODELS_DEV_LICENSE = "MIT (Copyright (c) 2025 models.dev; https://github.com/anomalyco/models.dev)"
 USER_AGENT = "mare-presets-drift/1.0"
@@ -437,7 +437,13 @@ def _self_test() -> int:
     for expected in (
         "deepseek",
         "kimi",
+        "kimi-cn",
         "kimi-code",
+        "kimi-code-cn",
+        "minimax",
+        "minimax-cn",
+        "zai",
+        "zhipu-cn",
         "openrouter",
         "lmstudio",
         "anthropic",
