@@ -1209,3 +1209,75 @@ async fn side_and_btw_answer_on_empty_session_with_project_context_and_keep_no_h
     })
     .await;
 }
+
+#[tokio::test]
+async fn side_and_btw_snapshot_context_succeed_after_compaction() {
+    local(async {
+        let env = TestEnv::new().await;
+        let long_reply = format!("compacted turn one {}", "work ".repeat(800));
+        let h = env
+            .host()
+            .builtins(&["conversations", "compact"])
+            .config(json!({
+                "plugins": {
+                    "compact": { "keep_recent_tokens": 100, "recent_user_tokens": 0 }
+                }
+            }))
+            .faux(json!([
+                { "text": long_reply },
+                { "text": "compacted turn two" },
+                { "text": "## Summary\nCompacted summary text." },
+                { "text": "SIDE_AFTER_COMPACT_129" },
+                { "text": "BTW_AFTER_COMPACT_129" }
+            ]))
+            .build()
+            .await;
+        expose(&h);
+
+        let r1 = h.prompt("first long turn", json!({})).await.unwrap();
+        assert!(r1["text"].as_str().unwrap_or("").starts_with("compacted turn one"));
+        let keep_turn_two = format!("second long turn {}", "keep ".repeat(200));
+        let r2 = h.prompt(&keep_turn_two, json!({})).await.unwrap();
+        assert_eq!(r2["text"], "compacted turn two");
+
+        exec(
+            &h,
+            r#"
+            local K = C.cordis:get("compact")
+            local res = K:run()
+            assert(res and res.status == "compacted", "compaction failed: " .. mare.json.encode(res))
+
+            -- Verify the session leaf is now a non-message (`compaction`) entry.
+            local sid = S:info().session_id
+            local snap = S:snapshot_context({ session_id = sid, allow_memory = true })
+            assert(snap and type(snap.messages) == "table" and #snap.messages > 0, "expected compacted snapshot messages")
+            for _, m in ipairs(snap.messages) do
+                assert(not m.turn_aborted, "compaction leaf must not synthesize a mid-turn interrupt marker")
+            end
+
+            local settled_tx, settled_rx = mare.task.channel()
+            C.cordis:on("conversation/settled", function(ev) settled_tx:send(ev) end)
+            local cmds = C.cordis:get("commands")
+            local conv = C.cordis:get("conversations")
+
+            cmds:run("/side what was compacted?")
+            local ok1, ev1 = mare.task.timeout(5000, function() return settled_rx:recv() end)
+            assert(ok1 and type(ev1) == "table", "/side did not settle after compaction")
+            assert(ev1.text == "SIDE_AFTER_COMPACT_129", "unexpected /side reply: " .. mare.json.encode(ev1))
+            cmds:run("/side back")
+            assert(conv:info() == nil, "/side back should close side conversation")
+
+            cmds:run("/btw quick check after compaction")
+            local ok2, ev2 = mare.task.timeout(5000, function() return settled_rx:recv() end)
+            assert(ok2 and type(ev2) == "table", "/btw did not settle after compaction")
+            assert(ev2.text == "BTW_AFTER_COMPACT_129", "unexpected /btw reply: " .. mare.json.encode(ev2))
+            cmds:run("/btw back")
+            assert(conv:info() == nil, "/btw back should close side conversation")
+            "#,
+        )
+        .await;
+
+        h.shutdown().await;
+    })
+    .await;
+}
