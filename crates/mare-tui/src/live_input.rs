@@ -35,9 +35,14 @@ pub(crate) struct LiveDecoder {
     pending_csi: Vec<u8>,
     pending_esc: Option<std::time::Instant>,
     in_paste: bool,
+    paste_last_at: Option<std::time::Instant>,
 }
 
 impl LiveDecoder {
+    /// Idle timeout before an unterminated bracketed paste (`\x1b[200~` without `\x1b[201~`)
+    /// is flushed and normal key decoding resumes.
+    pub(crate) const PASTE_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
     pub(crate) fn reset(&mut self) {
         *self = Self::default();
     }
@@ -46,10 +51,35 @@ impl LiveDecoder {
         self.pending_esc.map(|at| at + crate::term_input::EscJoin::ESC_TIMEOUT)
     }
 
+    pub(crate) fn paste_deadline(&self) -> Option<std::time::Instant> {
+        self.in_paste.then(|| self.paste_last_at.map(|at| at + Self::PASTE_IDLE_TIMEOUT)).flatten()
+    }
+
+    pub(crate) fn next_deadline(&self) -> Option<std::time::Instant> {
+        match (self.esc_deadline(), self.paste_deadline()) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
     pub(crate) fn flush_esc(&mut self, out: &mut Vec<Event>) -> Option<std::time::Instant> {
         let at = self.pending_esc.take()?;
         self.parser.parse(b"\x1b", false);
         self.drain_parser(None, out);
+        Some(at)
+    }
+
+    fn expire_paste(&mut self, out: &mut Vec<Event>) -> Option<std::time::Instant> {
+        let at = self.paste_last_at.take()?;
+        self.in_paste = false;
+        let before = out.len();
+        self.parser.parse(b"\x1b[201~", false);
+        self.drain_parser(None, out);
+        if out.len() == before {
+            // If `termina::Parser` was mid-escape inside the truncated paste buffer, reset it
+            // so subsequent normal keys can never remain trapped in paste mode.
+            self.parser = termina::Parser::default();
+        }
         Some(at)
     }
 
@@ -60,6 +90,8 @@ impl LiveDecoder {
     ) -> Option<std::time::Instant> {
         if self.pending_esc.is_some_and(|at| now >= at + crate::term_input::EscJoin::ESC_TIMEOUT) {
             self.flush_esc(out)
+        } else if self.in_paste && self.paste_last_at.is_some_and(|at| now >= at + Self::PASTE_IDLE_TIMEOUT) {
+            self.expire_paste(out)
         } else {
             None
         }
@@ -69,6 +101,7 @@ impl LiveDecoder {
         while let Some(ev) = self.parser.pop() {
             if matches!(ev, termina::Event::Paste(_)) {
                 self.in_paste = false;
+                self.paste_last_at = None;
             }
             let mut mapped = Event::from(ev);
             if let (Some(base), Event::Key(k)) = (base_key, &mut mapped) {
@@ -84,6 +117,10 @@ impl LiveDecoder {
     }
 
     pub(crate) fn feed_at(&mut self, bytes: &[u8], more: bool, now: std::time::Instant, out: &mut Vec<Event>) {
+        if self.in_paste && self.paste_last_at.is_some_and(|at| now >= at + Self::PASTE_IDLE_TIMEOUT) {
+            self.expire_paste(out);
+        }
+
         let mut i = 0;
         if !bytes.is_empty() && self.pending_esc.take().is_some() {
             match bytes[0] {
@@ -107,10 +144,12 @@ impl LiveDecoder {
                     let end = i + rel + 6;
                     self.parser.parse(&bytes[i..end], end < bytes.len() || more);
                     self.in_paste = false;
+                    self.paste_last_at = None;
                     self.drain_parser(None, out);
                     i = end;
                     continue;
                 }
+                self.paste_last_at = Some(now);
                 self.parser.parse(&bytes[i..], true);
                 self.drain_parser(None, out);
                 break;
@@ -129,6 +168,7 @@ impl LiveDecoder {
                     let seq = std::mem::take(&mut self.pending_csi);
                     if seq == b"\x1b[200~" {
                         self.in_paste = true;
+                        self.paste_last_at = Some(now);
                         self.parser.parse(&seq, true);
                         self.drain_parser(None, out);
                     } else {
@@ -302,5 +342,53 @@ mod tests {
         assert_eq!(dec.flush_expired_esc(expired, &mut out), Some(t0));
         assert!(out.is_empty(), "incomplete OSC trailing ESC must not emit key: {out:?}");
         assert!(dec.esc_deadline().is_none());
+    }
+
+    #[test]
+    fn repro_243_incomplete_bracketed_paste_recovers_for_normal_input() {
+        let mut dec = LiveDecoder::default();
+        let mut out = Vec::new();
+        let t0 = std::time::Instant::now();
+        // Start bracketed paste without closing `\x1b[201~`.
+        dec.feed_at(b"\x1b[200~truncated paste", false, t0, &mut out);
+        // Much later, user types normal input `'a'`.
+        let later = t0 + std::time::Duration::from_secs(5);
+        dec.flush_expired_esc(later, &mut out);
+        dec.feed_at(b"a", false, later, &mut out);
+        assert!(
+            out.iter().any(|e| matches!(e, Event::Key(k) if k.code == KeyCode::Char('a'))),
+            "decoder stayed stuck in paste mode and swallowed normal key 'a': {out:?}"
+        );
+    }
+
+    #[test]
+    fn multi_chunk_paste_within_idle_timeout_stays_single_paste() {
+        let mut dec = LiveDecoder::default();
+        let mut out = Vec::new();
+        let t0 = std::time::Instant::now();
+        let half = LiveDecoder::PASTE_IDLE_TIMEOUT / 2;
+        dec.feed_at(b"\x1b[200~chunk1", true, t0, &mut out);
+        assert!(out.is_empty());
+        assert!(dec.flush_expired_esc(t0 + half, &mut out).is_none());
+        dec.feed_at(b"chunk2", true, t0 + half, &mut out);
+        assert!(out.is_empty());
+        dec.feed_at(b"chunk3\x1b[201~", false, t0 + half * 2, &mut out);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(&out[0], Event::Paste(p) if p == "chunk1chunk2chunk3"));
+        assert!(dec.paste_deadline().is_none());
+    }
+
+    #[test]
+    fn incomplete_paste_ending_in_partial_escape_recovers_for_keys() {
+        let mut dec = LiveDecoder::default();
+        let mut out = Vec::new();
+        let t0 = std::time::Instant::now();
+        dec.feed_at(b"\x1b[200~partial\x1b", false, t0, &mut out);
+        let expired = t0 + LiveDecoder::PASTE_IDLE_TIMEOUT;
+        dec.feed_at(b"x", false, expired, &mut out);
+        assert!(
+            out.iter().any(|e| matches!(e, Event::Key(k) if k.code == KeyCode::Char('x'))),
+            "expected normal key 'x' after incomplete paste expired: {out:?}"
+        );
     }
 }

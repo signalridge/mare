@@ -64,19 +64,20 @@ impl Editor {
     }
 
     /// Inline paste without folding (shared by `handle_paste` and `Modal::Input`):
-    /// replaces any active selection as one undo step.
+    /// strips terminal escape sequences and control characters, normalizes line endings,
+    /// and replaces any active selection as one undo step.
     pub fn paste_inline(&mut self, text: &str) {
-        let norm = normalize_newlines(text);
+        let norm = mare_shared::ansi::sanitize(text, false);
         self.begin(LastOp::Other);
         self.delete_selection_internal();
         self.insert_str(&norm);
         self.last_op = LastOp::Other;
     }
 
-    /// Bracketed paste. Large pastes collapse into an atomic placeholder token. A pasted Tab
-    /// becomes two spaces wherever it sits, not a jump to the next tab stop.
+    /// Bracketed paste. Strips terminal escape sequences, normalizes line endings, and turns
+    /// pasted Tabs into two spaces. Large pastes collapse into an atomic placeholder token.
     pub fn handle_paste(&mut self, text: &str) {
-        let norm = normalize_newlines(text).replace('\t', "  ");
+        let norm = mare_shared::ansi::sanitize(text, false).replace('\t', "  ");
         let nlines = norm.split('\n').count();
         let nchars = norm.chars().count();
         if nlines <= 10 && nchars <= 800 {
@@ -217,5 +218,26 @@ mod tests {
         assert_eq!(ed.raw_text(), "before [Image #1]");
         assert_eq!(ed.snapshot_tokens(), vec![(old_id, "[Image #1]".into(), "[Image #1]".into())]);
         assert!(ed.referenced_element_ids().contains(&old_id));
+    }
+
+    #[test]
+    fn repro_243_ansi_formatting_stripped_on_paste() {
+        let mut ed = Editor::new();
+        ed.handle_paste("\x1b[31mhello\x1b[0m");
+        assert_eq!(ed.text(), "hello", "ANSI formatting escapes were retained verbatim in pasted text");
+    }
+
+    #[test]
+    fn paste_strips_csi_osc_and_controls_for_inline_and_folded_pastes() {
+        let mut ed = Editor::new();
+        ed.paste_inline("\x1b[1;32mgreen\x1b[0m\x1b]8;;https://example.com\x07link\x1b]8;;\x07\r\nline2");
+        assert_eq!(ed.text(), "greenlink\nline2");
+
+        let mut folded = Editor::new();
+        let big: String = (0..12).map(|i| format!("\x1b[36mrow {i}\x1b[0m\r\n")).collect();
+        folded.handle_paste(&big);
+        assert!(folded.raw_text().starts_with("[Pasted text #1 +13 lines]"));
+        let expected: String = (0..12).map(|i| format!("row {i}\n")).collect();
+        assert_eq!(folded.text(), expected);
     }
 }
