@@ -16,6 +16,7 @@ use tokio::sync::{Mutex as AsyncMutex, watch};
 use super::platform::{self, ProcessBackend, Signal};
 use super::proc::{build, kill_group, parse_opts, signal_num};
 use super::task::opt_token;
+use super::text::truncate::{split_utf8_boundary, trailing_incomplete_utf8_len};
 use mare_shared::lua::rt_err;
 
 const DEFAULT_CAP: usize = 1024 * 1024;
@@ -77,6 +78,48 @@ impl Ring {
         }
     }
 
+    fn drain_front_bytes(&mut self, mut n: usize, tail_buf: &mut Vec<u8>) {
+        while n > 0 {
+            let Some(front) = self.chunks.front_mut() else {
+                break;
+            };
+            if front.data.len() <= n {
+                let take = front.data.len();
+                let keep_start = take.saturating_sub(3);
+                tail_buf.extend_from_slice(&front.data[keep_start..]);
+                if tail_buf.len() > 3 {
+                    tail_buf.drain(..tail_buf.len() - 3);
+                }
+                self.size -= take;
+                n -= take;
+                self.chunks.pop_front();
+            } else {
+                let keep_start = n.saturating_sub(3);
+                tail_buf.extend_from_slice(&front.data[keep_start..n]);
+                if tail_buf.len() > 3 {
+                    tail_buf.drain(..tail_buf.len() - 3);
+                }
+                front.data.drain(..n);
+                front.off += n as u64;
+                self.size -= n;
+                n = 0;
+            }
+        }
+    }
+
+    fn peek_front_bytes(&self, max: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(max);
+        for c in &self.chunks {
+            for &b in &c.data {
+                out.push(b);
+                if out.len() == max {
+                    return out;
+                }
+            }
+        }
+        out
+    }
+
     fn push(&mut self, stream: Stream, mut data: &[u8]) {
         let room = self.head_cap - self.head_size;
         if room > 0 {
@@ -95,25 +138,102 @@ impl Ring {
         push_merged(&mut self.chunks, stream, self.total, data);
         self.total += data.len() as u64;
         self.size += data.len();
-        while self.size > self.cap {
+        if self.size > self.cap {
             let over = self.size - self.cap;
-            let front = self.chunks.front_mut().expect("size > 0");
-            if front.data.len() <= over {
-                self.size -= front.data.len();
-                self.chunks.pop_front();
-            } else {
-                front.data.drain(..over);
-                front.off += over as u64;
-                self.size -= over;
+            let mut dropped_tail = Vec::with_capacity(6);
+            if self.chunks.front().is_some_and(|f| f.off == self.head_size as u64) {
+                dropped_tail.extend_from_slice(&self.peek_bytes_before(self.head_size as u64, 3));
+            }
+            self.drain_front_bytes(over, &mut dropped_tail);
+            let next = self.peek_front_bytes(3);
+            if let Some((_, cont)) = split_utf8_boundary(&dropped_tail, &next) {
+                let mut ignore = Vec::new();
+                self.drain_front_bytes(cont, &mut ignore);
             }
         }
+    }
+
+    /// Peek up to `max` contiguous bytes starting at `offset` across buffered chunks.
+    /// Stops at any ring eviction gap (`c.off > cur`).
+    fn peek_bytes_at(&self, mut offset: u64, max: usize, only: Option<Stream>) -> Vec<u8> {
+        let mut out = Vec::with_capacity(max);
+        for c in self.head.iter().chain(self.chunks.iter()) {
+            let end = c.off + c.data.len() as u64;
+            if end <= offset {
+                continue;
+            }
+            if c.off > offset {
+                break;
+            }
+            let skip = (offset - c.off) as usize;
+            if only.is_none_or(|s| s == c.stream) {
+                let take = (c.data.len() - skip).min(max - out.len());
+                out.extend_from_slice(&c.data[skip..skip + take]);
+                if out.len() == max {
+                    break;
+                }
+            }
+            offset = end;
+        }
+        out
+    }
+
+    /// Peek up to `max` contiguous bytes immediately ending at `offset` across buffered chunks.
+    fn peek_bytes_before(&self, offset: u64, max: usize) -> Vec<u8> {
+        let start = offset.saturating_sub(max as u64);
+        let mut cur = start;
+        let mut out = Vec::with_capacity(max);
+        for c in self.head.iter().chain(self.chunks.iter()) {
+            let end = c.off + c.data.len() as u64;
+            if end <= cur {
+                continue;
+            }
+            if c.off >= offset {
+                break;
+            }
+            if c.off > cur {
+                out.clear();
+                cur = c.off;
+            }
+            let skip = (cur - c.off) as usize;
+            let stop = (offset.min(end) - c.off) as usize;
+            out.extend_from_slice(&c.data[skip..stop]);
+            cur = c.off + stop as u64;
+        }
+        if cur < offset {
+            out.clear();
+        }
+        out
+    }
+
+    /// Last `n` bytes of the ring, aligned forward off any split valid multi-byte UTF-8 character
+    /// while preserving genuinely invalid raw bytes.
+    fn tail(&self, n: usize) -> Vec<u8> {
+        if n == 0 || self.total == 0 {
+            return Vec::new();
+        }
+        let mut from = self.total.saturating_sub(n as u64);
+        let mut limit = n;
+        if from > 0 {
+            let prev = self.peek_bytes_before(from, 3);
+            let next = self.peek_bytes_at(from, 3, None);
+            if let Some((_, cont)) = split_utf8_boundary(&prev, &next) {
+                from += cont as u64;
+                limit = limit.saturating_sub(cont);
+            }
+        }
+        self.read(from, limit, None).0
     }
 
     /// Bytes from `offset`, at most `max`, optionally one stream only.
     /// -> (bytes, next offset, bytes lost). Bytes lost before the first returned byte are only
     /// counted; a gap crossed after some data (head → tail) is also marked inline.
     fn read(&self, offset: u64, max: usize, only: Option<Stream>) -> (Vec<u8>, u64, u64) {
+        if max == 0 {
+            return (Vec::new(), offset, 0);
+        }
         let mut out = Vec::new();
+        let mut last_offs: Vec<u64> = Vec::with_capacity(4);
         let mut from = offset;
         let mut dropped = 0u64;
         for c in self.head.iter().chain(self.chunks.iter()) {
@@ -121,23 +241,51 @@ impl Ring {
             if end <= from {
                 continue;
             }
-            if out.len() >= max {
-                break;
-            }
             if c.off > from {
-                let gap = c.off - from;
-                dropped += gap;
+                let mut gap = c.off - from;
                 if !out.is_empty() {
-                    out.extend_from_slice(super::headtail::marker(gap as usize).as_bytes());
+                    let trim = trailing_incomplete_utf8_len(&out);
+                    if trim > 0 {
+                        out.truncate(out.len() - trim);
+                        gap += trim as u64;
+                    }
+                    if !out.is_empty() {
+                        out.extend_from_slice(super::headtail::marker(gap as usize).as_bytes());
+                    }
+                    last_offs.clear();
                 }
+                dropped += gap;
                 from = c.off;
             }
             let skip = (from - c.off) as usize;
-            let take = (c.data.len() - skip).min(max.saturating_sub(out.len()));
             if only.is_none_or(|s| s == c.stream) {
+                let avail = c.data.len() - skip;
+                let remaining = max.saturating_sub(out.len());
+                let take = avail.min(remaining);
+                let base_off = c.off + skip as u64;
                 out.extend_from_slice(&c.data[skip..skip + take]);
+                for idx in take.saturating_sub(3)..take {
+                    last_offs.push(base_off + idx as u64);
+                }
+                if last_offs.len() > 3 {
+                    last_offs.drain(..last_offs.len() - 3);
+                }
+                from = base_off + take as u64;
+                if out.len() >= max {
+                    let after = self.peek_bytes_at(from, 3, only);
+                    let tail_start = out.len().saturating_sub(3);
+                    if let Some((pre, _)) = split_utf8_boundary(&out[tail_start..], &after)
+                        && pre <= last_offs.len()
+                    {
+                        let rewind_off = last_offs[last_offs.len() - pre];
+                        out.truncate(out.len() - pre);
+                        from = rewind_off;
+                    }
+                    break;
+                }
+            } else {
+                from = end;
             }
-            from = c.off + (skip + take) as u64;
         }
         (out, from, dropped)
     }
@@ -278,8 +426,7 @@ impl UserData for Job {
         m.add_method("tail", |lua, this, n: Option<usize>| {
             let n = n.unwrap_or(4096);
             let st = this.state.lock().unwrap();
-            let from = st.ring.total.saturating_sub(n as u64);
-            let (data, _, _) = st.ring.read(from, n, None);
+            let data = st.ring.tail(n);
             lua.create_string(&data)
         });
         // wait{timeout_ms?, cancel?} -> status table + timed_out / cancelled
@@ -972,5 +1119,110 @@ mod tests {
                 }
             })
             .await;
+    }
+
+    #[test]
+    fn repro_issue_203_ring_buffer_cuts_inside_multibyte_utf8_character() {
+        // Capacity 20 bytes: head_cap = 10, cap = 20.
+        // Push 10 ASCII bytes (fills head) + 10 3-byte UTF-8 chars ("中" = E4 B8 AD, 30 bytes > cap 20).
+        // Ring drains 10 bytes from front of tail (10 % 3 != 0), cutting inside a valid UTF-8 character.
+        let mut ring = Ring::new(20);
+        ring.push(Stream::Out, b"0123456789");
+        let cjk = "中".repeat(10);
+        ring.push(Stream::Out, cjk.as_bytes());
+        let (bytes, _next, dropped) = ring.read(10, 64, None);
+        assert!(dropped > 0, "expected tail overflow drop");
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            !text.contains('\u{FFFD}'),
+            "ring tail cut inside valid UTF-8 character, producing U+FFFD: {text:?} (raw={bytes:?})"
+        );
+    }
+
+    #[test]
+    fn ring_preserves_utf8_on_head_gap_and_max_read_and_keeps_genuinely_invalid_bytes() {
+        // 1. Head->gap->tail cut inside multi-byte UTF-8: head_cap = 10 cuts 4th "中" (bytes 9..12).
+        let mut ring = Ring::new(20);
+        let cjk = "中".repeat(12); // 36 bytes
+        ring.push(Stream::Out, cjk.as_bytes());
+        let (bytes, next, dropped) = ring.read(0, 128, None);
+        assert_eq!(next, 36);
+        assert!(dropped > 0);
+        let text = std::str::from_utf8(&bytes).expect("head + marker + tail must be valid UTF-8");
+        assert!(text.starts_with("中中中"), "head should keep complete chars: {text:?}");
+        assert!(text.ends_with("中中中"), "tail should keep complete chars: {text:?}");
+        assert!(text.contains("bytes omitted"), "gap marker missing: {text:?}");
+
+        // 2. Reading with `max` cutting inside a valid UTF-8 char aligns to whole chars and preserves offsets.
+        let mut ring2 = Ring::new(64);
+        ring2.push(Stream::Out, "a中b中c".as_bytes()); // 1 + 3 + 1 + 3 + 1 = 9 bytes
+        let (part1, off1, _) = ring2.read(0, 3, None); // byte 3 is mid-"中"
+        assert_eq!(std::str::from_utf8(&part1).unwrap(), "a");
+        assert_eq!(off1, 1);
+        let (part2, off2, _) = ring2.read(off1, 4, None); // "中b" = 4 bytes
+        assert_eq!(std::str::from_utf8(&part2).unwrap(), "中b");
+        assert_eq!(off2, 5);
+        let (part3, off3, _) = ring2.read(off2, 16, None);
+        assert_eq!(std::str::from_utf8(&part3).unwrap(), "中c");
+        assert_eq!(off3, 9);
+
+        // 3. Genuinely invalid UTF-8 bytes after an eviction are NOT swallowed as valid continuations.
+        let mut ring3 = Ring::new(10); // head_cap = 5, cap = 5
+        ring3.push(Stream::Out, b"01234");
+        // Push 6 bytes into cap 5: byte 0 is 0xFF (evicted), followed by invalid lone 0x80 + "abcd" (5 bytes).
+        ring3.push(Stream::Out, b"\xff\x80abcd");
+        let (raw, next3, dropped3) = ring3.read(5, 64, None);
+        assert_eq!(dropped3, 1);
+        assert_eq!(next3, 11);
+        assert_eq!(raw, b"\x80abcd", "genuinely invalid 0x80 after 0xFF must be preserved");
+        assert_eq!(ring3.tail(5), b"\x80abcd");
+
+        // 4. Multi-chunk read backoff must stop immediately without treating buffered bytes as a gap.
+        let mut ring4 = Ring::new(10); // head_cap = 5 ("a中b"), tail = "cdef"
+        ring4.push(Stream::Out, "a中bcdef".as_bytes());
+        let (p1, n1, d1) = ring4.read(0, 3, None);
+        assert_eq!(std::str::from_utf8(&p1).unwrap(), "a");
+        assert_eq!((n1, d1), (1, 0), "backed-off read must stop at first unconsumed byte with 0 dropped");
+        let (p2, n2, d2) = ring4.read(n1, 4, None);
+        assert_eq!(std::str::from_utf8(&p2).unwrap(), "中b");
+        assert_eq!((n2, d2), (5, 0));
+        let (p3, n3, d3) = ring4.read(n2, 16, None);
+        assert_eq!(std::str::from_utf8(&p3).unwrap(), "cdef");
+        assert_eq!((n3, d3), (9, 0));
+
+        // 5. Cross-chunk multi-byte UTF-8 character split across head/tail boundary (no eviction).
+        let mut ring5 = Ring::new(6); // head_cap = 3 ("ab\xe4"), tail = "\xb8\xadc" (6 bytes total)
+        ring5.push(Stream::Out, "ab中c".as_bytes());
+        let (c1, cn1, cd1) = ring5.read(0, 3, None);
+        assert_eq!(std::str::from_utf8(&c1).unwrap(), "ab");
+        assert_eq!((cn1, cd1), (2, 0));
+        let (c2, cn2, cd2) = ring5.read(0, 4, None);
+        assert_eq!(std::str::from_utf8(&c2).unwrap(), "ab");
+        assert_eq!((cn2, cd2), (2, 0));
+        let (c3, cn3, cd3) = ring5.read(2, 4, None);
+        assert_eq!(std::str::from_utf8(&c3).unwrap(), "中c");
+        assert_eq!((cn3, cd3), (6, 0));
+
+        // 5b. Cross-chunk split at head/tail followed immediately by eviction of the 1st continuation byte.
+        let mut ring5b = Ring::new(4); // head_cap = 2 ("a\xe4"), cap = 2, push "a中b" (5 bytes -> evicts "\xb8" + "\xad")
+        ring5b.push(Stream::Out, "a中b".as_bytes());
+        let (ev_out, ev_next, ev_drop) = ring5b.read(0, 32, None);
+        let ev_text = std::str::from_utf8(&ev_out).expect("head-split eviction must produce valid UTF-8");
+        assert!(ev_text.starts_with('a') && ev_text.ends_with('b'), "{ev_text:?}");
+        assert_eq!((ev_next, ev_drop), (5, 3));
+
+        // 6. Budget smaller than one multi-byte codepoint returns empty valid UTF-8 with 0 consumed/dropped.
+        let mut ring6 = Ring::new(16);
+        ring6.push(Stream::Out, "中a".as_bytes());
+        let (s1, sn1, sd1) = ring6.read(0, 2, None);
+        assert_eq!(s1, b"");
+        assert_eq!((sn1, sd1), (0, 0));
+        // tail(2) on "中" must align past continuation bytes (empty valid UTF-8).
+        let mut ring7 = Ring::new(16);
+        ring7.push(Stream::Out, "中".as_bytes());
+        assert_eq!(ring7.tail(2), b"", "tail(2) on 3-byte char must not start on continuation byte");
+        let mut ring8 = Ring::new(16);
+        ring8.push(Stream::Out, b"\xff\x80a");
+        assert_eq!(ring8.tail(2), b"\x80a", "genuinely invalid bytes preserved by tail");
     }
 }

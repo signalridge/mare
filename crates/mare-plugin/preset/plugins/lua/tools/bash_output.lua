@@ -150,6 +150,21 @@ return function(D)
 			end
 		end
 	end
+	--- Shared UTF-8 boundary helpers backed by Rust (`mare.text.utf8_*`, identical rules to
+	--- `job::Ring`): avoid splitting valid multi-byte UTF-8 characters at byte cuts while leaving
+	--- genuinely invalid raw bytes untouched.
+	local function utf8_trim_tail(s)
+		return mare.text.utf8_trim_tail(s)
+	end
+
+	local function utf8_align_start(s, start)
+		return mare.text.utf8_align_start(s, start)
+	end
+
+	local function utf8_align_end(s, stop)
+		return mare.text.utf8_align_end(s, stop)
+	end
+
 	--- bounded output for the persistent shell: the first and
 	--- last `cap/2` bytes stay in memory; once the output passes `cap`, all of it also streams
 	--- to a spill file, so nothing is lost and memory stays bounded however much is printed.
@@ -176,25 +191,29 @@ return function(D)
 				pcall(mare.proc.spill_write, SPILL, self.spill, self.head .. self.tail)
 			end
 			if #self.tail > cap then
-				self.tail = string.sub(self.tail, -half)
+				local start = utf8_align_start(self.tail, #self.tail - half + 1)
+				self.tail = string.sub(self.tail, start)
 			end
 		end
 		function o:tail_of(n)
 			local all = #self.head + #self.tail
-			if all == self.total then
-				return string.sub(self.head .. self.tail, -n)
+			local src = all == self.total and (self.head .. self.tail) or self.tail
+			if #src <= n then
+				return src
 			end
-			return string.sub(self.tail, -n)
+			return string.sub(src, utf8_align_start(src, #src - n + 1))
 		end
 		function o:result()
 			local kept = #self.head + #self.tail
 			if kept == self.total then
 				return { out = self.head .. self.tail, spill = self.spill }
 			end
-			local tail = string.sub(self.tail, -half)
-			local dropped = self.total - #self.head - #tail
+			local head = utf8_trim_tail(self.head)
+			local tail = #self.tail > half and string.sub(self.tail, utf8_align_start(self.tail, #self.tail - half + 1))
+				or self.tail
+			local dropped = self.total - #head - #tail
 			return {
-				out = self.head .. ("\n[… %d bytes omitted …]\n"):format(dropped) .. tail,
+				out = head .. ("\n[… %d bytes omitted …]\n"):format(dropped) .. tail,
 				spill = self.spill,
 				dropped = dropped,
 			}
@@ -210,5 +229,7 @@ return function(D)
 		partial_note = partial_note,
 		input_prompt_hint = input_prompt_hint,
 		new_output_acc = new_output_acc,
+		utf8_align_start = utf8_align_start,
+		utf8_align_end = utf8_align_end,
 	}
 end

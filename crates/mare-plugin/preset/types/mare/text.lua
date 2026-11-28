@@ -108,6 +108,24 @@ function mare.text.truncate(s, opts) end
 ---@param opts? {keep?: "head"|"tail", unit?: "bytes"|"chars"}
 ---@return string
 function mare.text.cut(s, n, opts) end
+--- Align a 1-based byte start index `start` forward past continuation bytes if the cut splits a
+--- valid multi-byte UTF-8 character; leaves genuinely invalid raw bytes untouched.
+---@param s string
+---@param start integer
+---@return integer
+function mare.text.utf8_align_start(s, start) end
+--- Align a 1-based inclusive byte end index `stop` backward before the lead byte if the cut
+--- splits a valid multi-byte UTF-8 character (returns `0` when `stop` is smaller than the first
+--- multi-byte code point); leaves genuinely invalid raw bytes untouched.
+---@param s string
+---@param stop integer
+---@return integer
+function mare.text.utf8_align_end(s, stop) end
+--- Remove any trailing incomplete valid multi-byte UTF-8 prefix from `s`, leaving complete
+--- characters and genuinely invalid raw bytes untouched.
+---@param s string
+---@return string
+function mare.text.utf8_trim_tail(s) end
 ---@class mare.TokenEstimateHint
 ---@field image_types? string[] Additional object `type` values whose `data` string holds an inline image payload.
 ---@field image_mime_keys? string[] Additional MIME key names (with `"image/..."` values) whose sibling `data` holds an inline image payload.
