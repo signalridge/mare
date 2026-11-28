@@ -4,8 +4,9 @@
 //! reading, copying into `~/.config/mare/plugins/` to override, and for LuaLS.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::loader::BUILTIN_NAMES;
 #[cfg(debug_assertions)]
@@ -13,8 +14,34 @@ use crate::loader::{builtin_module_texts, builtin_text};
 #[cfg(debug_assertions)]
 use crate::{keymap_lua, types_texts, ui_components, ui_prelude, ui_shell};
 
+const LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+const LOCK_POLL: Duration = Duration::from_millis(10);
+
 pub fn dir() -> PathBuf {
     mare_shared::paths::data_dir().join("runtime")
+}
+
+fn lock_path(dir: &Path) -> PathBuf {
+    dir.with_file_name("runtime.lock")
+}
+
+fn version_matches(stamp: &Path, version: &str) -> bool {
+    std::fs::read_to_string(stamp).ok().as_deref().map(str::trim) == Some(version)
+}
+
+fn lock_runtime(dir: &Path) -> Result<mare_shared::private::LockGuard> {
+    let lp = lock_path(dir);
+    mare_shared::private::lock_file_blocking(&lp, Some(LOCK_TIMEOUT), LOCK_POLL, true, None).map_err(|err| match err {
+        mare_shared::private::LockError::TimedOut => {
+            anyhow::anyhow!("timed out waiting for runtime lock {}", lp.display())
+        }
+        mare_shared::private::LockError::Cancelled => {
+            anyhow::anyhow!("cancelled waiting for runtime lock {}", lp.display())
+        }
+        mare_shared::private::LockError::Io(e) => {
+            anyhow::Error::new(e).context(format!("runtime lock {}", lp.display()))
+        }
+    })
 }
 
 fn write_ro(path: &Path, content: &str) -> std::io::Result<()> {
@@ -39,11 +66,27 @@ fn write_ro(path: &Path, content: &str) -> std::io::Result<()> {
 /// Extract builtins + types if the recorded version differs. Cheap when up to date.
 pub fn ensure() -> Result<PathBuf> {
     let dir = dir();
+    ensure_with(&dir, env!("CARGO_PKG_VERSION"), extract_all_files)?;
+    Ok(dir)
+}
+
+fn ensure_with(dir: &Path, version: &str, extract: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
     let stamp = dir.join("VERSION");
-    let version = env!("CARGO_PKG_VERSION");
-    if std::fs::read_to_string(&stamp).ok().as_deref().map(str::trim) == Some(version) {
-        return Ok(dir);
+    if version_matches(&stamp, version) {
+        return Ok(());
     }
+    let _guard = lock_runtime(dir)?;
+    if version_matches(&stamp, version) {
+        return Ok(());
+    }
+    extract(dir)?;
+    std::fs::create_dir_all(dir)?;
+    mare_shared::paths::write_atomic(&stamp, version.as_bytes(), mare_shared::paths::WriteMode::Shared)
+        .with_context(|| format!("write runtime version stamp {}", stamp.display()))?;
+    Ok(())
+}
+
+fn extract_all_files(dir: &Path) -> Result<()> {
     #[cfg(not(debug_assertions))]
     {
         // Single-pass decompression; `archive` is dropped at the end of this block so the
@@ -96,8 +139,7 @@ pub fn ensure() -> Result<PathBuf> {
         prune_types_by_name(&dir.join("types"), &type_keys);
         write_ro(&dir.join("NEWS.md"), &crate::news_text())?;
     }
-    std::fs::write(&stamp, version)?;
-    Ok(dir)
+    Ok(())
 }
 
 /// Remove `*.lua` under the runtime's `types/` that this version no longer ships (a namespace
@@ -196,4 +238,78 @@ pub fn init() -> Result<Vec<String>> {
         out.push(format!("kept     {} (changed by you; delete it to get the default)", luarc.display()));
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new(label: &str) -> Self {
+            static COUNTER: AtomicUsize = AtomicUsize::new(0);
+            let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!("mare-runtime-{label}-{}-{id}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn ensure_rechecks_version_after_acquiring_lock() {
+        let tmp = TestDir::new("recheck");
+        let rt_dir = tmp.path().join("runtime");
+        std::fs::create_dir_all(&rt_dir).unwrap();
+        std::fs::write(rt_dir.join("VERSION"), "0.0.0-stale").unwrap();
+
+        let guard = lock_runtime(&rt_dir).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_bg = Arc::clone(&calls);
+        let rt_bg = rt_dir.clone();
+        let handle = std::thread::spawn(move || {
+            ensure_with(&rt_bg, "9.9.9-target", |_| {
+                calls_bg.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        });
+
+        // Wait briefly so the waiter enters lock acquisition, then complete the refresh and unlock.
+        std::thread::sleep(Duration::from_millis(50));
+        std::fs::write(rt_dir.join("VERSION"), "9.9.9-target").unwrap();
+        drop(guard);
+
+        handle.join().unwrap().unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "second process must skip extraction once VERSION matches");
+    }
+
+    #[test]
+    fn ensure_does_not_write_version_stamp_when_extraction_fails() {
+        let tmp = TestDir::new("fail");
+        let rt_dir = tmp.path().join("runtime");
+        std::fs::create_dir_all(&rt_dir).unwrap();
+        std::fs::write(rt_dir.join("VERSION"), "0.0.0-stale").unwrap();
+
+        let err = ensure_with(&rt_dir, "9.9.9-target", |_| anyhow::bail!("simulated extraction failure")).unwrap_err();
+        assert!(err.to_string().contains("simulated extraction failure"), "{err:#}");
+        assert_eq!(
+            std::fs::read_to_string(rt_dir.join("VERSION")).unwrap(),
+            "0.0.0-stale",
+            "VERSION must remain unchanged when extraction fails"
+        );
+    }
 }

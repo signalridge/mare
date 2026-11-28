@@ -118,6 +118,48 @@ async fn mare_runtime_cli_prunes_stale_types_and_init_writes_default_init_once()
     .await
 }
 
+/// Concurrent `mare runtime` processes refreshing a stale read-only runtime directory must
+/// serialize instead of interleaving chmod/write/chmod on the same files.
+#[tokio::test]
+async fn mare_runtime_concurrent_processes_refresh_stale_dir_without_race() {
+    local(async {
+        let env = TestEnv::new().await;
+        // First populate the runtime directory with read-only files.
+        let seed = mare_cmd().arg("runtime").env("MARE_HOME", env.home.path()).run_output();
+        assert!(seed.status.success(), "seed mare runtime failed: {}", String::from_utf8_lossy(&seed.stderr));
+        let rt_dir = std::path::PathBuf::from(String::from_utf8_lossy(&seed.stdout).trim().to_string());
+        let stamp = rt_dir.join("VERSION");
+
+        for round in 0..3 {
+            std::fs::write(&stamp, format!("0.0.0-stale-{round}")).unwrap();
+            let children: Vec<_> = (0..4)
+                .map(|_| {
+                    mare_cmd()
+                        .arg("runtime")
+                        .env("MARE_HOME", env.home.path())
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::piped())
+                        .spawn()
+                        .expect("spawn mare runtime")
+                })
+                .collect();
+            for (idx, child) in children.into_iter().enumerate() {
+                let out = child.wait_with_output().expect("wait mare runtime");
+                assert!(
+                    out.status.success(),
+                    "round {round} child {idx} failed ({}): {}",
+                    out.status,
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                assert_eq!(std::path::PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()), rt_dir);
+            }
+            assert_eq!(std::fs::read_to_string(&stamp).unwrap().trim(), env!("CARGO_PKG_VERSION"));
+            assert!(rt_dir.join("types/mare.lua").is_file());
+        }
+    })
+    .await
+}
+
 /// Plugin runner emits `plugins/completed` with `action` and `status`.
 #[tokio::test]
 async fn plugins_runner_emits_plugins_completed_event() {
