@@ -1173,3 +1173,187 @@ async fn wire_estimate_hints_register_with_wire_and_dispose_on_unload() {
     })
     .await
 }
+
+/// Issue #188: local tool registration accepts object-root `oneOf`, so the Anthropic Messages
+/// encoder must adapt it rather than sending top-level `oneOf` in `input_schema`, while keeping
+/// local validation against the original `oneOf` and isolating unadaptable schemas per tool.
+#[tokio::test]
+async fn anthropic_wire_adapts_object_root_oneof_tool_schema() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let server = MockServer::start().await;
+        server.route("/anthropic", vec![Resp::sse(fixture("anthropic-text.sse"))]);
+        let h = provider_host(&mut env, &server, json!({ "model": "anthropic/claude-sonnet-5-5" })).await;
+        expose(&h);
+        exec(
+            &h,
+            r#"T:register("root_oneof_probe", {
+                description = "object-root oneOf tool",
+                side_effect = "read",
+                parameters = {
+                    type = "object",
+                    oneOf = {
+                        { properties = { path = { type = "string" } }, required = { "path" } },
+                        { properties = { url = { type = "string" } }, required = { "url" } },
+                    },
+                },
+                execute = function(args) return "ok:" .. tostring(args.path or args.url) end,
+            })
+            T:register("unadaptable_root_oneof", {
+                description = "non-object branch root oneOf tool",
+                side_effect = "read",
+                parameters = {
+                    type = "object",
+                    oneOf = {
+                        { type = "string" },
+                        { type = "object", properties = { a = { type = "string" } } },
+                    },
+                },
+                execute = function() return "no" end,
+            })"#,
+        )
+        .await;
+        h.prompt("hello", json!({})).await.unwrap();
+        let body = server.requests().pop().unwrap().json();
+        let tools = body["tools"].as_array().unwrap();
+        let tool = tools
+            .iter()
+            .find(|t| t["name"] == "root_oneof_probe")
+            .expect("root_oneof_probe tool in request");
+        assert!(
+            tool["input_schema"].get("oneOf").is_none(),
+            "Anthropic tool input_schema still contains top-level oneOf: {}",
+            tool["input_schema"]
+        );
+        assert_eq!(tool["input_schema"]["type"], json!("object"));
+        assert_eq!(tool["input_schema"]["properties"]["path"]["type"], json!("string"));
+        assert_eq!(tool["input_schema"]["properties"]["url"]["type"], json!("string"));
+        assert!(
+            tool["input_schema"]["description"].as_str().unwrap_or("").contains("required: path"),
+            "flattened schema description should preserve branch constraint note: {}",
+            tool["input_schema"]
+        );
+        assert!(
+            tools.iter().all(|t| t["name"] != "unadaptable_root_oneof"),
+            "unadaptable top-level oneOf tool must be omitted cleanly instead of failing the request"
+        );
+
+        // Local runtime validation still enforces the original oneOf constraint.
+        let (empty_err, both_err, valid_out): (bool, bool, String) = eval(
+            &h,
+            r#"
+            local r_empty = T:execute({ id = "c1", name = "root_oneof_probe", arguments = {} }, {})
+            local r_both = T:execute({ id = "c2", name = "root_oneof_probe", arguments = { path = "a", url = "https://x" } }, {})
+            local r_ok = T:execute({ id = "c3", name = "root_oneof_probe", arguments = { path = "a.txt" } }, {})
+            return r_empty.is_error == true, r_both.is_error == true, tostring(r_ok.content)
+            "#,
+        )
+        .await;
+        assert!(empty_err, "original oneOf must still reject empty args locally");
+        assert!(both_err, "original oneOf must still reject args matching both branches locally");
+        assert_eq!(valid_out, "ok:a.txt");
+        h.shutdown().await;
+    })
+    .await
+}
+
+/// Review regression (#333): a tool omitted by Anthropic's pre-bind wire filter must ALSO be
+/// absent from local dispatch bindings — even when the tool appeared in earlier session history
+/// and the model attempts to call it again on Anthropic.
+#[tokio::test]
+async fn anthropic_omitted_incompatible_tool_cannot_be_dispatched_even_when_in_history() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let server = MockServer::start().await;
+        let call_omitted_sse = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-5-5\",\"content\":[],\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_omit_1\",\"name\":\"unadaptable_root_oneof\",\"input\":{}}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"a\\\":\\\"hi\\\"}\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":8}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        );
+        server.route("/anthropic", vec![Resp::sse(call_omitted_sse), Resp::sse(fixture("anthropic-text.sse"))]);
+        let h = provider_host(&mut env, &server, json!({ "model": "anthropic/claude-sonnet-5-5" })).await;
+        expose(&h);
+        global(&h, "AG", h.service_table("agent").unwrap());
+        exec(
+            &h,
+            r#"T:register("unadaptable_root_oneof", {
+                description = "non-object branch root oneOf tool",
+                side_effect = "read",
+                parameters = {
+                    type = "object",
+                    oneOf = {
+                        { type = "string" },
+                        { type = "object", properties = { a = { type = "string" } } },
+                    },
+                },
+                execute = function()
+                    mare.g.OMITTED_TOOL_EXECUTED = (mare.g.OMITTED_TOOL_EXECUTED or 0) + 1
+                    return "should_never_run"
+                end,
+            })
+            -- Seed earlier history referencing `unadaptable_root_oneof` (e.g. from another provider).
+            AG:append({ role = "user", content = { { type = "text", text = "prior turn" } } })
+            AG:append({
+                role = "assistant",
+                content = {
+                    { type = "tool_call", id = "hist_call_1", name = "unadaptable_root_oneof", arguments = { a = "old" } },
+                },
+            })
+            AG:append({
+                role = "tool_result",
+                tool_call_id = "hist_call_1",
+                tool_name = "unadaptable_root_oneof",
+                content = { { type = "text", text = "prior output" } },
+            })
+            AG:append({ role = "assistant", content = { { type = "text", text = "prior done" } } })"#,
+        )
+        .await;
+
+        h.prompt("call it again", json!({})).await.unwrap();
+        assert_eq!(
+            eval::<i64>(&h, "return mare.g.OMITTED_TOOL_EXECUTED or 0").await,
+            0,
+            "tool omitted by Anthropic wire filter must NOT execute locally"
+        );
+        let reqs = server.requests();
+        assert!(reqs.len() >= 2, "expected initial + tool-error continuation request, got {}", reqs.len());
+        let first_tools = reqs[0].json()["tools"].as_array().cloned().unwrap_or_default();
+        assert!(
+            first_tools.iter().all(|t| t["name"] != "unadaptable_root_oneof"),
+            "omitted tool must not appear in Anthropic wire request tools"
+        );
+        // The continuation request degrades undeclared tool calls/results to text (never emitting
+        // raw tool_use/tool_result for an omitted tool) and carries the blocked-tool error text.
+        let second_msgs = reqs[1].json()["messages"].to_string();
+        assert!(
+            second_msgs.contains("Tool call blocked: tool was not declared in this request"),
+            "rejected call to omitted tool must carry blocked-tool error: {second_msgs}"
+        );
+        assert!(
+            !second_msgs.contains("\"type\":\"tool_use\"") && !second_msgs.contains("\"type\":\"tool_result\""),
+            "omitted tool must not serialize raw tool_use/tool_result blocks on Anthropic: {second_msgs}"
+        );
+        let blocked_in_history = eval::<bool>(
+            &h,
+            r#"for _, m in ipairs(AG:messages()) do
+                if m.role == "tool_result" and m.tool_name == "unadaptable_root_oneof" and m.is_error == true then
+                    return true
+                end
+            end
+            return false"#,
+        )
+        .await;
+        assert!(blocked_in_history, "session history must record blocked tool_result with is_error = true");
+        h.shutdown().await;
+    })
+    .await
+}

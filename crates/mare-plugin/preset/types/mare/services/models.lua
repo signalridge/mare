@@ -181,6 +181,7 @@
 ---@field model_fields? table<string, string> wire-specific allowed model entry fields and their type names
 ---@field enrich_model? fun(model: table, entry: table, mark: fun(field: string)) optional models.dev enrichment hook for wire-specific model fields
 ---@field encode fun(req: mare.LlmRequest, endpoint: table): table, any?
+---@field filter_tools? fun(tools: table[], req: mare.LlmRequest, meta: table): table[] optional pre-bind tool compatibility filter so wire declarations and local dispatch bindings match
 ---@field finalize? fun(req: mare.LlmRequest, endpoint: table, wire: table, state?: any)
 ---@field decoder fun(sink: fun(ev: mare.StreamEvent), context?: {endpoint: table, request: table, response?: table, state?: any}): mare.WireDecoder
 ---@field error? fun(payload: any): {api_code?: any, api_type?: string, message?: string, status?: integer, request_id?: string, trace_id?: string}|nil

@@ -320,6 +320,44 @@ assert(a_out.properties.txt.maxLength == nil and a_out.properties.txt.pattern ==
 assert(a_out.properties.txt.format == "uuid")
 assert(a_out.properties.txt.description:find("max length: 32", 1, true))
 
+-- Anthropic tool input_schema: object-root oneOf flattening, conflicting property merge, shared required, and non-object rejection
+local a_oneof_in = {
+    type = "object",
+    description = "Fetch resource",
+    oneOf = {
+        {
+            properties = { common = { type = "string" }, target = { type = "string" }, path = { type = "string" } },
+            required = { "common", "path" },
+            additionalProperties = false,
+        },
+        {
+            properties = { common = { type = "string" }, target = { type = "integer" }, url = { type = "string" } },
+            required = { "common", "url" },
+            additionalProperties = false,
+        },
+    },
+}
+local a_oneof_out = S.sanitize(a_oneof_in, "anthropic", "https://api.anthropic.com", "claude-sonnet-5-5", { route = "anthropic" })
+assert(a_oneof_out.oneOf == nil, "top-level oneOf must be flattened for Anthropic tool schemas")
+assert(a_oneof_out.type == "object")
+assert(a_oneof_out.properties.path.type == "string" and a_oneof_out.properties.url.type == "string")
+assert(a_oneof_out.properties.common.type == "string")
+assert(type(a_oneof_out.properties.target.anyOf) == "table" and #a_oneof_out.properties.target.anyOf == 2)
+assert(#a_oneof_out.required == 1 and a_oneof_out.required[1] == "common", "required must be branch intersection")
+assert(a_oneof_out.additionalProperties == false)
+assert(a_oneof_out.description:find("Fetch resource", 1, true) and a_oneof_out.description:find("required: common, path", 1, true))
+assert(a_oneof_in.oneOf ~= nil, "input oneOf schema must not be mutated")
+
+local ok_bad_root_oneof = pcall(
+    S.sanitize,
+    { type = "object", oneOf = { { type = "string" }, { type = "object", properties = { a = { type = "string" } } } } },
+    "anthropic",
+    "https://api.anthropic.com",
+    "claude-sonnet-5-5",
+    { route = "anthropic" }
+)
+assert(not ok_bad_root_oneof, "non-object branch in top-level oneOf must raise diagnostic error")
+
 return { ok = true }
 "#,
             json!([]),
