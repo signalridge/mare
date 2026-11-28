@@ -1210,3 +1210,130 @@ fn acp_queued_prompt_fails_promptly_when_preceding_background_turn_fails_and_par
 
     rpc.kill_and_wait();
 }
+
+#[test]
+fn acp_preserves_trust_source_for_trust_default_and_trust_resolve_plugins() {
+    // 1. `trust_default = "trust"` in init.lua loads project skills in both same-cwd and other-cwd sessions.
+    let home = tempfile::tempdir().unwrap();
+    let cfg_dir = home.path().join("config");
+    let plugins_dir = cfg_dir.join("plugins");
+    std::fs::create_dir_all(&plugins_dir).unwrap();
+    std::fs::write(cfg_dir.join("init.lua"), "mare.setup { trust_default = \"trust\" }\n").unwrap();
+
+    let req_log = home.path().join("acp-trust-req.json");
+    std::fs::write(
+        plugins_dir.join("record-prov.lua"),
+        format!(
+            r#"return {{
+    name = "record-prov",
+    inject = {{ "llm" }},
+    apply = function(ctx)
+        ctx.llm:register_provider({{
+            provider = "rec",
+            no_key = true,
+            models = {{ {{ model_id = "m", name = "Rec", images = true }} }},
+            stream = function(req)
+                mare.fs.write({:?}, mare.json.encode({{ system = req.system }}))
+                return {{ role = "assistant", content = {{ {{ type = "text", text = "ok" }} }}, stop_reason = "stop" }}
+            end,
+        }})
+    end,
+}}"#,
+            req_log.to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    let ws = tempfile::tempdir().unwrap();
+    let skill_dir = ws.path().join(".mare/skills/acp-proj-skill");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: acp-proj-skill\ndescription: ACP project skill loaded via trust_default\n---\nbody\n",
+    )
+    .unwrap();
+
+    let mut cmd = mare_cmd();
+    cmd.args(["--model", "rec/m", "acp"]).env("MARE_HOME", home.path()).current_dir(ws.path()).stderr(Stdio::piped());
+    let mut rpc = RpcClient::spawn_cmd(&mut cmd);
+    let _ = rpc.call_raw("initialize", json!({ "protocolVersion": 1, "clientCapabilities": {} }), |_| json!(null));
+    let cwd = dunce::canonicalize(ws.path()).unwrap();
+    let s = rpc.call_raw("session/new", json!({ "cwd": cwd, "mcpServers": [] }), |_| json!(null));
+    let sid = s["result"]["sessionId"].as_str().unwrap_or_else(|| panic!("{s}")).to_string();
+    let p_id = rpc.request("session/prompt", json!({ "sessionId": sid, "prompt": [{ "type": "text", "text": "hi" }] }));
+    let (p_resp, _) = read_until(&mut rpc, p_id, Some(&sid));
+    assert_eq!(p_resp["result"]["stopReason"], "end_turn", "{p_resp}");
+    rpc.kill_and_wait();
+
+    let recorded: Value = serde_json::from_str(&std::fs::read_to_string(&req_log).unwrap()).unwrap();
+    let system = recorded["system"].as_str().unwrap_or("");
+    assert!(
+        system.contains("acp-proj-skill"),
+        "ACP with trust_default = \"trust\" must load project skills into the request: {system}"
+    );
+
+    // 2. A `trust/resolve` plugin can trust a directory opened via ACP `session/new` even when launch cwd differs.
+    let home2 = tempfile::tempdir().unwrap();
+    let cfg_dir2 = home2.path().join("config");
+    let plugins_dir2 = cfg_dir2.join("plugins");
+    std::fs::create_dir_all(&plugins_dir2).unwrap();
+    let launch_dir = tempfile::tempdir().unwrap();
+    let ws2 = tempfile::tempdir().unwrap();
+    let skill_dir2 = ws2.path().join(".mare/skills/acp-resolver-skill");
+    std::fs::create_dir_all(&skill_dir2).unwrap();
+    std::fs::write(
+        skill_dir2.join("SKILL.md"),
+        "---\nname: acp-resolver-skill\ndescription: ACP project skill loaded via trust/resolve\n---\nbody\n",
+    )
+    .unwrap();
+    let req_log2 = home2.path().join("acp-resolver-req.json");
+    std::fs::write(
+        plugins_dir2.join("trust-resolver.lua"),
+        format!(
+            r#"return {{
+    name = "trust-resolver",
+    inject = {{ "bus", "llm" }},
+    apply = function(ctx)
+        ctx:on("trust/resolve", function(ev, next)
+            ev.decision = true
+            return next(ev)
+        end)
+        ctx.llm:register_provider({{
+            provider = "rec",
+            no_key = true,
+            models = {{ {{ model_id = "m", name = "Rec", images = true }} }},
+            stream = function(req)
+                mare.fs.write({:?}, mare.json.encode({{ system = req.system }}))
+                return {{ role = "assistant", content = {{ {{ type = "text", text = "ok" }} }}, stop_reason = "stop" }}
+            end,
+        }})
+    end,
+}}"#,
+            req_log2.to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    let mut cmd2 = mare_cmd();
+    cmd2.args(["--model", "rec/m", "acp"])
+        .env("MARE_HOME", home2.path())
+        .current_dir(launch_dir.path())
+        .stderr(Stdio::piped());
+    let mut rpc2 = RpcClient::spawn_cmd(&mut cmd2);
+    let _ = rpc2.call_raw("initialize", json!({ "protocolVersion": 1, "clientCapabilities": {} }), |_| json!(null));
+    let cwd2 = dunce::canonicalize(ws2.path()).unwrap();
+    let s2 = rpc2.call_raw("session/new", json!({ "cwd": cwd2, "mcpServers": [] }), |_| json!(null));
+    let sid2 = s2["result"]["sessionId"].as_str().unwrap_or_else(|| panic!("{s2}")).to_string();
+    let p_id2 =
+        rpc2.request("session/prompt", json!({ "sessionId": sid2, "prompt": [{ "type": "text", "text": "hi" }] }));
+    let (p_resp2, _) = read_until(&mut rpc2, p_id2, Some(&sid2));
+    assert_eq!(p_resp2["result"]["stopReason"], "end_turn", "{p_resp2}");
+    rpc2.kill_and_wait();
+
+    let recorded2: Value = serde_json::from_str(&std::fs::read_to_string(&req_log2).unwrap()).unwrap();
+    let system2 = recorded2["system"].as_str().unwrap_or("");
+    assert!(
+        system2.contains("acp-resolver-skill"),
+        "ACP trust/resolve plugin must load project skills into the request: {system2}"
+    );
+}

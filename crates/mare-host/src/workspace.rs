@@ -70,6 +70,89 @@ pub fn resolve_workspace_trust(
     }
 }
 
+/// Synchronize `mare.args` trust fields (`trust`, `trust_source`, `trust_pending`) for a
+/// workspace session hosted at `target_cwd`.
+///
+/// Mirrors [`resolve_workspace_trust`] so CLI `--no-trust` applies everywhere, CLI `--trust`
+/// applies only when `same_ws` is true, and undecided workspaces retain `trust_source` /
+/// `trust_pending` for `trust_default` and `trust/resolve` plugins.
+pub fn sync_workspace_trust_args(
+    args: &mut serde_json::Value,
+    target_cwd: &Path,
+    same_ws: bool,
+    trusted: bool,
+    cli_trust: Option<bool>,
+    plugins_enabled: bool,
+) {
+    if !args.is_object() {
+        *args = serde_json::json!({});
+    }
+    let Some(map) = args.as_object_mut() else { return };
+    if cli_trust == Some(false) {
+        map.insert("trust".into(), serde_json::Value::String("untrusted".into()));
+        map.insert("trust_source".into(), serde_json::Value::String("cli".into()));
+        map.insert("trust_pending".into(), serde_json::Value::Bool(false));
+        return;
+    }
+    if same_ws && cli_trust == Some(true) && plugins_enabled {
+        map.insert("trust".into(), serde_json::Value::String(if trusted { "trusted" } else { "untrusted" }.into()));
+        map.insert("trust_source".into(), serde_json::Value::String("cli".into()));
+        map.insert("trust_pending".into(), serde_json::Value::Bool(false));
+        return;
+    }
+    if trusted {
+        let existing_source = map.get("trust_source").and_then(|v| v.as_str()).map(str::to_owned);
+        let source = if same_ws && matches!(existing_source.as_deref(), Some("default" | "saved")) {
+            existing_source.unwrap()
+        } else if matches!(mare_config::trust::lookup_checked(target_cwd), Ok(Some(true))) {
+            "saved".to_string()
+        } else if same_ws {
+            "default".to_string()
+        } else {
+            "saved".to_string()
+        };
+        map.insert("trust".into(), serde_json::Value::String("trusted".into()));
+        map.insert("trust_source".into(), serde_json::Value::String(source));
+        map.insert("trust_pending".into(), serde_json::Value::Bool(false));
+        return;
+    }
+    if !plugins_enabled {
+        map.insert("trust".into(), serde_json::Value::String("untrusted".into()));
+        map.insert("trust_source".into(), serde_json::Value::String("none".into()));
+        map.insert("trust_pending".into(), serde_json::Value::Bool(false));
+        return;
+    }
+    match mare_config::trust::lookup_checked(target_cwd) {
+        Ok(Some(false)) => {
+            map.insert("trust".into(), serde_json::Value::String("untrusted".into()));
+            map.insert("trust_source".into(), serde_json::Value::String("saved".into()));
+            map.insert("trust_pending".into(), serde_json::Value::Bool(false));
+        }
+        Ok(Some(true)) | Err(_) => {
+            map.insert("trust".into(), serde_json::Value::String("untrusted".into()));
+            map.insert("trust_source".into(), serde_json::Value::String("none".into()));
+            map.insert("trust_pending".into(), serde_json::Value::Bool(false));
+        }
+        Ok(None) => {
+            let existing_source = map.get("trust_source").and_then(|v| v.as_str());
+            if same_ws && matches!(existing_source, Some("undecided" | "pending")) {
+                let pending =
+                    map.get("trust_pending").and_then(|v| v.as_bool()).unwrap_or(existing_source == Some("pending"));
+                map.insert("trust".into(), serde_json::Value::String("undecided".into()));
+                map.insert("trust_pending".into(), serde_json::Value::Bool(pending));
+            } else if !mare_config::trust::protected_resources(target_cwd).is_empty() {
+                map.insert("trust".into(), serde_json::Value::String("undecided".into()));
+                map.insert("trust_source".into(), serde_json::Value::String("undecided".into()));
+                map.insert("trust_pending".into(), serde_json::Value::Bool(false));
+            } else {
+                map.insert("trust".into(), serde_json::Value::String("untrusted".into()));
+                map.insert("trust_source".into(), serde_json::Value::String("none".into()));
+                map.insert("trust_pending".into(), serde_json::Value::Bool(false));
+            }
+        }
+    }
+}
+
 /// Per-workspace trust and effective config snapshot held by a [`crate::Host`] (and shared by
 /// `WorkspaceRegistry`).
 pub struct WorkspaceState {
@@ -459,5 +542,31 @@ mod tests {
         assert!(resolve_workspace_trust(dir.path(), true, true, None, false));
         assert!(!resolve_workspace_trust(dir.path(), true, false, None, false));
         assert!(!resolve_workspace_trust(sibling.path(), false, true, None, false));
+    }
+
+    #[test]
+    fn sync_workspace_trust_args_scopes_cli_and_preserves_undecided_sources() {
+        let dir = TempDir::new();
+        let sibling = TempDir::new();
+        std::fs::create_dir_all(sibling.path().join(".mare/plugins")).unwrap();
+
+        let mut args = serde_json::json!({ "trust": "trusted", "trust_source": "cli" });
+        sync_workspace_trust_args(&mut args, dir.path(), true, true, Some(true), true);
+        assert_eq!(args["trust"], "trusted");
+        assert_eq!(args["trust_source"], "cli");
+
+        let mut other = serde_json::json!({ "trust": "trusted", "trust_source": "cli" });
+        sync_workspace_trust_args(&mut other, sibling.path(), false, false, Some(true), true);
+        assert_eq!(other["trust"], "undecided");
+        assert_eq!(other["trust_source"], "undecided");
+
+        let mut no_trust_other = serde_json::json!({});
+        sync_workspace_trust_args(&mut no_trust_other, sibling.path(), false, false, Some(false), true);
+        assert_eq!(no_trust_other["trust"], "untrusted");
+        assert_eq!(no_trust_other["trust_source"], "cli");
+
+        let mut clean_saved = serde_json::json!({});
+        sync_workspace_trust_args(&mut clean_saved, dir.path(), true, true, None, false);
+        assert_eq!(clean_saved["trust"], "trusted");
     }
 }

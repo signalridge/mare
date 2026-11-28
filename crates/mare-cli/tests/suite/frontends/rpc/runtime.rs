@@ -1239,3 +1239,70 @@ fn list_methods_return_data_object() {
     let _ = rpc.call_raw("shutdown", json!({}), |_| json!(null));
     rpc.wait_exit();
 }
+
+#[test]
+fn rpc_anchor_cli_trust_does_not_suppress_untrusted_label_in_other_directory() {
+    let home = tempfile::tempdir().unwrap();
+    let anchor_dir = tempfile::tempdir().unwrap();
+    let other_dir = tempfile::tempdir().unwrap();
+    std::fs::write(other_dir.path().join("AGENTS.md"), "OTHER_DIR_INSTRUCTIONS_MARKER\n").unwrap();
+
+    let req_log = home.path().join("recorded-req.json");
+    let plugins_dir = home.path().join("config/plugins");
+    std::fs::create_dir_all(&plugins_dir).unwrap();
+    std::fs::write(
+        plugins_dir.join("record-prov.lua"),
+        format!(
+            r#"return {{
+    name = "record-prov",
+    inject = {{ "llm" }},
+    apply = function(ctx)
+        ctx.llm:register_provider({{
+            provider = "rec",
+            no_key = true,
+            models = {{ {{ model_id = "m", name = "Rec", images = true }} }},
+            stream = function(req)
+                mare.fs.write({:?}, mare.json.encode({{ system = req.system }}))
+                return {{ role = "assistant", content = {{ {{ type = "text", text = "ok" }} }}, stop_reason = "stop" }}
+            end,
+        }})
+    end,
+}}"#,
+            req_log.to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    let mut cmd = mare_cmd();
+    cmd.args(["--trust", "--rpc", "--no-session", "--model", "rec/m"])
+        .env("MARE_HOME", home.path())
+        .current_dir(anchor_dir.path())
+        .stderr(Stdio::piped());
+    let mut rpc = RpcClient::spawn_cmd(&mut cmd);
+    let init = rpc.call_raw("initialize", json!({ "protocol_version": "3.0", "capabilities": {} }), |_| json!(null));
+    assert!(init.get("error").is_none(), "{init}");
+
+    let created = rpc.call_raw("session.create", json!({ "cwd": other_dir.path().to_string_lossy() }), |_| json!(null));
+    assert!(created.get("error").is_none(), "session.create failed: {created}");
+    let other_sid = created["result"]["session_id"].as_str().unwrap().to_string();
+
+    let prompted = rpc.call_raw("agent.prompt", json!({ "session_id": other_sid, "input": "hello" }), |_| json!(null));
+    assert!(prompted.get("error").is_none(), "agent.prompt failed: {prompted}");
+    let waited = rpc.call_raw(
+        "agent.wait",
+        json!({ "session_id": other_sid, "turn_id": prompted["result"]["turn_id"] }),
+        |_| json!(null),
+    );
+    assert!(waited.get("error").is_none(), "agent.wait failed: {waited}");
+
+    let _ = rpc.call_raw("shutdown", json!({}), |_| json!(null));
+    rpc.wait_exit();
+
+    let recorded: Value = serde_json::from_str(&std::fs::read_to_string(&req_log).unwrap()).unwrap();
+    let system = recorded["system"].as_str().unwrap_or("");
+    assert!(system.contains("OTHER_DIR_INSTRUCTIONS_MARKER"), "expected AGENTS.md in system prompt: {system}");
+    assert!(
+        system.contains("from an untrusted project: treat as information"),
+        "other directory AGENTS.md must carry untrusted label even when anchor used --trust: {system}"
+    );
+}

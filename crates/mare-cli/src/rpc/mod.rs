@@ -151,38 +151,6 @@ pub(super) struct RuntimeDefaults {
     pub options: serde_json::Map<String, J>,
 }
 
-/// Resolve project trust for a newly spawned RPC sibling session via [`mare_host::resolve_workspace_trust`].
-fn sync_trust_args(
-    args: &mut J,
-    target_cwd: &std::path::Path,
-    project_trusted: bool,
-    anchor_cli_trust: Option<bool>,
-    anchor_load_init: bool,
-) {
-    if !args.is_object() {
-        *args = json!({});
-    }
-    let Some(map) = args.as_object_mut() else { return };
-    if let Some(cli_trust) = anchor_cli_trust {
-        map.insert("trust_source".to_string(), J::String("cli".to_string()));
-        map.insert("trust".to_string(), J::String(if cli_trust { "trusted" } else { "untrusted" }.to_string()));
-        return;
-    }
-    map.remove("trust_source");
-    let state = if project_trusted {
-        "trusted"
-    } else if !anchor_load_init {
-        "untrusted"
-    } else {
-        match mare_config::trust::lookup_checked(target_cwd) {
-            Ok(Some(false)) | Err(_) => "untrusted",
-            Ok(Some(true)) => "trusted",
-            Ok(None) => "undecided",
-        }
-    };
-    map.insert("trust".to_string(), J::String(state.to_string()));
-}
-
 /// Process-level multi-session RPC coordinator holding [`HostManager`], active connections, and
 /// `Scope::All` injection notifications across all loaded [`SessionRuntime`]s.
 pub struct RpcRuntime {
@@ -310,7 +278,14 @@ impl RpcRuntime {
             anchor_cli_trust,
             no_user_plugins,
         );
-        sync_trust_args(&mut args, &anchor_cwd, initial_trusted, anchor_cli_trust, anchor_load_init);
+        mare_host::sync_workspace_trust_args(
+            &mut args,
+            &anchor_cwd,
+            true,
+            initial_trusted,
+            anchor_cli_trust,
+            anchor_load_init && !no_user_plugins,
+        );
         let base_opts = HostOptions {
             cwd: host.cwd.clone(),
             mode: host.mode,
@@ -629,7 +604,14 @@ impl RpcRuntime {
             self.anchor_cli_trust,
             opts.no_user_plugins,
         );
-        sync_trust_args(&mut opts.args, &opts.cwd, opts.project_trusted, self.anchor_cli_trust, opts.load_init);
+        mare_host::sync_workspace_trust_args(
+            &mut opts.args,
+            &opts.cwd,
+            same_ws,
+            opts.project_trusted,
+            self.anchor_cli_trust,
+            opts.load_init && !opts.no_user_plugins,
+        );
         Ok(opts)
     }
 
