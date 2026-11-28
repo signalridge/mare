@@ -3,6 +3,7 @@
 return function(D)
 	local ctx, cfg = D.ctx, D.cfg
 	local providers, models, overrides, llm = D.providers, D.models, D.overrides, D.llm
+	local lib = require("mare_lib")
 
 	local model_sources = {}
 	local SOURCE_FIELDS = {
@@ -244,7 +245,7 @@ return function(D)
 		if type(raw) ~= "string" or raw == "" or not scope then
 			return nil
 		end
-		local ok, j = pcall(mare.json.decode, raw)
+		local ok, j = pcall(mare.json.decode, lib.strip_utf8_bom(raw))
 		if not (ok and type(j) == "table") then
 			return nil
 		end
@@ -276,7 +277,7 @@ return function(D)
 			return
 		end
 		local ok, existing = pcall(function()
-			return mare.json.decode(mare.fs.read(catalog_path(name)) or "")
+			return mare.json.decode(lib.strip_utf8_bom(mare.fs.read(catalog_path(name)) or ""))
 		end)
 		local scopes = ok and type(existing) == "table" and type(existing.scopes) == "table" and existing.scopes or {}
 		scopes[scope] = { fetched_at = os.time(), models = list }
@@ -361,7 +362,7 @@ return function(D)
 		local c = mdev_mem
 		if not c then
 			local ok, j = pcall(function()
-				return mare.json.decode(mare.fs.read(mdev_path) or "")
+				return mare.json.decode(lib.strip_utf8_bom(mare.fs.read(mdev_path) or ""))
 			end)
 			c = ok and type(j) == "table" and type(j.providers) == "table" and j or nil
 		end

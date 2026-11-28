@@ -198,7 +198,8 @@ impl SetupState {
         let p = setup_file(dir);
         match std::fs::read_to_string(&p) {
             Ok(t) => {
-                let v: Value = serde_json::from_str(&t).map_err(|e| format!("{}: {e}", p.display()))?;
+                let v: Value = serde_json::from_str(mare_shared::strip_utf8_bom(&t))
+                    .map_err(|e| format!("{}: {e}", p.display()))?;
                 Self::from_json(&v).map(Some)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),

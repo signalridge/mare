@@ -109,3 +109,29 @@ pub const SESSION_TRUST_SOURCE: &str = "session";
 
 /// Trust change source tag used when trust applies to the workspace.
 pub const WORKSPACE_TRUST_SOURCE: &str = "workspace";
+
+/// Strip at most one leading UTF-8 BOM (`EF BB BF`) from file text before parsing JSON.
+pub fn strip_utf8_bom(s: &str) -> &str {
+    s.strip_prefix('\u{FEFF}').unwrap_or(s)
+}
+
+/// Strip at most one leading UTF-8 BOM (`EF BB BF`) from file bytes before parsing JSON.
+pub fn strip_utf8_bom_bytes(bytes: &[u8]) -> &[u8] {
+    bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes)
+}
+
+#[cfg(test)]
+mod bom_tests {
+    use super::{strip_utf8_bom, strip_utf8_bom_bytes};
+
+    #[test]
+    fn strip_utf8_bom_removes_at_most_one_leading_bom() {
+        assert_eq!(strip_utf8_bom("\u{FEFF}{}"), "{}");
+        assert_eq!(strip_utf8_bom("\u{FEFF}\u{FEFF}{}"), "\u{FEFF}{}");
+        assert_eq!(strip_utf8_bom("{}"), "{}");
+        assert_eq!(strip_utf8_bom(""), "");
+        assert_eq!(strip_utf8_bom_bytes(b"\xEF\xBB\xBF{}"), b"{}");
+        assert_eq!(strip_utf8_bom_bytes(b"\xEF\xBB\xBF\xEF\xBB\xBF{}"), b"\xEF\xBB\xBF{}");
+        assert_eq!(strip_utf8_bom_bytes(b"{}"), b"{}");
+    }
+}

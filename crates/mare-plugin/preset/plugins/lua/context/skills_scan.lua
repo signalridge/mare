@@ -244,7 +244,9 @@ return function(D)
 
 	local function cached_skills(observation)
 		local ok, doc = pcall(function()
-			return mare.json.decode(mare.fs.read(cache_dir .. "/" .. observation.key .. ".json") or "")
+			return mare.json.decode(
+				lib.strip_utf8_bom(mare.fs.read(cache_dir .. "/" .. observation.key .. ".json") or "")
+			)
 		end)
 		if
 			not ok

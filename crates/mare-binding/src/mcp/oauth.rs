@@ -175,7 +175,9 @@ impl FileCredentialStore {
 impl CredentialStore for FileCredentialStore {
     async fn load(&self) -> Result<Option<StoredCredentials>, AuthError> {
         match tokio::fs::read(&self.0).await {
-            Ok(b) => serde_json::from_slice(&b).map(Some).map_err(|e| AuthError::InternalError(e.to_string())),
+            Ok(b) => serde_json::from_slice(mare_shared::strip_utf8_bom_bytes(&b))
+                .map(Some)
+                .map_err(|e| AuthError::InternalError(e.to_string())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(AuthError::InternalError(e.to_string())),
         }

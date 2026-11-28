@@ -52,10 +52,11 @@ return function(path, bump_policy_revision)
 		if text == nil then
 			return nil, path .. ": " .. tostring(rerr or "read failed"), "read-error:" .. tostring(rerr)
 		end
-		if not text:match("%S") then
+		local body = lib.strip_utf8_bom(text)
+		if not body:match("%S") then
 			return {}, nil, "bytes:" .. text
 		end
-		local ok, doc = pcall(mare.json.decode_lossless, text)
+		local ok, doc = pcall(mare.json.decode_lossless, body)
 		if not ok or type(doc) ~= "table" or #doc > 0 then
 			return nil, path .. " is corrupt (not a JSON object): not overwritten", "bytes:" .. text
 		end

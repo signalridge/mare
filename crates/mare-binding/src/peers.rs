@@ -188,7 +188,10 @@ fn list_in(d: &Path) -> Vec<Value> {
             remove_entry_in(d, pid);
             continue;
         }
-        if let Some(v) = std::fs::read_to_string(&p).ok().and_then(|s| serde_json::from_str::<Value>(&s).ok()) {
+        if let Some(v) = std::fs::read_to_string(&p)
+            .ok()
+            .and_then(|s| serde_json::from_str::<Value>(mare_shared::strip_utf8_bom(&s)).ok())
+        {
             out.push(v);
         }
     }

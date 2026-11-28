@@ -1,6 +1,7 @@
 -- llm.auth_store: auth.json reads and writes (corrupt-file guard, lock); part of the `llm` plugin (plugins/llm.lua), loaded at the start of its apply.
 return function(D)
 	local ctx, llm = D.ctx, D.llm
+	local lib = require("mare_lib")
 	local AUTH_VERSION = 1
 
 	--- auth.json helpers shared by providers.
@@ -19,7 +20,8 @@ return function(D)
 			end
 			return nil, ("%s cannot be read: %s"):format(mare.paths.auth, tostring(read_err)), "io"
 		end
-		local ok, t = pcall(mare.json.decode, s)
+		local body = lib.strip_utf8_bom(s)
+		local ok, t = pcall(mare.json.decode, body)
 		if not ok then
 			return nil, tostring(t), "corrupt"
 		end
@@ -30,7 +32,7 @@ return function(D)
 			and t.version == AUTH_VERSION
 		then
 			if lossless then
-				local converted, result, err = pcall(mare.json.decode_lossless, s)
+				local converted, result, err = pcall(mare.json.decode_lossless, body)
 				if not converted then
 					return nil, tostring(result), "corrupt"
 				end

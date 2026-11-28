@@ -96,7 +96,8 @@ function M.news()
 			end
 			seen = { version = expected_version, seen = {} }
 		else
-			local ok, parsed = pcall(mare.json.decode_lossless, raw)
+			local body = type(raw) == "string" and raw:sub(1, 3) == "\239\187\191" and raw:sub(4) or raw
+			local ok, parsed = pcall(mare.json.decode_lossless, body)
 			if not ok or not valid_news_doc(parsed, expected_version) then
 				local detail = ok and "unsupported format or version" or tostring(parsed)
 				mare.log(

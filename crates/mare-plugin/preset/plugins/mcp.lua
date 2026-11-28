@@ -110,6 +110,7 @@ return {
 		local approvals_path = state_dir .. "/mcp-approvals.json"
 		local disabled_path = state_dir .. "/mcp-disabled.json"
 		local startup_cap = 300000
+		local lib = require("mare_lib")
 
 		local function read_json(path, project_safe)
 			if not mare.fs.exists(path) then
@@ -127,7 +128,7 @@ return {
 			if type(text) ~= "string" then
 				return nil, ("%s: %s"):format(path, tostring(rerr or "read failed"))
 			end
-			local dok, j, derr = pcall(mare.json.decode, text)
+			local dok, j, derr = pcall(mare.json.decode, lib.strip_utf8_bom(text))
 			if not dok then
 				return nil, ("%s: invalid JSON (%s)"):format(path, tostring(j))
 			end
@@ -182,7 +183,6 @@ return {
 		-- result shaping, elicitation, server prompts, the /mcp and `mare mcp` actions and the
 		-- public catalog register nothing when loaded: each loads the first time its field on D is
 		-- read (a server connects, a tool returns, /mcp or `mare mcp` runs) instead of at startup
-		local lib = require("mare_lib")
 		local function cold(loader)
 			local _, proxy = lib.lazy_group({}, {}, loader)
 			return proxy
@@ -219,7 +219,7 @@ return {
 			if not ok or type(text) ~= "string" then
 				return nil
 			end
-			local decoded, j = pcall(mare.json.decode_lossless, text)
+			local decoded, j = pcall(mare.json.decode_lossless, lib.strip_utf8_bom(text))
 			return decoded and type(j) == "table" and j.version == 2 and type(j.tools) == "table" and j.tools or nil
 		end
 		-- written outside tool calls (a write from inside one goes through the sandbox and the

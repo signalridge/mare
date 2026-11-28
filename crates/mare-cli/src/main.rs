@@ -363,7 +363,7 @@ fn load_output_schema(cli: &Cli, cwd: &Path, mode: Mode) -> std::result::Result<
     let raw = std::fs::read_to_string(&resolved).map_err(|e| {
         crate::headless::usage_error(headless_json, &format!("reading --output-schema {}: {e}", path.display()))
     })?;
-    let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
+    let parsed: serde_json::Value = serde_json::from_str(mare_shared::strip_utf8_bom(&raw)).map_err(|e| {
         crate::headless::usage_error(headless_json, &format!("invalid JSON in --output-schema {}: {e}", path.display()))
     })?;
     mare_shared::schema::OutputSchema::compile(parsed.clone()).map_err(|e| {
