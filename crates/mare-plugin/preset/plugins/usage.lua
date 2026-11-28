@@ -46,6 +46,8 @@ return {
 			for k in pairs(U) do
 				if k == "cost_unknown" then
 					U[k] = false
+				elseif k == "reasoning" then
+					U[k] = nil
 				else
 					U[k] = 0
 				end
@@ -56,6 +58,9 @@ return {
 		local function add(u, model, subscription, side)
 			U.input = U.input + (u.input or 0)
 			U.output = U.output + (u.output or 0)
+			if type(u.reasoning) == "number" then
+				U.reasoning = (U.reasoning or 0) + u.reasoning
+			end
 			U.cache_read = U.cache_read + (u.cache_read or 0)
 			U.cache_write = U.cache_write + (u.cache_write or 0)
 			U.cache_write_1h = U.cache_write_1h + (u.cache_write_1h or 0)
@@ -384,7 +389,10 @@ return {
 								)
 						),
 						row("input", k(U.input)),
-						row("output", k(U.output)),
+						row(
+							"output",
+							k(U.output) .. (U.reasoning ~= nil and (" (%s reasoning)"):format(k(U.reasoning)) or "")
+						),
 						row("cache read", k(U.cache_read)),
 						row(
 							"cache write",

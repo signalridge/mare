@@ -447,3 +447,124 @@ async fn rate_limit_reset_at_seconds_converts_to_epoch_ms() {
     })
     .await
 }
+
+/// Issue #114: reported `usage.reasoning` tokens are accumulated across live turns, side requests,
+/// and resume recomputation, distinguished from unreported (`nil` vs explicit `0`), and displayed
+/// in `/usage` as a share of `output` without altering output, context, or cost accounting.
+#[tokio::test]
+async fn usage_tracks_and_displays_reported_reasoning_tokens_across_live_side_and_resume() {
+    local(async {
+        let env = TestEnv::new().await;
+        let h = env.host().builtins(&["usage", "commands"]).faux(json!([])).build().await;
+        expose(&h);
+        fake_ui(&h).await;
+        global(&h, "U", h.service_table("usage").unwrap());
+        global(&h, "L", h.service_table("llm").unwrap());
+        global(&h, "CMD", h.service_table("commands").unwrap());
+
+        exec(
+            &h,
+            r#"
+            OVERLAY_TEXT = ""
+            local function flatten(node)
+                if type(node) ~= "table" then return "" end
+                if node.text then return tostring(node.text) end
+                local parts = {}
+                for _, child in ipairs(node.spans or node.items or {}) do
+                    parts[#parts + 1] = flatten(child)
+                end
+                return table.concat(parts, node.items and "\n" or "")
+            end
+            mare.ui.overlay = function(_, body) OVERLAY_TEXT = flatten(body) end
+
+            MODE = "unreported"
+            L:register_provider({
+                provider = "reas",
+                is_configured = function() return true end,
+                models = {
+                    {
+                        model_id = "m",
+                        name = "Reas",
+                        context_window = 100000,
+                        max_output = 4096,
+                        cost = { input = 1, output = 2, cache_read = 0, cache_write = 0 },
+                    },
+                },
+                stream = function()
+                    local u = { input = 100, output = 50, cache_read = 0, cache_write = 0 }
+                    if MODE == "zero" then
+                        u.reasoning = 0
+                    elseif MODE == "positive" then
+                        u.reasoning = 30
+                    end
+                    return {
+                        role = "assistant",
+                        stop_reason = "stop",
+                        content = { { type = "text", text = "reply " .. MODE } },
+                        usage = u,
+                    }
+                end,
+            })
+            assert(L:set_model("reas/m"))
+            "#,
+        )
+        .await;
+
+        // 1) Unreported reasoning stays nil and `/usage` does not show a reasoning suffix.
+        h.prompt("turn unreported", json!({})).await.unwrap();
+        let (has_r0, out0, ctx0, text0): (bool, i64, i64, String) = eval(
+            &h,
+            "CMD:run('/usage'); local t = U:totals(); return t.reasoning ~= nil, t.output, U:context_tokens(), OVERLAY_TEXT",
+        )
+        .await;
+        assert!(!has_r0, "unreported reasoning must stay nil");
+        assert_eq!((out0, ctx0), (50, 150));
+        assert!(!text0.contains("reasoning"), "unreported reasoning must not appear in /usage: {text0}");
+
+        // 2) Explicit 0 reasoning is distinguished from unreported and displayed as `(0 reasoning)`.
+        exec(&h, "MODE = 'zero'").await;
+        h.prompt("turn zero", json!({})).await.unwrap();
+        let (r1, out1, ctx1, text1): (i64, i64, i64, String) = eval(
+            &h,
+            "CMD:run('/usage'); local t = U:totals(); return t.reasoning, t.output, U:context_tokens(), OVERLAY_TEXT",
+        )
+        .await;
+        assert_eq!((r1, out1, ctx1), (0, 100, 150));
+        assert!(text1.contains("100 (0 reasoning)"), "explicit zero reasoning must appear in /usage: {text1}");
+
+        // 3) Positive reasoning on a main turn + auxiliary side request accumulates without changing
+        //    output, context size, or cost accounting.
+        exec(&h, "MODE = 'positive'").await;
+        h.prompt("turn positive", json!({})).await.unwrap();
+        let (r2, out2, ctx2, cost2, text2): (i64, i64, i64, f64, String) = eval(
+            &h,
+            r#"
+            local side_res = L:complete({
+                purpose = "btw",
+                messages = { { role = "user", content = { { type = "text", text = "side" } } } },
+                tools = {},
+            })
+            assert(side_res.stop_reason == "stop")
+            CMD:run("/usage")
+            local t = U:totals()
+            return t.reasoning, t.output, U:context_tokens(), t.cost, OVERLAY_TEXT
+            "#,
+        )
+        .await;
+        assert_eq!(r2, 60, "30 main + 30 side reasoning tokens");
+        assert_eq!(out2, 200, "output stays 4 * 50 without double-counting reasoning");
+        assert_eq!(ctx2, 150, "context stays input(100) + output(50)");
+        assert!(text2.contains("200 (60 reasoning)"), "expected reasoning share in /usage: {text2}");
+        h.shutdown().await;
+
+        // 4) Resume recomputes reasoning tokens from both main turns and side records.
+        let h2 = env.host().builtins(&["usage"]).faux(json!([])).resume().build().await;
+        global(&h2, "U", h2.service_table("usage").unwrap());
+        let (r_res, out_res, cost_res): (i64, i64, f64) =
+            eval(&h2, "local t = U:totals(); return t.reasoning, t.output, t.cost").await;
+        assert_eq!((r_res, out_res), (60, 200));
+        assert!((cost_res - cost2).abs() < 1e-9, "cost must match across resume: before={cost2} after={cost_res}");
+        h2.shutdown().await;
+    })
+    .await
+}

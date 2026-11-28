@@ -44,6 +44,7 @@ end
 local usage_totals = object({
 	input = integer,
 	output = integer,
+	reasoning = integer,
 	cache_read = integer,
 	cache_write = integer,
 	cache_write_1h = integer,
