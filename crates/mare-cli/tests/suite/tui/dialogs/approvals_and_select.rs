@@ -839,7 +839,6 @@ async fn permission_streak_offer_switches_to_wider_preset_when_accepted() {
     .await
 }
 
-<<<<<<< HEAD
 #[tokio::test]
 async fn permission_approval_dialog_shows_grant_scope_and_expiry() {
     local(async {
@@ -902,16 +901,17 @@ async fn permission_approval_dialog_shows_grant_scope_and_expiry() {
         t.until(
             "sandbox_permissions dialog shows resolved physical parent dir in body even with a long command",
             |s| {
-                let trimmed: Vec<&str> = s.lines().map(|l| l.trim().trim_matches('│').trim()).collect();
-                let flat_paths = trimmed.join("");
-                let flat_words = trimmed.join(" ");
+                let left_trimmed: Vec<&str> =
+                    s.lines().map(|l| l.split("│ │").next().unwrap_or(l).trim().trim_matches('│').trim()).collect();
+                let flat_paths = left_trimmed.join("");
+                let flat_words = left_trimmed.join(" ");
                 !s.contains("Grant scope:")
                     && !s.contains("later commands return to baseline")
                     && flat_paths.contains(&file_parent_s)
                     && flat_words.contains("Allow once = this call only")
                     && flat_words.matches("Allow once = this call only").count() == 1
                     && s.contains("Allow once (y)")
-                    && s.contains("Allow for this session (a)")
+                    && s.contains("Allow command & requested access for this session (a)")
             },
         )
         .await;
