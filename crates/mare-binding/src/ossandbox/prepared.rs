@@ -292,9 +292,13 @@ impl Prepared {
                     .map_err(|e| rt_err(format!("{}{e}", crate::winsandbox::RUNNER_SIGNATURE)))?;
                 crate::winsandbox::prepare_grants(&policy.workspace_roots(), &temp)
             };
-            grants.map_err(|e| {
+            let sids = grants.map_err(|e| {
                 rt_err(format!("{}granting the writable roots: {e}", crate::winsandbox::RUNNER_SIGNATURE))
-            })?
+            })?;
+            crate::winsandbox::verify_cwd_inheritance(&policy.workspace_roots(), cwd).map_err(|e| {
+                rt_err(format!("{}granting the writable roots: {e}", crate::winsandbox::RUNNER_SIGNATURE))
+            })?;
+            sids
         } else {
             vec![]
         };

@@ -34,8 +34,8 @@ mod token;
 #[path = "default_tests_win.rs"]
 mod tests;
 
-pub use acl::grant_write;
-pub(crate) use acl::with_path_acl_lock;
+pub use acl::{grant_write, has_standing_grant};
+pub(crate) use acl::{verify_dir_inheritance, with_path_acl_lock};
 pub use token::probe;
 
 use acl::allow_null_device;

@@ -11,8 +11,9 @@ use windows_sys::Win32::Security::Authorization::{
     SetSecurityInfo, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
 };
 use windows_sys::Win32::Security::{
-    ACL, ACL_REVISION, AddMandatoryAce, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, GetLengthSid, InitializeAcl,
-    LABEL_SECURITY_INFORMATION, SUB_CONTAINERS_AND_OBJECTS_INHERIT, WinLowLabelSid, WinWorldSid,
+    ACL, ACL_REVISION, AddMandatoryAce, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, GetLengthSid,
+    GetSecurityDescriptorControl, InitializeAcl, LABEL_SECURITY_INFORMATION, SE_DACL_PROTECTED,
+    SUB_CONTAINERS_AND_OBJECTS_INHERIT, WinLowLabelSid, WinWorldSid,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_SHARE_READ, FILE_SHARE_WRITE,
@@ -85,6 +86,150 @@ pub(super) unsafe fn has_exact(acl: *const ACL, ace_type: u8, flags: u8, mask: u
     }
 }
 
+/// Does `acl` hold an allow ACE granting at least `mask` to `sid` (with any inheritance flags)?
+unsafe fn has_allow_mask(acl: *const ACL, mask: u32, sid: *mut c_void) -> bool {
+    if acl.is_null() {
+        return false;
+    }
+    unsafe {
+        let base = acl as *const u8;
+        let size = std::ptr::read_unaligned(base.add(2) as *const u16) as usize;
+        let count = std::ptr::read_unaligned(base.add(4) as *const u16) as usize;
+        if !(8..=1 << 20).contains(&size) {
+            return false;
+        }
+        let sid_len = GetLengthSid(sid) as usize;
+        let want = std::slice::from_raw_parts(sid as *const u8, sid_len);
+        let mut off = 8;
+        for _ in 0..count {
+            if off + 8 > size {
+                return false;
+            }
+            let ace_size = std::ptr::read_unaligned(base.add(off + 2) as *const u16) as usize;
+            if ace_size < 8 || off + ace_size > size {
+                return false;
+            }
+            let ace_mask = std::ptr::read_unaligned(base.add(off + 4) as *const u32);
+            if *base.add(off) == ACCESS_ALLOWED_ACE_TYPE
+                && (ace_mask & mask) == mask
+                && ace_size >= 8 + sid_len
+                && std::slice::from_raw_parts(base.add(off + 8), sid_len) == want
+            {
+                return true;
+            }
+            off += ace_size;
+        }
+        false
+    }
+}
+
+unsafe fn is_standing_grant(dacl: *const ACL, sacl: *const ACL, cap: &LocalSid, world: &BufSid, low: &BufSid) -> bool {
+    unsafe {
+        has_exact(dacl, ACCESS_ALLOWED_ACE_TYPE, SUB_CONTAINERS_AND_OBJECTS_INHERIT as u8, GRANT_MASK, cap.0)
+            && has_exact(dacl, ACCESS_DENIED_ACE_TYPE, CONTAINER_INHERIT_ACE as u8, FILE_DELETE_CHILD, world.ptr())
+            && has_exact(
+                sacl,
+                SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+                SUB_CONTAINERS_AND_OBJECTS_INHERIT as u8,
+                SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+                low.ptr(),
+            )
+    }
+}
+
+/// Fast read-only check whether `path` currently carries the exact standing write grant for `sid`.
+pub fn has_standing_grant(path: &Path, sid: &str) -> Result<bool, String> {
+    let cap = LocalSid::parse(sid)?;
+    let low = BufSid::well_known(WinLowLabelSid)?;
+    let world = BufSid::well_known(WinWorldSid)?;
+    let wpath = wide(path);
+    unsafe {
+        let (mut dacl, mut sacl, mut sd): (*mut ACL, *mut ACL, *mut c_void) =
+            (std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut());
+        let rc = GetNamedSecurityInfoW(
+            wpath.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut dacl,
+            &mut sacl,
+            &mut sd,
+        );
+        if rc != 0 {
+            return Err(format!("GetNamedSecurityInfoW({}) failed: {rc}", path.display()));
+        }
+        let standing = is_standing_grant(dacl, sacl, &cap, &world, &low);
+        LocalFree(sd as HLOCAL);
+        Ok(standing)
+    }
+}
+
+/// Verify that `target` and every intermediate directory up to `root` can receive the write grant
+/// for `sid`. Preserves administrator-set protected DACLs (`SE_DACL_PROTECTED`), returning
+/// `RootInheritance::Blocked` with a targeted diagnostic when inheritance is disabled and no
+/// explicit grant for `sid` is present.
+pub(crate) fn verify_dir_inheritance(
+    root: &Path,
+    target: &Path,
+    sid: &str,
+) -> Result<super::super::grants::RootInheritance, String> {
+    use super::super::grants::RootInheritance;
+    let cap = LocalSid::parse(sid)?;
+    let root_canon = crate::realpath::canonical_path_key(root).ok();
+    let mut cur = target;
+    loop {
+        if let (Some(rk), Ok(ck)) = (&root_canon, crate::realpath::canonical_path_key(cur))
+            && ck == *rk
+        {
+            break;
+        }
+        if cur == root {
+            break;
+        }
+        let wpath = wide(cur);
+        unsafe {
+            let (mut dacl, mut sd): (*mut ACL, *mut c_void) = (std::ptr::null_mut(), std::ptr::null_mut());
+            let rc = GetNamedSecurityInfoW(
+                wpath.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut dacl,
+                std::ptr::null_mut(),
+                &mut sd,
+            );
+            if rc != 0 {
+                return Err(format!("GetNamedSecurityInfoW({}) failed: {rc}", cur.display()));
+            }
+            let mut control: u16 = 0;
+            let mut revision: u32 = 0;
+            let got_ctrl = GetSecurityDescriptorControl(sd, &mut control, &mut revision) != 0;
+            let protected = got_ctrl && (control & SE_DACL_PROTECTED) != 0;
+            let has_grant = has_allow_mask(dacl, GRANT_MASK, cap.0);
+            LocalFree(sd as HLOCAL);
+            if has_grant && cur == target {
+                return Ok(RootInheritance::Allowed);
+            }
+            if protected {
+                if has_grant {
+                    return Ok(RootInheritance::Allowed);
+                }
+                return Ok(RootInheritance::Blocked(super::super::grants::format_protected_dacl_diagnostic(cur, root)));
+            }
+        }
+        let Some(parent) = cur.parent() else {
+            break;
+        };
+        if parent == cur {
+            break;
+        }
+        cur = parent;
+    }
+    Ok(RootInheritance::Allowed)
+}
+
 /// Serialize read-modify-write DACL updates per canonical path across processes using `LockFileEx`.
 pub(crate) fn with_path_acl_lock<T>(path: &Path, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     use sha2::{Digest, Sha256};
@@ -139,16 +284,7 @@ fn grant_write_locked(path: &Path, sid: &str) -> Result<(), String> {
         if rc != 0 {
             return Err(format!("GetNamedSecurityInfoW({}) failed: {rc}", path.display()));
         }
-        let standing =
-            has_exact(dacl, ACCESS_ALLOWED_ACE_TYPE, SUB_CONTAINERS_AND_OBJECTS_INHERIT as u8, GRANT_MASK, cap.0)
-                && has_exact(dacl, ACCESS_DENIED_ACE_TYPE, CONTAINER_INHERIT_ACE as u8, FILE_DELETE_CHILD, world.ptr())
-                && has_exact(
-                    sacl,
-                    SYSTEM_MANDATORY_LABEL_ACE_TYPE,
-                    SUB_CONTAINERS_AND_OBJECTS_INHERIT as u8,
-                    SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
-                    low.ptr(),
-                );
+        let standing = is_standing_grant(dacl, sacl, &cap, &world, &low);
         if standing {
             LocalFree(sd as HLOCAL);
             return Ok(());
