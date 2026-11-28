@@ -43,8 +43,9 @@ use mare_shared::ui::Mode;
 use crate::rpc::call_service;
 use crate::session_addr::{SelectorError, resolve_session};
 use helpers::{
-    config_options, extract_prompt, find_session, image_refusal, list_sessions, resolve_cwd, same_directory,
-    set_config_option, translate_mcp_servers,
+    available_commands, available_commands_update, command_result_text, config_options, extract_prompt, find_session,
+    image_refusal, list_sessions, parse_slash_command, resolve_cwd, same_directory, set_config_option,
+    translate_mcp_servers,
 };
 use mare_shared::wire_projection::WireProjector;
 use turns::{
@@ -115,11 +116,20 @@ impl AcpErr {
 struct RestoredSession {
     config_options: Vec<SessionConfigOption>,
     updates: Vec<J>,
+    commands_update: J,
     projector: Option<WireProjector>,
     replay_done: Option<oneshot::Sender<()>>,
 }
 
-type NewSessionReply = Result<(String, Vec<SessionConfigOption>, Option<WireProjector>), AcpErr>;
+struct CreatedSession {
+    id: String,
+    config_options: Vec<SessionConfigOption>,
+    commands_update: J,
+    projector: Option<WireProjector>,
+    ready: oneshot::Sender<()>,
+}
+
+type NewSessionReply = Result<CreatedSession, AcpErr>;
 type ConfigReply = Result<(Vec<SessionConfigOption>, Option<WireProjector>), AcpErr>;
 
 enum Req {
@@ -162,6 +172,7 @@ enum Req {
         /// the session's turn token when the protocol thread accepted the prompt
         turn_cancel: CancellationToken,
         prompt_gen: u64,
+        conn: ConnectionTo<Client>,
         reply: oneshot::Sender<Result<String, AcpErr>>,
     },
 }
@@ -246,7 +257,7 @@ where
     tokio::spawn(async move {
         let _ = match rrx.await {
             Ok(Ok(restored)) => {
-                let RestoredSession { config_options, updates, projector, replay_done } = restored;
+                let RestoredSession { config_options, updates, commands_update, projector, replay_done } = restored;
                 let mut replay_err = None;
                 for u in updates {
                     if let Err(e) = send_update(&conn, &session_id, u, projector.as_slice()) {
@@ -254,13 +265,20 @@ where
                         break;
                     }
                 }
+                let sent = match replay_err {
+                    Some(e) => send_reply(responder, Err(AcpErr::Internal(e)), projector.as_slice()),
+                    None => {
+                        let res = send_reply(responder, Ok(make_response(config_options)), projector.as_slice());
+                        if res.is_ok() {
+                            let _ = send_update(&conn, &session_id, commands_update, projector.as_slice());
+                        }
+                        res
+                    }
+                };
                 if let Some(tx) = replay_done {
                     let _ = tx.send(());
                 }
-                match replay_err {
-                    Some(e) => send_reply(responder, Err(AcpErr::Internal(e)), projector.as_slice()),
-                    None => send_reply(responder, Ok(make_response(config_options)), projector.as_slice()),
-                }
+                sent
             }
             Ok(Err(e)) => send_reply(responder, Err(e), &[]),
             Err(_) => channel_closed(responder),
@@ -346,6 +364,7 @@ async fn serve(
         .on_receive_request(
             async move |req: NewSessionRequest, responder, conn| {
                 let (rtx, rrx) = oneshot::channel();
+                let conn_reply = conn.clone();
                 let Some(responder) = try_enqueue_req(
                     &tx_new,
                     Req::NewSession {
@@ -360,9 +379,25 @@ async fn serve(
                     return Ok(());
                 };
                 // the connection dispatches one handler at a time: answer from a task, so a
-                // busy session actor never holds up later messages (other requests, cancels)
-                spawn_reply(rrx, responder, |(id, opts, projector)| {
-                    (NewSessionResponse::new(id).config_options(opts), projector.into_iter().collect())
+                // busy session actor never holds up later messages (other requests, cancels).
+                // Publish `available_commands_update` immediately after `NewSessionResponse` so
+                // the client already knows `sessionId` and receives the command list before live
+                // forwarder updates begin.
+                tokio::spawn(async move {
+                    let _ = match rrx.await {
+                        Ok(Ok(created)) => {
+                            let CreatedSession { id, config_options, commands_update, projector, ready } = created;
+                            let resp = NewSessionResponse::new(id.clone()).config_options(config_options);
+                            let sent = send_reply(responder, Ok(resp), projector.as_slice());
+                            if sent.is_ok() {
+                                let _ = send_update(&conn_reply, &id, commands_update, projector.as_slice());
+                            }
+                            let _ = ready.send(());
+                            sent
+                        }
+                        Ok(Err(e)) => send_reply(responder, Err(e), &[]),
+                        Err(_) => channel_closed(responder),
+                    };
                 });
                 Ok(())
             },
@@ -461,7 +496,7 @@ async fn serve(
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
-            async move |req: PromptRequest, responder, _conn| {
+            async move |req: PromptRequest, responder, conn| {
                 let extracted = match extract_prompt(&req.prompt) {
                     Ok(v) => v,
                     Err(msg) => return responder.respond_with_error(AcpErr::InvalidParams(msg).into_rpc()),
@@ -481,6 +516,7 @@ async fn serve(
                         content: extracted.content,
                         turn_cancel,
                         prompt_gen,
+                        conn,
                         reply: rtx,
                     },
                     responder,
@@ -660,6 +696,18 @@ async fn apply_additional_directories(host: &Host, dirs: &[PathBuf]) -> Result<(
     Ok(())
 }
 
+fn map_command_run_error(err: anyhow::Error) -> AcpErr {
+    if let Some(mare_kernel::ServiceCallError::Coded(ev)) = err.downcast_ref::<mare_kernel::ServiceCallError>()
+        && matches!(
+            ev.code.as_str(),
+            "invalid_arguments" | "commands.local_only" | "commands.command_unavailable" | "commands.unknown_command"
+        )
+    {
+        return AcpErr::InvalidParams(ev.message.clone());
+    }
+    AcpErr::Internal(err.to_string())
+}
+
 async fn open_session_forwarder(
     host: &Arc<Host>,
     session_id: &str,
@@ -668,12 +716,15 @@ async fn open_session_forwarder(
     forwarders: &SessionForwarders,
     start_after: Option<oneshot::Receiver<()>>,
     compaction_updates: bool,
-) -> Vec<SessionConfigOption> {
+) -> (Vec<SessionConfigOption>, J) {
     let cfg_opts = config_options(host).await;
     let cfg_json = serde_json::to_value(&cfg_opts).unwrap_or(J::Null);
+    let cmds = available_commands(host).await;
+    let cmds_json = serde_json::to_value(&cmds).unwrap_or(J::Null);
+    let cmds_update = available_commands_update(&cmds);
     let cursor = host.kernel.open_cursor(std::sync::Arc::new(|name| helpers::handles_event(name).then_some(true)));
     let projector = mare_shared::wire_projection::hook(host.lua());
-    let config_sync = ConfigSync::install(host, cfg_json, compaction_updates);
+    let config_sync = ConfigSync::install(host, cfg_json, cmds_json, compaction_updates);
     forwarders.open(
         session_id,
         ForwarderTarget {
@@ -685,7 +736,7 @@ async fn open_session_forwarder(
             config: config_sync,
         },
     );
-    cfg_opts
+    (cfg_opts, cmds_update)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -697,17 +748,17 @@ async fn finish_acp_session(
     forwarders: &SessionForwarders,
     start_after: Option<oneshot::Receiver<()>>,
     compaction_updates: bool,
-) -> std::result::Result<Vec<SessionConfigOption>, AcpErr> {
+) -> std::result::Result<(Vec<SessionConfigOption>, J), AcpErr> {
     if let Err(e) = approvals::install(&rt.host, &rt.session_id, conn, rt.cancel.clone()) {
         let err = AcpErr::Internal(e.to_string()).with_projector(&rt.host);
         let _ = manager.close_session(&rt.session_id).await;
         return Err(err);
     }
-    let cfg_opts =
+    let (cfg_opts, cmds_update) =
         open_session_forwarder(&rt.host, &rt.session_id, conn, &rt.cancel, forwarders, start_after, compaction_updates)
             .await;
     cancels.open(&rt.session_id);
-    Ok(cfg_opts)
+    Ok((cfg_opts, cmds_update))
 }
 
 struct AcpSessionExt {
@@ -978,12 +1029,24 @@ pub async fn run(opts: HostOptions, strict_config: bool) -> Result<i32> {
                             }
                         };
                         let compaction_updates = client_compaction.load(Ordering::Relaxed);
-                        let res =
-                            finish_acp_session(&manager, &rt, &conn, &cancels, &forwarders, None, compaction_updates)
-                                .await
-                                .map(|cfg_opts| {
-                                    (rt.session_id.clone(), cfg_opts, mare_shared::wire_projection::hook(rt.host.lua()))
-                                });
+                        let (ready_tx, start_after) = oneshot::channel();
+                        let res = finish_acp_session(
+                            &manager,
+                            &rt,
+                            &conn,
+                            &cancels,
+                            &forwarders,
+                            Some(start_after),
+                            compaction_updates,
+                        )
+                        .await
+                        .map(|(cfg_opts, cmds_update)| CreatedSession {
+                            id: rt.session_id.clone(),
+                            config_options: cfg_opts,
+                            commands_update: cmds_update,
+                            projector: mare_shared::wire_projection::hook(rt.host.lua()),
+                            ready: ready_tx,
+                        });
                         if reply.is_closed() || reply.send(res).is_err() {
                             let ext_sid = aliases.borrow_mut().remove_by_internal(&rt.session_id);
                             forwarders.close(&ext_sid);
@@ -1105,11 +1168,9 @@ pub async fn run(opts: HostOptions, strict_config: bool) -> Result<i32> {
                         } else {
                             Vec::new()
                         };
-                        let (replay_done, start_after) = if replay {
+                        let (replay_done, start_after) = {
                             let (tx, rx) = oneshot::channel();
                             (Some(tx), Some(rx))
-                        } else {
-                            (None, None)
                         };
                         let res = finish_acp_session(
                             &manager,
@@ -1121,9 +1182,10 @@ pub async fn run(opts: HostOptions, strict_config: bool) -> Result<i32> {
                             compaction_updates,
                         )
                         .await
-                        .map(|cfg_opts| RestoredSession {
+                        .map(|(cfg_opts, cmds_update)| RestoredSession {
                             config_options: cfg_opts,
                             updates,
+                            commands_update: cmds_update,
                             projector: mare_shared::wire_projection::hook(rt.host.lua()),
                             replay_done,
                         });
@@ -1216,7 +1278,7 @@ pub async fn run(opts: HostOptions, strict_config: bool) -> Result<i32> {
                     }
                 }
             }
-            Req::Prompt { session, text, images, content, turn_cancel, prompt_gen, reply } => {
+            Req::Prompt { session, text, images, content, turn_cancel, prompt_gen, conn, reply } => {
                 let internal_sid = aliases.borrow().resolve_internal(&session);
                 let entry = match manager.session(&internal_sid) {
                     Ok(entry) => entry,
@@ -1289,6 +1351,55 @@ pub async fn run(opts: HostOptions, strict_config: bool) -> Result<i32> {
                     }
                     if turn_cancel.is_cancelled() {
                         let _ = reply.send(Ok("cancelled".into()));
+                        return;
+                    }
+                    // Route advertised executable slash commands through the shared `commands.run`
+                    // service rather than treating them as plain chat prompts.
+                    let slash_cmd = if images.is_empty() {
+                        parse_slash_command(&text).map(|(name, _)| name.to_string())
+                    } else {
+                        None
+                    };
+                    let is_executable_cmd = match slash_cmd.as_deref() {
+                        Some(name) => available_commands(&host).await.iter().any(|c| c.name == name),
+                        None => false,
+                    };
+                    if is_executable_cmd {
+                        let projector = mare_shared::wire_projection::hook(host.lua());
+                        let cmd_input = if content.is_empty() { json!({}) } else { json!({ "content": content }) };
+                        let stop = match call_service(&host, "commands", "run", vec![json!(text), cmd_input]).await {
+                            Ok(val) => {
+                                if let Some(reply_text) = command_result_text(&val) {
+                                    let _ = send_update(
+                                        &conn,
+                                        &session_for_prompt,
+                                        json!({
+                                            "sessionUpdate": "agent_message_chunk",
+                                            "content": { "type": "text", "text": reply_text },
+                                        }),
+                                        projector.as_slice(),
+                                    );
+                                }
+                                // Yield once so any `ctx:spawn` prompt started by a command (e.g. a
+                                // skill or prompt template) can claim its turn before checking.
+                                tokio::task::yield_now().await;
+                                if let Ok(act) = call_service(&host, "agent", "activity", vec![]).await
+                                    && act.get("busy").and_then(J::as_bool) == Some(true)
+                                    && let Some(turn_id) = act.get("turn_id").and_then(J::as_str)
+                                {
+                                    let res = wait_for_started_turn(&host, turn_id, &turn_cancel).await;
+                                    map_turn_result(&res)
+                                } else {
+                                    Ok("end_turn".into())
+                                }
+                            }
+                            Err(err) => Err(map_command_run_error(err)),
+                        };
+                        let stop = match forwarders_for_prompt.flush(&session_for_prompt, PROMPT_DRAIN_TIMEOUT).await {
+                            Ok(()) => stop,
+                            Err(e) => Err(AcpErr::Internal(e)),
+                        };
+                        let _ = reply.send(stop.map_err(|e| e.with_projector(&host)));
                         return;
                     }
                     // Open a lightweight lifecycle cursor before calling host.prompt so that if

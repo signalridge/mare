@@ -19,7 +19,16 @@ use tokio_util::sync::CancellationToken;
 use crate::rpc::call_service;
 
 use super::AcpErr;
+<<<<<<< HEAD
 use super::helpers::{TranslateOpts, config_options, has_truncated_image, hydrate_tool_result_update, to_update_with};
+||||||| parent of 2ba42dd6f (feat(acp): advertise and execute available slash commands)
+use super::helpers::{config_options, has_truncated_image, hydrate_tool_result_update, to_update};
+=======
+use super::helpers::{
+    available_commands, available_commands_update, config_options, has_truncated_image, hydrate_tool_result_update,
+    to_update,
+};
+>>>>>>> 2ba42dd6f (feat(acp): advertise and execute available slash commands)
 
 /// How long a finished turn may take to hand its queued updates to the client.
 pub(super) const PROMPT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -72,24 +81,37 @@ impl ConfigWatcher for NoConfigWatcher {
     }
 }
 
-/// Host-backed watcher for live session `configOptions` updates (`llm/model-changed`,
-/// `llm/providers-changed`), session path/capability context, and hydration of wire-truncated
+/// Host-backed watcher for live session `configOptions` (`llm/model-changed`,
+/// `llm/providers-changed`), executable slash commands (`reload/completed`, `turn/started`,
+/// `turn/completed`), session path/capability context, and hydration of wire-truncated
 /// tool-result image payloads (`agent.messages`).
 pub(super) struct ConfigSync {
     host: std::sync::Weak<Host>,
     rx: Option<tokio::sync::watch::Receiver<u64>>,
-    last: J,
+    last_config: J,
+    last_commands: J,
     cwd: PathBuf,
     compaction_updates: bool,
 }
 
 impl ConfigSync {
-    pub(super) fn install(host: &Arc<Host>, initial: J, compaction_updates: bool) -> Self {
+    pub(super) fn install(
+        host: &Arc<Host>,
+        initial_config: J,
+        initial_commands: J,
+        compaction_updates: bool,
+    ) -> Self {
         let rx = (|| -> mlua::Result<tokio::sync::watch::Receiver<u64>> {
             let ctx = host.kernel.host_ctx()?;
             let owner = host.kernel.host_owner()?;
             let (tx, rx) = tokio::sync::watch::channel(0u64);
-            for event in ["llm/model-changed", "llm/providers-changed"] {
+            for event in [
+                "llm/model-changed",
+                "llm/providers-changed",
+                "reload/completed",
+                "turn/started",
+                "turn/completed",
+            ] {
                 let tx_ev = tx.clone();
                 let cb = host.lua().create_function(move |_, _: mlua::MultiValue| {
                     tx_ev.send_modify(|n| *n = n.wrapping_add(1));
@@ -99,9 +121,16 @@ impl ConfigSync {
             }
             Ok(rx)
         })()
-        .map_err(|e| tracing::warn!("installing ACP llm config watcher failed: {e}"))
+        .map_err(|e| tracing::warn!("installing ACP session sync watcher failed: {e}"))
         .ok();
-        Self { host: Arc::downgrade(host), rx, last: initial, cwd: host.cwd().to_path_buf(), compaction_updates }
+        Self {
+            host: Arc::downgrade(host),
+            rx,
+            last_config: initial_config,
+            last_commands: initial_commands,
+            cwd: host.cwd().to_path_buf(),
+            compaction_updates,
+        }
     }
 }
 
@@ -128,18 +157,25 @@ impl ConfigWatcher for ConfigSync {
         let Some(host) = self.host.upgrade() else {
             return Vec::new();
         };
+        let mut updates = Vec::new();
         let opts = config_options(&host).await;
-        let Ok(opts_json) = serde_json::to_value(&opts) else {
-            return Vec::new();
-        };
-        if opts_json == self.last {
-            return Vec::new();
+        if let Ok(opts_json) = serde_json::to_value(&opts)
+            && opts_json != self.last_config
+        {
+            self.last_config = opts_json;
+            updates.push(json!({
+                "sessionUpdate": "config_option_update",
+                "configOptions": opts,
+            }));
         }
-        self.last = opts_json;
-        vec![json!({
-            "sessionUpdate": "config_option_update",
-            "configOptions": opts,
-        })]
+        let cmds = available_commands(&host).await;
+        if let Ok(cmds_json) = serde_json::to_value(&cmds)
+            && cmds_json != self.last_commands
+        {
+            self.last_commands = cmds_json;
+            updates.push(available_commands_update(&cmds));
+        }
+        updates
     }
 
     async fn translate_event(&mut self, name: &str, payload: &J) -> Option<J> {
