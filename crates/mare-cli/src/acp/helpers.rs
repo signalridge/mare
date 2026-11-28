@@ -1,8 +1,8 @@
 //! ACP helpers: workspace/MCP validation, prompt content extraction, event-to-update mapping,
 //! model/reasoning config options, and session listing/resolution.
 
-use std::collections::{BTreeMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Component, Path, PathBuf};
 
 use agent_client_protocol::v1::schema::{
     ContentBlock, EmbeddedResourceResource, ListSessionsResponse, McpServer, SessionConfigOption,
@@ -196,8 +196,40 @@ pub(super) fn extract_prompt(blocks: &[ContentBlock]) -> Result<ExtractedPrompt,
     Ok(ExtractedPrompt { text: texts.join("\n\n"), images, content })
 }
 
-/// Derive ACP tool kind from kernel tool policy metadata (`command_tool`, `side_effect`).
+/// Session-scoped context for translating kernel events and replayed history into ACP updates.
+#[derive(Clone, Copy, Default)]
+pub(super) struct TranslateOpts<'a> {
+    pub cwd: Option<&'a Path>,
+    pub compaction_updates: bool,
+}
+
+/// Restored conversation message paired with its persisted session `entry_id` (when available).
+pub(super) struct ReplayMessage {
+    pub message: J,
+    pub entry_id: Option<String>,
+}
+
+fn explicit_tool_kind_str(kind: &str) -> Option<&'static str> {
+    match kind {
+        "read" => Some("read"),
+        "edit" => Some("edit"),
+        "delete" => Some("delete"),
+        "move" => Some("move"),
+        "search" => Some("search"),
+        "execute" => Some("execute"),
+        "think" => Some("think"),
+        "fetch" => Some("fetch"),
+        "switch_mode" => Some("switch_mode"),
+        "other" => Some("other"),
+        _ => None,
+    }
+}
+
+/// Derive ACP tool kind from kernel tool policy metadata (`kind`, `command_tool`, `side_effect`).
 pub(super) fn acp_tool_kind_str(info: &J) -> &'static str {
+    if let Some(kind) = info.get("kind").and_then(J::as_str).and_then(explicit_tool_kind_str) {
+        return kind;
+    }
     if info.get("command_tool").and_then(|v| v.as_bool()) == Some(true) {
         return "execute";
     }
@@ -208,21 +240,296 @@ pub(super) fn acp_tool_kind_str(info: &J) -> &'static str {
     }
 }
 
-fn tool_call_update_start(id: &J, name: &str, arguments: &J, info: Option<&J>) -> J {
+fn patch_tool_kind(input: &str) -> Option<&'static str> {
+    let mut has_delete = false;
+    let mut has_move = false;
+    let mut has_edit = false;
+    for line in input.lines() {
+        if line.starts_with("*** Move to: ") {
+            has_move = true;
+        } else if line.starts_with("*** Delete File: ") {
+            has_delete = true;
+        } else if line.starts_with("*** Add File: ") || line.starts_with("*** Update File: ") {
+            has_edit = true;
+        }
+    }
+    if has_move {
+        Some("move")
+    } else if has_delete && !has_edit {
+        Some("delete")
+    } else if has_edit || has_delete {
+        Some("edit")
+    } else {
+        None
+    }
+}
+
+fn acp_tool_kind_for(info: Option<&J>, arguments: &J) -> &'static str {
+    let Some(info) = info else {
+        return "other";
+    };
+    if let Some(kind) = info.get("kind").and_then(J::as_str).and_then(explicit_tool_kind_str) {
+        return kind;
+    }
+    if info.get("command_tool").and_then(J::as_bool) == Some(true) {
+        return "execute";
+    }
+    let obj = arguments.as_object();
+    match info.get("side_effect").and_then(J::as_str) {
+        Some("write") => {
+            if let Some(input) = obj.and_then(|o| o.get("input")).and_then(J::as_str)
+                && let Some(kind) = patch_tool_kind(input)
+            {
+                return kind;
+            }
+            "edit"
+        }
+        Some("read") => {
+            if obj.is_some_and(|o| o.contains_key("pattern") || o.contains_key("query")) {
+                "search"
+            } else {
+                "read"
+            }
+        }
+        Some("external") if info.get("idempotent").and_then(J::as_bool) == Some(true) => {
+            if obj.is_some_and(|o| o.contains_key("url")) {
+                "fetch"
+            } else if obj.is_some_and(|o| o.contains_key("queries") || o.contains_key("query")) {
+                "search"
+            } else {
+                "other"
+            }
+        }
+        _ => "other",
+    }
+}
+
+fn normalize_lexical_path(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::Prefix(p) => out.push(p.as_os_str()),
+            Component::RootDir => out.push(comp.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(part) => out.push(part),
+        }
+    }
+    out
+}
+
+/// Resolve a tool file path to an absolute path against `cwd`, skipping empty or `~`-relative paths.
+fn resolve_tool_path(raw: &str, cwd: Option<&Path>) -> Option<PathBuf> {
+    if raw.is_empty() || raw.starts_with('~') {
+        return None;
+    }
+    let candidate = Path::new(raw);
+    let abs = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        let base = cwd.filter(|c| c.is_absolute())?;
+        base.join(candidate)
+    };
+    Some(normalize_lexical_path(&abs))
+}
+
+fn parse_patch_paths(input: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for line in input.lines() {
+        for prefix in ["*** Add File: ", "*** Update File: ", "*** Delete File: ", "*** Move to: "] {
+            if let Some(rest) = line.strip_prefix(prefix) {
+                let trimmed = rest.trim();
+                if !trimmed.is_empty() && seen.insert(trimmed) {
+                    out.push(trimmed);
+                }
+                break;
+            }
+        }
+    }
+    out
+}
+
+fn location_json(path: &Path, line: Option<u32>) -> J {
+    let mut obj = Map::new();
+    obj.insert("path".into(), J::String(path.to_string_lossy().into_owned()));
+    if let Some(line) = line {
+        obj.insert("line".into(), json!(line));
+    }
+    J::Object(obj)
+}
+
+fn tool_call_locations_start(arguments: &J, cwd: Option<&Path>) -> Vec<J> {
+    let Some(obj) = arguments.as_object() else {
+        return Vec::new();
+    };
+    if let Some(raw_path) = obj.get("path").and_then(J::as_str) {
+        if let Some(abs) = resolve_tool_path(raw_path, cwd) {
+            let line = obj
+                .get("offset")
+                .or_else(|| obj.get("line"))
+                .and_then(J::as_u64)
+                .filter(|&n| n >= 1)
+                .and_then(|n| u32::try_from(n).ok());
+            return vec![location_json(&abs, line)];
+        }
+        return Vec::new();
+    }
+    if let Some(input) = obj.get("input").and_then(J::as_str) {
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+        for raw in parse_patch_paths(input) {
+            if let Some(abs) = resolve_tool_path(raw, cwd)
+                && seen.insert(abs.clone())
+            {
+                out.push(location_json(&abs, None));
+            }
+        }
+        return out;
+    }
+    Vec::new()
+}
+
+fn parse_unified_diff(diff: &str) -> (String, String) {
+    let mut in_hunk = false;
+    let mut old_lines = Vec::new();
+    let mut new_lines = Vec::new();
+    for line in diff.lines() {
+        if line.starts_with("@@ ") {
+            in_hunk = true;
+            continue;
+        }
+        if !in_hunk || line.starts_with("\\ ") {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix(' ') {
+            old_lines.push(rest);
+            new_lines.push(rest);
+        } else if let Some(rest) = line.strip_prefix('-') {
+            old_lines.push(rest);
+        } else if let Some(rest) = line.strip_prefix('+') {
+            new_lines.push(rest);
+        }
+    }
+    (old_lines.join("\n"), new_lines.join("\n"))
+}
+
+fn diff_block(path: &Path, old_text: Option<&str>, new_text: &str) -> J {
+    let mut obj = Map::new();
+    obj.insert("type".into(), J::String("diff".into()));
+    obj.insert("path".into(), J::String(path.to_string_lossy().into_owned()));
+    if let Some(old) = old_text {
+        obj.insert("oldText".into(), J::String(old.to_string()));
+    }
+    obj.insert("newText".into(), J::String(new_text.to_string()));
+    J::Object(obj)
+}
+
+fn tool_result_diffs_and_locations(
+    details: Option<&J>,
+    arguments: Option<&J>,
+    failed: bool,
+    cwd: Option<&Path>,
+) -> (Vec<J>, Vec<J>) {
+    let Some(obj) = details.and_then(J::as_object) else {
+        return (Vec::new(), Vec::new());
+    };
+    let mut diffs = Vec::new();
+    let mut locations = Vec::new();
+    let mut seen_locs = HashSet::new();
+    let mut push_loc = |abs: &Path| {
+        if seen_locs.insert(abs.to_path_buf()) {
+            locations.push(location_json(abs, None));
+        }
+    };
+
+    if let Some(changes) = obj.get("changes").and_then(J::as_array) {
+        let outcomes = obj.get("outcomes").and_then(J::as_array);
+        for (idx, ch) in changes.iter().enumerate() {
+            let outcome_status = outcomes.and_then(|o| o.get(idx)).and_then(|o| o.get("status")).and_then(J::as_str);
+            let completed = match outcome_status {
+                Some(s) => s == "completed",
+                None => !failed,
+            };
+            let src_abs = ch.get("path").and_then(J::as_str).and_then(|p| resolve_tool_path(p, cwd));
+            let dst_abs = ch.get("move_to").and_then(J::as_str).and_then(|p| resolve_tool_path(p, cwd));
+            if let Some(p) = &src_abs {
+                push_loc(p);
+            }
+            if let Some(p) = &dst_abs {
+                push_loc(p);
+            }
+            if !completed {
+                continue;
+            }
+            let kind = ch.get("kind").and_then(J::as_str).unwrap_or("");
+            if kind == "delete" {
+                continue;
+            }
+            let Some(target) = dst_abs.as_deref().or(src_abs.as_deref()) else {
+                continue;
+            };
+            if let Some(unified) = ch.get("diff").and_then(J::as_str) {
+                let (old, new) = parse_unified_diff(unified);
+                if kind == "add" {
+                    diffs.push(diff_block(target, None, &new));
+                } else if !unified.is_empty() {
+                    diffs.push(diff_block(target, Some(&old), &new));
+                }
+            } else if let Some(new) = ch.get("new").and_then(J::as_str) {
+                if kind == "add" {
+                    diffs.push(diff_block(target, None, new));
+                } else {
+                    diffs.push(diff_block(target, Some(ch.get("old").and_then(J::as_str).unwrap_or("")), new));
+                }
+            }
+        }
+        return (diffs, locations);
+    }
+
+    if let Some(raw_path) = obj.get("path").and_then(J::as_str)
+        && let Some(abs) = resolve_tool_path(raw_path, cwd)
+    {
+        push_loc(&abs);
+        if !failed {
+            if let Some(unified) = obj.get("diff").and_then(J::as_str).filter(|d| !d.is_empty()) {
+                let (old, new) = parse_unified_diff(unified);
+                diffs.push(diff_block(&abs, Some(&old), &new));
+            } else if let Some(new) = obj.get("new").and_then(J::as_str) {
+                let old = obj.get("old").and_then(J::as_str);
+                diffs.push(diff_block(&abs, old, new));
+            } else if obj.get("version").and_then(J::as_u64) == Some(2)
+                && obj.get("replaced").and_then(J::as_bool) != Some(true)
+                && let Some(content) = arguments.and_then(|a| a.get("content")).and_then(J::as_str)
+            {
+                diffs.push(diff_block(&abs, None, content));
+            }
+        }
+    }
+    (diffs, locations)
+}
+
+fn tool_call_update_start(id: &J, name: &str, arguments: &J, info: Option<&J>, cwd: Option<&Path>) -> J {
     let arg = arguments
         .as_object()
-        .and_then(|o| o.get("path").or_else(|| o.get("command")))
+        .and_then(|o| o.get("path").or_else(|| o.get("command")).or_else(|| o.get("url")))
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let kind = info.map(acp_tool_kind_str).unwrap_or("other");
-    json!({
-        "sessionUpdate": "tool_call",
-        "toolCallId": id,
-        "title": if arg.is_empty() { name.to_string() } else { format!("{name} {arg}") },
-        "kind": kind,
-        "status": "in_progress",
-        "rawInput": arguments,
-    })
+    let kind = acp_tool_kind_for(info, arguments);
+    let mut obj = Map::new();
+    obj.insert("sessionUpdate".into(), J::String("tool_call".into()));
+    obj.insert("toolCallId".into(), id.clone());
+    obj.insert("title".into(), J::String(if arg.is_empty() { name.to_string() } else { format!("{name} {arg}") }));
+    obj.insert("kind".into(), J::String(kind.into()));
+    obj.insert("status".into(), J::String("in_progress".into()));
+    obj.insert("rawInput".into(), arguments.clone());
+    let locations = tool_call_locations_start(arguments, cwd);
+    if !locations.is_empty() {
+        obj.insert("locations".into(), J::Array(locations));
+    }
+    J::Object(obj)
 }
 
 fn block_image_to_acp(block: &J) -> Option<J> {
@@ -251,18 +558,34 @@ fn tool_result_content(content: &J) -> Vec<J> {
     }
 }
 
-fn tool_call_update_end(id: &J, failed: bool, content: &J) -> J {
-    json!({
-        "sessionUpdate": "tool_call_update",
-        "toolCallId": id,
-        "status": if failed { "failed" } else { "completed" },
-        "content": tool_result_content(content),
-    })
+fn tool_call_update_end(
+    id: &J,
+    failed: bool,
+    content: &J,
+    details: Option<&J>,
+    arguments: Option<&J>,
+    cwd: Option<&Path>,
+) -> J {
+    let mut blocks = tool_result_content(content);
+    let (diffs, locations) = tool_result_diffs_and_locations(details, arguments, failed, cwd);
+    blocks.extend(diffs);
+    let mut obj = Map::new();
+    obj.insert("sessionUpdate".into(), J::String("tool_call_update".into()));
+    obj.insert("toolCallId".into(), id.clone());
+    obj.insert("status".into(), J::String(if failed { "failed" } else { "completed" }.into()));
+    obj.insert("content".into(), J::Array(blocks));
+    if !locations.is_empty() {
+        obj.insert("locations".into(), J::Array(locations));
+    }
+    J::Object(obj)
 }
 
-/// Events translated into ACP `SessionUpdate` notifications by [`to_update`].
+/// Events translated into ACP `SessionUpdate` notifications by [`to_update_with`].
 pub(super) fn handles_event(name: &str) -> bool {
-    matches!(name, "item/delta" | "item/started" | "item/completed" | "usage/changed")
+    matches!(
+        name,
+        "item/delta" | "item/started" | "item/completed" | "usage/changed" | "compact/started" | "compact/completed"
+    )
 }
 
 pub(super) fn has_truncated_image(content: &J) -> bool {
@@ -275,7 +598,15 @@ pub(super) fn has_truncated_image(content: &J) -> bool {
     })
 }
 
-fn parse_completed_tool_call(p: &J) -> Option<(&J, bool, &J)> {
+struct CompletedToolCall<'a> {
+    call_id: &'a J,
+    failed: bool,
+    content: &'a J,
+    details: Option<&'a J>,
+    arguments: Option<&'a J>,
+}
+
+fn parse_completed_tool_call(p: &J) -> Option<CompletedToolCall<'_>> {
     let item = p.get("item")?;
     if item.get("type").and_then(J::as_str) != Some("tool_call") {
         return None;
@@ -289,7 +620,9 @@ fn parse_completed_tool_call(p: &J) -> Option<(&J, bool, &J)> {
     let status_failed = item["status"].as_str().is_some_and(|s| s != "completed");
     let failed = is_error || status_failed;
     let content = item.pointer("/message/content").unwrap_or(&J::Null);
-    Some((call_id, failed, content))
+    let details = item.pointer("/message/details");
+    let arguments = item.get("arguments");
+    Some(CompletedToolCall { call_id, failed, content, details, arguments })
 }
 
 async fn fetch_full_tool_result_content(host: &Host, call_id: &str) -> Option<J> {
@@ -304,29 +637,60 @@ async fn fetch_full_tool_result_content(host: &Host, call_id: &str) -> Option<J>
 
 /// Resolve an `item/completed` event into an ACP `tool_call_update`, reading the full tool result
 /// from `agent.messages` when inline image blocks were truncated by the kernel wire bound.
-pub(super) async fn hydrate_tool_result_update(host: &Host, p: &J) -> Option<J> {
-    let (call_id, failed, content) = parse_completed_tool_call(p)?;
-    if has_truncated_image(content)
-        && let Some(id_str) = call_id.as_str()
+pub(super) async fn hydrate_tool_result_update(host: &Host, p: &J, cwd: Option<&Path>) -> Option<J> {
+    let c = parse_completed_tool_call(p)?;
+    if has_truncated_image(c.content)
+        && let Some(id_str) = c.call_id.as_str()
         && let Some(full) = fetch_full_tool_result_content(host, id_str).await
     {
-        return Some(tool_call_update_end(call_id, failed, &full));
+        return Some(tool_call_update_end(c.call_id, c.failed, &full, c.details, c.arguments, cwd));
     }
-    Some(tool_call_update_end(call_id, failed, content))
+    Some(tool_call_update_end(c.call_id, c.failed, c.content, c.details, c.arguments, cwd))
 }
 
-/// Map a mare kernel event to an ACP `SessionUpdate` (as JSON).
-pub(super) fn to_update(name: &str, p: &J) -> Option<J> {
+fn content_chunk_update(kind: &str, content: J, message_id: Option<&str>) -> J {
+    let mut obj = Map::new();
+    obj.insert("sessionUpdate".into(), J::String(kind.into()));
+    obj.insert("content".into(), content);
+    if let Some(id) = message_id.filter(|s| !s.is_empty()) {
+        obj.insert("messageId".into(), J::String(id.into()));
+    }
+    J::Object(obj)
+}
+
+fn compaction_update_json(compaction_id: &str, status: &str, summary: Option<&str>, error: Option<&str>) -> J {
+    let mut obj = Map::new();
+    obj.insert("sessionUpdate".into(), J::String("compaction_update".into()));
+    obj.insert("compactionId".into(), J::String(compaction_id.into()));
+    obj.insert("status".into(), J::String(status.into()));
+    if let Some(text) = summary.filter(|s| !s.is_empty()) {
+        obj.insert("summary".into(), json!([{ "type": "text", "text": text }]));
+    }
+    if let Some(err) = error.filter(|s| !s.is_empty()) {
+        obj.insert("error".into(), J::String(err.into()));
+    }
+    J::Object(obj)
+}
+
+/// Map a mare kernel event to an ACP `SessionUpdate` (as JSON) using session context.
+pub(super) fn to_update_with(name: &str, p: &J, opts: TranslateOpts<'_>) -> Option<J> {
     match name {
-        "item/delta" => match p.get("kind")?.as_str()? {
-            "text" => Some(
-                json!({ "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": p["delta"] } }),
-            ),
-            "reasoning" => Some(
-                json!({ "sessionUpdate": "agent_thought_chunk", "content": { "type": "text", "text": p["delta"] } }),
-            ),
-            _ => None,
-        },
+        "item/delta" => {
+            let msg_id = p.get("item_id").and_then(J::as_str);
+            match p.get("kind")?.as_str()? {
+                "text" => Some(content_chunk_update(
+                    "agent_message_chunk",
+                    json!({ "type": "text", "text": p["delta"] }),
+                    msg_id,
+                )),
+                "reasoning" => Some(content_chunk_update(
+                    "agent_thought_chunk",
+                    json!({ "type": "text", "text": p["delta"] }),
+                    msg_id,
+                )),
+                _ => None,
+            }
+        }
         "item/started" => {
             let item = p.get("item")?;
             if item.get("type").and_then(J::as_str) != Some("tool_call") {
@@ -335,11 +699,39 @@ pub(super) fn to_update(name: &str, p: &J) -> Option<J> {
             let call_id = item.get("tool_call_id").or_else(|| p.get("item_id"))?;
             let tool_name = item["name"].as_str().unwrap_or("tool");
             let info = item.get("info").or_else(|| p.get("info"));
-            Some(tool_call_update_start(call_id, tool_name, &item["arguments"], info))
+            Some(tool_call_update_start(call_id, tool_name, &item["arguments"], info, opts.cwd))
         }
         "item/completed" => {
-            let (call_id, failed, content) = parse_completed_tool_call(p)?;
-            Some(tool_call_update_end(call_id, failed, content))
+            let c = parse_completed_tool_call(p)?;
+            Some(tool_call_update_end(c.call_id, c.failed, c.content, c.details, c.arguments, opts.cwd))
+        }
+        "compact/started" => {
+            if !opts.compaction_updates {
+                return None;
+            }
+            let compact_id = p.get("compact_id").and_then(J::as_str).filter(|s| !s.is_empty())?;
+            Some(compaction_update_json(compact_id, "in_progress", None, None))
+        }
+        "compact/completed" => {
+            if !opts.compaction_updates {
+                return None;
+            }
+            let compact_id = p.get("compact_id").and_then(J::as_str).filter(|s| !s.is_empty())?;
+            let status = match p.get("status").and_then(J::as_str) {
+                Some("completed") => "completed",
+                Some("cancelled") => "cancelled",
+                _ if p.get("cancelled").and_then(J::as_bool) == Some(true) => "cancelled",
+                _ => "failed",
+            };
+            let summary = (status == "completed").then(|| p.get("summary").and_then(J::as_str)).flatten();
+            let error = (status != "completed")
+                .then(|| {
+                    p.get("error")
+                        .and_then(|e| e.as_str().or_else(|| e.get("message").and_then(J::as_str)))
+                        .or_else(|| p.get("message").and_then(J::as_str))
+                })
+                .flatten();
+            Some(compaction_update_json(compact_id, status, summary, error))
         }
         "usage/changed" => {
             let used = p.get("last_context").and_then(|v| v.as_u64())?;
@@ -350,16 +742,21 @@ pub(super) fn to_update(name: &str, p: &J) -> Option<J> {
     }
 }
 
-fn push_replay_chunk(out: &mut Vec<J>, kind: &str, text: &str) {
+#[cfg(test)]
+pub(super) fn to_update(name: &str, p: &J) -> Option<J> {
+    to_update_with(name, p, TranslateOpts::default())
+}
+
+fn push_replay_chunk(out: &mut Vec<J>, kind: &str, text: &str, message_id: Option<&str>) {
     if !text.is_empty() {
-        out.push(json!({ "sessionUpdate": kind, "content": { "type": "text", "text": text } }));
+        out.push(content_chunk_update(kind, json!({ "type": "text", "text": text }), message_id));
     }
 }
 
-/// Collect registered tool policy metadata (`command_tool`, `side_effect`) keyed by tool name so
-/// history replay derives ACP `kind` from declared metadata instead of hardcoded tool names.
-pub(super) async fn tool_metadata_map(host: &Host) -> std::collections::HashMap<String, J> {
-    let mut map = std::collections::HashMap::new();
+/// Collect registered tool policy metadata (`command_tool`, `side_effect`, `idempotent`) keyed by
+/// tool name so history replay derives ACP `kind` from declared metadata instead of hardcoded names.
+pub(super) async fn tool_metadata_map(host: &Host) -> HashMap<String, J> {
+    let mut map = HashMap::new();
     if let Ok(J::Array(defs)) = call_service(host, "tools", "list", vec![]).await {
         for def in defs {
             if let Some(name) = def.get("name").and_then(J::as_str) {
@@ -370,49 +767,93 @@ pub(super) async fn tool_metadata_map(host: &Host) -> std::collections::HashMap<
     map
 }
 
+/// Read restored `agent.messages` paired with each message's persisted `session.entry_id`,
+/// querying `session.entry_id` before converting Lua tables to JSON so table identity matches.
+pub(super) async fn collect_replay_messages(host: &Host) -> anyhow::Result<Vec<ReplayMessage>> {
+    let lua = host.lua();
+    let res = host.call_service("agent", "messages", mlua::MultiValue::new()).await?;
+    let Some(mlua::Value::Table(tbl)) = res.into_iter().next() else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for item in tbl.sequence_values::<mlua::Value>() {
+        let val = item?;
+        let entry_id = host
+            .call_service("session", "entry_id", mlua::MultiValue::from_vec(vec![val.clone()]))
+            .await
+            .ok()
+            .and_then(|mv| mv.into_iter().next())
+            .and_then(|v| match v {
+                mlua::Value::String(s) => s.to_str().ok().map(|s| s.to_string()).filter(|s| !s.is_empty()),
+                _ => None,
+            });
+        let message = mare_shared::lua::lua_to_json(lua, val)?;
+        out.push(ReplayMessage { message, entry_id });
+    }
+    Ok(out)
+}
+
 /// Project restored `agent:messages` entries into ordered ACP `SessionUpdate` replay items for `session/load`.
 #[cfg(test)]
 pub(super) fn messages_to_updates(messages: &[J]) -> Vec<J> {
-    messages_to_updates_with_info(messages, &std::collections::HashMap::new())
+    let wrapped: Vec<ReplayMessage> =
+        messages.iter().map(|m| ReplayMessage { message: m.clone(), entry_id: None }).collect();
+    messages_to_updates_with_context(&wrapped, &HashMap::new(), TranslateOpts::default())
 }
 
 /// Project restored `agent:messages` entries into ordered ACP `SessionUpdate` replay items for
-/// `session/load`, resolving tool kinds from optional tool metadata keyed by tool name.
-pub(super) fn messages_to_updates_with_info(
-    messages: &[J],
-    tool_info: &std::collections::HashMap<String, J>,
+/// `session/load`, resolving tool kinds, file locations/diffs, message IDs, and capability-gated
+/// compaction updates.
+pub(super) fn messages_to_updates_with_context(
+    messages: &[ReplayMessage],
+    tool_info: &HashMap<String, J>,
+    opts: TranslateOpts<'_>,
 ) -> Vec<J> {
     let mut out = Vec::new();
     let mut seen_tool_calls = HashSet::new();
     let mut tool_call_order = Vec::new();
+    let mut tool_call_args: HashMap<String, &J> = HashMap::new();
     let mut closed_tool_calls = HashSet::new();
-    for msg in messages {
+    for (idx, entry) in messages.iter().enumerate() {
+        let msg = &entry.message;
+        let msg_id = entry.entry_id.as_deref();
         let Some(role) = msg.get("role").and_then(J::as_str) else { continue };
         match role {
             "user" => {
+                if msg.get("compaction").and_then(J::as_bool) == Some(true) {
+                    if opts.compaction_updates {
+                        let fallback_id;
+                        let cid = match msg_id.filter(|s| !s.is_empty()) {
+                            Some(id) => id,
+                            None => {
+                                fallback_id = format!("compaction-{idx}");
+                                &fallback_id
+                            }
+                        };
+                        let summary = msg.get("summary").and_then(J::as_str);
+                        out.push(compaction_update_json(cid, "completed", summary, None));
+                    }
+                    continue;
+                }
                 if msg.get("notification").and_then(J::as_bool) == Some(true)
                     || msg.get("turn_aborted").and_then(J::as_bool) == Some(true)
-                    || msg.get("compaction").and_then(J::as_bool) == Some(true)
                     || msg.get("branch_summary").and_then(J::as_bool) == Some(true)
                 {
                     continue;
                 }
                 match msg.get("content") {
-                    Some(J::String(text)) => push_replay_chunk(&mut out, "user_message_chunk", text),
+                    Some(J::String(text)) => push_replay_chunk(&mut out, "user_message_chunk", text, msg_id),
                     Some(J::Array(blocks)) => {
                         for block in blocks {
                             match block.get("type").and_then(J::as_str) {
                                 Some("text") => {
                                     if let Some(text) = block.get("text").and_then(J::as_str) {
-                                        push_replay_chunk(&mut out, "user_message_chunk", text);
+                                        push_replay_chunk(&mut out, "user_message_chunk", text, msg_id);
                                     }
                                 }
                                 Some("image") => {
                                     if let Some(img) = block_image_to_acp(block) {
-                                        out.push(json!({
-                                            "sessionUpdate": "user_message_chunk",
-                                            "content": img,
-                                        }));
+                                        out.push(content_chunk_update("user_message_chunk", img, msg_id));
                                     }
                                 }
                                 _ => {}
@@ -423,7 +864,7 @@ pub(super) fn messages_to_updates_with_info(
                 }
             }
             "assistant" => match msg.get("content") {
-                Some(J::String(text)) => push_replay_chunk(&mut out, "agent_message_chunk", text),
+                Some(J::String(text)) => push_replay_chunk(&mut out, "agent_message_chunk", text, msg_id),
                 Some(J::Array(blocks)) => {
                     for block in blocks {
                         match block.get("type").and_then(J::as_str) {
@@ -431,12 +872,12 @@ pub(super) fn messages_to_updates_with_info(
                                 if block.get("redacted").and_then(J::as_bool) != Some(true)
                                     && let Some(text) = block.get("text").and_then(J::as_str)
                                 {
-                                    push_replay_chunk(&mut out, "agent_thought_chunk", text);
+                                    push_replay_chunk(&mut out, "agent_thought_chunk", text, msg_id);
                                 }
                             }
                             Some("text") => {
                                 if let Some(text) = block.get("text").and_then(J::as_str) {
-                                    push_replay_chunk(&mut out, "agent_message_chunk", text);
+                                    push_replay_chunk(&mut out, "agent_message_chunk", text, msg_id);
                                 }
                             }
                             Some("tool_call") => {
@@ -447,15 +888,23 @@ pub(super) fn messages_to_updates_with_info(
                                     let args = block.get("arguments").unwrap_or(&J::Null);
                                     let info = block.get("info").or_else(|| tool_info.get(name));
                                     if block.get("hosted").and_then(J::as_bool) == Some(true) {
-                                        out.push(tool_call_update_start(id_val, name, args, info));
+                                        out.push(tool_call_update_start(id_val, name, args, info, opts.cwd));
                                         let result = block.get("result").unwrap_or(&J::Null);
                                         let failed = result.get("status").and_then(J::as_str) == Some("failed");
-                                        out.push(tool_call_update_end(id_val, failed, result));
+                                        out.push(tool_call_update_end(
+                                            id_val,
+                                            failed,
+                                            result,
+                                            None,
+                                            Some(args),
+                                            opts.cwd,
+                                        ));
                                     } else {
                                         if seen_tool_calls.insert(id.to_string()) {
                                             tool_call_order.push(id.to_string());
                                         }
-                                        out.push(tool_call_update_start(id_val, name, args, info));
+                                        tool_call_args.insert(id.to_string(), args);
+                                        out.push(tool_call_update_start(id_val, name, args, info, opts.cwd));
                                     }
                                 }
                             }
@@ -472,7 +921,9 @@ pub(super) fn messages_to_updates_with_info(
                 {
                     closed_tool_calls.insert(id.to_string());
                     let failed = msg.get("is_error").and_then(J::as_bool).unwrap_or(false);
-                    out.push(tool_call_update_end(id_val, failed, &msg["content"]));
+                    let details = msg.get("details");
+                    let args = tool_call_args.get(id).copied();
+                    out.push(tool_call_update_end(id_val, failed, &msg["content"], details, args, opts.cwd));
                 }
             }
             _ => {}
@@ -480,7 +931,7 @@ pub(super) fn messages_to_updates_with_info(
     }
     for id in tool_call_order {
         if !closed_tool_calls.contains(&id) {
-            out.push(tool_call_update_end(&J::String(id), true, &J::Null));
+            out.push(tool_call_update_end(&J::String(id), true, &J::Null, None, None, opts.cwd));
         }
     }
     out
@@ -1076,5 +1527,114 @@ mod tests {
         assert_eq!(page2.sessions[1].session_id.0.as_ref(), "s-zero");
         assert_eq!(page2.sessions[1].updated_at, None);
         assert!(parse_list_cursor(Some("-1:abc")).is_err());
+    }
+
+    #[test]
+    fn tool_call_kinds_and_locations_cover_metadata_and_patch_operations() {
+        let cwd = PathBuf::from("/workspace/proj");
+        let opts = TranslateOpts { cwd: Some(&cwd), compaction_updates: false };
+
+        let del_patch = "*** Begin Patch\n*** Delete File: old.txt\n*** End Patch\n";
+        let move_patch = "*** Begin Patch\n*** Update File: a.txt\n*** Move to: b.txt\n@@\n-x\n+y\n*** End Patch\n";
+        let cases = [
+            (
+                "delete patch",
+                json!({ "side_effect": "write" }),
+                json!({ "input": del_patch }),
+                "delete",
+                Some(json!([{ "path": "/workspace/proj/old.txt" }])),
+            ),
+            (
+                "move patch",
+                json!({ "side_effect": "write" }),
+                json!({ "input": move_patch }),
+                "move",
+                Some(json!([{ "path": "/workspace/proj/a.txt" }, { "path": "/workspace/proj/b.txt" }])),
+            ),
+            (
+                "read search",
+                json!({ "side_effect": "read" }),
+                json!({ "pattern": "foo", "path": "src" }),
+                "search",
+                Some(json!([{ "path": "/workspace/proj/src" }])),
+            ),
+            (
+                "web fetch",
+                json!({ "side_effect": "external", "idempotent": true }),
+                json!({ "url": "https://example.com" }),
+                "fetch",
+                None,
+            ),
+            (
+                "web search",
+                json!({ "side_effect": "external", "idempotent": true }),
+                json!({ "queries": ["rust acp"] }),
+                "search",
+                None,
+            ),
+            ("explicit kind", json!({ "kind": "think" }), json!({ "path": "~/ignored.txt" }), "think", None),
+        ];
+
+        for (label, info, args, expected_kind, expected_locs) in cases {
+            let u = to_update_with(
+                "item/started",
+                &json!({
+                    "item": {
+                        "type": "tool_call",
+                        "tool_call_id": "tc1",
+                        "name": "tool",
+                        "arguments": args,
+                        "info": info,
+                    }
+                }),
+                opts,
+            )
+            .unwrap();
+            assert_eq!(u["kind"], expected_kind, "{label}: {u}");
+            assert_eq!(u.get("locations").cloned(), expected_locs, "{label}: {u}");
+            let parsed: Result<SessionNotification, _> =
+                serde_json::from_value(json!({ "sessionId": "s1", "update": u }));
+            assert!(parsed.is_ok(), "{label}: invalid SessionNotification {u}: {parsed:?}");
+        }
+    }
+
+    #[test]
+    fn compaction_updates_respect_capability_flag_and_map_statuses() {
+        let started = json!({ "compact_id": "cmp-1", "reason": "manual" });
+        let completed = json!({ "compact_id": "cmp-1", "status": "completed", "summary": "Short summary" });
+        let failed = json!({
+            "compact_id": "cmp-2",
+            "status": "stalled",
+            "error": { "code": "compact.not_compacted", "message": "context still full" }
+        });
+        let cancelled = json!({ "compact_id": "cmp-3", "status": "cancelled", "cancelled": true });
+
+        let disabled = TranslateOpts { cwd: None, compaction_updates: false };
+        assert!(to_update_with("compact/started", &started, disabled).is_none());
+        assert!(to_update_with("compact/completed", &completed, disabled).is_none());
+
+        let enabled = TranslateOpts { cwd: None, compaction_updates: true };
+        let u_start = to_update_with("compact/started", &started, enabled).unwrap();
+        assert_eq!(
+            u_start,
+            json!({ "sessionUpdate": "compaction_update", "compactionId": "cmp-1", "status": "in_progress" })
+        );
+
+        let u_done = to_update_with("compact/completed", &completed, enabled).unwrap();
+        assert_eq!(u_done["status"], "completed");
+        assert_eq!(u_done["summary"], json!([{ "type": "text", "text": "Short summary" }]));
+
+        let u_fail = to_update_with("compact/completed", &failed, enabled).unwrap();
+        assert_eq!(u_fail["status"], "failed");
+        assert_eq!(u_fail["error"], "context still full");
+
+        let u_cancel = to_update_with("compact/completed", &cancelled, enabled).unwrap();
+        assert_eq!(u_cancel["status"], "cancelled");
+
+        for u in [&u_start, &u_done, &u_fail, &u_cancel] {
+            let parsed: Result<SessionNotification, _> =
+                serde_json::from_value(json!({ "sessionId": "s1", "update": u }));
+            assert!(parsed.is_ok(), "invalid compaction_update {u}: {parsed:?}");
+        }
     }
 }
