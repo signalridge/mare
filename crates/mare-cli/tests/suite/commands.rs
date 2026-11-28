@@ -1303,3 +1303,158 @@ async fn profile_warns_when_third_party_plugin_apply_yields() {
     })
     .await
 }
+
+#[tokio::test]
+async fn repro_issue_200_skill_and_template_slash_prompts_drop_image_attachments() {
+    local(async {
+        let env = TestEnv::new().await;
+        let skills_root = env.config_dir().join("skills");
+        let prompts_root = env.config_dir().join("prompts");
+        std::fs::create_dir_all(skills_root.join("img-skill")).unwrap();
+        std::fs::create_dir_all(&prompts_root).unwrap();
+        std::fs::write(
+            skills_root.join("img-skill/SKILL.md"),
+            "---\nname: img-skill\ndescription: inspect attached image\n---\nInspect the image carefully.\n",
+        )
+        .unwrap();
+        std::fs::write(prompts_root.join("img-tpl.md"), "---\ndescription: template with image\n---\nDescribe: $@\n")
+            .unwrap();
+
+        let cfg = json!({
+            "plugins": {
+                "context": {
+                    "skill_dirs": [skills_root],
+                    "prompt_dirs": [prompts_root]
+                }
+            }
+        });
+        let mut b = env.host().faux(json!([{ "text": "ok1" }, { "text": "ok2" }])).config(cfg).no_session();
+        b.opts.mode = mare_shared::ui::Mode::Tui;
+        let h = b.build().await;
+        expose(&h);
+        exec(&h, r#"mare.ui.connected = function() return true end"#).await;
+        h.kernel.reload(Some("ui")).await.unwrap();
+
+        let (skill_images, tpl_images): (i64, i64) = eval(
+            &h,
+            r#"
+            local U = C.cordis:get("ui")
+            local seen = {}
+            C.cordis:on("request/build", function(req, next)
+                local last = req.messages[#req.messages]
+                local n = 0
+                for _, b in ipairs(last and last.content or {}) do
+                    if b.type == "image" then n = n + 1 end
+                end
+                seen[#seen + 1] = n
+                return next()
+            end)
+            local img = { type = "image", mime = "image/png", data = mare.crypto.base64_encode("PNG") }
+            C.cordis:emit("input/submit", { text = "/skill:img-skill check this", images = { img } })
+            while #seen < 1 do mare.task.sleep(10) end
+            C.cordis:emit("input/submit", { text = "/img-tpl check that", images = { img } })
+            while #seen < 2 do mare.task.sleep(10) end
+            return seen[1], seen[2]
+            "#,
+        )
+        .await;
+        h.shutdown().await;
+        assert_eq!(
+            (skill_images, tpl_images),
+            (1, 1),
+            "slash skill/template submit dropped attached images (skill_images={skill_images}, tpl_images={tpl_images})"
+        );
+    })
+    .await
+}
+
+#[tokio::test]
+async fn slash_skill_and_template_preserve_untyped_tui_images_and_file_parts() {
+    local(async {
+        let env = TestEnv::new().await;
+        let skills_root = env.config_dir().join("skills");
+        let prompts_root = env.config_dir().join("prompts");
+        std::fs::create_dir_all(skills_root.join("img-skill")).unwrap();
+        std::fs::create_dir_all(&prompts_root).unwrap();
+        std::fs::write(
+            skills_root.join("img-skill/SKILL.md"),
+            "---\nname: img-skill\ndescription: inspect attached image\n---\nInspect carefully.\n",
+        )
+        .unwrap();
+        std::fs::write(prompts_root.join("img-tpl.md"), "---\ndescription: template\n---\nReview: $@\n").unwrap();
+
+        let cfg = json!({
+            "plugins": {
+                "context": {
+                    "skill_dirs": [skills_root],
+                    "prompt_dirs": [prompts_root]
+                }
+            }
+        });
+        let mut b =
+            env.host().faux(json!([{ "text": "ok1" }, { "text": "ok2" }, { "text": "ok3" }])).config(cfg).no_session();
+        b.opts.mode = mare_shared::ui::Mode::Tui;
+        let h = b.build().await;
+        expose(&h);
+        exec(&h, r#"mare.ui.connected = function() return true end"#).await;
+        h.kernel.reload(Some("ui")).await.unwrap();
+
+        let summary: String = eval(
+            &h,
+            r#"
+            local cmds = C.cordis:get("commands")
+            local seen = {}
+            C.cordis:on("request/build", function(req, next)
+                local last = req.messages[#req.messages]
+                local entry = { text = "", images = 0, mentions = 0 }
+                for _, b in ipairs(last and last.content or {}) do
+                    if b.type == "text" then entry.text = entry.text .. b.text end
+                    if b.type == "image" then entry.images = entry.images + 1 end
+                    if b.type == "mention" then entry.mentions = entry.mentions + 1 end
+                end
+                seen[#seen + 1] = entry
+                return next()
+            end)
+            -- Untyped TUI pasted image (`{ mime, data }` without explicit `type`)
+            C.cordis:emit("input/submit", {
+                text = "/skill:img-skill look",
+                images = { { mime = "image/png", data = mare.crypto.base64_encode("PNG") } },
+            })
+            while #seen < 1 do mare.task.sleep(10) end
+            -- Direct commands:run with typed file ContentPart
+            cmds:run("/img-tpl hello", {
+                content = {
+                    { type = "text", text = "hello" },
+                    { type = "file", path = "notes.txt" },
+                },
+            })
+            while #seen < 2 do mare.task.sleep(10) end
+            -- Mixed `ev.content` (image A + file) and distinct `ev.images` (image B) must keep both images.
+            C.cordis:emit("input/submit", {
+                text = "/skill:img-skill both",
+                content = {
+                    { type = "text", text = "/skill:img-skill both" },
+                    { type = "image", mime = "image/png", data = mare.crypto.base64_encode("PNG-A") },
+                    { type = "file", path = "notes.txt" },
+                },
+                images = {
+                    { mime = "image/png", data = mare.crypto.base64_encode("PNG-B") },
+                },
+            })
+            while #seen < 3 do mare.task.sleep(10) end
+            return mare.json.encode(seen)
+            "#,
+        )
+        .await;
+        h.shutdown().await;
+        let seen: Value = serde_json::from_str(&summary).unwrap();
+        assert_eq!(seen[0]["images"], 1, "{seen}");
+        assert!(seen[0]["text"].as_str().unwrap().contains("Inspect carefully."), "{seen}");
+        assert_eq!(seen[1]["mentions"], 1, "{seen}");
+        assert!(seen[1]["text"].as_str().unwrap().contains("Review: hello"), "{seen}");
+        assert_eq!(seen[2]["images"], 2, "distinct images from ev.content and ev.images must both survive: {seen}");
+        assert_eq!(seen[2]["mentions"], 1, "{seen}");
+        assert!(seen[2]["text"].as_str().unwrap().contains("Inspect carefully."), "{seen}");
+    })
+    .await
+}

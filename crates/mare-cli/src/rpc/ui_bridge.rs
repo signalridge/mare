@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 
 use mare_host::SessionRuntime;
 use mare_protocol::{self as proto, methods};
-use mlua::Value;
+use mlua::{LuaSerdeExt, Value};
 use serde_json::{Value as J, json};
 
 use super::*;
@@ -496,6 +496,11 @@ pub(super) async fn rpc_send_editor(
     let _ = ev.set("text", submitted.as_str());
     let _ = ev.set("mode", mode.as_str());
     let _ = ev.set("handled", false);
+    if let Some(ref parts) = built_parts
+        && let Ok(lua_parts) = lua.to_value(parts)
+    {
+        let _ = ev.set("content", lua_parts);
+    }
     let _ = host.kernel.emit("input/submit", mlua::MultiValue::from_vec(vec![Value::Table(ev.clone())])).await;
     let handled = ev.get::<Option<bool>>("handled").ok().flatten().unwrap_or(false);
     let result = if handled {

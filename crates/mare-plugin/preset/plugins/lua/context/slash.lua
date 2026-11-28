@@ -91,6 +91,47 @@ return function(D)
 		return load_templates()
 	end
 
+	local function prompt_with_attachments(expanded, input)
+		local blocks = type(input) == "table" and type(input.content) == "table" and input.content or nil
+		if not blocks then
+			return expanded
+		end
+		local out = {}
+		local replaced = false
+		local has_extra = false
+		for _, b in ipairs(blocks) do
+			if type(b) == "table" and b.type == "text" then
+				if not replaced then
+					out[#out + 1] = { type = "text", text = expanded }
+					replaced = true
+				end
+			elseif type(b) == "table" and type(b.type) == "string" then
+				has_extra = true
+				out[#out + 1] = b
+			end
+		end
+		if not replaced then
+			table.insert(out, 1, { type = "text", text = expanded })
+		end
+		return has_extra and out or expanded
+	end
+
+	local function run_prompt(expanded, input)
+		local agent = D.svc.agent
+		if not agent then
+			return
+		end
+		local payload = prompt_with_attachments(expanded, input)
+		ctx:spawn(function()
+			local ok, res = pcall(agent.prompt, agent, payload)
+			if not ok then
+				ui.notify(type(res) == "table" and res.message or tostring(res), "warning")
+			elseif type(res) == "table" and res.error then
+				ui.notify(res.error, "warning")
+			end
+		end)
+	end
+
 	-- /skill:name [args] — force-load a skill: its instructions go in as a user message
 	local function register_commands(commands)
 		for _, tp in ipairs(load_templates()) do
@@ -106,24 +147,12 @@ return function(D)
 			end
 			local desc = type(fm.description) == "string" and fm.description ~= "" and fm.description
 				or (body:match("^%s*([^\n]+)") or tp.name)
-			local function run_prompt(text)
-				local agent = D.svc.agent
-				if not agent then
-					return
-				end
-				ctx:spawn(function()
-					local res = agent:prompt(text)
-					if type(res) == "table" and res.error then
-						ui.notify(res.error, "warning")
-					end
-				end)
-			end
 			commands:register(tp.name, {
 				description = mare.text.trunc_width(one_line(desc), 60),
 				-- `argument-hint`: shown dim after the name in the `/` menu
 				args = type(fm["argument-hint"]) == "string" and fm["argument-hint"] or nil,
-				run = function(args)
-					run_prompt(expand_template(body, args))
+				run = function(args, input)
+					run_prompt(expand_template(body, args), input)
 				end,
 			})
 			::continue::
@@ -132,7 +161,7 @@ return function(D)
 			commands:register("skill:" .. sk.name, {
 				description = mare.text.trunc_width(one_line(sk.description), 60),
 				args = sk.argument_hint,
-				run = function(args)
+				run = function(args, input)
 					local _, body = frontmatter(mare.fs.read(sk.path) or "")
 					local dir = string.match(sk.path, "^(.*)/[^/]+$")
 					local text = require("mare_lib").data_block(
@@ -143,15 +172,7 @@ return function(D)
 					if args and args ~= "" then
 						text = text .. "\n\n" .. args
 					end
-					local agent = D.svc.agent
-					if agent then
-						ctx:spawn(function()
-							local res = agent:prompt(text)
-							if type(res) == "table" and res.error then
-								ui.notify(res.error, "warning")
-							end
-						end)
-					end
+					run_prompt(text, input)
 				end,
 			})
 		end
