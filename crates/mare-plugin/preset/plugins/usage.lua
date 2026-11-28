@@ -166,8 +166,10 @@ return {
 			end
 			local u = m.usage
 			add(u, model_of(m), m.subscription)
-			U.last_context = context_of(u)
-			U.last_cache_read = u.cache_read or 0
+			if mare_lib.has_usage_counts(u) then
+				U.last_context = context_of(u)
+				U.last_cache_read = u.cache_read or 0
+			end
 			emit_changed()
 		end)
 		-- requests outside the conversation (llm reports them; compaction summaries, /btw)
@@ -274,7 +276,7 @@ return {
 			else
 				for i = #(ev.messages or {}), 1, -1 do
 					local m = ev.messages[i]
-					if m.role == "assistant" and m.usage then
+					if m.role == "assistant" and mare_lib.has_usage_counts(m.usage) then
 						U.last_context = context_of(m.usage)
 						U.last_cache_read = m.usage.cache_read or 0
 						break

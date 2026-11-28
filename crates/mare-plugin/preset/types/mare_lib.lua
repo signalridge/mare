@@ -416,6 +416,11 @@ function M.resolve_cache_retention(req, model, prov_cfg, plugin_cfg, route_cfg, 
 ---@return {type: "ephemeral", ttl?: "1h"}|nil
 function M.anthropic_cache_control(retention, supports_long, read_only) end
 
+--- True when a provider usage table reports at least one non-zero token count.
+---@param u any
+---@return boolean
+function M.has_usage_counts(u) end
+
 --- True when the last assistant message's usage on `path`/`entries` is stale (before the last compaction/prune).
 ---@param path table|nil
 ---@param entries table|nil

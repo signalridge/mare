@@ -400,6 +400,193 @@ async fn side_usage_keeps_reported_usage_from_an_empty_response_retry() {
     .await
 }
 
+/// Issue #112: a reply with empty usage metadata (`usage = {}`) must keep the last measured
+/// context and cache_read readings both live and across resume, while still counting the request;
+/// after compaction, an empty-usage reply must keep using the local estimate instead of restoring
+/// pre-compaction context.
+#[tokio::test]
+async fn empty_usage_reply_keeps_last_context_and_cache_live_and_on_resume() {
+    local(async {
+        let env = TestEnv::new().await;
+        let h = env.host().builtins(&["usage"]).faux(json!([])).build().await;
+        expose(&h);
+        global(&h, "U", h.service_table("usage").unwrap());
+        global(&h, "L", h.service_table("llm").unwrap());
+
+        exec(
+            &h,
+            r#"
+            CALLS = 0
+            L:register_provider({
+                provider = "empty-u",
+                is_configured = function() return true end,
+                models = { { model_id = "m", name = "EmptyU", context_window = 100000, max_output = 4096 } },
+                stream = function()
+                    CALLS = CALLS + 1
+                    if CALLS == 1 then
+                        return {
+                            role = "assistant",
+                            stop_reason = "stop",
+                            content = { { type = "text", text = "first measured reply" } },
+                            usage = { input = 1200, output = 80, cache_read = 400, cache_write = 100 },
+                        }
+                    end
+                    return {
+                        role = "assistant",
+                        stop_reason = "stop",
+                        content = { { type = "text", text = "second reply without usage" } },
+                        usage = {},
+                    }
+                end,
+            })
+            assert(L:set_model("empty-u/m"))
+            "#,
+        )
+        .await;
+
+        h.prompt("turn one", json!({})).await.unwrap();
+        let (ctx1, cr1, req1): (i64, i64, i64) =
+            eval(&h, "local t = U:totals(); return U:context_tokens(), t.last_cache_read, t.requests").await;
+        assert_eq!((ctx1, cr1, req1), (1780, 400, 1));
+
+        h.prompt("turn two", json!({})).await.unwrap();
+        let (ctx2, cr2, req2, path): (i64, i64, i64, String) = eval(
+            &h,
+            "local t = U:totals(); return U:context_tokens(), t.last_cache_read, t.requests, S:info().path",
+        )
+        .await;
+        assert_eq!(req2, 2, "empty-usage reply must still count as a request");
+        assert_eq!(ctx2, 1780, "live empty-usage reply must keep last measured context");
+        assert_eq!(cr2, 400, "live empty-usage reply must keep last measured cache_read");
+        h.shutdown().await;
+
+        // Resume: reverse scan skips the trailing `usage: {}` reply and restores the measured context.
+        let h2 = env.host().builtins(&["usage"]).faux(json!([])).resume().build().await;
+        expose(&h2);
+        global(&h2, "U", h2.service_table("usage").unwrap());
+        let (ctx_r, cr_r, req_r): (i64, i64, i64) =
+            eval(&h2, "local t = U:totals(); return U:context_tokens(), t.last_cache_read, t.requests").await;
+        assert_eq!(
+            (ctx_r, cr_r, req_r),
+            (1780, 400, 2),
+            "resume must keep last valid context and cache_read past empty usage"
+        );
+
+        // After compaction + an empty-usage reply, path_usage_stale must stay true so resume uses
+        // the local estimate rather than pulling pre-compaction context from before the boundary.
+        let (stale_after_empty, ctx_after_cmp): (bool, i64) = eval(
+            &h2,
+            r#"
+            local lib = require("mare_lib")
+            local path = {
+                { entry_id = "u1", type = "message", message = { role = "user", content = { { type = "text", text = "old" } } } },
+                { entry_id = "a1", type = "message", message = { role = "assistant", content = { { type = "text", text = "old reply" } }, usage = { input = 50000, output = 100 } } },
+                { entry_id = "c1", type = "compaction", first_kept_entry_id = "u2" },
+                { entry_id = "u2", type = "message", message = { role = "user", content = { { type = "text", text = "after compact" } } } },
+                { entry_id = "a2", type = "message", message = { role = "assistant", content = { { type = "text", text = "brief" } }, usage = {} } },
+            }
+            local stale = lib.path_usage_stale(path, path, false)
+            C.cordis:get("bus"):emit("session/loaded", {
+                navigated = true,
+                usage_stale = stale,
+                messages = { path[4].message, path[5].message },
+            })
+            return stale, U:context_tokens()
+            "#,
+        )
+        .await;
+        assert!(stale_after_empty, "empty usage after compaction must keep usage_stale = true");
+        assert!(
+            ctx_after_cmp > 0 && ctx_after_cmp < 1000,
+            "post-compaction resume with empty usage must use local estimate, not 50100: {ctx_after_cmp}"
+        );
+        let _ = path;
+        h2.shutdown().await;
+    })
+    .await
+}
+
+/// Live `item/completed` with `usage = {}` right after compaction must not mark stale usage
+/// current again; the next `compact:measure()` must still compute a local estimate reflecting
+/// post-compaction messages.
+#[tokio::test]
+async fn live_compact_then_empty_usage_reply_keeps_local_estimate() {
+    local(async {
+        let env = TestEnv::new().await;
+        let cfg = json!({
+            "plugins": {
+                "compact": {
+                    "auto": false,
+                    "keep_recent_tokens": 50,
+                    "recent_user_tokens": 0,
+                    "stages": ["local"]
+                }
+            }
+        });
+        let h = env.host().builtins(&["usage", "compact"]).faux(json!([])).config(cfg).no_session().build().await;
+        expose(&h);
+        global(&h, "U", h.service_table("usage").unwrap());
+        global(&h, "K", h.service_table("compact").unwrap());
+        global(&h, "L", h.service_table("llm").unwrap());
+
+        let (after_compact, after_empty_turn, usage_ctx): (i64, i64, i64) = eval(
+            &h,
+            r###"
+            CALLS = 0
+            L:register_provider({
+                provider = "empty-cmp",
+                is_configured = function() return true end,
+                models = { { model_id = "m", name = "EmptyCmp", context_window = 100000, max_output = 4096 } },
+                stream = function(req)
+                    if req and req.purpose == "compact" then
+                        return {
+                            role = "assistant",
+                            stop_reason = "stop",
+                            content = { { type = "text", text = "## Summary\nShort summary" } },
+                        }
+                    end
+                    CALLS = CALLS + 1
+                    if CALLS == 1 then
+                        return {
+                            role = "assistant",
+                            stop_reason = "stop",
+                            content = { { type = "text", text = string.rep("initial history payload ", 400) } },
+                            usage = { input = 50000, output = 100 },
+                        }
+                    end
+                    return {
+                        role = "assistant",
+                        stop_reason = "stop",
+                        content = { { type = "text", text = string.rep("post compact new reply tokens ", 500) } },
+                        usage = {},
+                    }
+                end,
+            })
+            assert(L:set_model("empty-cmp/m"))
+
+            local t1 = A:prompt("first turn")
+            A:wait(t1.turn_id)
+            assert(K:measure() == 50100, "measured usage before compaction: " .. tostring(K:measure()))
+
+            local cr = K:run()
+            assert(cr and cr.status == "compacted", tostring(cr and cr.error or cr and cr.status))
+            local m_after_compact = K:measure()
+
+            local t2 = A:prompt(string.rep("post compact user prompt tokens ", 400))
+            A:wait(t2.turn_id)
+            return m_after_compact, K:measure(), U:context_tokens()
+            "###,
+        )
+        .await;
+        h.shutdown().await;
+        assert!(
+            after_empty_turn > after_compact + 1000,
+            "after compact + empty-usage reply, compact:measure() must re-estimate new tokens instead of reusing stale context (after_compact={after_compact}, after_empty_turn={after_empty_turn}, usage_ctx={usage_ctx})"
+        );
+    })
+    .await
+}
+
 #[tokio::test]
 async fn rate_limit_reset_at_seconds_converts_to_epoch_ms() {
     local(async {
