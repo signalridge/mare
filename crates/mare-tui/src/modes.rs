@@ -37,7 +37,7 @@ pub const MOUSE_OFF: &[u8] = b"\x1b[?1006l\x1b[?1002l";
 /// DISAMBIGUATE_ESCAPE_CODES (1) | REPORT_ALTERNATE_KEYS (4)
 pub const KITTY_PUSH: &[u8] = b"\x1b[>5u";
 pub const KITTY_POP: &[u8] = b"\x1b[<1u";
-const MODES_ON: &[u8] = b"\x1b[?2004h\x1b[?1004h"; // bracketed paste, focus reporting
+const MODES_ON: &[u8] = b"\x1b[?2031h\x1b[?2004h\x1b[?1004h"; // theme change notifications, bracketed paste, focus reporting
 const LEAVE_IDLE_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Bytes that turn mare's modes on (`kitty`: also push our keyboard flags).
@@ -65,7 +65,7 @@ pub fn leave_bytes_full(main_kitty: bool, alt_kitty: bool, in_alt: bool) -> Vec<
     if main_kitty {
         b.extend_from_slice(KITTY_POP);
     }
-    b.extend_from_slice(b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?1004l");
+    b.extend_from_slice(b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?1004l\x1b[?2031l");
     b
 }
 
@@ -216,7 +216,7 @@ mod tests {
         let alt_leave = b_alt.find("\x1b[?1049l").unwrap();
         let main_pop = b_alt.rfind("\x1b[<1u").unwrap();
         assert!(alt_pop < alt_leave && alt_leave < main_pop, "{b_alt:?}");
-        assert_eq!(enter_bytes(true), b"\x1b[?2004h\x1b[?1004h\x1b[>5u");
+        assert_eq!(enter_bytes(true), b"\x1b[?2031h\x1b[?2004h\x1b[?1004h\x1b[>5u");
     }
 
     #[test]
@@ -312,5 +312,27 @@ mod tests {
         );
         leave();
         crate::out::capture(false);
+    }
+
+    #[test]
+    fn repro_214_modes_subscribe_and_unsubscribe_theme_change_notifications() {
+        // Confirm the parser already accepts DEC 2031 theme reports (CSI ? 997 ; 2 n -> Light).
+        let mut parser = termina::Parser::default();
+        parser.parse(b"\x1b[?997;2n", false);
+        let ev = crate::tty::Event::from(parser.pop().expect("parsed ReportTheme"));
+        let parsed = crate::term_input::parse_escape_event(&ev).expect("term_input parses ReportTheme");
+        assert_eq!(parsed.rgb, Some([255, 255, 255]));
+
+        // Yet terminal enter/leave sequences never enable or disable DEC mode 2031 (`?2031h`/`?2031l`).
+        let enter = String::from_utf8(enter_bytes(false)).unwrap();
+        let leave = String::from_utf8(leave_bytes_full(false, false, false)).unwrap();
+        assert!(
+            enter.contains("\x1b[?2031h"),
+            "enter_bytes must enable DEC 2031 theme-change notifications (`?2031h`); got {enter:?}"
+        );
+        assert!(
+            leave.contains("\x1b[?2031l"),
+            "leave_bytes_full must disable DEC 2031 theme-change notifications (`?2031l`); got {leave:?}"
+        );
     }
 }

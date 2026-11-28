@@ -218,6 +218,11 @@ pub(in crate::app) fn apply_inband_escape(app: &mut App, guard: Option<&TermGuar
     };
     let host = app.host.clone();
     apply_probe_update(app, &host, guard, parsed.rgb, parsed.probe, parsed.saw_da1);
+    if parsed.theme_report {
+        // DEC 2031 reports only dark vs light; follow up with an in-band OSC 11 query through
+        // the shared background-refresh path so supporting terminals supply their exact RGB bg.
+        refresh_background_inband(app);
+    }
     true
 }
 

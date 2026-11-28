@@ -180,6 +180,7 @@ pub struct EscapeProbe {
     pub rgb: Option<[u8; 3]>,
     pub probe: Probe,
     pub saw_da1: bool,
+    pub theme_report: bool,
 }
 
 /// Extract terminal capability / background / cursor-position data from a `tty::Event` escape reply.
@@ -232,6 +233,7 @@ pub fn parse_termina_escape(ev: &termina::Event) -> Option<EscapeProbe> {
                 csi::ThemeMode::Dark => [0, 0, 0],
                 csi::ThemeMode::Light => [255, 255, 255],
             });
+            out.theme_report = true;
             any = true;
         }
         termina::Event::Csi(csi::Csi::Window(win)) => {
