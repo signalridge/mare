@@ -25,24 +25,6 @@ return {
 			local o = mare.o or mare.config or {}
 			return cfg.enabled ~= false and o.update_check ~= false
 		end
-		--- "1.2.10" > "1.2.9"; a leading "v" and pre-release suffixes are ignored
-		local function newer(a, b)
-			local function parts(v)
-				local out = {}
-				for n in tostring(v):gsub("^v", ""):gsub("[-+].*$", ""):gmatch("%d+") do
-					out[#out + 1] = tonumber(n)
-				end
-				return out
-			end
-			local x, y = parts(a), parts(b)
-			for i = 1, math.max(#x, #y) do
-				local p, q = x[i] or 0, y[i] or 0
-				if p ~= q then
-					return p > q
-				end
-			end
-			return false
-		end
 
 		local svc = {}
 		--- check() -> {latest, current, newer} | nil, reason. Makes no request when disabled.
@@ -65,7 +47,8 @@ return {
 				return nil, "no tag_name"
 			end
 			pcall(mare.state.set, "update_check_at", os.time()) -- locked, atomic; never over a corrupt file
-			local res = { latest = tag, current = mare.version, newer = newer(tag, mare.version) }
+			local res =
+				{ latest = tag, current = mare.version, newer = mare.semver.is_newer_release(tag, mare.version) }
 			if res.newer then
 				ctx.bus:emit("update-check/available", res)
 			end

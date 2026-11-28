@@ -93,6 +93,70 @@ async fn update_check_treats_future_timestamp_as_expired() {
     .await
 }
 
+#[tokio::test]
+async fn update_check_uses_semver_precedence_for_prereleases() {
+    local(async {
+        let env = TestEnv::new().await;
+        let mock = MockServer::start().await;
+        mock.route(
+            "/releases/latest",
+            vec![
+                Resp::status(200, r#"{"tag_name":"v1.0.0"}"#),
+                Resp::status(200, r#"{"tag_name":"v1.0.0-rc.10"}"#),
+                Resp::status(200, r#"{"tag_name":"v1.0.0-rc.2"}"#),
+                Resp::status(200, r#"{"tag_name":"v1.0.0-rc.1"}"#),
+                Resp::status(200, r#"{"tag_name":"v1.0.1-rc.1"}"#),
+            ],
+        );
+        let url = format!("{}/releases/latest", mock.base);
+        let h = env
+            .host()
+            .builtins(&["update-check"])
+            .config(json!({ "plugins": { "update-check": { "url": url } } }))
+            .no_session()
+            .build()
+            .await;
+        global(&h, "UC", h.service_table("update-check").unwrap());
+
+        for (current, expected_tag, expected_newer) in [
+            ("1.0.0-rc.1", "v1.0.0", true),       // RC -> stable notifies
+            ("1.0.0-rc.2", "v1.0.0-rc.10", true), // RC numeric ordering (10 > 2)
+            ("1.0.0-rc.10", "v1.0.0-rc.2", false),
+            ("1.0.0", "v1.0.0-rc.1", false), // stable never upgrades to RC
+            ("1.0.0", "v1.0.1-rc.1", false), // stable never upgrades to higher RC
+        ] {
+            let (latest, newer): (String, bool) = eval(
+                &h,
+                &format!(
+                    r#"local orig = mare.version
+                       mare.version = {current:?}
+                       local r = UC:check()
+                       mare.version = orig
+                       return r.latest, r.newer"#
+                ),
+            )
+            .await;
+            assert_eq!(
+                (latest.as_str(), newer),
+                (expected_tag, expected_newer),
+                "current={current} tag={expected_tag}"
+            );
+        }
+        let (cmp_rc, semver_rc, rel_rc, cmp_meta, cmp_bad): (i8, bool, bool, i8, Option<i8>) = eval(
+            &h,
+            r#"return mare.semver.compare("v1.0.1-rc.1", "1.0.0"),
+                      mare.semver.is_newer("v1.0.1-rc.1", "1.0.0"),
+                      mare.semver.is_newer_release("v1.0.1-rc.1", "1.0.0"),
+                      mare.semver.compare("1.0.0+b2", "1.0.0+b1"),
+                      mare.semver.compare("bad", "1.0.0")"#,
+        )
+        .await;
+        assert_eq!((cmp_rc, semver_rc, rel_rc, cmp_meta, cmp_bad), (1, true, false, 0, None));
+        h.shutdown().await;
+    })
+    .await
+}
+
 /// Windows: a private DACL (`mare_shared::private`), below a MARE_HOME open to everyone.
 #[tokio::test]
 async fn login_takes_the_key_masked_and_stores_it_0600() {
