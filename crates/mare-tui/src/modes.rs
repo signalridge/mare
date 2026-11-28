@@ -144,6 +144,23 @@ pub fn leave() {
     crate::capture::pause();
 }
 
+/// Bounded forced-exit cleanup: restore only Mare-owned terminal modes without blocking on the
+/// writer thread. Removes the Kitty ownership marker only when the reset bytes were written,
+/// preserving startup stale-entry recovery if the terminal fd was blocked.
+pub fn force_leave(timeout: std::time::Duration) {
+    if HANDED_OFF.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let main_kitty = KITTY_PUSHED.swap(false, Ordering::SeqCst);
+    let alt_kitty = ALT_KITTY_PUSHED.swap(false, Ordering::SeqCst);
+    let alt = IN_ALT.swap(false, Ordering::SeqCst);
+    WAS_IN_ALT.store(alt, Ordering::SeqCst);
+    let wrote = crate::out::write_direct_bounded(&leave_bytes_full(main_kitty, alt_kitty, alt), timeout);
+    if main_kitty && wrote {
+        crate::kitty_marker::popped();
+    }
+}
+
 /// Back from a handoff: every mode as before (kitty re-pushed if the terminal supports it,
 /// alternate screen and its Kitty stack restored if active before handoff).
 pub fn resume() {
@@ -334,5 +351,21 @@ mod tests {
             leave.contains("\x1b[?2031l"),
             "leave_bytes_full must disable DEC 2031 theme-change notifications (`?2031l`); got {leave:?}"
         );
+    }
+
+    #[test]
+    fn force_leave_writes_owned_resets_and_skips_when_handed_off() {
+        let _g = crate::out::test_lock();
+        crate::out::capture(true);
+        enter();
+        enable_kitty();
+        let _ = crate::out::capture(true);
+        force_leave(std::time::Duration::from_millis(50));
+        let forced = String::from_utf8(crate::out::capture(true)).unwrap();
+        assert!(forced.starts_with("\x1b[0m\x1b[?25h\x1b[<1u"), "{forced:?}");
+        assert!(forced.contains("\x1b[?2004l\x1b[?1004l"), "{forced:?}");
+        // Already handed off: a second force_leave must write nothing.
+        force_leave(std::time::Duration::from_millis(50));
+        assert!(crate::out::capture(false).is_empty());
     }
 }
