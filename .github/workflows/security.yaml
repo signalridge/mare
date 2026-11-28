@@ -17,27 +17,19 @@ on:
       - "docs-site/package-lock.json"
       - ".github/workflows/security.yaml"
       - ".github/actions/**"
-  pull_request:
-    branches: [main]
-    paths:
-      - "crates/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - ".cargo/**"
-      - "deny.toml"
-      - "about.toml"
-      - "Dockerfile"
-      - "Dockerfile.release"
-      - "flake.lock"
-      - "docs-site/package.json"
-      - "docs-site/package-lock.json"
-      - ".github/workflows/security.yaml"
-      - ".github/actions/**"
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_call:
+    inputs:
+      run_codeql:
+        description: "Run CodeQL Rust analysis (pass false for Trivy-only PR checks)"
+        required: false
+        type: boolean
+        default: false
   workflow_dispatch:
 concurrency:
   group: security-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: false
 permissions:
   actions: read
   contents: read
@@ -45,6 +37,7 @@ permissions:
 jobs:
   changes:
     name: changes
+    if: toJSON(inputs.run_codeql) != 'false'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -96,8 +89,8 @@ jobs:
               return False
 
           event = os.environ.get("EVENT_NAME", "")
-          if event == "workflow_dispatch":
-              emit(True, "workflow_dispatch")
+          if event in ("workflow_dispatch", "schedule"):
+              emit(True, event)
           elif event == "pull_request":
               if git("rev-parse", "--verify", "HEAD^2").returncode == 0:
                   files = changed_files("HEAD^1")
@@ -120,13 +113,15 @@ jobs:
   codeql:
     name: CodeQL Rust Analysis
     needs: [changes]
-    if: needs.changes.outputs.codeql == 'true'
+    if: toJSON(inputs.run_codeql) != 'false' && needs.changes.outputs.codeql == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: mare-${{ runner.os }}-${{ runner.arch }}-dev
       - name: Initialize CodeQL
         uses: github/codeql-action/init@5595ccaf912efad79be6eef63a5619ff05969be3 # v4
         with:

@@ -1,28 +1,7 @@
 name: Release Dry Run
 
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - ".github/ci-tools.json"
-      - ".github/actions/**"
-      - "about.toml"
-      - "deny.toml"
-      - "scripts/check_notices.py"
-      - "rust-toolchain.toml"
-      - ".python-version"
-      - ".github/workflows/release.yaml"
-      - ".github/workflows/release-dry-run.yaml"
-      - ".github/workflows/release-please.yaml"
-      - "release-please-config.json"
-      - ".release-please-manifest.json"
-      - "Dockerfile.release"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "scripts/release_manifests.py"
-      - "scripts/check_release_gate.py"
-      - "scripts/check_release_policy.py"
-      - "scripts/verify_release_archive.py"
+  workflow_call:
   workflow_dispatch:
 
 permissions:
@@ -60,7 +39,7 @@ jobs:
           } >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          key: release-dry-run-musl
+          shared-key: mare-${{ runner.os }}-${{ runner.arch }}-release-musl
       - name: Run release script self-tests and policy checks
         run: |
           python3 scripts/release_manifests.py --self-test
@@ -186,7 +165,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          key: release-dry-run-windows
+          shared-key: mare-${{ runner.os }}-${{ runner.arch }}-release
       - name: Build locked release binary and verify seams (Windows)
         shell: pwsh
         run: |

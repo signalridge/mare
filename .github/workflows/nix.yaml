@@ -11,16 +11,7 @@ on:
       - Cargo.lock
       - "crates/**"
       - ".github/workflows/nix.yaml"
-  pull_request:
-    branches: [main]
-    paths:
-      - flake.nix
-      - flake.lock
-      - rust-toolchain.toml
-      - Cargo.toml
-      - Cargo.lock
-      - "crates/**"
-      - ".github/workflows/nix.yaml"
+  workflow_call:
   workflow_dispatch:
 
 concurrency:
