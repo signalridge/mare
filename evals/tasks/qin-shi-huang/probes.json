@@ -1,0 +1,43 @@
+{
+  "budget": {
+    "seconds": 900,
+    "max_tool_calls": 60
+  },
+  "probes": [
+    {
+      "id": "valid-svg",
+      "kind": "must_show",
+      "text": "result.svg parses as valid XML with root <svg>",
+      "check": {
+        "type": "verifier_check",
+        "name": "result.svg parses as XML with root <svg>"
+      }
+    },
+    {
+      "id": "answer-states-21",
+      "kind": "must_show",
+      "text": "Final answer states 21",
+      "check": {
+        "type": "verifier_check",
+        "name": "the answer states 21"
+      }
+    },
+    {
+      "id": "no-unpaired-tool-calls",
+      "kind": "must_not_show",
+      "text": "Agent leaves unpaired tool calls without matching results",
+      "check": {
+        "type": "unpaired_tool_calls"
+      }
+    },
+    {
+      "id": "no-nonzero-exit",
+      "kind": "must_not_show",
+      "text": "Agent exits with a non-zero exit code",
+      "check": {
+        "type": "exit_code",
+        "not_equals": 0
+      }
+    }
+  ]
+}

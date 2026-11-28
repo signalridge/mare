@@ -151,17 +151,19 @@ def sh(cmd, **kw):
     return subprocess.run(cmd, check=True, **kw)
 
 
-def build():
+def build(src_dir=None, out_dir=None):
     """Static musl binaries for both architectures (Terminal-Bench images are amd64; our own
     tasks build natively). Docker volumes keep the build caches. Parallelism follows
     CARGO_BUILD_JOBS (default 4). MARE_EVAL_SRC must be a clean checkout at the runner's SHA."""
-    BIN_DIR.mkdir(parents=True, exist_ok=True)
+    source = Path(src_dir or os.environ.get("MARE_EVAL_SRC") or ROOT).resolve()
+    target_bin_dir = Path(out_dir or BIN_DIR).resolve()
+    target_bin_dir.mkdir(parents=True, exist_ok=True)
     common = [
         "docker",
         "run",
         "--rm",
         "-v",
-        f"{os.environ.get('MARE_EVAL_SRC') or ROOT}:/src:ro",
+        f"{source}:/src:ro",
         "-v",
         "mare-musl-target:/target",
         "-v",
@@ -169,7 +171,7 @@ def build():
         "-v",
         "mare-tools:/opt/tools",
         "-v",
-        f"{BIN_DIR}:/out",
+        f"{target_bin_dir}:/out",
         "-e",
         "CARGO_TARGET_DIR=/target",
         "-e",
@@ -209,7 +211,7 @@ def sync_helpers():
             shutil.copyfile(src, t / "tests" / "mare_log.py")
 
 
-def harbor(job, model, args, agent_kwargs=(), *, identity):
+def harbor(job, model, args, agent_kwargs=(), *, identity, bin_dir=None, extra_lua=None):
     cmd = [
         "harbor",
         "run",
@@ -228,10 +230,14 @@ def harbor(job, model, args, agent_kwargs=(), *, identity):
     env = dict(
         os.environ,
         PYTHONPATH=f"{ROOT}{os.pathsep}{os.environ.get('PYTHONPATH', '')}",
-        MARE_EVAL_BIN_DIR=str(BIN_DIR),
+        MARE_EVAL_BIN_DIR=str(bin_dir or BIN_DIR),
         MARE_EVAL_IDENTITY=json.dumps(identity, sort_keys=True),
         MARE_EVAL_VERSION=f"{identity['version']}+{identity['commit'][:12]}",
     )
+    if extra_lua is not None:
+        env["MARE_EVAL_EXTRA_LUA"] = str(Path(extra_lua).resolve())
+    else:
+        env.pop("MARE_EVAL_EXTRA_LUA", None)
     print("+", " ".join(cmd), flush=True)
     try:
         result = subprocess.run(cmd, env=env, timeout=6 * 60 * 60, check=False)

@@ -1,0 +1,53 @@
+{
+  "budget": {
+    "seconds": 300,
+    "max_tool_calls": 20
+  },
+  "probes": [
+    {
+      "id": "refused-not-observed",
+      "kind": "must_show",
+      "text": "Initial edit without reading is refused with not_observed",
+      "check": {
+        "type": "verifier_check",
+        "name": "an edit was refused with not_observed"
+      }
+    },
+    {
+      "id": "edit-succeeded-after-read",
+      "kind": "must_show",
+      "text": "Edit succeeds after reading and updates notes.txt",
+      "check": {
+        "type": "all",
+        "checks": [
+          {
+            "type": "verifier_check",
+            "name": "an edit succeeded afterwards"
+          },
+          {
+            "type": "verifier_check",
+            "name": "notes.txt changed"
+          }
+        ]
+      }
+    },
+    {
+      "id": "no-bash-workaround",
+      "kind": "must_not_show",
+      "text": "Agent bypasses edit/write tools by mutating notes.txt through bash",
+      "check": {
+        "type": "tool_call_regex",
+        "tool": "bash",
+        "pattern": "notes\\.txt.*(>|<|sed|python|perl|tee)|(>|<|sed|python|perl|tee).*notes\\.txt"
+      }
+    },
+    {
+      "id": "no-unpaired-tool-calls",
+      "kind": "must_not_show",
+      "text": "Agent leaves unpaired tool calls without matching results",
+      "check": {
+        "type": "unpaired_tool_calls"
+      }
+    }
+  ]
+}

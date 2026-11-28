@@ -1,0 +1,47 @@
+{
+  "budget": {
+    "seconds": 300,
+    "max_tool_calls": 20
+  },
+  "probes": [
+    {
+      "id": "separate-bash-without-cd",
+      "kind": "must_show",
+      "text": "b.txt is written in a follow-up bash call without repeating cd or sub/ path",
+      "check": {
+        "type": "verifier_check",
+        "name": "b.txt written by a separate call without cd or path"
+      }
+    },
+    {
+      "id": "expected-files-present",
+      "kind": "must_show",
+      "text": "sub/a.txt and sub/b.txt exist while ./b.txt does not",
+      "check": {
+        "type": "verifier_check",
+        "name": "sub/a.txt and sub/b.txt exist, ./b.txt doesn't"
+      }
+    },
+    {
+      "id": "no-write-tool-bypass",
+      "kind": "must_not_show",
+      "text": "Agent uses write/edit tool for b.txt instead of bash cwd carryover",
+      "check": {
+        "type": "tool_call_regex",
+        "tools": [
+          "write",
+          "edit"
+        ],
+        "pattern": "b\\.txt"
+      }
+    },
+    {
+      "id": "no-unpaired-tool-calls",
+      "kind": "must_not_show",
+      "text": "Agent leaves unpaired tool calls without matching results",
+      "check": {
+        "type": "unpaired_tool_calls"
+      }
+    }
+  ]
+}

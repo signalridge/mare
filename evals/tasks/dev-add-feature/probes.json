@@ -1,0 +1,64 @@
+{
+  "budget": {
+    "seconds": 1200,
+    "max_tool_calls": 80
+  },
+  "probes": [
+    {
+      "id": "hidden-and-original-pass",
+      "kind": "must_show",
+      "text": "Hidden coupon tests and original tests both pass",
+      "check": {
+        "type": "all",
+        "checks": [
+          {
+            "type": "verifier_check",
+            "name": "hidden coupon tests pass"
+          },
+          {
+            "type": "verifier_check",
+            "name": "original tests still pass"
+          }
+        ]
+      }
+    },
+    {
+      "id": "own-tests-effective",
+      "kind": "must_show",
+      "text": "Agent writes >= 5 passing coupon tests that fail on original code",
+      "check": {
+        "type": "all",
+        "checks": [
+          {
+            "type": "verifier_check",
+            "name": "own tests: >= 5, all pass"
+          },
+          {
+            "type": "verifier_check",
+            "name": "own tests fail on the original code"
+          }
+        ]
+      }
+    },
+    {
+      "id": "no-original-test-edits",
+      "kind": "must_not_show",
+      "text": "Agent modifies existing original test files",
+      "check": {
+        "type": "not",
+        "check": {
+          "type": "verifier_check",
+          "name": "original test files unchanged"
+        }
+      }
+    },
+    {
+      "id": "no-unpaired-tool-calls",
+      "kind": "must_not_show",
+      "text": "Agent leaves unpaired tool calls without matching results",
+      "check": {
+        "type": "unpaired_tool_calls"
+      }
+    }
+  ]
+}

@@ -1,0 +1,57 @@
+{
+  "budget": {
+    "seconds": 300,
+    "max_tool_calls": 20
+  },
+  "probes": [
+    {
+      "id": "single-apply-patch",
+      "kind": "must_show",
+      "text": "One apply_patch call adds new.txt, updates keep.txt, and deletes remove.txt",
+      "check": {
+        "type": "verifier_check",
+        "name": "one apply_patch call did all three"
+      }
+    },
+    {
+      "id": "all-three-files-correct",
+      "kind": "must_show",
+      "text": "new.txt, keep.txt, and remove.txt reflect the patched state",
+      "check": {
+        "type": "all",
+        "checks": [
+          {
+            "type": "verifier_check",
+            "name": "new.txt == hello"
+          },
+          {
+            "type": "verifier_check",
+            "name": "keep.txt == new"
+          },
+          {
+            "type": "verifier_check",
+            "name": "remove.txt deleted"
+          }
+        ]
+      }
+    },
+    {
+      "id": "no-bash-file-mutations",
+      "kind": "must_not_show",
+      "text": "Agent uses bash to create, modify, or delete the patch target files",
+      "check": {
+        "type": "tool_call_regex",
+        "tool": "bash",
+        "pattern": "(new|keep|remove)\\.txt"
+      }
+    },
+    {
+      "id": "no-unpaired-tool-calls",
+      "kind": "must_not_show",
+      "text": "Agent leaves unpaired tool calls without matching results",
+      "check": {
+        "type": "unpaired_tool_calls"
+      }
+    }
+  ]
+}

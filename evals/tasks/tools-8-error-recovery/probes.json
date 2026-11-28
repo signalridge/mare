@@ -1,0 +1,54 @@
+{
+  "budget": {
+    "seconds": 300,
+    "max_tool_calls": 20
+  },
+  "probes": [
+    {
+      "id": "missing-read-failed",
+      "kind": "must_show",
+      "text": "Attempting to read missing.txt returns a tool error",
+      "check": {
+        "type": "verifier_check",
+        "name": "the read of missing.txt failed"
+      }
+    },
+    {
+      "id": "recovered-and-answered",
+      "kind": "must_show",
+      "text": "Agent recovers by reading data/real.txt and answers 42",
+      "check": {
+        "type": "all",
+        "checks": [
+          {
+            "type": "verifier_check",
+            "name": "data/real.txt was read"
+          },
+          {
+            "type": "verifier_check",
+            "name": "the answer states 42"
+          }
+        ]
+      }
+    },
+    {
+      "id": "no-repeated-missing-reads",
+      "kind": "must_not_show",
+      "text": "Agent retries failing reads 3 or more times instead of recovering",
+      "check": {
+        "type": "tool_count",
+        "tool": "read",
+        "is_error": true,
+        "min": 3
+      }
+    },
+    {
+      "id": "no-unpaired-tool-calls",
+      "kind": "must_not_show",
+      "text": "Agent leaves unpaired tool calls without matching results",
+      "check": {
+        "type": "unpaired_tool_calls"
+      }
+    }
+  ]
+}

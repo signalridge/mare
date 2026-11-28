@@ -99,6 +99,19 @@ eval group="all" *args:
     export OPENCODE_API_KEY="${OPENCODE_API_KEY:-}"
     python3 evals/run.py {{group}} {{args}}
 
+# interleaved same-scenario A/B eval on Harbor (builds, Lua overlays, or models)
+eval-ab scenario *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export OPENCODE_API_KEY="${OPENCODE_API_KEY:-}"
+    python3 evals/ab.py {{scenario}} {{args}}
+
+# re-score a saved A/B eval directory offline without running the agent
+eval-rescore source *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    python3 evals/ab.py --rescore {{source}} {{args}}
+
 # real terminal through herdr (TUI e2e, local layer): skipped outside a herdr pane
 tui-e2e:
     #!/usr/bin/env bash

@@ -1,0 +1,44 @@
+{
+  "budget": {
+    "seconds": 900,
+    "max_tool_calls": 60
+  },
+  "probes": [
+    {
+      "id": "schema-valid",
+      "kind": "must_show",
+      "text": "model_answer.json matches output_schema.json",
+      "check": {
+        "type": "verifier_check",
+        "name": "model_answer.json matches output_schema.json"
+      }
+    },
+    {
+      "id": "read-question-png",
+      "kind": "must_show",
+      "text": "Agent inspects question.png via a tool call",
+      "check": {
+        "type": "verifier_check",
+        "name": "a tool call read question.png"
+      }
+    },
+    {
+      "id": "no-untouched-placeholder",
+      "kind": "must_not_show",
+      "text": "Agent leaves the empty placeholder model_answer.json untouched",
+      "check": {
+        "type": "verifier_detail",
+        "key": "placeholder untouched",
+        "eq": true
+      }
+    },
+    {
+      "id": "no-unpaired-tool-calls",
+      "kind": "must_not_show",
+      "text": "Agent leaves unpaired tool calls without matching results",
+      "check": {
+        "type": "unpaired_tool_calls"
+      }
+    }
+  ]
+}

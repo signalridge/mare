@@ -1,0 +1,44 @@
+{
+  "budget": {
+    "seconds": 300,
+    "max_tool_calls": 20
+  },
+  "probes": [
+    {
+      "id": "task-txt-updated",
+      "kind": "must_show",
+      "text": "task.txt contains value=after",
+      "check": {
+        "type": "verifier_check",
+        "name": "task.txt is value=after"
+      }
+    },
+    {
+      "id": "read-before-and-after",
+      "kind": "must_show",
+      "text": "Agent reads task.txt before and after modifying it",
+      "check": {
+        "type": "verifier_check",
+        "name": "read before and after"
+      }
+    },
+    {
+      "id": "no-unpaired-tool-calls",
+      "kind": "must_not_show",
+      "text": "Agent leaves unpaired tool calls without matching results",
+      "check": {
+        "type": "unpaired_tool_calls"
+      }
+    },
+    {
+      "id": "no-excessive-tool-errors",
+      "kind": "must_not_show",
+      "text": "Agent hits 3 or more tool errors on a simple read-modify-read task",
+      "check": {
+        "type": "tool_count",
+        "is_error": true,
+        "min": 3
+      }
+    }
+  ]
+}

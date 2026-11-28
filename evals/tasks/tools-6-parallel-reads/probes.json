@@ -1,0 +1,45 @@
+{
+  "budget": {
+    "seconds": 300,
+    "max_tool_calls": 15
+  },
+  "probes": [
+    {
+      "id": "first-lines-reported",
+      "kind": "must_show",
+      "text": "Final answer reports the first lines of a.txt, b.txt, and c.txt",
+      "check": {
+        "type": "verifier_check",
+        "name": "first lines reported"
+      }
+    },
+    {
+      "id": "three-parallel-reads",
+      "kind": "must_show",
+      "text": "All three read tool calls are issued in a single assistant message",
+      "check": {
+        "type": "tool_batch",
+        "tool": "read",
+        "min": 3
+      }
+    },
+    {
+      "id": "no-bash-read-bypass",
+      "kind": "must_not_show",
+      "text": "Agent reads a.txt, b.txt, or c.txt via bash instead of parallel read calls",
+      "check": {
+        "type": "tool_call_regex",
+        "tool": "bash",
+        "pattern": "(a|b|c)\\.txt"
+      }
+    },
+    {
+      "id": "no-unpaired-tool-calls",
+      "kind": "must_not_show",
+      "text": "Agent leaves unpaired tool calls without matching results",
+      "check": {
+        "type": "unpaired_tool_calls"
+      }
+    }
+  ]
+}
