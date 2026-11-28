@@ -13,6 +13,7 @@ use mlua::{MultiValue, Value};
 use serde_json::{Map, Value as J};
 use tokio_util::sync::CancellationToken;
 
+use mare_binding::ui::{non_empty_str, split_reason_parts, title_first_line};
 use mare_host::Host;
 
 fn acp_tool_kind(info: &J) -> ToolKind {
@@ -47,72 +48,81 @@ fn permission_options(kind: &str, a: &[J]) -> (Vec<PermissionOption>, bool) {
     (options, allow_always)
 }
 
-fn non_empty_str<'a>(obj: &'a J, key: &str) -> Option<&'a str> {
-    obj.get(key).and_then(J::as_str).map(str::trim).filter(|s| !s.is_empty())
-}
-
-fn first_line_preview(text: &str, max_chars: usize) -> String {
-    let first = text.lines().next().unwrap_or("").trim();
-    if first.chars().count() <= max_chars {
-        first.to_string()
-    } else {
-        let mut s: String = first.chars().take(max_chars.saturating_sub(1)).collect();
-        s.push('…');
-        s
-    }
-}
-
 fn resolve_abs_path(cwd: &str, raw: &str) -> PathBuf {
     mare_binding::fs::resolve_path(Path::new(cwd), raw)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum WriteTargetState {
+enum FileDiffState {
     NewFile,
-    ExistingText(String),
-    ExistingUnreadable,
+    DiffTexts { old: String, new: String },
+    Unavailable,
 }
 
-/// Inspect an existing `write` target through `mare.fs` with the active sandbox policy so
-/// `deny_read` rules are honored. Returns `NewFile` only when the path does not exist,
-/// `ExistingText` when the old file is readable text within `MAX_DIFF_BYTES`, and
-/// `ExistingUnreadable` otherwise (so we never misreport an overwrite as a new file).
-async fn inspect_write_target(lua: &mlua::Lua, abs: &Path) -> WriteTargetState {
+/// Inspect a `write` or `edit` target through `mare.fs` with the active sandbox policy so
+/// `deny_read` rules are honored.
+/// - For `write`: returns `NewFile` when absent, `DiffTexts` with full old/new file content when
+///   readable within `MAX_DIFF_BYTES`, or `Unavailable` otherwise.
+/// - For `edit`: reads the full file and applies `mare.text.replace` (honoring `replace_all`) to
+///   produce full-file `DiffTexts`, or `Unavailable` if unreadable / replacement fails.
+async fn inspect_file_diff(lua: &mlua::Lua, tool: &str, abs: &Path, args: &J) -> FileDiffState {
     const MAX_DIFF_BYTES: usize = 512 * 1024;
     let path_str = abs.to_string_lossy();
     let script = r#"
-        local path, max_bytes = ...
+        local tool, path, max_bytes, arg1, arg2, replace_all = ...
         local policy = mare and mare.proc and mare.proc.sandbox and mare.proc.sandbox.current and mare.proc.sandbox.current()
         local policies = policy and { policy } or nil
         local st = mare.fs.stat(path, { policies = policies })
         if not st then
-            if mare.fs.exists(path) then
-                return "unreadable", nil
+            if tool == "write" and not mare.fs.exists(path) then
+                return "new", nil, nil
             end
-            return "new", nil
+            return "unavailable", nil, nil
         end
         if st.kind ~= "file" or (st.size and st.size > max_bytes) then
-            return "unreadable", nil
+            return "unavailable", nil, nil
         end
-        local ok, text = pcall(mare.fs.read, path, { policies = policies, max_bytes = max_bytes })
-        if ok and type(text) == "string" then
-            return "existing", text
+        local ok, old = pcall(mare.fs.read, path, { policies = policies, max_bytes = max_bytes })
+        if not ok or type(old) ~= "string" then
+            return "unavailable", nil, nil
         end
-        return "unreadable", nil
+        if tool == "write" then
+            return "diff", old, arg1
+        end
+        local rok, new = pcall(mare.text.replace, old, arg1 or "", arg2 or "", replace_all == true)
+        if rok and type(new) == "string" then
+            return "diff", old, new
+        end
+        return "unavailable", nil, nil
     "#;
-    match lua.load(script).call_async::<(String, Option<String>)>((path_str.as_ref(), MAX_DIFF_BYTES)).await {
-        Ok((tag, Some(old))) if tag == "existing" => WriteTargetState::ExistingText(old),
-        Ok((tag, _)) if tag == "new" => WriteTargetState::NewFile,
-        _ => WriteTargetState::ExistingUnreadable,
+    let (arg1, arg2, replace_all) = if tool == "write" {
+        (args.get("content").and_then(J::as_str).unwrap_or(""), "", false)
+    } else {
+        (
+            args.get("old_string").and_then(J::as_str).unwrap_or(""),
+            args.get("new_string").and_then(J::as_str).unwrap_or(""),
+            args.get("replace_all").and_then(J::as_bool).unwrap_or(false),
+        )
+    };
+    match lua
+        .load(script)
+        .call_async::<(String, Option<String>, Option<String>)>((
+            tool,
+            path_str.as_ref(),
+            MAX_DIFF_BYTES,
+            arg1,
+            arg2,
+            replace_all,
+        ))
+        .await
+    {
+        Ok((tag, Some(old), Some(new))) if tag == "diff" => FileDiffState::DiffTexts { old, new },
+        Ok((tag, _, _)) if tag == "new" => FileDiffState::NewFile,
+        _ => FileDiffState::Unavailable,
     }
 }
 
-fn build_tool_call_update(
-    kind: &str,
-    a: &[J],
-    host_cwd: &Path,
-    write_state: Option<WriteTargetState>,
-) -> ToolCallUpdate {
+fn build_tool_call_update(kind: &str, a: &[J], host_cwd: &Path, file_diff: Option<FileDiffState>) -> ToolCallUpdate {
     if kind == "tool" {
         let call = &a[0];
         let info = a.get(1).unwrap_or(&J::Null);
@@ -126,13 +136,13 @@ fn build_tool_call_update(
         let path = non_empty_str(&args, "path").or_else(|| non_empty_str(&args, "file_path"));
         let url = non_empty_str(&args, "url");
         let title_arg = if let Some(c) = cmd {
-            Some(first_line_preview(c, 80))
+            Some(title_first_line(c, 80))
         } else if let Some(p) = path {
             Some(p.to_string())
         } else if let Some(u) = url {
             Some(u.to_string())
         } else if args.as_object().is_some_and(|m| !m.is_empty()) {
-            serde_json::to_string(&args).ok().map(|s| first_line_preview(&s, 80))
+            serde_json::to_string(&args).ok().map(|s| title_first_line(&s, 80))
         } else {
             None
         };
@@ -146,27 +156,41 @@ fn build_tool_call_update(
         if let Some(c) = cmd {
             content.push(ToolCallContent::from(c.to_string()));
         }
-        if matches!(name, "write" | "edit")
-            && let Some(p) = path
-        {
+        let is_file_tool = matches!(name, "write" | "edit");
+        if is_file_tool && let Some(p) = path {
             let abs = resolve_abs_path(&cwd, p);
             locations.push(ToolCallLocation::new(abs.clone()));
             if name == "edit"
                 && let (Some(old_s), Some(new_s)) =
                     (args.get("old_string").and_then(J::as_str), args.get("new_string").and_then(J::as_str))
             {
-                content.push(ToolCallContent::from(Diff::new(abs, new_s).old_text(old_s)));
+                match file_diff.unwrap_or(FileDiffState::Unavailable) {
+                    FileDiffState::DiffTexts { old, new } => {
+                        content.push(ToolCallContent::from(Diff::new(abs, new).old_text(old)));
+                    }
+                    FileDiffState::NewFile | FileDiffState::Unavailable => {
+                        let mode = if args.get("replace_all").and_then(J::as_bool).unwrap_or(false) {
+                            " (replace_all)"
+                        } else {
+                            ""
+                        };
+                        content.push(ToolCallContent::from(format!(
+                            "Edit {}{mode}:\n--- old\n{old_s}\n+++ new\n{new_s}",
+                            abs.display()
+                        )));
+                    }
+                }
             } else if name == "write"
                 && let Some(new_s) = args.get("content").and_then(J::as_str)
             {
-                match write_state.unwrap_or(WriteTargetState::ExistingUnreadable) {
-                    WriteTargetState::NewFile => {
+                match file_diff.unwrap_or(FileDiffState::Unavailable) {
+                    FileDiffState::NewFile => {
                         content.push(ToolCallContent::from(Diff::new(abs, new_s)));
                     }
-                    WriteTargetState::ExistingText(old_s) => {
-                        content.push(ToolCallContent::from(Diff::new(abs, new_s).old_text(old_s)));
+                    FileDiffState::DiffTexts { old, new } => {
+                        content.push(ToolCallContent::from(Diff::new(abs, new).old_text(old)));
                     }
-                    WriteTargetState::ExistingUnreadable => {
+                    FileDiffState::Unavailable => {
                         content.push(ToolCallContent::from(format!(
                             "Overwrite {} ({} bytes):\n{new_s}",
                             abs.display(),
@@ -186,8 +210,11 @@ fn build_tool_call_update(
             content.push(ToolCallContent::from(format!("Working directory: {cwd}")));
         }
         let reason = non_empty_str(verdict, "reason");
-        if let Some(r) = reason {
-            content.push(ToolCallContent::from(format!("Reason: {r}")));
+        let shown_path = (cmd.is_none() || is_file_tool).then_some(path).flatten();
+        if let Some(r) = reason
+            && let Some(clean) = split_reason_parts(r, name, shown_path, cmd, !cwd.is_empty(), false, false, None)
+        {
+            content.push(ToolCallContent::from(format!("Reason: {clean}")));
         }
         let unconfined = info.get("unconfined").and_then(J::as_bool).unwrap_or(false);
         if unconfined {
@@ -306,21 +333,24 @@ pub(super) fn install(
                 let cancel = projected.cancel_token;
                 let mut a = projected.json_args;
                 a.resize(3, J::Null);
-                let write_state = if kind == "tool"
-                    && a[0].get("name").and_then(J::as_str) == Some("write")
+                let file_diff = if kind == "tool"
+                    && let Some(tool_name @ ("write" | "edit")) = a[0].get("name").and_then(J::as_str)
                     && let Some(args) = a[0].get("arguments")
-                    && args.get("content").and_then(J::as_str).is_some()
+                    && ((tool_name == "write" && args.get("content").and_then(J::as_str).is_some())
+                        || (tool_name == "edit"
+                            && args.get("old_string").and_then(J::as_str).is_some()
+                            && args.get("new_string").and_then(J::as_str).is_some()))
                     && let Some(p) = non_empty_str(args, "path").or_else(|| non_empty_str(args, "file_path"))
                 {
                     let cwd = non_empty_str(&a[0], "cwd")
                         .map(str::to_owned)
                         .unwrap_or_else(|| host_cwd.to_string_lossy().into_owned());
                     let abs = resolve_abs_path(&cwd, p);
-                    Some(inspect_write_target(&lua, &abs).await)
+                    Some(inspect_file_diff(&lua, tool_name, &abs, args).await)
                 } else {
                     None
                 };
-                let tool_call = build_tool_call_update(kind, &a, &host_cwd, write_state);
+                let tool_call = build_tool_call_update(kind, &a, &host_cwd, file_diff);
                 let (options, allow_always_offered) = permission_options(kind, &a);
                 let req = RequestPermissionRequest::new(sid, tool_call, options);
                 let fut = super::wire::request_permission(&conn, req, projector.as_slice());
@@ -402,6 +432,7 @@ mod tests {
     #[test]
     fn acp_permission_options_label_session_scope_and_tool_call_includes_details() {
         let long_cmd = format!("echo start && {} && echo TAIL_END", "x".repeat(200));
+        let raw_reason = format!("{long_cmd} · cwd /repo/work · runs outside sandbox");
         let args = [
             json!({
                 "id": "call-1",
@@ -410,7 +441,7 @@ mod tests {
                 "arguments": { "command": long_cmd }
             }),
             json!({ "command_tool": true, "side_effect": "external", "unconfined": true }),
-            json!({ "reason": "runs outside sandbox" }),
+            json!({ "reason": raw_reason }),
         ];
         let (opts, offered) = permission_options("tool", &args);
         assert!(offered);
@@ -420,13 +451,17 @@ mod tests {
 
         let update = build_tool_call_update("tool", &args, Path::new("/fallback"), None);
         let serialized = serde_json::to_value(&update).unwrap();
+        let content_blocks = serialized["content"].as_array().expect("content array");
         let content_str = serialized["content"].to_string();
         assert!(content_str.contains("TAIL_END"), "full command must appear in ACP content: {serialized}");
         assert!(content_str.contains("Working directory: /repo/work"), "{serialized}");
-        assert!(content_str.contains("Reason: runs outside sandbox"), "{serialized}");
+        assert!(
+            content_blocks.iter().any(|c| c["content"]["text"] == "Reason: runs outside sandbox"),
+            "ACP visible Reason must strip duplicate command & cwd while preserving policy warning: {serialized}"
+        );
         assert!(content_str.contains("Runs outside the local sandbox"), "{serialized}");
         assert_eq!(serialized["_meta"]["unconfined"], json!(true));
-        assert_eq!(serialized["_meta"]["reason"], json!("runs outside sandbox"));
+        assert_eq!(serialized["_meta"]["reason"], json!(raw_reason));
         assert!(serialized["_meta"].get("diff").is_none(), "_meta.diff must not duplicate patch content: {serialized}");
 
         let edit_args = [
@@ -434,16 +469,42 @@ mod tests {
                 "id": "call-2",
                 "name": "edit",
                 "cwd": "/repo",
-                "arguments": { "path": "src/lib.rs", "old_string": "old", "new_string": "new" }
+                "arguments": { "path": "src/lib.rs", "old_string": "foo", "new_string": "bar", "replace_all": true }
             }),
             json!({ "side_effect": "write" }),
             json!({ "reason": "edit file" }),
         ];
-        let edit_json =
-            serde_json::to_value(build_tool_call_update("tool", &edit_args, Path::new("/repo"), None)).unwrap();
+        let edit_json = serde_json::to_value(build_tool_call_update(
+            "tool",
+            &edit_args,
+            Path::new("/repo"),
+            Some(FileDiffState::DiffTexts { old: "foo one\nfoo two\n".into(), new: "bar one\nbar two\n".into() }),
+        ))
+        .unwrap();
         assert!(
-            edit_json["content"].as_array().unwrap().iter().any(|c| c["type"] == "diff" && c["newText"] == "new"),
-            "edit approval must include ACP diff content: {edit_json}"
+            edit_json["content"].as_array().unwrap().iter().any(|c| {
+                c["type"] == "diff" && c["oldText"] == "foo one\nfoo two\n" && c["newText"] == "bar one\nbar two\n"
+            }),
+            "edit approval must include full-file ACP diff content: {edit_json}"
+        );
+
+        let edit_fallback_json = serde_json::to_value(build_tool_call_update(
+            "tool",
+            &edit_args,
+            Path::new("/repo"),
+            Some(FileDiffState::Unavailable),
+        ))
+        .unwrap();
+        assert!(
+            edit_fallback_json["content"].as_array().unwrap().iter().all(|c| c["type"] != "diff"),
+            "unavailable edit must not emit partial snippet Diff: {edit_fallback_json}"
+        );
+        let edit_fallback_str = edit_fallback_json["content"].to_string();
+        assert!(
+            edit_fallback_str.contains("replace_all")
+                && edit_fallback_str.contains("foo")
+                && edit_fallback_str.contains("bar"),
+            "unavailable edit fallback must note replace_all and old/new snippets: {edit_fallback_json}"
         );
 
         // `write` onto existing readable file includes `oldText`; unreadable existing file falls back
@@ -462,7 +523,7 @@ mod tests {
             "tool",
             &write_args,
             Path::new("/repo"),
-            Some(WriteTargetState::ExistingText("previous".into())),
+            Some(FileDiffState::DiffTexts { old: "previous".into(), new: "updated".into() }),
         ))
         .unwrap();
         let loc_path = overwrite_json["locations"][0]["path"].as_str().unwrap_or("");
@@ -480,7 +541,7 @@ mod tests {
             "tool",
             &write_args,
             Path::new("/repo"),
-            Some(WriteTargetState::ExistingUnreadable),
+            Some(FileDiffState::Unavailable),
         ))
         .unwrap();
         assert!(
