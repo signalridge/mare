@@ -48,6 +48,13 @@ fn permission_options(kind: &str, a: &[J]) -> (Vec<PermissionOption>, bool) {
     (options, allow_always)
 }
 
+fn raw_path_arg(args: &J) -> Option<&str> {
+    args.get("path")
+        .and_then(J::as_str)
+        .filter(|s| !s.is_empty())
+        .or_else(|| args.get("file_path").and_then(J::as_str).filter(|s| !s.is_empty()))
+}
+
 fn resolve_abs_path(cwd: &str, raw: &str) -> PathBuf {
     mare_binding::fs::resolve_path(Path::new(cwd), raw)
 }
@@ -122,6 +129,25 @@ async fn inspect_file_diff(lua: &mlua::Lua, tool: &str, abs: &Path, args: &J) ->
     }
 }
 
+async fn inspect_tool_file_diff(lua: &mlua::Lua, kind: &str, a: &[J], host_cwd: &Path) -> Option<FileDiffState> {
+    if kind == "tool"
+        && let Some(tool_name @ ("write" | "edit")) = a[0].get("name").and_then(J::as_str)
+        && let Some(args) = a[0].get("arguments")
+        && ((tool_name == "write" && args.get("content").and_then(J::as_str).is_some())
+            || (tool_name == "edit"
+                && args.get("old_string").and_then(J::as_str).is_some()
+                && args.get("new_string").and_then(J::as_str).is_some()))
+        && let Some(p) = raw_path_arg(args)
+    {
+        let cwd =
+            non_empty_str(&a[0], "cwd").map(str::to_owned).unwrap_or_else(|| host_cwd.to_string_lossy().into_owned());
+        let abs = resolve_abs_path(&cwd, p);
+        Some(inspect_file_diff(lua, tool_name, &abs, args).await)
+    } else {
+        None
+    }
+}
+
 fn build_tool_call_update(kind: &str, a: &[J], host_cwd: &Path, file_diff: Option<FileDiffState>) -> ToolCallUpdate {
     if kind == "tool" {
         let call = &a[0];
@@ -157,7 +183,7 @@ fn build_tool_call_update(kind: &str, a: &[J], host_cwd: &Path, file_diff: Optio
             content.push(ToolCallContent::from(c.to_string()));
         }
         let is_file_tool = matches!(name, "write" | "edit");
-        if is_file_tool && let Some(p) = path {
+        if is_file_tool && let Some(p) = raw_path_arg(&args) {
             let abs = resolve_abs_path(&cwd, p);
             locations.push(ToolCallLocation::new(abs.clone()));
             if name == "edit"
@@ -333,23 +359,7 @@ pub(super) fn install(
                 let cancel = projected.cancel_token;
                 let mut a = projected.json_args;
                 a.resize(3, J::Null);
-                let file_diff = if kind == "tool"
-                    && let Some(tool_name @ ("write" | "edit")) = a[0].get("name").and_then(J::as_str)
-                    && let Some(args) = a[0].get("arguments")
-                    && ((tool_name == "write" && args.get("content").and_then(J::as_str).is_some())
-                        || (tool_name == "edit"
-                            && args.get("old_string").and_then(J::as_str).is_some()
-                            && args.get("new_string").and_then(J::as_str).is_some()))
-                    && let Some(p) = non_empty_str(args, "path").or_else(|| non_empty_str(args, "file_path"))
-                {
-                    let cwd = non_empty_str(&a[0], "cwd")
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| host_cwd.to_string_lossy().into_owned());
-                    let abs = resolve_abs_path(&cwd, p);
-                    Some(inspect_file_diff(&lua, tool_name, &abs, args).await)
-                } else {
-                    None
-                };
+                let file_diff = inspect_tool_file_diff(&lua, kind, &a, &host_cwd).await;
                 let tool_call = build_tool_call_update(kind, &a, &host_cwd, file_diff);
                 let (options, allow_always_offered) = permission_options(kind, &a);
                 let req = RequestPermissionRequest::new(sid, tool_call, options);
@@ -574,6 +584,75 @@ mod tests {
         assert!(
             mcp_json.get("locations").is_none() || mcp_json["locations"].as_array().is_some_and(Vec::is_empty),
             "MCP tool with path+content must not emit local file locations: {mcp_json}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn acp_file_diff_and_locations_preserve_raw_untrimmed_path() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("notes"), "from-unspaced\n").unwrap();
+        std::fs::write(dir.path().join("notes "), "from-trailing-space\n").unwrap();
+
+        let lua = mlua::Lua::new();
+        let mare = lua.create_table().unwrap();
+        mare_binding::fs::install(&lua, &mare, dir.path().to_path_buf()).unwrap();
+        mare_binding::text::install(&lua, &mare, dir.path().to_path_buf()).unwrap();
+        lua.globals().set("mare", mare).unwrap();
+
+        let cwd = dir.path().to_string_lossy().into_owned();
+        let expected_path = dir.path().join("notes ").to_string_lossy().into_owned();
+
+        let edit_args = [
+            json!({
+                "id": "call-edit-space",
+                "name": "edit",
+                "cwd": cwd,
+                "arguments": {
+                    "path": "notes ",
+                    "old_string": "from-trailing-space",
+                    "new_string": "updated-trailing-space"
+                }
+            }),
+            json!({ "side_effect": "write" }),
+            json!({ "reason": "edit file" }),
+        ];
+        let edit_diff = inspect_tool_file_diff(&lua, "tool", &edit_args, dir.path()).await;
+        let edit_json =
+            serde_json::to_value(build_tool_call_update("tool", &edit_args, dir.path(), edit_diff)).unwrap();
+        assert_eq!(edit_json["locations"][0]["path"], json!(expected_path), "{edit_json}");
+        assert!(
+            edit_json["content"].as_array().unwrap().iter().any(|c| {
+                c["type"] == "diff"
+                    && c["path"] == expected_path
+                    && c["oldText"] == "from-trailing-space\n"
+                    && c["newText"] == "updated-trailing-space\n"
+            }),
+            "edit diff must read and report the raw 'notes ' path, not trimmed 'notes': {edit_json}"
+        );
+
+        let write_args = [
+            json!({
+                "id": "call-write-space",
+                "name": "write",
+                "cwd": cwd,
+                "arguments": { "path": "notes ", "content": "rewritten\n" }
+            }),
+            json!({ "side_effect": "write" }),
+            json!({ "reason": "write file" }),
+        ];
+        let write_diff = inspect_tool_file_diff(&lua, "tool", &write_args, dir.path()).await;
+        let write_json =
+            serde_json::to_value(build_tool_call_update("tool", &write_args, dir.path(), write_diff)).unwrap();
+        assert_eq!(write_json["locations"][0]["path"], json!(expected_path), "{write_json}");
+        assert!(
+            write_json["content"].as_array().unwrap().iter().any(|c| {
+                c["type"] == "diff"
+                    && c["path"] == expected_path
+                    && c["oldText"] == "from-trailing-space\n"
+                    && c["newText"] == "rewritten\n"
+            }),
+            "write diff must read and report the raw 'notes ' path, not trimmed 'notes': {write_json}"
         );
     }
 }
