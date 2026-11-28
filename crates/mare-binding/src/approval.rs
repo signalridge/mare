@@ -39,12 +39,15 @@ impl Binding {
 #[derive(Default)]
 struct Responses(Mutex<OneTimeRegistry<String, Binding, Response>>);
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Snapshot {
     pub tool: String,
     pub call_id: Option<String>,
     pub cwd: Option<String>,
     pub arguments: J,
+    pub command: Option<String>,
+    pub preview_shows_cwd: bool,
+    pub approval_scope: Option<J>,
     pub requested_permissions: Option<J>,
     pub unconfined: bool,
     pub protected_arguments: bool,
@@ -133,13 +136,20 @@ impl Snapshot {
             .map(str::to_owned);
         let cwd = call.and_then(|c| c.get("cwd")).and_then(J::as_str).filter(|s| !s.is_empty()).map(str::to_owned);
         let arguments = call.and_then(|c| c.get("arguments")).cloned().unwrap_or(J::Null);
+        let detail = info.and_then(|i| i.get("approval_detail"));
+        let command =
+            detail.and_then(|d| d.get("command")).and_then(J::as_str).filter(|s| !s.is_empty()).map(str::to_owned);
+        let preview_shows_cwd = detail.and_then(|d| d.get("preview_shows_cwd")).and_then(J::as_bool).unwrap_or(false);
+        let approval_scope = detail.and_then(|d| d.get("scope")).filter(|v| v.is_object()).cloned();
         let requested_permissions =
             verdict.and_then(|v| v.get("requested_permissions")).filter(|v| v.is_object()).cloned();
         let protected_arguments = call.and_then(|c| c.get("protected_arguments")).and_then(J::as_bool).unwrap_or(false);
         let origin = call.and_then(|c| c.get("origin")).filter(|v| !v.is_null()).cloned();
         let unconfined = info.and_then(|i| i.get("unconfined")).and_then(J::as_bool).unwrap_or(false);
-        let scoped = info.and_then(|i| i.get("permission_request")).and_then(J::as_bool).unwrap_or(false)
-            || verdict.and_then(|v| v.get("permission_scope")).is_some_and(|v| !v.is_null());
+        let scoped = approval_scope.as_ref().and_then(|s| s.get("scoped")).and_then(J::as_bool).unwrap_or_else(|| {
+            info.and_then(|i| i.get("permission_request")).and_then(J::as_bool).unwrap_or(false)
+                || verdict.and_then(|v| v.get("permission_scope")).is_some_and(|v| !v.is_null())
+        });
         let reason = verdict.and_then(|v| v.get("reason")).and_then(J::as_str).map(str::to_owned);
         let amendment_description = verdict.and_then(|v| v.get("amendment")).and_then(|a| {
             if origin.is_some() {
@@ -156,6 +166,9 @@ impl Snapshot {
             call_id,
             cwd,
             arguments,
+            command,
+            preview_shows_cwd,
+            approval_scope,
             requested_permissions,
             unconfined,
             protected_arguments,
@@ -443,15 +456,10 @@ mod tests {
         let original = Snapshot {
             tool: "secret_tool".into(),
             call_id: Some("call-1".into()),
-            cwd: None,
             arguments: serde_json::json!({"token": "ref-1"}),
-            requested_permissions: None,
             unconfined: true,
             protected_arguments: true,
-            origin: None,
-            scoped: false,
-            reason: None,
-            amendment_description: None,
+            ..Default::default()
         };
         let mut lease = register_snapshot(&lua, binding.clone(), original).unwrap();
 

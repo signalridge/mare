@@ -22,6 +22,37 @@ return function(D)
 	local function resolve_workdir(...)
 		return D.bash_run.resolve_workdir(...)
 	end
+	local function visible_control(s)
+		return (s:gsub("[%z\1-\8\10-\31\127]", function(ch)
+			return ("\\x%02x"):format(string.byte(ch))
+		end))
+	end
+	local function shell_preview(a, call_cwd)
+		local cmd = type(a) == "table" and type(a.command) == "string" and a.command or ""
+		local cwd = (type(call_cwd) == "string" and call_cwd ~= "") and call_cwd or resolve_workdir(a)
+		local items = {}
+		if type(cwd) == "string" and cwd ~= "" then
+			items[#items + 1] = ui.Paragraph(
+				ui.Line({
+					ui.Span("cwd: "):hl("MareMuted"),
+					ui.Span(visible_control(cwd)):hl("MareTitle"),
+				}),
+				{ hard_wrap = true }
+			)
+		end
+		for _, line in ipairs(mare.text.split_lines(cmd)) do
+			items[#items + 1] =
+				ui.Paragraph(ui.Line({ ui.Span(visible_control(line)):hl("MareText") }), { hard_wrap = true })
+		end
+		if #items == 0 then
+			return nil
+		end
+		local node = ui.Lines(items)
+		if type(cwd) == "string" and cwd ~= "" then
+			node.includes_cwd = true
+		end
+		return node
+	end
 	local function shell_parameters(desc_hint, cmd_desc, has_jobs)
 		local props = {
 			description = { type = "string", description = desc_hint },
@@ -133,6 +164,7 @@ return function(D)
 				),
 				timeout_ms = 24 * 3600 * 1000,
 				resolve_cwd = resolve_workdir,
+				preview = shell_preview,
 				summary = function(a)
 					return ("PowerShell(%s)"):format((string.gsub(a.command or "", "\n.*", " …")))
 				end,
@@ -206,6 +238,7 @@ return function(D)
 				timeout_ms = 24 * 3600 * 1000, -- bash enforces its own timeout
 				uses_shell_cwd = true, -- the snapshot / permission checks use the carried-over directory
 				resolve_cwd = resolve_workdir,
+				preview = shell_preview,
 				summary = function(a)
 					local c = string.gsub(a.command or "", "\n.*", " …")
 					return ("Bash(%s)"):format(c)

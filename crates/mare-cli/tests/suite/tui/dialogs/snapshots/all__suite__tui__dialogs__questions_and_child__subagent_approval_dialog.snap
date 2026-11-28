@@ -16,7 +16,7 @@ expression: snap
   │ permission preset changes) · remember rule (A)                                           │
   │                                                                                          │
   │ Allow once (y)                                                                           │
-  │ Allow for this session (a)                                                               │
+  │ Allow this exact call for this session (a)                                               │
   │ Allow and remember (A): don't ask again for `write` calls, for this sub-agent's session  │
   │ Deny, and tell the model why (n) — affects only this subagent                            │
   │ Deny and stop this turn (ctrl+c) — stops only this subagent                              │

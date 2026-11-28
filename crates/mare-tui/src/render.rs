@@ -70,14 +70,18 @@ pub fn render_node(node: &Node, width: usize, theme: &Theme, frame: usize) -> Ve
     match node {
         Node::Empty => vec![],
         Node::Line(l) => vec![truncate_line(&l.resolve(theme), width)],
-        Node::Paragraph { line, indent } => {
+        Node::Paragraph { line, indent, hard_wrap } => {
             let wrap = || {
                 let line = line.resolve(theme);
                 let indent: Vec<Span> = indent.iter().map(|s| s.resolve(theme)).collect();
                 let mut out = vec![];
                 // honor embedded newlines
                 for part in split_line(&line) {
-                    out.extend(wrap_line_indent(&part, width, &indent));
+                    if *hard_wrap {
+                        out.extend(mare_shared::style::wrap_line_indent_hard(&part, width, &indent));
+                    } else {
+                        out.extend(wrap_line_indent(&part, width, &indent));
+                    }
                 }
                 out
             };
@@ -85,7 +89,7 @@ pub fn render_node(node: &Node, width: usize, theme: &Theme, frame: usize) -> Ve
             if line.width() <= width && !line.spans.iter().any(|s| s.text.contains('\n')) {
                 return vec![line.resolve(theme)];
             }
-            cache::WRAP.get_or_insert(cache::key(&(line, indent), width), wrap)
+            cache::WRAP.get_or_insert(cache::key(&(line, indent, hard_wrap), width), wrap)
         }
         Node::Lines(items) => {
             let mut lines = vec![];
@@ -372,7 +376,7 @@ pub mod cache {
         match n {
             Node::Empty => {}
             Node::Line(l) => l.hash(h),
-            Node::Paragraph { line, indent } => (line, indent).hash(h),
+            Node::Paragraph { line, indent, hard_wrap } => (line, indent, hard_wrap).hash(h),
             Node::Lines(items) => {
                 items.len().hash(h);
                 for i in items {
