@@ -58,6 +58,113 @@ return function(D)
 	--- `idempotent`. Undeclared tools are treated as external and non-idempotent; a
 	--- `readonly = true` tool is "read". `unconfined = true` marks tools executed outside this
 	--- process (MCP servers, RPC hosts): the local sandbox can't confine them.
+	local command_evaluating = setmetatable({}, { __mode = "k" })
+
+	local function normalize_command(spec, opts)
+		local dynamic = opts and opts.dynamic == true or false
+		assert(type(spec) == "table", "command declaration must be a table")
+		if spec.shell ~= nil or spec.arg ~= nil then
+			assert(spec.argv == nil and spec.defaults == nil, "command declaration cannot mix {shell, arg} and {argv}")
+			assert(
+				type(spec.shell) == "string" and spec.shell ~= "" and type(spec.arg) == "string" and spec.arg ~= "",
+				"command shell declaration requires non-empty shell and arg strings"
+			)
+			return dynamic and { shell = spec.shell, arg = spec.arg, dynamic = true }
+				or { shell = spec.shell, arg = spec.arg }
+		elseif spec.argv ~= nil then
+			if dynamic then
+				assert(spec.defaults == nil, "dynamic command resolver cannot declare defaults")
+			end
+			assert(
+				type(spec.argv) == "table" and #spec.argv > 0,
+				"command argv declaration must be a non-empty string list"
+			)
+			local argv, count = {}, 0
+			for index, item in pairs(spec.argv) do
+				assert(
+					type(index) == "number" and index % 1 == 0 and index > 0 and type(item) == "string",
+					"command.argv must be a dense string list"
+				)
+				argv[index], count = item, count + 1
+			end
+			assert(count == #argv, "command.argv must be a dense string list")
+			if dynamic then
+				assert(argv[1] ~= "", "command argv executable must be a non-empty string")
+			else
+				assert(
+					argv[1] ~= "" and not argv[1]:find("{", 1, true),
+					"command template executable must be a literal string"
+				)
+			end
+			local defaults
+			if spec.defaults ~= nil then
+				assert(type(spec.defaults) == "table", "command.defaults must be a table")
+				defaults = {}
+				for k, v in pairs(spec.defaults) do
+					assert(type(k) == "string", "command.defaults keys must be strings")
+					local vt = type(v)
+					assert(
+						vt == "string" or vt == "number" or vt == "boolean",
+						"command.defaults values must be primitive"
+					)
+					defaults[k] = v
+				end
+				if next(defaults) == nil then
+					defaults = nil
+				end
+			end
+			if dynamic then
+				return { argv = argv, dynamic = true }
+			end
+			return { argv = argv, defaults = defaults }
+		else
+			error("command declaration requires either {shell, arg} or {argv}")
+		end
+	end
+
+	local function evaluate_command(def, args, cwd)
+		local spec = def and def.command or nil
+		if spec == nil then
+			return nil
+		end
+		local mare_lib = require("mare_lib")
+		if type(spec) == "table" then
+			return mare_lib.copy_deep(spec)
+		end
+		assert(type(spec) == "function", "command declaration must be a table or function")
+		if command_evaluating[def] then
+			error("command resolver is re-entrant")
+		end
+		command_evaluating[def] = true
+		local ok, result = pcall(function()
+			local call_args = mare_lib.copy_deep(type(args) == "table" and args or {})
+			local co = coroutine.create(function()
+				return spec(call_args, { cwd = cwd })
+			end)
+			local rok, rval = coroutine.resume(co)
+			if coroutine.status(co) ~= "dead" then
+				error("command resolver yielded")
+			end
+			if not rok then
+				error(tostring(rval), 0)
+			end
+			if rval == nil then
+				return nil
+			end
+			return normalize_command(rval, { dynamic = true })
+		end)
+		command_evaluating[def] = nil
+		if not ok then
+			error(result, 0)
+		end
+		return result
+	end
+
+	local command_eval = {
+		normalize = normalize_command,
+		evaluate = evaluate_command,
+	}
+
 	local function normalize(def)
 		assert(def.timeout_policy == nil or def.timeout_policy == "managed", "invalid tool timeout_policy")
 		assert(def.access == nil or type(def.access) == "function", "tool access must be a function")
@@ -90,58 +197,8 @@ return function(D)
 			def.sensitive_inputs = fields
 		end
 		if def.command ~= nil then
-			assert(type(def.command) == "table", "command declaration must be a table")
-			if def.command.shell ~= nil or def.command.arg ~= nil then
-				assert(
-					def.command.argv == nil and def.command.defaults == nil,
-					"command declaration cannot mix {shell, arg} and {argv}"
-				)
-				assert(
-					type(def.command.shell) == "string"
-						and def.command.shell ~= ""
-						and type(def.command.arg) == "string"
-						and def.command.arg ~= "",
-					"command shell declaration requires non-empty shell and arg strings"
-				)
-				def.command = { shell = def.command.shell, arg = def.command.arg }
-			elseif def.command.argv ~= nil then
-				assert(
-					type(def.command.argv) == "table" and #def.command.argv > 0,
-					"command argv declaration must be a non-empty string list"
-				)
-				local argv, count = {}, 0
-				for index, item in pairs(def.command.argv) do
-					assert(
-						type(index) == "number" and index % 1 == 0 and index > 0 and type(item) == "string",
-						"command.argv must be a dense string list"
-					)
-					argv[index], count = item, count + 1
-				end
-				assert(count == #argv, "command.argv must be a dense string list")
-				assert(
-					argv[1] ~= "" and not argv[1]:find("{", 1, true),
-					"command template executable must be a literal string"
-				)
-				local defaults
-				if def.command.defaults ~= nil then
-					assert(type(def.command.defaults) == "table", "command.defaults must be a table")
-					defaults = {}
-					for k, v in pairs(def.command.defaults) do
-						assert(type(k) == "string", "command.defaults keys must be strings")
-						local vt = type(v)
-						assert(
-							vt == "string" or vt == "number" or vt == "boolean",
-							"command.defaults values must be primitive"
-						)
-						defaults[k] = v
-					end
-					if next(defaults) == nil then
-						defaults = nil
-					end
-				end
-				def.command = { argv = argv, defaults = defaults }
-			else
-				error("command declaration requires either {shell, arg} or {argv}")
+			if type(def.command) ~= "function" then
+				def.command = normalize_command(def.command)
 			end
 		end
 	end
@@ -755,6 +812,7 @@ return function(D)
 	return {
 		tools = tools,
 		registry = registry,
+		command = command_eval,
 		native_tool_update = native_tool_update,
 		deferred_names = deferred_names,
 		excluded = excluded,

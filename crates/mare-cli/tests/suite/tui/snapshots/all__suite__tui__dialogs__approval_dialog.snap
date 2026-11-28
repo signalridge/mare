@@ -12,7 +12,7 @@ expression: t.snap().await
  │ the permission preset changes) · remember rule (A)                         │
  │                                                                            │
  │ Allow once (y)                                                             │
- │ Allow for this session (a)                                                 │
+ │ Allow this exact call for this session (a)                                 │
  │ Allow and remember (A): allow all write calls this session                 │
  │ Deny, and tell the model why (n)                                           │
  │ Deny and stop this turn (ctrl+c)                                           │

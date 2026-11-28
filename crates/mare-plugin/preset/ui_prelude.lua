@@ -91,10 +91,19 @@ function ui.Line(spans)
 	return setmetatable({ type = "line", spans = spans or {} }, Line)
 end
 
---- ui.Paragraph(text|Line, indent?) — word-wrapped
-function ui.Paragraph(x, indent)
+--- ui.Paragraph(text|Line, indent?, opts?) — word-wrapped (or hard-wrapped with `{ hard_wrap = true }`)
+function ui.Paragraph(x, indent, opts)
 	local l = type(x) == "table" and x or ui.Line({ x })
-	return { type = "paragraph", spans = l.spans, style = l.style, indent = indent }
+	if type(indent) == "table" and indent.hard_wrap ~= nil then
+		opts, indent = indent, nil
+	end
+	return {
+		type = "paragraph",
+		spans = l.spans,
+		style = l.style,
+		indent = indent,
+		hard_wrap = type(opts) == "table" and opts.hard_wrap == true or nil,
+	}
 end
 
 --- ui.Lines { node, ... }

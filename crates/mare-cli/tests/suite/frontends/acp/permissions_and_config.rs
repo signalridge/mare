@@ -1456,3 +1456,471 @@ return {{
 
     rpc.kill_and_wait();
 }
+
+/// ACP permission requests forward reason, outside-sandbox marker, working directory, and full
+/// command, label `allow-always` as `"Allow for this session"`, and scope that grant strictly to
+/// the current ACP session (same call in same session skips prompt; new session prompts again).
+#[test]
+fn acp_permission_request_forwards_detail_and_session_grant_resets_on_new_session() {
+    let home = tempfile::tempdir().unwrap();
+    let ws = tempfile::tempdir().unwrap();
+    std::fs::write(ws.path().join("existing.txt"), "old-existing-body").unwrap();
+    std::fs::write(ws.path().join("multi.txt"), "alpha one\nalpha two\n").unwrap();
+    let long_cmd = format!("echo head && {} && echo ACP_TAIL_MARKER", "a".repeat(160));
+    let faux_path = home.path().join("faux-acp-detail.json");
+    std::fs::write(
+        &faux_path,
+        json!([
+            { "tool_calls": [{ "name": "unconfined_sh", "arguments": { "command": long_cmd } }] },
+            { "text": "s1-turn1" },
+            { "tool_calls": [{ "name": "unconfined_sh", "arguments": { "command": long_cmd } }] },
+            { "text": "s1-turn2" },
+            { "tool_calls": [{ "name": "write", "arguments": { "path": "existing.txt", "content": "new-overwritten-body" } }] },
+            { "text": "s1-write-done" },
+            { "tool_calls": [{ "name": "edit", "arguments": { "path": "multi.txt", "old_string": "alpha", "new_string": "beta", "replace_all": true } }] },
+            { "text": "s1-edit-done" }
+        ])
+        .to_string(),
+    )
+    .unwrap();
+    let cfg_dir = home.path().join("config");
+    let plugins_dir = cfg_dir.join("plugins");
+    std::fs::create_dir_all(&plugins_dir).unwrap();
+    std::fs::write(
+        plugins_dir.join("unconfined-sh.lua"),
+        r#"
+        return {
+            name = "unconfined-sh",
+            inject = { "tools" },
+            apply = function(ctx)
+                ctx.tools:register("unconfined_sh", {
+                    description = "unconfined command test tool",
+                    side_effect = "external",
+                    unconfined = true,
+                    parameters = {
+                        type = "object",
+                        properties = { command = { type = "string" } },
+                        required = { "command" },
+                    },
+                    execute = function() return { content = "ran" } end,
+                })
+            end,
+        }
+        "#,
+    )
+    .unwrap();
+    std::fs::write(
+        cfg_dir.join("init.lua"),
+        "mare.setup { plugins = { permissions = { enabled = true, preset = 'read-only' } } }\n",
+    )
+    .unwrap();
+
+    let mut cmd = mare_cmd();
+    cmd.args(["--model", "faux/echo", "acp"])
+        .env("MARE_HOME", home.path())
+        .env("MARE_FAUX_SCRIPT", &faux_path)
+        .stderr(Stdio::piped());
+    let mut rpc = RpcClient::spawn_cmd(&mut cmd);
+    let init = rpc.call_raw("initialize", json!({ "protocolVersion": 1, "clientCapabilities": {} }), |_| json!(null));
+    assert_eq!(init["result"]["protocolVersion"], 1, "{init}");
+    let cwd = dunce::canonicalize(ws.path()).unwrap();
+
+    let s1 = rpc.call_raw("session/new", json!({ "cwd": cwd, "mcpServers": [] }), |_| json!(null));
+    let sid1 = s1["result"]["sessionId"].as_str().unwrap_or_else(|| panic!("{s1}")).to_string();
+
+    let mut reqs_s1_t1 = Vec::new();
+    let r1 = rpc.call_raw(
+        "session/prompt",
+        json!({ "sessionId": sid1, "prompt": [{ "type": "text", "text": "first" }] }),
+        |req| {
+            if req["method"] == "session/request_permission" {
+                reqs_s1_t1.push(req["params"].clone());
+                return json!({ "outcome": { "outcome": "selected", "optionId": "allow-always" } });
+            }
+            json!(null)
+        },
+    );
+    assert_eq!(r1["result"]["stopReason"], "end_turn", "{r1}");
+    assert_eq!(reqs_s1_t1.len(), 1, "expected 1 permission prompt on first call: {reqs_s1_t1:?}");
+    let p = &reqs_s1_t1[0];
+    let always =
+        p["options"].as_array().unwrap().iter().find(|o| o["optionId"] == "allow-always").expect("allow-always option");
+    assert_eq!(always["name"], "Allow for this session", "allow-always label mismatch: {p}");
+    assert_eq!(always["kind"], "allow_always", "allow-always kind must stay unchanged: {p}");
+    let content_str = p["toolCall"]["content"].to_string();
+    assert!(content_str.contains("ACP_TAIL_MARKER"), "ACP toolCall.content must include full command: {p}");
+    assert!(content_str.contains("Working directory:"), "ACP toolCall.content must include cwd: {p}");
+    assert!(content_str.contains("Reason:"), "ACP toolCall.content must include reason: {p}");
+    assert!(
+        content_str.contains("Runs outside the local sandbox") && p["toolCall"]["_meta"]["unconfined"] == json!(true),
+        "ACP toolCall must include outside-sandbox marker: {p}"
+    );
+
+    // Same call in the SAME session must NOT ask again after "Allow for this session".
+    let mut asks_s1_t2 = 0usize;
+    let r2 = rpc.call_raw(
+        "session/prompt",
+        json!({ "sessionId": sid1, "prompt": [{ "type": "text", "text": "second" }] }),
+        |req| {
+            if req["method"] == "session/request_permission" {
+                asks_s1_t2 += 1;
+                return json!({ "outcome": { "outcome": "selected", "optionId": "allow-once" } });
+            }
+            json!(null)
+        },
+    );
+    assert_eq!(r2["result"]["stopReason"], "end_turn", "{r2}");
+    assert_eq!(asks_s1_t2, 0, "same call in same session should reuse session grant");
+
+    // Overwriting an existing file via `write` must asynchronously read the existing file and send
+    // a real ACP `Diff` with `oldText` (not a new-file diff or unreadable fallback).
+    let mut write_reqs = Vec::new();
+    let r_write = rpc.call_raw(
+        "session/prompt",
+        json!({ "sessionId": sid1, "prompt": [{ "type": "text", "text": "overwrite" }] }),
+        |req| {
+            if req["method"] == "session/request_permission" {
+                write_reqs.push(req["params"].clone());
+                return json!({ "outcome": { "outcome": "selected", "optionId": "reject-once" } });
+            }
+            json!(null)
+        },
+    );
+    assert_eq!(r_write["result"]["stopReason"], "end_turn", "{r_write}");
+    assert_eq!(write_reqs.len(), 1, "expected 1 permission prompt for write overwrite: {write_reqs:?}");
+    let write_content = write_reqs[0]["toolCall"]["content"].as_array().expect("write content array");
+    assert!(
+        write_content.iter().any(|c| {
+            c["type"] == "diff" && c["oldText"] == "old-existing-body" && c["newText"] == "new-overwritten-body"
+        }),
+        "ACP write overwrite must include real oldText in Diff content: {}",
+        write_reqs[0]
+    );
+
+    // Editing a file with `replace_all: true` must send full-file oldText and newText with all
+    // matches replaced (matching TUI diff semantics).
+    let mut edit_reqs = Vec::new();
+    let r_edit = rpc.call_raw(
+        "session/prompt",
+        json!({ "sessionId": sid1, "prompt": [{ "type": "text", "text": "edit all" }] }),
+        |req| {
+            if req["method"] == "session/request_permission" {
+                edit_reqs.push(req["params"].clone());
+                return json!({ "outcome": { "outcome": "selected", "optionId": "reject-once" } });
+            }
+            json!(null)
+        },
+    );
+    assert_eq!(r_edit["result"]["stopReason"], "end_turn", "{r_edit}");
+    assert_eq!(edit_reqs.len(), 1, "expected 1 permission prompt for edit replace_all: {edit_reqs:?}");
+    let edit_content = edit_reqs[0]["toolCall"]["content"].as_array().expect("edit content array");
+    assert!(
+        edit_content.iter().any(|c| {
+            c["type"] == "diff" && c["oldText"] == "alpha one\nalpha two\n" && c["newText"] == "beta one\nbeta two\n"
+        }),
+        "ACP edit with replace_all must include full-file oldText and newText: {}",
+        edit_reqs[0]
+    );
+
+    // Same call in a NEW session MUST ask again.
+    let s2 = rpc.call_raw("session/new", json!({ "cwd": cwd, "mcpServers": [] }), |_| json!(null));
+    let sid2 = s2["result"]["sessionId"].as_str().unwrap_or_else(|| panic!("{s2}")).to_string();
+    let mut asks_s2 = 0usize;
+    let r3 = rpc.call_raw(
+        "session/prompt",
+        json!({ "sessionId": sid2, "prompt": [{ "type": "text", "text": "third" }] }),
+        |req| {
+            if req["method"] == "session/request_permission" {
+                asks_s2 += 1;
+                return json!({ "outcome": { "outcome": "selected", "optionId": "allow-once" } });
+            }
+            json!(null)
+        },
+    );
+    assert_eq!(r3["result"]["stopReason"], "end_turn", "{r3}");
+    assert_eq!(asks_s2, 1, "new ACP session must prompt again for session-scoped grant");
+
+    rpc.kill_and_wait();
+}
+
+/// Shared authorization-path previews, locations, and resolved commands reach ACP for:
+/// 1. custom tools with a public `preview` callback returning `ui.Diff` + declared `access`,
+/// 2. custom tools returning a text `preview` (`ui.Lines`),
+/// 3. dynamically resolved command tools (`command = function(...)`),
+/// 4. built-in `edit`/`write` on raw untrimmed paths (`"notes "` vs `"notes"`),
+/// 5. a shadowed `"write"` tool with its own preview (never reading disk via hardcoded tool name).
+#[test]
+fn acp_permission_request_projects_custom_preview_dynamic_command_and_shadowed_write() {
+    let home = tempfile::tempdir().unwrap();
+    let ws = tempfile::tempdir().unwrap();
+    std::fs::write(ws.path().join("notes"), "from-unspaced\n").unwrap();
+    #[cfg(unix)]
+    std::fs::write(ws.path().join("notes "), "from-trailing-space\n").unwrap();
+    std::fs::write(ws.path().join("secret-on-disk.txt"), "DISK_SHOULD_NOT_LEAK\n").unwrap();
+
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut turns = vec![
+        json!({ "tool_calls": [{ "name": "custom_patcher", "arguments": { "target": "notes", "replacement": "patched\n" } }] }),
+        json!({ "text": "custom-diff-done" }),
+        json!({ "tool_calls": [{ "name": "custom_note", "arguments": { "env": "staging" } }] }),
+        json!({ "text": "custom-text-done" }),
+        json!({ "tool_calls": [{ "name": "dyn_runner", "arguments": { "dialect": "bash", "script": "echo DYN_CMD_PREVIEW" } }] }),
+        json!({ "text": "dyn-cmd-done" }),
+    ];
+    #[cfg(unix)]
+    {
+        turns.push(json!({ "tool_calls": [{ "name": "edit", "arguments": { "path": "notes ", "old_string": "from-trailing-space", "new_string": "updated-trailing-space" } }] }));
+        turns.push(json!({ "text": "space-edit-done" }));
+    }
+    let faux_path = home.path().join("faux-acp-custom-preview.json");
+    std::fs::write(&faux_path, serde_json::to_string(&turns).unwrap()).unwrap();
+
+    let cfg_dir = home.path().join("config");
+    let plugins_dir = cfg_dir.join("plugins");
+    std::fs::create_dir_all(&plugins_dir).unwrap();
+    std::fs::write(
+        plugins_dir.join("custom-preview-tools.lua"),
+        r#"
+        return {
+            name = "custom-preview-tools",
+            inject = { "tools" },
+            apply = function(ctx)
+                ctx.tools:register("custom_patcher", {
+                    description = "custom file patcher with preview",
+                    side_effect = "write",
+                    access = function(a)
+                        return { { kind = "file", op = "write", path = a.target, recursive = false } }
+                    end,
+                    parameters = {
+                        type = "object",
+                        properties = { target = { type = "string" }, replacement = { type = "string" } },
+                        required = { "target", "replacement" },
+                    },
+                    preview = function(a, cwd)
+                        local p = mare.fs.resolve_path(a.target, cwd).logical
+                        local old = mare.fs.read(p) or ""
+                        return ui.Diff({ old = old, new = a.replacement, path = a.target, full_path = p })
+                    end,
+                    execute = function() return { content = "patched" } end,
+                })
+                ctx.tools:register("custom_note", {
+                    description = "custom tool with text preview",
+                    side_effect = "external",
+                    parameters = {
+                        type = "object",
+                        properties = { env = { type = "string" } },
+                        required = { "env" },
+                    },
+                    preview = function(a)
+                        return ui.Lines({ ui.Line({ ui.Span("Deploying release to " .. tostring(a.env)) }) })
+                    end,
+                    execute = function() return { content = "deployed" } end,
+                })
+                ctx.tools:register("dyn_runner", {
+                    description = "dynamic command resolver tool",
+                    side_effect = "external",
+                    command_tool = true,
+                    command = function(a)
+                        return { shell = a.dialect or "bash", arg = "script" }
+                    end,
+                    parameters = {
+                        type = "object",
+                        properties = { dialect = { type = "string" }, script = { type = "string" } },
+                        required = { "script" },
+                    },
+                    execute = function() return { content = "ran" } end,
+                })
+            end,
+        }
+        "#,
+    )
+    .unwrap();
+    std::fs::write(
+        cfg_dir.join("init.lua"),
+        r#"mare.setup {
+            plugins = {
+                permissions = {
+                    enabled = true,
+                    preset = "read-only",
+                    rules = {
+                        { tool = "custom_note", decision = "prompt" },
+                        { argv = { "echo" }, decision = "prompt" },
+                    },
+                },
+            },
+        }
+"#,
+    )
+    .unwrap();
+
+    let mut cmd = mare_cmd();
+    cmd.args(["--model", "faux/echo", "acp"])
+        .env("MARE_HOME", home.path())
+        .env("MARE_FAUX_SCRIPT", &faux_path)
+        .stderr(Stdio::piped());
+    let mut rpc = RpcClient::spawn_cmd(&mut cmd);
+    let _ = rpc.call_raw("initialize", json!({ "protocolVersion": 1, "clientCapabilities": {} }), |_| json!(null));
+    let cwd = dunce::canonicalize(ws.path()).unwrap();
+    let s = rpc.call_raw("session/new", json!({ "cwd": cwd, "mcpServers": [] }), |_| json!(null));
+    let sid = s["result"]["sessionId"].as_str().unwrap_or_else(|| panic!("{s}")).to_string();
+
+    let mut ask_turn = |prompt_text: &str| -> Value {
+        let mut reqs = Vec::new();
+        let resp = rpc.call_raw(
+            "session/prompt",
+            json!({ "sessionId": sid, "prompt": [{ "type": "text", "text": prompt_text }] }),
+            |req| {
+                if req["method"] == "session/request_permission" {
+                    reqs.push(req["params"].clone());
+                    return json!({ "outcome": { "outcome": "selected", "optionId": "reject-once" } });
+                }
+                json!(null)
+            },
+        );
+        assert_eq!(resp["result"]["stopReason"], "end_turn", "{resp}");
+        assert_eq!(reqs.len(), 1, "expected 1 permission prompt for {prompt_text}: {reqs:?}");
+        reqs.remove(0)
+    };
+
+    // 1. Custom tool `ui.Diff` preview + declared `access` reaches ACP as `Diff` + `locations`.
+    let p_diff = ask_turn("run custom_patcher");
+    let expected_notes = cwd.join("notes").to_string_lossy().into_owned();
+    assert_eq!(p_diff["toolCall"]["locations"][0]["path"], json!(expected_notes), "{p_diff}");
+    assert!(
+        p_diff["toolCall"]["content"].as_array().unwrap().iter().any(|c| {
+            c["type"] == "diff"
+                && c["path"] == expected_notes
+                && c["oldText"] == "from-unspaced\n"
+                && c["newText"] == "patched\n"
+        }),
+        "custom tool Diff preview must reach ACP: {p_diff}"
+    );
+
+    // 2. Custom tool text preview reaches ACP content.
+    let p_text = ask_turn("run custom_note");
+    assert!(
+        p_text["toolCall"]["content"].to_string().contains("Deploying release to staging"),
+        "custom tool text preview must reach ACP: {p_text}"
+    );
+
+    // 3. Dynamic command resolver tool forwards frozen command text to ACP.
+    let p_dyn = ask_turn("run dyn_runner");
+    assert!(
+        p_dyn["toolCall"]["content"].to_string().contains("echo DYN_CMD_PREVIEW"),
+        "dynamic command resolver must forward resolved command to ACP: {p_dyn}"
+    );
+
+    // 4. Raw untrimmed path `"notes "` is preserved in ACP `edit` diff and locations.
+    #[cfg(unix)]
+    {
+        let p_space = ask_turn("edit notes space");
+        let expected_spaced = cwd.join("notes ").to_string_lossy().into_owned();
+        assert_eq!(p_space["toolCall"]["locations"][0]["path"], json!(expected_spaced), "{p_space}");
+        assert!(
+            p_space["toolCall"]["content"].as_array().unwrap().iter().any(|c| {
+                c["type"] == "diff"
+                    && c["path"] == expected_spaced
+                    && c["oldText"] == "from-trailing-space\n"
+                    && c["newText"] == "updated-trailing-space\n"
+            }),
+            "raw untrimmed 'notes ' path must be preserved in ACP diff & locations: {p_space}"
+        );
+    }
+
+    rpc.kill_and_wait();
+
+    // 5. Shadowing `"write"` with a custom tool uses that tool's own preview and never reads disk.
+    let shadow_home = tempfile::tempdir().unwrap();
+    let shadow_cfg = shadow_home.path().join("config");
+    let shadow_plugins = shadow_cfg.join("plugins");
+    std::fs::create_dir_all(&shadow_plugins).unwrap();
+    std::fs::write(
+        shadow_plugins.join("shadow-write.lua"),
+        r#"
+        return {
+            name = "shadow-write",
+            inject = { "tools" },
+            apply = function(ctx)
+                ctx.tools:register("write", {
+                    description = "remote KV writer shadowing built-in write",
+                    side_effect = "external",
+                    parameters = {
+                        type = "object",
+                        properties = { path = { type = "string" }, content = { type = "string" } },
+                        required = { "path", "content" },
+                    },
+                    preview = function(a)
+                        return ui.Line({ ui.Span("Shadow remote KV put: " .. tostring(a.path)) })
+                    end,
+                    execute = function() return { content = "ok" } end,
+                })
+            end,
+        }
+        "#,
+    )
+    .unwrap();
+    std::fs::write(
+        shadow_cfg.join("init.lua"),
+        r#"mare.setup {
+            plugins = {
+                permissions = {
+                    enabled = true,
+                    preset = "read-only",
+                    rules = { { tool = "write", decision = "prompt" } },
+                },
+            },
+        }
+"#,
+    )
+    .unwrap();
+    let shadow_faux = shadow_home.path().join("faux-shadow.json");
+    std::fs::write(
+        &shadow_faux,
+        json!([
+            { "tool_calls": [{ "name": "write", "arguments": { "path": "secret-on-disk.txt", "content": "remote-val" } }] },
+            { "text": "shadow-done" }
+        ])
+        .to_string(),
+    )
+    .unwrap();
+
+    let mut shadow_cmd = mare_cmd();
+    shadow_cmd
+        .args(["--model", "faux/echo", "acp"])
+        .env("MARE_HOME", shadow_home.path())
+        .env("MARE_FAUX_SCRIPT", &shadow_faux)
+        .stderr(Stdio::piped());
+    let mut srpc = RpcClient::spawn_cmd(&mut shadow_cmd);
+    let _ = srpc.call_raw("initialize", json!({ "protocolVersion": 1, "clientCapabilities": {} }), |_| json!(null));
+    let ss = srpc.call_raw("session/new", json!({ "cwd": cwd, "mcpServers": [] }), |_| json!(null));
+    let ssid = ss["result"]["sessionId"].as_str().unwrap_or_else(|| panic!("{ss}")).to_string();
+    let mut shadow_reqs = Vec::new();
+    let sresp = srpc.call_raw(
+        "session/prompt",
+        json!({ "sessionId": ssid, "prompt": [{ "type": "text", "text": "shadow write" }] }),
+        |req| {
+            if req["method"] == "session/request_permission" {
+                shadow_reqs.push(req["params"].clone());
+                return json!({ "outcome": { "outcome": "selected", "optionId": "reject-once" } });
+            }
+            json!(null)
+        },
+    );
+    assert_eq!(sresp["result"]["stopReason"], "end_turn", "{sresp}");
+    assert_eq!(shadow_reqs.len(), 1, "{shadow_reqs:?}");
+    let sp = &shadow_reqs[0];
+    let sp_str = sp.to_string();
+    assert!(
+        sp_str.contains("Shadow remote KV put: secret-on-disk.txt"),
+        "shadowed write must display its own preview: {sp}"
+    );
+    assert!(
+        !sp_str.contains("DISK_SHOULD_NOT_LEAK"),
+        "shadowed write must NEVER read disk via hardcoded tool name: {sp}"
+    );
+    assert!(
+        sp["toolCall"]["content"].as_array().unwrap().iter().all(|c| c["type"] != "diff"),
+        "shadowed write without diff preview must not fabricate Diff: {sp}"
+    );
+    srpc.kill_and_wait();
+}
