@@ -150,8 +150,12 @@ describe("web-fetch-http", function()
 		for _, mime in ipairs({
 			"text/plain",
 			"text/markdown",
+			"text/javascript",
 			"application/json",
 			"application/xml",
+			"application/javascript",
+			"application/x-javascript",
+			"application/ecmascript",
 			"application/problem+json",
 			"application/atom+xml",
 		}) do
@@ -159,6 +163,20 @@ describe("web-fetch-http", function()
 			expect.truthy(ok, mime)
 			expect.eq(result.content, "ok", mime)
 		end
+		for _, mime in ipairs({
+			"application/javascript",
+			"application/x-javascript",
+			"application/ecmascript",
+		}) do
+			local ok, result = run({ "console.log(1);" }, { ["content-type"] = mime })
+			expect.truthy(ok, mime .. " without charset")
+			expect.eq(result.content, "console.log(1);", mime .. " without charset")
+			expect.truthy(
+				last_req.headers.accept:find(mime, 1, true),
+				"Accept header must advertise " .. mime .. ": " .. tostring(last_req.headers.accept)
+			)
+		end
+		expect.truthy(last_req.headers.accept:find("text/javascript", 1, true))
 		for _, mime in ipairs({ "text/html", "application/xhtml+xml" }) do
 			local ok, result = run({ "<p>hi</p>" }, { ["content-type"] = mime .. "; charset='UTF-8'" })
 			expect.truthy(ok, mime)
@@ -166,9 +184,17 @@ describe("web-fetch-http", function()
 		end
 
 		local before = reads
-		expect_err("WEB_UNSUPPORTED_CONTENT_TYPE", function()
+		local bin_err = expect_err("WEB_UNSUPPORTED_CONTENT_TYPE", function()
 			return run({ "unread" }, { ["content-type"] = "application/octet-stream" })
 		end)
+		expect.match(bin_err, "supported:")
+		expect.match(bin_err, "application/javascript")
+		expect.match(bin_err, "application/x%-javascript")
+		expect.match(bin_err, "application/ecmascript")
+		local png_err = expect_err("WEB_UNSUPPORTED_CONTENT_TYPE", function()
+			return run({ "\x89PNG" }, { ["content-type"] = "image/png" })
+		end)
+		expect.match(png_err, "supported:")
 		expect_err("WEB_UNSUPPORTED_CONTENT_TYPE", function()
 			return run({ "unread" }, { ["content-type"] = "text/plain; charset=bogus" })
 		end)
@@ -229,6 +255,8 @@ describe("web-fetch-http", function()
 		expect.eq(last_req.max_redirects, 0)
 		expect.eq(last_req.headers["user-agent"], "custom-ua/1")
 		expect.match(last_req.headers.accept, "application/xhtml%+xml")
+		expect.match(last_req.headers.accept, "application/javascript")
+		expect.match(last_req.headers.accept, "application/ecmascript")
 		expect.eq(last_req.cancel, cancel)
 
 		ok, result = run(
