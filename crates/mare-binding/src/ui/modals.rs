@@ -263,8 +263,9 @@ pub(super) fn install(lua: &Lua, ui: &Table, shared: &Arc<UiShared>) -> mlua::Re
                 let scoped = snapshot.scoped;
                 let amendment_desc = snapshot.amendment_description.clone();
                 let is_subagent = snapshot.origin.is_some();
-                let has_command = non_empty_str(&snapshot.arguments, "command").is_some();
-                let has_reusable_sandbox_scope = reusable_sandbox_scope(&snapshot.arguments).is_some();
+                let has_wider_session_scope =
+                    has_additional_permissions(&snapshot) || reusable_sandbox_scope(&snapshot.arguments).is_some();
+                let allow_session_label = allow_session_choice_label(&snapshot);
                 let theme = s.theme.read().unwrap().clone();
                 let preview = match t.get::<Value>("preview")? {
                     Value::Nil => None,
@@ -290,20 +291,7 @@ pub(super) fn install(lua: &Lua, ui: &Table, shared: &Arc<UiShared>) -> mlua::Re
                             if scoped { "this turn" } else { "allow once" }.to_string(),
                         ),
                         "allow_session" => (
-                            if scoped {
-                                if is_subagent {
-                                    "Allow requested access for this subagent session (a)"
-                                } else {
-                                    "Allow requested access for this session (a)"
-                                }
-                            } else if has_reusable_sandbox_scope {
-                                "Allow command & requested access for this session (a)"
-                            } else if has_command {
-                                "Allow this exact command for this session (a)"
-                            } else {
-                                "Allow this exact call for this session (a)"
-                            }
-                            .to_string(),
+                            allow_session_label.to_string(),
                             if scoped {
                                 Some("reused by later commands until session ends or permissions change".to_string())
                             } else {
@@ -360,7 +348,7 @@ pub(super) fn install(lua: &Lua, ui: &Table, shared: &Arc<UiShared>) -> mlua::Re
                 let cmd = UiCmd::Select {
                     title,
                     title_right: vec![],
-                    split: if has_reusable_sandbox_scope {
+                    split: if has_wider_session_scope {
                         mare_shared::ui::SelectSplit { ratio: 0.52, min: 57 }
                     } else {
                         mare_shared::ui::SelectSplit { ratio: 0.46, min: 50 }
@@ -593,7 +581,7 @@ async fn run_input_modal(
     })
 }
 
-fn non_empty_str<'a>(obj: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+pub fn non_empty_str<'a>(obj: &'a serde_json::Value, key: &str) -> Option<&'a str> {
     obj.get(key).and_then(serde_json::Value::as_str).map(str::trim).filter(|s| !s.is_empty())
 }
 
@@ -688,7 +676,7 @@ fn is_redundant_label_segment(seg: &str, tool: &str, shown_path: Option<&str>, s
 /// preserve all remaining policy explanations and warnings (credential reminders, dangerous
 /// commands, prompt rules, `(via call_tool)`). Never elevates untrusted text into `Directory:`.
 #[allow(clippy::too_many_arguments)]
-fn split_reason_parts(
+pub fn split_reason_parts(
     reason: &str,
     tool: &str,
     shown_path: Option<&str>,
@@ -737,7 +725,32 @@ fn reusable_sandbox_scope(arguments: &serde_json::Value) -> Option<&str> {
     non_empty_str(arguments, "sandbox_permissions").filter(|s| !matches!(*s, "all" | "danger-full-access"))
 }
 
-fn title_first_line(text: &str, max_chars: usize) -> String {
+fn has_additional_permissions(snapshot: &crate::approval::Snapshot) -> bool {
+    snapshot.requested_permissions.is_some()
+        || snapshot.arguments.get("additional_permissions").is_some_and(serde_json::Value::is_object)
+}
+
+fn allow_session_choice_label(snapshot: &crate::approval::Snapshot) -> &'static str {
+    let is_subagent = snapshot.origin.is_some();
+    let has_command = non_empty_str(&snapshot.arguments, "command").is_some();
+    if snapshot.scoped {
+        if is_subagent {
+            "Allow requested access for this subagent session (a)"
+        } else {
+            "Allow requested access for this session (a)"
+        }
+    } else if has_additional_permissions(snapshot) {
+        "Allow call & requested access for this session (a)"
+    } else if reusable_sandbox_scope(&snapshot.arguments).is_some() {
+        "Allow command & requested access for this session (a)"
+    } else if has_command {
+        "Allow this exact command for this session (a)"
+    } else {
+        "Allow this exact call for this session (a)"
+    }
+}
+
+pub fn title_first_line(text: &str, max_chars: usize) -> String {
     let first = text.lines().next().unwrap_or("").trim();
     if first.chars().count() <= max_chars {
         first.to_string()
@@ -835,7 +848,7 @@ fn build_approval_presentation(
     if let Some(scope) = reusable_sandbox_scope(&snapshot.arguments) {
         body.push(format!("Requested access: {scope}"));
     }
-    if snapshot.tool == "web_fetch"
+    if (snapshot.tool == "web_fetch" || showed_specific_args)
         && let Some(url) = non_empty_str(&snapshot.arguments, "url")
     {
         body.push(format!("URL: {url}"));
@@ -1174,6 +1187,41 @@ mod tests {
         assert!(
             mcp_joined.contains(r#"Arguments: {"url":"https://api.example.invalid/orders","method":"POST","limit":5}"#),
             "MCP tools with additional_permissions and url must still display business Arguments JSON: {mcp_joined}"
+        );
+        assert_eq!(
+            allow_session_choice_label(&mcp_snap),
+            "Allow call & requested access for this session (a)",
+            "additional_permissions with omitted scope commits session permissions and must not claim exact-call-only"
+        );
+        let mut arg_only_perm_snap = mcp_snap.clone();
+        arg_only_perm_snap.requested_permissions = None;
+        assert_eq!(
+            allow_session_choice_label(&arg_only_perm_snap),
+            "Allow call & requested access for this session (a)"
+        );
+
+        let mcp_path_url_snap = Snapshot {
+            tool: "mcp__srv__download".into(),
+            call_id: Some("call_m2".into()),
+            cwd: None,
+            arguments: serde_json::json!({
+                "path": "out/archive.tar.gz",
+                "url": "https://downloads.example.invalid/archive.tar.gz"
+            }),
+            requested_permissions: None,
+            unconfined: false,
+            protected_arguments: false,
+            origin: None,
+            scoped: false,
+            reason: None,
+            amendment_description: None,
+        };
+        let (_, path_url_body) = build_approval_presentation(&mcp_path_url_snap, &choices, false);
+        let path_url_joined = path_url_body.join("\n");
+        assert!(path_url_joined.contains("Path: out/archive.tar.gz"), "{path_url_joined}");
+        assert!(
+            path_url_joined.contains("URL: https://downloads.example.invalid/archive.tar.gz"),
+            "MCP tool with both path and url must not hide URL when Arguments is suppressed: {path_url_joined}"
         );
 
         let fetch_snap = Snapshot {

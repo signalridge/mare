@@ -1465,6 +1465,7 @@ fn acp_permission_request_forwards_detail_and_session_grant_resets_on_new_sessio
     let home = tempfile::tempdir().unwrap();
     let ws = tempfile::tempdir().unwrap();
     std::fs::write(ws.path().join("existing.txt"), "old-existing-body").unwrap();
+    std::fs::write(ws.path().join("multi.txt"), "alpha one\nalpha two\n").unwrap();
     let long_cmd = format!("echo head && {} && echo ACP_TAIL_MARKER", "a".repeat(160));
     let faux_path = home.path().join("faux-acp-detail.json");
     std::fs::write(
@@ -1475,7 +1476,9 @@ fn acp_permission_request_forwards_detail_and_session_grant_resets_on_new_sessio
             { "tool_calls": [{ "name": "unconfined_sh", "arguments": { "command": long_cmd } }] },
             { "text": "s1-turn2" },
             { "tool_calls": [{ "name": "write", "arguments": { "path": "existing.txt", "content": "new-overwritten-body" } }] },
-            { "text": "s1-write-done" }
+            { "text": "s1-write-done" },
+            { "tool_calls": [{ "name": "edit", "arguments": { "path": "multi.txt", "old_string": "alpha", "new_string": "beta", "replace_all": true } }] },
+            { "text": "s1-edit-done" }
         ])
         .to_string(),
     )
@@ -1592,6 +1595,31 @@ fn acp_permission_request_forwards_detail_and_session_grant_resets_on_new_sessio
         }),
         "ACP write overwrite must include real oldText in Diff content: {}",
         write_reqs[0]
+    );
+
+    // Editing a file with `replace_all: true` must send full-file oldText and newText with all
+    // matches replaced (matching TUI diff semantics).
+    let mut edit_reqs = Vec::new();
+    let r_edit = rpc.call_raw(
+        "session/prompt",
+        json!({ "sessionId": sid1, "prompt": [{ "type": "text", "text": "edit all" }] }),
+        |req| {
+            if req["method"] == "session/request_permission" {
+                edit_reqs.push(req["params"].clone());
+                return json!({ "outcome": { "outcome": "selected", "optionId": "reject-once" } });
+            }
+            json!(null)
+        },
+    );
+    assert_eq!(r_edit["result"]["stopReason"], "end_turn", "{r_edit}");
+    assert_eq!(edit_reqs.len(), 1, "expected 1 permission prompt for edit replace_all: {edit_reqs:?}");
+    let edit_content = edit_reqs[0]["toolCall"]["content"].as_array().expect("edit content array");
+    assert!(
+        edit_content.iter().any(|c| {
+            c["type"] == "diff" && c["oldText"] == "alpha one\nalpha two\n" && c["newText"] == "beta one\nbeta two\n"
+        }),
+        "ACP edit with replace_all must include full-file oldText and newText: {}",
+        edit_reqs[0]
     );
 
     // Same call in a NEW session MUST ask again.

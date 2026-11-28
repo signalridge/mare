@@ -17,6 +17,7 @@ pub use mare_shared::ui::{BlockPatch, Node, SelectItem, SelectTab, UiCmd, UiHook
 
 pub(crate) use crate::ui_node::{line_value, spans_from};
 pub use crate::ui_node::{node_from, style_from};
+pub use modals::{non_empty_str, split_reason_parts, title_first_line};
 pub(crate) use modals::{parse_cancel, wait_input, wait_select};
 
 /// Parse a non-negative integer Lua number/integer (rejecting negative, fractional, or NaN values).
