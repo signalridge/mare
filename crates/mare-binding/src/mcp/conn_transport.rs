@@ -556,8 +556,11 @@ pub(super) async fn http_client(spec: &Spec) -> Result<reqwest::Client, String> 
             headers.insert(name, val);
         }
     }
-    // the same client setup as mare.http: proxies, NO_PROXY, system + custom CAs
-    let mut b = crate::http::base_builder()?.default_headers(headers);
+    // the same client setup as mare.http: proxies, NO_PROXY, system + custom CAs;
+    // restrict redirects to the server's origin so custom headers (e.g. X-API-Key
+    // from `headers` / `env_http_headers`) never follow cross-origin hops.
+    let mut b =
+        crate::http::base_builder()?.redirect(crate::http::same_origin_redirect_policy()).default_headers(headers);
     if let Some(ca) = spec.raw.get("tls").and_then(|t| t.get("ca_bundle")).and_then(|v| v.as_str()) {
         let pem = std::fs::read(ca).map_err(|e| format!("tls.ca_bundle {ca}: {e}"))?;
         let certs = reqwest::Certificate::from_pem_bundle(&pem).map_err(|e| format!("tls.ca_bundle {ca}: {e}"))?;
