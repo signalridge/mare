@@ -92,12 +92,289 @@ return function(D)
 		}, {})))
 	end
 
+	local function resolve_command_display(call, info)
+		local args = type(call and call.arguments) == "table" and call.arguments or {}
+		local spec = type(info) == "table" and info.command or nil
+		if type(spec) == "table" then
+			if type(spec.shell) == "string" and type(spec.arg) == "string" then
+				local shell = spec.shell == "pwsh" and "powershell" or spec.shell
+				local raw = args[spec.arg]
+				if type(raw) == "string" and raw ~= "" then
+					return raw, shell
+				end
+				return nil, shell
+			elseif type(spec.argv) == "table" then
+				local ml = require("mare_lib")
+				local argv
+				if spec.dynamic then
+					argv = ml.copy_deep(spec.argv)
+				else
+					argv = ml.expand_argv_template(spec.argv, spec.defaults, args)
+				end
+				if type(argv) == "table" and #argv > 0 then
+					return table.concat(argv, " "), nil
+				end
+			end
+		end
+		if type(args.command) == "string" and args.command ~= "" then
+			return args.command, nil
+		end
+		return nil, nil
+	end
+
+	local function resolve_location_path(raw_path, cwd)
+		if type(raw_path) ~= "string" or raw_path == "" then
+			return nil
+		end
+		if type(cwd) == "string" and cwd ~= "" and mare.fs.resolve_path then
+			local ok, resolved = pcall(mare.fs.resolve_path, raw_path, cwd)
+			if ok and type(resolved) == "table" and type(resolved.logical) == "string" and resolved.logical ~= "" then
+				return resolved.logical
+			end
+		end
+		if mare.fs.resolve then
+			local ok, resolved = pcall(mare.fs.resolve, raw_path)
+			if ok and type(resolved) == "string" and resolved ~= "" then
+				return resolved
+			end
+		end
+		return raw_path
+	end
+
+	local function flatten_spans(spans)
+		if type(spans) == "string" or type(spans) == "number" then
+			return tostring(spans)
+		end
+		if type(spans) ~= "table" then
+			return ""
+		end
+		if spans.type == "span" then
+			return tostring(spans.text or "")
+		end
+		if spans.type == "line" then
+			return flatten_spans(spans.spans)
+		end
+		local parts = {}
+		for _, sp in ipairs(spans) do
+			if type(sp) == "string" or type(sp) == "number" then
+				parts[#parts + 1] = tostring(sp)
+			elseif type(sp) == "table" then
+				if sp.text ~= nil then
+					parts[#parts + 1] = tostring(sp.text)
+				elseif sp.spans ~= nil then
+					parts[#parts + 1] = flatten_spans(sp.spans)
+				end
+			end
+		end
+		return table.concat(parts)
+	end
+
+	--- Project a Lua `mare.Node` preview into JSON-safe structured blocks (`diff` | `text`)
+	--- and record any diff target paths in `locations` so ACP, TUI, and RPC share one preview.
+	local function project_preview_blocks(node, cwd, add_location)
+		local blocks = {}
+		local pending_lines = {}
+		local function flush_text()
+			if #pending_lines > 0 then
+				local text = table.concat(pending_lines, "\n")
+				pending_lines = {}
+				if text:match("%S") then
+					blocks[#blocks + 1] = { type = "text", text = text }
+				end
+			end
+		end
+		local function walk(n)
+			if n == nil then
+				return
+			end
+			if type(n) == "string" then
+				pending_lines[#pending_lines + 1] = n
+				return
+			end
+			if type(n) ~= "table" then
+				return
+			end
+			local ty = n.type
+			if ty == nil then
+				for _, item in ipairs(n) do
+					walk(item)
+				end
+			elseif ty == "diff" then
+				local target = resolve_location_path(n.full_path or n.path, cwd)
+				if target then
+					add_location(target)
+				end
+				if type(n.unified) == "string" then
+					if n.unified ~= "" then
+						flush_text()
+						blocks[#blocks + 1] = { type = "text", text = n.unified }
+					end
+				elseif type(n.new) == "string" and target ~= nil then
+					flush_text()
+					local old_for_diff = (n.is_new == true or type(n.old) ~= "string") and "" or n.old
+					local uok, unified = pcall(mare.text.diff, old_for_diff, n.new, { path = n.path or target })
+					local unified_text = (uok and type(unified) == "string" and unified ~= "") and unified or nil
+					if n.is_new == true then
+						blocks[#blocks + 1] =
+							{ type = "diff", path = target, new = n.new, is_new = true, unified = unified_text }
+					elseif type(n.old) == "string" then
+						blocks[#blocks + 1] =
+							{ type = "diff", path = target, old = n.old, new = n.new, unified = unified_text }
+					else
+						blocks[#blocks + 1] =
+							{ type = "diff", path = target, new = n.new, is_new = true, unified = unified_text }
+					end
+				elseif type(n.new) == "string" and n.new ~= "" then
+					pending_lines[#pending_lines + 1] = n.new
+				end
+			elseif ty == "lines" then
+				for _, item in ipairs(n.items or {}) do
+					walk(item)
+				end
+			elseif ty == "line" or ty == "paragraph" then
+				pending_lines[#pending_lines + 1] = flatten_spans(n.spans)
+			elseif ty == "span" then
+				pending_lines[#pending_lines + 1] = tostring(n.text or "")
+			elseif ty == "code" then
+				if type(n.code) == "string" and n.code ~= "" then
+					flush_text()
+					blocks[#blocks + 1] = { type = "text", text = n.code }
+				end
+			elseif ty == "markdown" or ty == "presented_markdown" then
+				if type(n.text) == "string" and n.text ~= "" then
+					flush_text()
+					blocks[#blocks + 1] = { type = "text", text = n.text }
+				end
+			elseif ty == "block" or ty == "indent" or ty == "clip" then
+				walk(n.child)
+			elseif ty == "row" then
+				local row_parts = {}
+				for _, item in ipairs(n.items or {}) do
+					if type(item) == "string" then
+						row_parts[#row_parts + 1] = item
+					elseif type(item) == "table" and (item.type == "line" or item.type == "paragraph") then
+						row_parts[#row_parts + 1] = flatten_spans(item.spans)
+					elseif type(item) == "table" and item.type == "span" then
+						row_parts[#row_parts + 1] = tostring(item.text or "")
+					end
+				end
+				if #row_parts > 0 then
+					pending_lines[#pending_lines + 1] = table.concat(row_parts, " ")
+				end
+			elseif ty == "gap" then
+				pending_lines[#pending_lines + 1] = ""
+			end
+		end
+		walk(node)
+		flush_text()
+		return blocks
+	end
+
+	local function project_value(value)
+		if value == nil then
+			return nil
+		end
+		local ok, projected = pcall(mare.projection.project, value)
+		if ok then
+			return projected
+		end
+		local ok_lossy, projected_lossy = pcall(mare.projection.project, value, { lossy = true })
+		if ok_lossy then
+			return projected_lossy
+		end
+		return nil
+	end
+
+	--- Compute one projected approval detail (command, preview, locations, scope) in the shared
+	--- authorization path so TUI, ACP, and RPC render identical tool-derived facts.
+	local function build_approval_detail(call, info, verdict)
+		local copy = require("mare_lib").copy_deep
+		local args = type(call and call.arguments) == "table" and call.arguments or {}
+		local cmd_text, cmd_shell = resolve_command_display(call, info)
+
+		local locations, seen_locs = {}, {}
+		local function add_location(path)
+			if type(path) == "string" and path ~= "" and not seen_locs[path] then
+				seen_locs[path] = true
+				locations[#locations + 1] = { path = path }
+			end
+		end
+		if type(info) == "table" and info.access_state == "declared" and type(info.access) == "table" then
+			for _, entry in ipairs(info.access) do
+				if type(entry) == "table" and entry.kind == "file" then
+					add_location(entry.logical or entry.path)
+				end
+			end
+		end
+
+		local def = registry[call.name]
+		local raw_preview = nil
+		local preview_blocks = {}
+		local preview_shows_cwd = false
+		if def and def.preview then
+			local pok, pv = pcall(def.preview, copy(args), call.cwd)
+			if pok and pv ~= nil then
+				if type(pv) == "table" and pv.includes_cwd == true then
+					preview_shows_cwd = true
+				end
+				raw_preview = project_value(pv)
+				if raw_preview ~= nil then
+					preview_blocks = project_preview_blocks(raw_preview, call.cwd, add_location)
+				end
+			end
+		end
+
+		local scoped = (type(info) == "table" and info.permission_request == true)
+			or (type(verdict) == "table" and verdict.permission_scope ~= nil)
+		local session_allowed = not call.protected_arguments
+			and (not scoped or (type(verdict) == "table" and verdict.permission_scope == "session"))
+		local has_additional = (type(verdict) == "table" and type(verdict.requested_permissions) == "table")
+			or type(args.additional_permissions) == "table"
+		local raw_sb = type(args.sandbox_permissions) == "string" and args.sandbox_permissions:match("^%s*(.-)%s*$")
+			or nil
+		local reusable_sandbox = (raw_sb ~= nil and raw_sb ~= "" and raw_sb ~= "all" and raw_sb ~= "danger-full-access")
+				and raw_sb
+			or nil
+		local session_kind
+		if scoped then
+			session_kind = call.origin ~= nil and "scoped_subagent" or "scoped"
+		elseif has_additional then
+			session_kind = "additional_permissions"
+		elseif reusable_sandbox ~= nil then
+			session_kind = "sandbox_permissions"
+		elseif cmd_text ~= nil then
+			session_kind = "exact_command"
+		else
+			session_kind = "exact_call"
+		end
+
+		local detail = {
+			command = cmd_text,
+			command_shell = cmd_shell,
+			preview_shows_cwd = preview_shows_cwd,
+			scope = {
+				scoped = scoped,
+				session_allowed = session_allowed,
+				kind = session_kind,
+				requested_access = reusable_sandbox,
+				permission_scope = type(verdict) == "table" and verdict.permission_scope or nil,
+			},
+		}
+		if #locations > 0 then
+			detail.locations = locations
+		end
+		if #preview_blocks > 0 then
+			detail.preview = preview_blocks
+		end
+		return raw_preview, project_value(detail)
+	end
+
 	--- approval for an `ask` verdict. Decisions:
 	---   allow (once) · allow_session · allow_amend (+ `amendment`, a rule the permissions
 	---   plugin persists) · deny · abort (deny and end the turn).
 	--- tool/approval listeners vote (policy; an RPC host answers via `approval.request`);
 	--- without any, an interactive UI asks the user; otherwise (headless) it's `unavailable`.
-	local function approve_now(call, info, verdict, cancel)
+	local function approve_now(call, info, verdict, cancel, raw_preview)
 		if D.policy:has_voters("tool/approval-host") then
 			local v = D.policy:decide(
 				"tool/approval-host",
@@ -126,9 +403,15 @@ return function(D)
 		end
 		if mare.ui.connected() then
 			-- the answer keys are on the items (the hint bar keeps Ctrl+C / Esc in view)
-			local scoped = info.permission_request or verdict.permission_scope ~= nil
-			local session_allowed = not call.protected_arguments
-				and (not scoped or verdict.permission_scope == "session")
+			local scope = type(info) == "table"
+					and type(info.approval_detail) == "table"
+					and type(info.approval_detail.scope) == "table"
+					and info.approval_detail.scope
+				or nil
+			local scoped = scope and scope.scoped == true
+				or (info.permission_request or verdict.permission_scope ~= nil)
+			local session_allowed = scope and scope.session_allowed == true
+				or (not call.protected_arguments and (not scoped or verdict.permission_scope == "session"))
 			local choices = { "allow" }
 			if session_allowed then
 				choices[#choices + 1] = "allow_session"
@@ -138,13 +421,6 @@ return function(D)
 			end
 			choices[#choices + 1] = "deny"
 			choices[#choices + 1] = "abort"
-			-- what the call would change (diff or command preview shown in the dialog): a tool's
-			-- `preview(arguments, cwd) -> node` is shown next to (or under) the choices
-			local def = registry[call.name]
-			local pok, pv = false, nil
-			if def and def.preview then
-				pok, pv = pcall(def.preview, call.arguments or {}, call.cwd)
-			end
 			local d, human_approval = mare.ui.approve({
 				approval_binding = call.approval_binding,
 				approval_arguments = call.arguments,
@@ -156,7 +432,7 @@ return function(D)
 				unconfined = info.unconfined,
 				protected_arguments = call.protected_arguments,
 				scoped = scoped,
-				preview = (pok and pv) or nil,
+				preview = raw_preview,
 				cancel = cancel,
 				wait_kind = "approval", -- ui/wait-start {kind = "approval"} (status, notify, status hooks)
 				wait_title = ("Allow %s?"):format(tostring(call.name)),
@@ -284,11 +560,18 @@ return function(D)
 			-- receive their own call.schema copy and cannot rewrite what the reviewer sees.
 			local review_call = copy(call)
 			review_call.schema = mare.projection.project(copy(declaration))
+			local review_info = copy(info)
+			local raw_preview, approval_detail = build_approval_detail(review_call, review_info, verdict)
+			if approval_detail ~= nil then
+				review_info.approval_detail = approval_detail
+			end
 			local service = D.svc.approvals
 			local policy
 			local function check_policy()
-				policy =
-					D.policy:decide("tool/approval", table.pack(copy(review_call), copy(info), copy(verdict), cancel))
+				policy = D.policy:decide(
+					"tool/approval",
+					table.pack(copy(review_call), copy(review_info), copy(verdict), cancel)
+				)
 				return policy
 			end
 			local answer = function(binding)
@@ -314,9 +597,9 @@ return function(D)
 				-- Forward the authoritative schema through ordinary user/RPC/child answerers too.
 				call.schema = mare.projection.project(copy(declaration))
 				if has_host or not custom then
-					return approve_now(copy(call), copy(info), copy(verdict), cancel)
+					return approve_now(copy(call), copy(review_info), copy(verdict), cancel, raw_preview)
 				end
-				local ans = normalize_answer(custom(copy(call), copy(info), copy(verdict), cancel))
+				local ans = normalize_answer(custom(copy(call), copy(review_info), copy(verdict), cancel))
 				return ans
 			end
 			if not service then
@@ -324,7 +607,7 @@ return function(D)
 			end
 			return service:request("tool", {
 				call = review_call,
-				info = info,
+				info = review_info,
 				verdict = verdict,
 				schema = mare.projection.project(copy(declaration)),
 				history = D.svc.agent and D.svc.agent:list_messages().data or {},

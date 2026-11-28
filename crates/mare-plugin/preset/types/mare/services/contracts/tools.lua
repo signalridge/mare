@@ -90,6 +90,7 @@ return {
 					parameters = "table|fun(model?: mare.Model): table",
 					admit = "fun(): boolean|string|nil",
 					summary = "string|fun(args: table): string",
+					preview = "fun(args: table, cwd?: string): mare.Node|nil",
 					render = "fun(...): any",
 					enabled = "boolean|fun(model?: mare.Model, edit_mode?: string): boolean",
 					concurrency_safe = "boolean|fun(args: table): boolean",

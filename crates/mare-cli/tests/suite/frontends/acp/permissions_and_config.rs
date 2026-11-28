@@ -1642,3 +1642,285 @@ fn acp_permission_request_forwards_detail_and_session_grant_resets_on_new_sessio
 
     rpc.kill_and_wait();
 }
+
+/// Shared authorization-path previews, locations, and resolved commands reach ACP for:
+/// 1. custom tools with a public `preview` callback returning `ui.Diff` + declared `access`,
+/// 2. custom tools returning a text `preview` (`ui.Lines`),
+/// 3. dynamically resolved command tools (`command = function(...)`),
+/// 4. built-in `edit`/`write` on raw untrimmed paths (`"notes "` vs `"notes"`),
+/// 5. a shadowed `"write"` tool with its own preview (never reading disk via hardcoded tool name).
+#[test]
+fn acp_permission_request_projects_custom_preview_dynamic_command_and_shadowed_write() {
+    let home = tempfile::tempdir().unwrap();
+    let ws = tempfile::tempdir().unwrap();
+    std::fs::write(ws.path().join("notes"), "from-unspaced\n").unwrap();
+    #[cfg(unix)]
+    std::fs::write(ws.path().join("notes "), "from-trailing-space\n").unwrap();
+    std::fs::write(ws.path().join("secret-on-disk.txt"), "DISK_SHOULD_NOT_LEAK\n").unwrap();
+
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut turns = vec![
+        json!({ "tool_calls": [{ "name": "custom_patcher", "arguments": { "target": "notes", "replacement": "patched\n" } }] }),
+        json!({ "text": "custom-diff-done" }),
+        json!({ "tool_calls": [{ "name": "custom_note", "arguments": { "env": "staging" } }] }),
+        json!({ "text": "custom-text-done" }),
+        json!({ "tool_calls": [{ "name": "dyn_runner", "arguments": { "dialect": "bash", "script": "echo DYN_CMD_PREVIEW" } }] }),
+        json!({ "text": "dyn-cmd-done" }),
+    ];
+    #[cfg(unix)]
+    {
+        turns.push(json!({ "tool_calls": [{ "name": "edit", "arguments": { "path": "notes ", "old_string": "from-trailing-space", "new_string": "updated-trailing-space" } }] }));
+        turns.push(json!({ "text": "space-edit-done" }));
+    }
+    let faux_path = home.path().join("faux-acp-custom-preview.json");
+    std::fs::write(&faux_path, serde_json::to_string(&turns).unwrap()).unwrap();
+
+    let cfg_dir = home.path().join("config");
+    let plugins_dir = cfg_dir.join("plugins");
+    std::fs::create_dir_all(&plugins_dir).unwrap();
+    std::fs::write(
+        plugins_dir.join("custom-preview-tools.lua"),
+        r#"
+        return {
+            name = "custom-preview-tools",
+            inject = { "tools" },
+            apply = function(ctx)
+                ctx.tools:register("custom_patcher", {
+                    description = "custom file patcher with preview",
+                    side_effect = "write",
+                    access = function(a)
+                        return { { kind = "file", op = "write", path = a.target, recursive = false } }
+                    end,
+                    parameters = {
+                        type = "object",
+                        properties = { target = { type = "string" }, replacement = { type = "string" } },
+                        required = { "target", "replacement" },
+                    },
+                    preview = function(a, cwd)
+                        local p = mare.fs.resolve_path(a.target, cwd).logical
+                        local old = mare.fs.read(p) or ""
+                        return ui.Diff({ old = old, new = a.replacement, path = a.target, full_path = p })
+                    end,
+                    execute = function() return { content = "patched" } end,
+                })
+                ctx.tools:register("custom_note", {
+                    description = "custom tool with text preview",
+                    side_effect = "external",
+                    parameters = {
+                        type = "object",
+                        properties = { env = { type = "string" } },
+                        required = { "env" },
+                    },
+                    preview = function(a)
+                        return ui.Lines({ ui.Line({ ui.Span("Deploying release to " .. tostring(a.env)) }) })
+                    end,
+                    execute = function() return { content = "deployed" } end,
+                })
+                ctx.tools:register("dyn_runner", {
+                    description = "dynamic command resolver tool",
+                    side_effect = "external",
+                    command_tool = true,
+                    command = function(a)
+                        return { shell = a.dialect or "bash", arg = "script" }
+                    end,
+                    parameters = {
+                        type = "object",
+                        properties = { dialect = { type = "string" }, script = { type = "string" } },
+                        required = { "script" },
+                    },
+                    execute = function() return { content = "ran" } end,
+                })
+            end,
+        }
+        "#,
+    )
+    .unwrap();
+    std::fs::write(
+        cfg_dir.join("init.lua"),
+        r#"mare.setup {
+            plugins = {
+                permissions = {
+                    enabled = true,
+                    preset = "read-only",
+                    rules = {
+                        { tool = "custom_note", decision = "prompt" },
+                        { argv = { "echo" }, decision = "prompt" },
+                    },
+                },
+            },
+        }
+"#,
+    )
+    .unwrap();
+
+    let mut cmd = mare_cmd();
+    cmd.args(["--model", "faux/echo", "acp"])
+        .env("MARE_HOME", home.path())
+        .env("MARE_FAUX_SCRIPT", &faux_path)
+        .stderr(Stdio::piped());
+    let mut rpc = RpcClient::spawn_cmd(&mut cmd);
+    let _ = rpc.call_raw("initialize", json!({ "protocolVersion": 1, "clientCapabilities": {} }), |_| json!(null));
+    let cwd = dunce::canonicalize(ws.path()).unwrap();
+    let s = rpc.call_raw("session/new", json!({ "cwd": cwd, "mcpServers": [] }), |_| json!(null));
+    let sid = s["result"]["sessionId"].as_str().unwrap_or_else(|| panic!("{s}")).to_string();
+
+    let mut ask_turn = |prompt_text: &str| -> Value {
+        let mut reqs = Vec::new();
+        let resp = rpc.call_raw(
+            "session/prompt",
+            json!({ "sessionId": sid, "prompt": [{ "type": "text", "text": prompt_text }] }),
+            |req| {
+                if req["method"] == "session/request_permission" {
+                    reqs.push(req["params"].clone());
+                    return json!({ "outcome": { "outcome": "selected", "optionId": "reject-once" } });
+                }
+                json!(null)
+            },
+        );
+        assert_eq!(resp["result"]["stopReason"], "end_turn", "{resp}");
+        assert_eq!(reqs.len(), 1, "expected 1 permission prompt for {prompt_text}: {reqs:?}");
+        reqs.remove(0)
+    };
+
+    // 1. Custom tool `ui.Diff` preview + declared `access` reaches ACP as `Diff` + `locations`.
+    let p_diff = ask_turn("run custom_patcher");
+    let expected_notes = cwd.join("notes").to_string_lossy().into_owned();
+    assert_eq!(p_diff["toolCall"]["locations"][0]["path"], json!(expected_notes), "{p_diff}");
+    assert!(
+        p_diff["toolCall"]["content"].as_array().unwrap().iter().any(|c| {
+            c["type"] == "diff"
+                && c["path"] == expected_notes
+                && c["oldText"] == "from-unspaced\n"
+                && c["newText"] == "patched\n"
+        }),
+        "custom tool Diff preview must reach ACP: {p_diff}"
+    );
+
+    // 2. Custom tool text preview reaches ACP content.
+    let p_text = ask_turn("run custom_note");
+    assert!(
+        p_text["toolCall"]["content"].to_string().contains("Deploying release to staging"),
+        "custom tool text preview must reach ACP: {p_text}"
+    );
+
+    // 3. Dynamic command resolver tool forwards frozen command text to ACP.
+    let p_dyn = ask_turn("run dyn_runner");
+    assert!(
+        p_dyn["toolCall"]["content"].to_string().contains("echo DYN_CMD_PREVIEW"),
+        "dynamic command resolver must forward resolved command to ACP: {p_dyn}"
+    );
+
+    // 4. Raw untrimmed path `"notes "` is preserved in ACP `edit` diff and locations.
+    #[cfg(unix)]
+    {
+        let p_space = ask_turn("edit notes space");
+        let expected_spaced = cwd.join("notes ").to_string_lossy().into_owned();
+        assert_eq!(p_space["toolCall"]["locations"][0]["path"], json!(expected_spaced), "{p_space}");
+        assert!(
+            p_space["toolCall"]["content"].as_array().unwrap().iter().any(|c| {
+                c["type"] == "diff"
+                    && c["path"] == expected_spaced
+                    && c["oldText"] == "from-trailing-space\n"
+                    && c["newText"] == "updated-trailing-space\n"
+            }),
+            "raw untrimmed 'notes ' path must be preserved in ACP diff & locations: {p_space}"
+        );
+    }
+
+    rpc.kill_and_wait();
+
+    // 5. Shadowing `"write"` with a custom tool uses that tool's own preview and never reads disk.
+    let shadow_home = tempfile::tempdir().unwrap();
+    let shadow_cfg = shadow_home.path().join("config");
+    let shadow_plugins = shadow_cfg.join("plugins");
+    std::fs::create_dir_all(&shadow_plugins).unwrap();
+    std::fs::write(
+        shadow_plugins.join("shadow-write.lua"),
+        r#"
+        return {
+            name = "shadow-write",
+            inject = { "tools" },
+            apply = function(ctx)
+                ctx.tools:register("write", {
+                    description = "remote KV writer shadowing built-in write",
+                    side_effect = "external",
+                    parameters = {
+                        type = "object",
+                        properties = { path = { type = "string" }, content = { type = "string" } },
+                        required = { "path", "content" },
+                    },
+                    preview = function(a)
+                        return ui.Line({ ui.Span("Shadow remote KV put: " .. tostring(a.path)) })
+                    end,
+                    execute = function() return { content = "ok" } end,
+                })
+            end,
+        }
+        "#,
+    )
+    .unwrap();
+    std::fs::write(
+        shadow_cfg.join("init.lua"),
+        r#"mare.setup {
+            plugins = {
+                permissions = {
+                    enabled = true,
+                    preset = "read-only",
+                    rules = { { tool = "write", decision = "prompt" } },
+                },
+            },
+        }
+"#,
+    )
+    .unwrap();
+    let shadow_faux = shadow_home.path().join("faux-shadow.json");
+    std::fs::write(
+        &shadow_faux,
+        json!([
+            { "tool_calls": [{ "name": "write", "arguments": { "path": "secret-on-disk.txt", "content": "remote-val" } }] },
+            { "text": "shadow-done" }
+        ])
+        .to_string(),
+    )
+    .unwrap();
+
+    let mut shadow_cmd = mare_cmd();
+    shadow_cmd
+        .args(["--model", "faux/echo", "acp"])
+        .env("MARE_HOME", shadow_home.path())
+        .env("MARE_FAUX_SCRIPT", &shadow_faux)
+        .stderr(Stdio::piped());
+    let mut srpc = RpcClient::spawn_cmd(&mut shadow_cmd);
+    let _ = srpc.call_raw("initialize", json!({ "protocolVersion": 1, "clientCapabilities": {} }), |_| json!(null));
+    let ss = srpc.call_raw("session/new", json!({ "cwd": cwd, "mcpServers": [] }), |_| json!(null));
+    let ssid = ss["result"]["sessionId"].as_str().unwrap_or_else(|| panic!("{ss}")).to_string();
+    let mut shadow_reqs = Vec::new();
+    let sresp = srpc.call_raw(
+        "session/prompt",
+        json!({ "sessionId": ssid, "prompt": [{ "type": "text", "text": "shadow write" }] }),
+        |req| {
+            if req["method"] == "session/request_permission" {
+                shadow_reqs.push(req["params"].clone());
+                return json!({ "outcome": { "outcome": "selected", "optionId": "reject-once" } });
+            }
+            json!(null)
+        },
+    );
+    assert_eq!(sresp["result"]["stopReason"], "end_turn", "{sresp}");
+    assert_eq!(shadow_reqs.len(), 1, "{shadow_reqs:?}");
+    let sp = &shadow_reqs[0];
+    let sp_str = sp.to_string();
+    assert!(
+        sp_str.contains("Shadow remote KV put: secret-on-disk.txt"),
+        "shadowed write must display its own preview: {sp}"
+    );
+    assert!(
+        !sp_str.contains("DISK_SHOULD_NOT_LEAK"),
+        "shadowed write must NEVER read disk via hardcoded tool name: {sp}"
+    );
+    assert!(
+        sp["toolCall"]["content"].as_array().unwrap().iter().all(|c| c["type"] != "diff"),
+        "shadowed write without diff preview must not fabricate Diff: {sp}"
+    );
+    srpc.kill_and_wait();
+}

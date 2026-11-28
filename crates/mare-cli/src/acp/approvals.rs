@@ -28,11 +28,13 @@ fn acp_tool_kind(info: &J) -> ToolKind {
 fn permission_options(kind: &str, a: &[J]) -> (Vec<PermissionOption>, bool) {
     let allow_always = if kind == "tool" {
         let (call, info, verdict) = (&a[0], &a[1], &a[2]);
-        let protected = call.get("protected_arguments").and_then(|v| v.as_bool()).unwrap_or(false);
-        let scoped = info.get("permission_request").and_then(|v| v.as_bool()).unwrap_or(false)
-            || verdict.get("permission_scope").is_some_and(|v| !v.is_null());
-        let scope_is_session = verdict.get("permission_scope").and_then(|v| v.as_str()) == Some("session");
-        !protected && (!scoped || scope_is_session)
+        info.pointer("/approval_detail/scope/session_allowed").and_then(J::as_bool).unwrap_or_else(|| {
+            let protected = call.get("protected_arguments").and_then(|v| v.as_bool()).unwrap_or(false);
+            let scoped = info.get("permission_request").and_then(|v| v.as_bool()).unwrap_or(false)
+                || verdict.get("permission_scope").is_some_and(|v| !v.is_null());
+            let scope_is_session = verdict.get("permission_scope").and_then(|v| v.as_str()) == Some("session");
+            !protected && (!scoped || scope_is_session)
+        })
     } else {
         true
     };
@@ -48,117 +50,18 @@ fn permission_options(kind: &str, a: &[J]) -> (Vec<PermissionOption>, bool) {
     (options, allow_always)
 }
 
-fn raw_path_arg(args: &J) -> Option<&str> {
-    args.get("path")
-        .and_then(J::as_str)
-        .filter(|s| !s.is_empty())
-        .or_else(|| args.get("file_path").and_then(J::as_str).filter(|s| !s.is_empty()))
-}
-
-fn resolve_abs_path(cwd: &str, raw: &str) -> PathBuf {
-    mare_binding::fs::resolve_path(Path::new(cwd), raw)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum FileDiffState {
-    NewFile,
-    DiffTexts { old: String, new: String },
-    Unavailable,
-}
-
-/// Inspect a `write` or `edit` target through `mare.fs` with the active sandbox policy so
-/// `deny_read` rules are honored.
-/// - For `write`: returns `NewFile` when absent, `DiffTexts` with full old/new file content when
-///   readable within `MAX_DIFF_BYTES`, or `Unavailable` otherwise.
-/// - For `edit`: reads the full file and applies `mare.text.replace` (honoring `replace_all`) to
-///   produce full-file `DiffTexts`, or `Unavailable` if unreadable / replacement fails.
-async fn inspect_file_diff(lua: &mlua::Lua, tool: &str, abs: &Path, args: &J) -> FileDiffState {
-    const MAX_DIFF_BYTES: usize = 512 * 1024;
-    let path_str = abs.to_string_lossy();
-    let script = r#"
-        local tool, path, max_bytes, arg1, arg2, replace_all = ...
-        local policy = mare and mare.proc and mare.proc.sandbox and mare.proc.sandbox.current and mare.proc.sandbox.current()
-        local policies = policy and { policy } or nil
-        local st = mare.fs.stat(path, { policies = policies })
-        if not st then
-            if tool == "write" and not mare.fs.exists(path) then
-                return "new", nil, nil
-            end
-            return "unavailable", nil, nil
-        end
-        if st.kind ~= "file" or (st.size and st.size > max_bytes) then
-            return "unavailable", nil, nil
-        end
-        local ok, old = pcall(mare.fs.read, path, { policies = policies, max_bytes = max_bytes })
-        if not ok or type(old) ~= "string" then
-            return "unavailable", nil, nil
-        end
-        if tool == "write" then
-            return "diff", old, arg1
-        end
-        local rok, new = pcall(mare.text.replace, old, arg1 or "", arg2 or "", replace_all == true)
-        if rok and type(new) == "string" then
-            return "diff", old, new
-        end
-        return "unavailable", nil, nil
-    "#;
-    let (arg1, arg2, replace_all) = if tool == "write" {
-        (args.get("content").and_then(J::as_str).unwrap_or(""), "", false)
-    } else {
-        (
-            args.get("old_string").and_then(J::as_str).unwrap_or(""),
-            args.get("new_string").and_then(J::as_str).unwrap_or(""),
-            args.get("replace_all").and_then(J::as_bool).unwrap_or(false),
-        )
-    };
-    match lua
-        .load(script)
-        .call_async::<(String, Option<String>, Option<String>)>((
-            tool,
-            path_str.as_ref(),
-            MAX_DIFF_BYTES,
-            arg1,
-            arg2,
-            replace_all,
-        ))
-        .await
-    {
-        Ok((tag, Some(old), Some(new))) if tag == "diff" => FileDiffState::DiffTexts { old, new },
-        Ok((tag, _, _)) if tag == "new" => FileDiffState::NewFile,
-        _ => FileDiffState::Unavailable,
-    }
-}
-
-async fn inspect_tool_file_diff(lua: &mlua::Lua, kind: &str, a: &[J], host_cwd: &Path) -> Option<FileDiffState> {
-    if kind == "tool"
-        && let Some(tool_name @ ("write" | "edit")) = a[0].get("name").and_then(J::as_str)
-        && let Some(args) = a[0].get("arguments")
-        && ((tool_name == "write" && args.get("content").and_then(J::as_str).is_some())
-            || (tool_name == "edit"
-                && args.get("old_string").and_then(J::as_str).is_some()
-                && args.get("new_string").and_then(J::as_str).is_some()))
-        && let Some(p) = raw_path_arg(args)
-    {
-        let cwd =
-            non_empty_str(&a[0], "cwd").map(str::to_owned).unwrap_or_else(|| host_cwd.to_string_lossy().into_owned());
-        let abs = resolve_abs_path(&cwd, p);
-        Some(inspect_file_diff(lua, tool_name, &abs, args).await)
-    } else {
-        None
-    }
-}
-
-fn build_tool_call_update(kind: &str, a: &[J], host_cwd: &Path, file_diff: Option<FileDiffState>) -> ToolCallUpdate {
+fn build_tool_call_update(kind: &str, a: &[J], host_cwd: &Path) -> ToolCallUpdate {
     if kind == "tool" {
         let call = &a[0];
         let info = a.get(1).unwrap_or(&J::Null);
         let verdict = a.get(2).unwrap_or(&J::Null);
+        let detail = info.get("approval_detail");
         let call_id = call.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
         let name = call.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
         let args = call.get("arguments").cloned().unwrap_or(J::Null);
         let cwd =
             non_empty_str(call, "cwd").map(str::to_owned).unwrap_or_else(|| host_cwd.to_string_lossy().into_owned());
-        let cmd = non_empty_str(&args, "command");
+        let cmd = detail.and_then(|d| non_empty_str(d, "command")).or_else(|| non_empty_str(&args, "command"));
         let path = non_empty_str(&args, "path").or_else(|| non_empty_str(&args, "file_path"));
         let url = non_empty_str(&args, "url");
         let title_arg = if let Some(c) = cmd {
@@ -179,64 +82,68 @@ fn build_tool_call_update(kind: &str, a: &[J], host_cwd: &Path, file_diff: Optio
 
         let mut content: Vec<ToolCallContent> = Vec::new();
         let mut locations: Vec<ToolCallLocation> = Vec::new();
-        if let Some(c) = cmd {
-            content.push(ToolCallContent::from(c.to_string()));
-        }
-        let is_file_tool = matches!(name, "write" | "edit");
-        if is_file_tool && let Some(p) = raw_path_arg(&args) {
-            let abs = resolve_abs_path(&cwd, p);
-            locations.push(ToolCallLocation::new(abs.clone()));
-            if name == "edit"
-                && let (Some(old_s), Some(new_s)) =
-                    (args.get("old_string").and_then(J::as_str), args.get("new_string").and_then(J::as_str))
-            {
-                match file_diff.unwrap_or(FileDiffState::Unavailable) {
-                    FileDiffState::DiffTexts { old, new } => {
-                        content.push(ToolCallContent::from(Diff::new(abs, new).old_text(old)));
+        if let Some(locs) = detail.and_then(|d| d.get("locations")).and_then(J::as_array) {
+            for loc in locs {
+                if let Some(p) = loc.get("path").and_then(J::as_str).filter(|s| !s.is_empty()) {
+                    let mut entry = ToolCallLocation::new(PathBuf::from(p));
+                    if let Some(line) = loc.get("line").and_then(J::as_u64).and_then(|n| u32::try_from(n).ok()) {
+                        entry = entry.line(line);
                     }
-                    FileDiffState::NewFile | FileDiffState::Unavailable => {
-                        let mode = if args.get("replace_all").and_then(J::as_bool).unwrap_or(false) {
-                            " (replace_all)"
-                        } else {
-                            ""
-                        };
-                        content.push(ToolCallContent::from(format!(
-                            "Edit {}{mode}:\n--- old\n{old_s}\n+++ new\n{new_s}",
-                            abs.display()
-                        )));
-                    }
-                }
-            } else if name == "write"
-                && let Some(new_s) = args.get("content").and_then(J::as_str)
-            {
-                match file_diff.unwrap_or(FileDiffState::Unavailable) {
-                    FileDiffState::NewFile => {
-                        content.push(ToolCallContent::from(Diff::new(abs, new_s)));
-                    }
-                    FileDiffState::DiffTexts { old, new } => {
-                        content.push(ToolCallContent::from(Diff::new(abs, new).old_text(old)));
-                    }
-                    FileDiffState::Unavailable => {
-                        content.push(ToolCallContent::from(format!(
-                            "Overwrite {} ({} bytes):\n{new_s}",
-                            abs.display(),
-                            new_s.len()
-                        )));
-                    }
+                    locations.push(entry);
                 }
             }
         }
-        let diff_text = non_empty_str(&args, "patch")
-            .or_else(|| non_empty_str(&args, "diff"))
-            .or_else(|| (name == "apply_patch").then(|| non_empty_str(&args, "input")).flatten());
-        if let Some(diff) = diff_text {
+
+        let mut preview_emitted = false;
+        let mut preview_has_cmd = false;
+        if let Some(blocks) = detail.and_then(|d| d.get("preview")).and_then(J::as_array) {
+            for block in blocks {
+                match block.get("type").and_then(J::as_str) {
+                    Some("diff") => {
+                        if let (Some(p), Some(new_text)) = (
+                            block.get("path").and_then(J::as_str).filter(|s| !s.is_empty()),
+                            block.get("new").and_then(J::as_str),
+                        ) {
+                            let is_new = block.get("is_new").and_then(J::as_bool) == Some(true);
+                            let diff = if is_new {
+                                Diff::new(PathBuf::from(p), new_text)
+                            } else if let Some(old_text) = block.get("old").and_then(J::as_str) {
+                                Diff::new(PathBuf::from(p), new_text).old_text(old_text)
+                            } else {
+                                Diff::new(PathBuf::from(p), new_text)
+                            };
+                            content.push(ToolCallContent::from(diff));
+                            preview_emitted = true;
+                        }
+                    }
+                    Some("text") => {
+                        if let Some(text) = block.get("text").and_then(J::as_str).filter(|s| !s.is_empty()) {
+                            if let Some(c) = cmd
+                                && text.contains(c)
+                            {
+                                preview_has_cmd = true;
+                            }
+                            content.push(ToolCallContent::from(text.to_string()));
+                            preview_emitted = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if let Some(c) = cmd
+            && !preview_has_cmd
+        {
+            content.push(ToolCallContent::from(c.to_string()));
+        }
+        if !preview_emitted && let Some(diff) = non_empty_str(&args, "patch").or_else(|| non_empty_str(&args, "diff")) {
             content.push(ToolCallContent::from(diff.to_string()));
         }
         if !cwd.is_empty() {
             content.push(ToolCallContent::from(format!("Working directory: {cwd}")));
         }
         let reason = non_empty_str(verdict, "reason");
-        let shown_path = (cmd.is_none() || is_file_tool).then_some(path).flatten();
+        let shown_path = (cmd.is_none() || !locations.is_empty()).then_some(path).flatten();
         if let Some(r) = reason
             && let Some(clean) = split_reason_parts(r, name, shown_path, cmd, !cwd.is_empty(), false, false, None)
         {
@@ -255,6 +162,12 @@ fn build_tool_call_update(kind: &str, a: &[J], host_cwd: &Path, file_diff: Optio
         }
         if let Some(se) = non_empty_str(info, "side_effect") {
             meta.insert("side_effect".into(), J::String(se.to_string()));
+        }
+        if let Some(scope) = detail.and_then(|d| d.get("scope")).filter(|v| v.is_object()) {
+            meta.insert("scope".into(), scope.clone());
+        }
+        if let Some(shell) = detail.and_then(|d| non_empty_str(d, "command_shell")) {
+            meta.insert("command_shell".into(), J::String(shell.to_string()));
         }
 
         let mut fields = ToolCallUpdateFields::new()
@@ -359,8 +272,7 @@ pub(super) fn install(
                 let cancel = projected.cancel_token;
                 let mut a = projected.json_args;
                 a.resize(3, J::Null);
-                let file_diff = inspect_tool_file_diff(&lua, kind, &a, &host_cwd).await;
-                let tool_call = build_tool_call_update(kind, &a, &host_cwd, file_diff);
+                let tool_call = build_tool_call_update(kind, &a, &host_cwd);
                 let (options, allow_always_offered) = permission_options(kind, &a);
                 let req = RequestPermissionRequest::new(sid, tool_call, options);
                 let fut = super::wire::request_permission(&conn, req, projector.as_slice());
@@ -459,7 +371,7 @@ mod tests {
         assert_eq!(always.name, "Allow for this session");
         assert_eq!(always.kind, PermissionOptionKind::AllowAlways);
 
-        let update = build_tool_call_update("tool", &args, Path::new("/fallback"), None);
+        let update = build_tool_call_update("tool", &args, Path::new("/fallback"));
         let serialized = serde_json::to_value(&update).unwrap();
         let content_blocks = serialized["content"].as_array().expect("content array");
         let content_str = serialized["content"].to_string();
@@ -474,185 +386,134 @@ mod tests {
         assert_eq!(serialized["_meta"]["reason"], json!(raw_reason));
         assert!(serialized["_meta"].get("diff").is_none(), "_meta.diff must not duplicate patch content: {serialized}");
 
-        let edit_args = [
+        // Shared `approval_detail` drives Diff, text preview, locations, resolved command, and scope
+        // for both built-in and custom tools without hardcoding tool names.
+        let custom_diff_args = [
             json!({
                 "id": "call-2",
-                "name": "edit",
+                "name": "custom_editor",
                 "cwd": "/repo",
-                "arguments": { "path": "src/lib.rs", "old_string": "foo", "new_string": "bar", "replace_all": true }
+                "arguments": { "target": "src/lib.rs" }
             }),
-            json!({ "side_effect": "write" }),
-            json!({ "reason": "edit file" }),
+            json!({
+                "side_effect": "write",
+                "approval_detail": {
+                    "locations": [{ "path": "/repo/src/lib.rs" }],
+                    "preview": [{
+                        "type": "diff",
+                        "path": "/repo/src/lib.rs",
+                        "old": "foo one\nfoo two\n",
+                        "new": "bar one\nbar two\n"
+                    }],
+                    "scope": { "scoped": false, "session_allowed": true, "kind": "exact_call" }
+                }
+            }),
+            json!({ "reason": "custom editor approval" }),
         ];
-        let edit_json = serde_json::to_value(build_tool_call_update(
-            "tool",
-            &edit_args,
-            Path::new("/repo"),
-            Some(FileDiffState::DiffTexts { old: "foo one\nfoo two\n".into(), new: "bar one\nbar two\n".into() }),
-        ))
-        .unwrap();
+        let custom_diff_json =
+            serde_json::to_value(build_tool_call_update("tool", &custom_diff_args, Path::new("/repo"))).unwrap();
+        assert_eq!(custom_diff_json["locations"][0]["path"], json!("/repo/src/lib.rs"), "{custom_diff_json}");
         assert!(
-            edit_json["content"].as_array().unwrap().iter().any(|c| {
-                c["type"] == "diff" && c["oldText"] == "foo one\nfoo two\n" && c["newText"] == "bar one\nbar two\n"
+            custom_diff_json["content"].as_array().unwrap().iter().any(|c| {
+                c["type"] == "diff"
+                    && c["path"] == "/repo/src/lib.rs"
+                    && c["oldText"] == "foo one\nfoo two\n"
+                    && c["newText"] == "bar one\nbar two\n"
             }),
-            "edit approval must include full-file ACP diff content: {edit_json}"
+            "custom tool preview diff must project to ACP diff content: {custom_diff_json}"
         );
+        assert_eq!(custom_diff_json["_meta"]["scope"]["kind"], json!("exact_call"), "{custom_diff_json}");
 
-        let edit_fallback_json = serde_json::to_value(build_tool_call_update(
-            "tool",
-            &edit_args,
-            Path::new("/repo"),
-            Some(FileDiffState::Unavailable),
-        ))
-        .unwrap();
-        assert!(
-            edit_fallback_json["content"].as_array().unwrap().iter().all(|c| c["type"] != "diff"),
-            "unavailable edit must not emit partial snippet Diff: {edit_fallback_json}"
-        );
-        let edit_fallback_str = edit_fallback_json["content"].to_string();
-        assert!(
-            edit_fallback_str.contains("replace_all")
-                && edit_fallback_str.contains("foo")
-                && edit_fallback_str.contains("bar"),
-            "unavailable edit fallback must note replace_all and old/new snippets: {edit_fallback_json}"
-        );
-
-        // `write` onto existing readable file includes `oldText`; unreadable existing file falls back
-        // to text content instead of misreporting a new-file Diff; `~` expands instead of joining cwd.
-        let write_args = [
+        // New-file diff (`is_new: true`) omits `oldText`, and custom text preview blocks are forwarded.
+        let new_file_args = [
             json!({
                 "id": "call-3",
-                "name": "write",
+                "name": "custom_writer",
                 "cwd": "/repo",
-                "arguments": { "path": "~/notes.txt", "content": "updated" }
+                "arguments": { "target": "new.txt" }
             }),
-            json!({ "side_effect": "write" }),
+            json!({
+                "side_effect": "write",
+                "approval_detail": {
+                    "locations": [{ "path": "/repo/new.txt" }],
+                    "preview": [
+                        { "type": "text", "text": "Creating config file" },
+                        { "type": "diff", "path": "/repo/new.txt", "new": "hello\n", "is_new": true }
+                    ]
+                }
+            }),
             json!({ "reason": "write file" }),
         ];
-        let overwrite_json = serde_json::to_value(build_tool_call_update(
-            "tool",
-            &write_args,
-            Path::new("/repo"),
-            Some(FileDiffState::DiffTexts { old: "previous".into(), new: "updated".into() }),
-        ))
-        .unwrap();
-        let loc_path = overwrite_json["locations"][0]["path"].as_str().unwrap_or("");
-        assert!(!loc_path.contains("/~/"), "tilde path must expand instead of joining cwd: {overwrite_json}");
+        let new_file_json =
+            serde_json::to_value(build_tool_call_update("tool", &new_file_args, Path::new("/repo"))).unwrap();
+        let new_blocks = new_file_json["content"].as_array().unwrap();
+        assert!(new_blocks.iter().any(|c| c["content"]["text"] == "Creating config file"), "{new_file_json}");
         assert!(
-            overwrite_json["content"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|c| c["type"] == "diff" && c["oldText"] == "previous" && c["newText"] == "updated"),
-            "overwrite diff must include oldText: {overwrite_json}"
+            new_blocks.iter().any(|c| c["type"] == "diff" && c.get("oldText").is_none() && c["newText"] == "hello\n"),
+            "new-file diff must omit oldText: {new_file_json}"
         );
 
-        let unreadable_json = serde_json::to_value(build_tool_call_update(
-            "tool",
-            &write_args,
-            Path::new("/repo"),
-            Some(FileDiffState::Unavailable),
-        ))
-        .unwrap();
-        assert!(
-            unreadable_json["content"].as_array().unwrap().iter().all(|c| c["type"] != "diff"),
-            "unreadable overwrite must not emit a misleading new-file Diff: {unreadable_json}"
-        );
-        assert!(
-            unreadable_json["content"].to_string().contains("Overwrite"),
-            "unreadable overwrite must emit text content: {unreadable_json}"
-        );
-
-        // Non-write/edit tools (e.g. remote MCP tools) with `path` + `content` must not emit local
-        // Diff content or file locations.
-        let mcp_args = [
+        // Tools without `approval_detail.preview`/`locations` (e.g. remote MCP tools or shadowed
+        // `"write"` tools) must NEVER emit fabricated local Diff content or local file locations.
+        let shadowed_write_args = [
             json!({
                 "id": "call-4",
-                "name": "mcp__docs__save",
+                "name": "write",
                 "cwd": "/repo",
                 "arguments": { "path": "docs/spec.md", "content": "remote body" }
             }),
-            json!({ "side_effect": "external", "unconfined": true }),
-            json!({ "reason": "unconfined tool" }),
-        ];
-        let mcp_json =
-            serde_json::to_value(build_tool_call_update("tool", &mcp_args, Path::new("/repo"), None)).unwrap();
-        assert!(
-            mcp_json["content"].as_array().unwrap().iter().all(|c| c["type"] != "diff"),
-            "MCP tool with path+content must not emit local Diff: {mcp_json}"
-        );
-        assert!(
-            mcp_json.get("locations").is_none() || mcp_json["locations"].as_array().is_some_and(Vec::is_empty),
-            "MCP tool with path+content must not emit local file locations: {mcp_json}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn acp_file_diff_and_locations_preserve_raw_untrimmed_path() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("notes"), "from-unspaced\n").unwrap();
-        std::fs::write(dir.path().join("notes "), "from-trailing-space\n").unwrap();
-
-        let lua = mlua::Lua::new();
-        let mare = lua.create_table().unwrap();
-        mare_binding::fs::install(&lua, &mare, dir.path().to_path_buf()).unwrap();
-        mare_binding::text::install(&lua, &mare, dir.path().to_path_buf()).unwrap();
-        lua.globals().set("mare", mare).unwrap();
-
-        let cwd = dir.path().to_string_lossy().into_owned();
-        let expected_path = dir.path().join("notes ").to_string_lossy().into_owned();
-
-        let edit_args = [
             json!({
-                "id": "call-edit-space",
-                "name": "edit",
-                "cwd": cwd,
-                "arguments": {
-                    "path": "notes ",
-                    "old_string": "from-trailing-space",
-                    "new_string": "updated-trailing-space"
+                "side_effect": "external",
+                "unconfined": true,
+                "approval_detail": {
+                    "preview": [{ "type": "text", "text": "Remote write to docs/spec.md" }],
+                    "scope": { "scoped": false, "session_allowed": false, "kind": "exact_call" }
                 }
             }),
-            json!({ "side_effect": "write" }),
-            json!({ "reason": "edit file" }),
+            json!({ "reason": "unconfined tool" }),
         ];
-        let edit_diff = inspect_tool_file_diff(&lua, "tool", &edit_args, dir.path()).await;
-        let edit_json =
-            serde_json::to_value(build_tool_call_update("tool", &edit_args, dir.path(), edit_diff)).unwrap();
-        assert_eq!(edit_json["locations"][0]["path"], json!(expected_path), "{edit_json}");
+        let (_, shadowed_allow_always) = permission_options("tool", &shadowed_write_args);
+        assert!(!shadowed_allow_always, "permission_options must honor approval_detail.scope.session_allowed");
+        let shadowed_json =
+            serde_json::to_value(build_tool_call_update("tool", &shadowed_write_args, Path::new("/repo"))).unwrap();
         assert!(
-            edit_json["content"].as_array().unwrap().iter().any(|c| {
-                c["type"] == "diff"
-                    && c["path"] == expected_path
-                    && c["oldText"] == "from-trailing-space\n"
-                    && c["newText"] == "updated-trailing-space\n"
-            }),
-            "edit diff must read and report the raw 'notes ' path, not trimmed 'notes': {edit_json}"
+            shadowed_json["content"].as_array().unwrap().iter().all(|c| c["type"] != "diff"),
+            "shadowed write tool without diff preview must not fabricate local Diff: {shadowed_json}"
+        );
+        assert!(
+            shadowed_json["content"].to_string().contains("Remote write to docs/spec.md"),
+            "shadowed write tool must forward its own preview text: {shadowed_json}"
+        );
+        assert!(
+            shadowed_json.get("locations").is_none()
+                || shadowed_json["locations"].as_array().is_some_and(Vec::is_empty),
+            "tool without declared locations must not emit local file locations: {shadowed_json}"
         );
 
-        let write_args = [
+        // Resolved command from `#128` (`approval_detail.command`) populates title and content even
+        // when the tool argument is not named `command`.
+        let dynamic_cmd_args = [
             json!({
-                "id": "call-write-space",
-                "name": "write",
-                "cwd": cwd,
-                "arguments": { "path": "notes ", "content": "rewritten\n" }
+                "id": "call-5",
+                "name": "multi_shell",
+                "cwd": "/repo",
+                "arguments": { "dialect": "powershell", "script": "Get-ChildItem -Force" }
             }),
-            json!({ "side_effect": "write" }),
-            json!({ "reason": "write file" }),
+            json!({
+                "command_tool": true,
+                "side_effect": "external",
+                "approval_detail": {
+                    "command": "Get-ChildItem -Force",
+                    "command_shell": "powershell",
+                    "scope": { "scoped": false, "session_allowed": true, "kind": "exact_command" }
+                }
+            }),
+            json!({ "reason": "powershell: Get-ChildItem -Force · ask" }),
         ];
-        let write_diff = inspect_tool_file_diff(&lua, "tool", &write_args, dir.path()).await;
-        let write_json =
-            serde_json::to_value(build_tool_call_update("tool", &write_args, dir.path(), write_diff)).unwrap();
-        assert_eq!(write_json["locations"][0]["path"], json!(expected_path), "{write_json}");
-        assert!(
-            write_json["content"].as_array().unwrap().iter().any(|c| {
-                c["type"] == "diff"
-                    && c["path"] == expected_path
-                    && c["oldText"] == "from-trailing-space\n"
-                    && c["newText"] == "rewritten\n"
-            }),
-            "write diff must read and report the raw 'notes ' path, not trimmed 'notes': {write_json}"
-        );
+        let dyn_json =
+            serde_json::to_value(build_tool_call_update("tool", &dynamic_cmd_args, Path::new("/repo"))).unwrap();
+        assert_eq!(dyn_json["title"], json!("multi_shell Get-ChildItem -Force"), "{dyn_json}");
+        assert!(dyn_json["content"].to_string().contains("Get-ChildItem -Force"), "{dyn_json}");
+        assert_eq!(dyn_json["_meta"]["command_shell"], json!("powershell"), "{dyn_json}");
     }
 }
