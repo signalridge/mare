@@ -248,3 +248,243 @@ assert(msg and not msg.error, tostring(msg and msg.error))
     })
     .await;
 }
+
+/// Issue #191: dynamically discovered Gemini 3+ models from Google `/models` must select
+/// `thinkingLevel` rather than falling back to `thinkingBudget` because `reasoning_level` was
+/// omitted by `decode_google_models`.
+#[tokio::test]
+async fn dynamically_discovered_gemini_3_model_uses_thinking_level() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let server = MockServer::start().await;
+        server.route(
+            "/google/models/gemini-3-flash-preview:streamGenerateContent",
+            vec![Resp::sse(fixture("google.sse")), Resp::sse(fixture("google.sse")), Resp::sse(fixture("google.sse"))],
+        );
+        server.route(
+            "/google/models/gemini-3.1-pro-preview:streamGenerateContent",
+            vec![Resp::sse(fixture("google.sse")), Resp::sse(fixture("google.sse"))],
+        );
+        server.route("/google/models/gemini-4-carbon:streamGenerateContent", vec![Resp::sse(fixture("google.sse"))]);
+        server.route(
+            "/google/models/gemini-4-unknown-preview:streamGenerateContent",
+            vec![Resp::sse(fixture("google.sse"))],
+        );
+        server.route(
+            "/google/models/gemini-4-custom-efforts:streamGenerateContent",
+            vec![Resp::sse(fixture("google.sse"))],
+        );
+        server.route(
+            "/google/models/gemini-3-budget-override:streamGenerateContent",
+            vec![Resp::sse(fixture("google.sse"))],
+        );
+        server.route(
+            "/google/models",
+            vec![Resp::status(
+                200,
+                json!({
+                    "models": [
+                        {
+                            "name": "models/gemini-3-flash-preview",
+                            "displayName": "Gemini 3 Flash Preview",
+                            "inputTokenLimit": 1048576,
+                            "outputTokenLimit": 65536,
+                            "thinking": true,
+                            "supportedGenerationMethods": ["generateContent"]
+                        },
+                        {
+                            "name": "models/gemini-3.1-pro-preview",
+                            "displayName": "Gemini 3.1 Pro Preview",
+                            "inputTokenLimit": 1048576,
+                            "outputTokenLimit": 65536,
+                            "thinking": true,
+                            "supportedGenerationMethods": ["generateContent"]
+                        },
+                        {
+                            "name": "models/gemini-4-carbon",
+                            "displayName": "Gemini 4 Carbon",
+                            "inputTokenLimit": 1048576,
+                            "outputTokenLimit": 65536,
+                            "thinking": true,
+                            "supportedGenerationMethods": ["generateContent"]
+                        },
+                        {
+                            "name": "models/gemini-4-unknown-preview",
+                            "displayName": "Gemini 4 Unknown Preview",
+                            "inputTokenLimit": 1048576,
+                            "outputTokenLimit": 65536,
+                            "thinking": true,
+                            "supportedGenerationMethods": ["generateContent"]
+                        },
+                        {
+                            "name": "models/gemini-4-custom-efforts",
+                            "displayName": "Gemini 4 Custom Efforts",
+                            "inputTokenLimit": 1048576,
+                            "outputTokenLimit": 65536,
+                            "thinking": true,
+                            "supportedGenerationMethods": ["generateContent"]
+                        },
+                        {
+                            "name": "models/gemini-3-budget-override",
+                            "displayName": "Gemini 3 Budget Override",
+                            "inputTokenLimit": 1048576,
+                            "outputTokenLimit": 65536,
+                            "thinking": true,
+                            "supportedGenerationMethods": ["generateContent"]
+                        }
+                    ]
+                })
+                .to_string(),
+            )],
+        );
+
+        let h = provider_host(
+            &mut env,
+            &server,
+            json!({
+                "models": {
+                    "google/gemini-3-budget-override": {
+                        "reasoning": true,
+                        "reasoning_level": false
+                    },
+                    "google/gemini-4-custom-efforts": {
+                        "reasoning": true,
+                        "efforts": ["minimal", "low", "medium", "high", "xhigh"]
+                    }
+                },
+                "plugins": {
+                    "llm": { "catalog_refresh_ms": 1, "models_dev": false }
+                }
+            }),
+        )
+        .await;
+
+        lua_call(
+            &h,
+            r#"
+LLM:refresh_catalog({ force = true })
+local msgs = { { role = "user", content = { { type = "text", text = "hi" } } } }
+
+-- 1. Real model #1: Gemini 3 Flash supports minimal..high (clamps xhigh -> high).
+local g3_flash = assert(LLM:resolve("google/gemini-3-flash-preview"), "discovered gemini-3-flash-preview missing")
+local msg = LLM:stream({ model = g3_flash, system = "sys", effort = "high", messages = msgs }, function() end)
+assert(msg and not msg.error, tostring(msg and msg.error))
+LLM:set_model("google/gemini-3-flash-preview", { save = false })
+LLM:set_effort("minimal", { save = false })
+assert(LLM:stream({ model = g3_flash, system = "sys", messages = msgs }, function() end).error == nil)
+LLM:set_effort("xhigh", { save = false })
+assert(LLM:stream({ model = g3_flash, system = "sys", messages = msgs }, function() end).error == nil)
+
+-- 2. Real model #2: Gemini 3.1 Pro supports low/medium/high (clamps minimal -> low, xhigh -> high).
+local g31_pro = assert(LLM:resolve("google/gemini-3.1-pro-preview"), "discovered gemini-3.1-pro-preview missing")
+LLM:set_model("google/gemini-3.1-pro-preview", { save = false })
+LLM:set_effort("minimal", { save = false })
+assert(LLM:stream({ model = g31_pro, system = "sys", messages = msgs }, function() end).error == nil)
+LLM:set_effort("xhigh", { save = false })
+assert(LLM:stream({ model = g31_pro, system = "sys", messages = msgs }, function() end).error == nil)
+
+-- 3. gemini-4-carbon supports low/medium/high only (must NOT advertise/send xhigh).
+local g4_carbon = assert(LLM:resolve("google/gemini-4-carbon"), "discovered gemini-4-carbon missing")
+LLM:set_model("google/gemini-4-carbon", { save = false })
+LLM:set_effort("xhigh", { save = false })
+assert(LLM:stream({ model = g4_carbon, system = "sys", messages = msgs }, function() end).error == nil)
+
+-- 4. Unknown Gemini 4 model falls back conservatively to low/high (clamps xhigh -> high).
+local g4_unk = assert(LLM:resolve("google/gemini-4-unknown-preview"), "discovered gemini-4-unknown-preview missing")
+LLM:set_model("google/gemini-4-unknown-preview", { save = false })
+LLM:set_effort("xhigh", { save = false })
+assert(LLM:stream({ model = g4_unk, system = "sys", messages = msgs }, function() end).error == nil)
+
+-- 5. Explicit `efforts` override in mare.model permits xhigh on a custom/future model.
+local g4_custom = assert(LLM:resolve("google/gemini-4-custom-efforts"), "discovered gemini-4-custom-efforts missing")
+LLM:set_model("google/gemini-4-custom-efforts", { save = false })
+LLM:set_effort("xhigh", { save = false })
+assert(LLM:stream({ model = g4_custom, system = "sys", messages = msgs }, function() end).error == nil)
+
+-- 6. Explicit model override `reasoning_level = false` forces thinkingBudget even on gemini-3*.
+local ov = assert(LLM:resolve("google/gemini-3-budget-override"), "discovered gemini-3-budget-override missing")
+local msg_ov = LLM:stream({ model = ov, system = "sys", effort = "high", messages = msgs }, function() end)
+assert(msg_ov and not msg_ov.error, tostring(msg_ov and msg_ov.error))
+"#,
+            json!([]),
+        )
+        .await;
+
+        let reqs = server.requests();
+        let g3_reqs: Vec<_> =
+            reqs.iter().filter(|r| r.path.contains("gemini-3-flash-preview:streamGenerateContent")).collect();
+        assert_eq!(g3_reqs.len(), 3, "expected 3 requests for gemini-3-flash-preview");
+        let tc = &g3_reqs[0].json()["generationConfig"]["thinkingConfig"];
+        assert!(
+            tc.get("thinkingLevel").is_some() && tc.get("thinkingBudget").is_none(),
+            "dynamically discovered Gemini 3 model received thinkingBudget instead of thinkingLevel: {tc}"
+        );
+        assert_eq!(tc["thinkingLevel"], json!("high"));
+        assert_eq!(
+            g3_reqs[1].json()["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+            json!("minimal"),
+            "Gemini 3 Flash should support minimal"
+        );
+        assert_eq!(
+            g3_reqs[2].json()["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+            json!("high"),
+            "Gemini 3 Flash should clamp unsupported xhigh to high"
+        );
+
+        let g31_reqs: Vec<_> =
+            reqs.iter().filter(|r| r.path.contains("gemini-3.1-pro-preview:streamGenerateContent")).collect();
+        assert_eq!(g31_reqs.len(), 2, "expected 2 requests for gemini-3.1-pro-preview");
+        assert_eq!(
+            g31_reqs[0].json()["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+            json!("low"),
+            "Gemini 3.1 Pro should clamp minimal to low"
+        );
+        assert_eq!(
+            g31_reqs[1].json()["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+            json!("high"),
+            "Gemini 3.1 Pro should clamp xhigh to high"
+        );
+
+        let carbon_req = reqs
+            .iter()
+            .find(|r| r.path.contains("gemini-4-carbon:streamGenerateContent"))
+            .expect("generateContent request for gemini-4-carbon");
+        assert_eq!(
+            carbon_req.json()["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+            json!("high"),
+            "gemini-4-carbon must clamp xhigh to high instead of sending unsupported xhigh"
+        );
+
+        let unk_req = reqs
+            .iter()
+            .find(|r| r.path.contains("gemini-4-unknown-preview:streamGenerateContent"))
+            .expect("generateContent request for gemini-4-unknown-preview");
+        assert_eq!(
+            unk_req.json()["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+            json!("high"),
+            "unknown Gemini 4 model must fall back conservatively and clamp xhigh to high"
+        );
+
+        let custom_req = reqs
+            .iter()
+            .find(|r| r.path.contains("gemini-4-custom-efforts:streamGenerateContent"))
+            .expect("generateContent request for gemini-4-custom-efforts");
+        assert_eq!(
+            custom_req.json()["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+            json!("xhigh"),
+            "explicit efforts override must allow xhigh"
+        );
+
+        let ov_req = reqs
+            .iter()
+            .find(|r| r.path.contains("gemini-3-budget-override:streamGenerateContent"))
+            .expect("generateContent request for gemini-3-budget-override");
+        let ov_tc = &ov_req.json()["generationConfig"]["thinkingConfig"];
+        assert!(
+            ov_tc.get("thinkingBudget").is_some() && ov_tc.get("thinkingLevel").is_none(),
+            "explicit reasoning_level=false override must force thinkingBudget: {ov_tc}"
+        );
+        h.shutdown().await;
+    })
+    .await;
+}

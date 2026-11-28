@@ -3,6 +3,74 @@
 local BUDGETS = { minimal = 512, low = 2048, medium = 8192, high = 24576, xhigh = 32768 }
 local LEVELS = { minimal = "minimal", low = "low", medium = "medium", high = "high", xhigh = "xhigh" }
 
+local function model_id_of(m)
+	if type(m) == "string" then
+		return m:lower()
+	end
+	if type(m) == "table" then
+		local tbl = m --[[@as table]]
+		return tostring(tbl.id or tbl.model_id or ""):lower()
+	end
+	return ""
+end
+
+local function gemini_major_version(id)
+	local major = id:match("gemini%-live%-(%d+)") or id:match("gemini%-(%d+)")
+	return major and tonumber(major) or nil
+end
+
+--- Infer whether a Google/Gemini model uses `thinkingLevel` vs `thinkingBudget`,
+--- honoring an explicit `reasoning_level` boolean override on the model.
+local function uses_thinking_level(m)
+	if type(m) == "table" then
+		local explicit = (m --[[@as table]]).reasoning_level
+		if type(explicit) == "boolean" then
+			return explicit
+		end
+	end
+	local id = model_id_of(m)
+	local major = gemini_major_version(id)
+	if major and major >= 3 then
+		return true
+	end
+	if id == "gemini-flash-latest" or id == "gemini-flash-lite-latest" then
+		return true
+	end
+	if id:match("gemma%-?4") then
+		return true
+	end
+	return false
+end
+
+-- Known per-model thinkingLevel effort capabilities. Protocol shape (`uses_thinking_level`)
+-- and supported effort values are separate capabilities; unknown models fall back conservatively
+-- to `{ "low", "high" }` unless explicitly overridden via `mare.model`.
+local KNOWN_LEVEL_EFFORTS = {
+	{ pattern = "^gemini%-3%.1%-pro", efforts = { "low", "medium", "high" } },
+	{ pattern = "^gemini%-3%-pro", efforts = { "low", "high" } },
+	{ pattern = "^gemini%-3%.0%-pro", efforts = { "low", "high" } },
+	{ pattern = "^gemini%-3%.%d+%-flash", efforts = { "minimal", "low", "medium", "high" } },
+	{ pattern = "^gemini%-3%-flash", efforts = { "minimal", "low", "medium", "high" } },
+	{ pattern = "^gemini%-flash%-latest$", efforts = { "minimal", "low", "medium", "high" } },
+	{ pattern = "^gemini%-flash%-lite%-latest$", efforts = { "minimal", "low", "medium", "high" } },
+	{ pattern = "^gemini%-4%-carbon", efforts = { "low", "medium", "high" } },
+}
+local CONSERVATIVE_LEVEL_EFFORTS = { "low", "high" }
+
+local function inferred_level_efforts(id)
+	local lower = id:lower()
+	for _, entry in ipairs(KNOWN_LEVEL_EFFORTS) do
+		if lower:match(entry.pattern) then
+			local copy = {}
+			for i, v in ipairs(entry.efforts) do
+				copy[i] = v
+			end
+			return copy
+		end
+	end
+	return { CONSERVATIVE_LEVEL_EFFORTS[1], CONSERVATIVE_LEVEL_EFFORTS[2] }
+end
+
 return {
 	name = "provider-google",
 	-- its provider/* hooks go through ctx.bus
@@ -75,12 +143,16 @@ return {
 						end
 					end
 					if gen then
+						local is_reasoning = m.thinking == true
+						local level_based = is_reasoning and uses_thinking_level(id) or false
 						out[#out + 1] = {
 							id = id,
 							name = type(m.displayName) == "string" and m.displayName or nil,
 							context_window = tonumber(m.inputTokenLimit),
 							max_output = tonumber(m.outputTokenLimit),
-							reasoning = m.thinking == true or nil,
+							reasoning = is_reasoning or nil,
+							reasoning_level = level_based or nil,
+							efforts = level_based and inferred_level_efforts(id) or nil,
 						}
 					end
 				end
@@ -271,9 +343,7 @@ return {
 		end
 		llm:define_params({
 			route = "google",
-			when = function(m)
-				return (m --[[@as table]]).reasoning_level
-			end,
+			when = uses_thinking_level,
 			define = {
 				effort = {
 					options = leveled,
@@ -284,7 +354,7 @@ return {
 		llm:define_params({
 			route = "google",
 			when = function(m)
-				return not (m --[[@as table]]).reasoning_level
+				return not uses_thinking_level(m)
 			end,
 			define = {
 				effort = {
