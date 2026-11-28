@@ -35,6 +35,7 @@ pub(in crate::app) struct CompletionState {
     popup_token: Option<String>,
     pending_scope: Option<(usize, usize, bool)>,
     pending_token: Option<String>,
+    pending: bool,
     seq: u64,
     shell_level: u8,
 }
@@ -52,6 +53,7 @@ impl CompletionState {
         self.seq += 1;
         self.pending_scope = Some(scope);
         self.pending_token = Some(token);
+        self.pending = true;
         self.seq
     }
 
@@ -63,6 +65,7 @@ impl CompletionState {
         self.popup_token = None;
         self.pending_scope = None;
         self.pending_token = None;
+        self.pending = false;
         self.seq += 1;
     }
 
@@ -70,6 +73,7 @@ impl CompletionState {
     /// request or [`Self::invalidate`] superseded them.
     pub(in crate::app) fn apply(&mut self, seq: u64, items: Vec<CompletionItem>, hint: Option<(u64, String)>) {
         if seq == self.seq {
+            self.pending = false;
             self.popup = if items.is_empty() { None } else { Some(Completion { items, selected: 0 }) };
             self.popup_scope = self.popup.as_ref().and(self.pending_scope);
             self.popup_token = if self.popup.is_some() { self.pending_token.clone() } else { None };
@@ -79,6 +83,10 @@ impl CompletionState {
 
     pub(in crate::app) fn is_open(&self) -> bool {
         self.popup.is_some()
+    }
+
+    pub(in crate::app) fn is_pending(&self) -> bool {
+        self.pending
     }
 }
 

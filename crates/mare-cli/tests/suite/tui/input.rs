@@ -791,9 +791,9 @@ async fn notify_suppressed_while_focused_does_not_poison_dedupe_window() {
     .await
 }
 
-/// Typing past a cached completion prefix and pressing Enter before the new async completion
-/// reply returns must discard the stale popup and submit the current editor text instead of
-/// accepting and auto-executing the stale candidate.
+/// Typing past a cached completion prefix and pressing Enter while the visible popup is still
+/// refreshing must dismiss the stale popup without accepting the stale candidate or prematurely
+/// submitting; pressing Enter once the popup is closed then submits the current editor text.
 #[tokio::test]
 async fn enter_does_not_accept_stale_completion_popup_after_typing() {
     local(async {
@@ -837,21 +837,32 @@ async fn enter_does_not_accept_stale_completion_popup_after_typing() {
         t.until("stale completion popup opens", |s| s.contains("/exit")).await;
 
         // Keep typing `port` so the editor holds `/export` while `/export`'s completion is still
-        // in flight, then press Enter immediately.
+        // in flight, then press Enter immediately: closes the refreshing popup and leaves `/export`
+        // in the editor without accepting stale `/exit` or submitting prematurely.
         t.vt.type_str("port");
         t.until_vt("export completion started", |t| {
             futures_util::FutureExt::now_or_never(eval::<bool>(&t.vt.host, "return EXPORT_STARTED")).unwrap_or(false)
         })
         .await;
         t.key(KeyCode::Enter, Modifiers::NONE);
+        t.step().await;
+        assert_eq!(
+            eval::<i64>(&t.vt.host, "return #SUBMITTED").await,
+            0,
+            "first Enter while refreshing popup is visible must not submit or accept stale /exit"
+        );
+        assert_eq!(t.vt.editor_text(), "/export", "draft must stay intact for editing or explicit submit");
+
+        // Now that the popup is closed, pressing Enter submits `/export`.
+        t.key(KeyCode::Enter, Modifiers::NONE);
         t.until_vt("submit recorded", |t| {
             futures_util::FutureExt::now_or_never(eval::<i64>(&t.vt.host, "return #SUBMITTED")).unwrap_or(0) >= 1
         })
         .await;
         let submitted: String = eval(&t.vt.host, "return SUBMITTED[1]").await;
-        assert_eq!(submitted, "/export", "Enter must submit /export rather than accepting stale /exit");
+        assert_eq!(submitted, "/export", "Enter after closing popup must submit /export rather than stale /exit");
 
-        // Unblock the suspended completion task so shutdown is clean.
+        // Unblock the suspended completion task so shutdown is clean (stale reply must be dropped).
         exec(&t.vt.host, "GATE:send(true)").await;
         t.step().await;
 
@@ -865,6 +876,70 @@ async fn enter_does_not_accept_stale_completion_popup_after_typing() {
         .await;
         let accepted: String = eval(&t.vt.host, "return SUBMITTED[2]").await;
         assert_eq!(accepted, "/exit", "Enter on a fresh matching popup must still accept and execute /exit");
+    })
+    .await
+}
+
+#[tokio::test]
+async fn repro_249_enter_does_not_submit_draft_while_visible_completion_refreshing() {
+    local(async {
+        let mut t = Term::new(json!([]), 80, 24).await;
+        t.until_vt("startup", |t| !t.vt.starting()).await;
+        t.vt.dismiss_notices();
+        expose(&t.vt.host);
+        exec(
+            &t.vt.host,
+            r#"
+            GATE249, WAIT249 = mare.task.channel()
+            REFRESH_STARTED = false
+            SUBMITTED249 = {}
+            C.cordis:on("input/submit", function(ev)
+                SUBMITTED249[#SUBMITTED249 + 1] = ev.text
+                ev.handled = true
+            end)
+            mare.ui.completion.register({
+                name = "repro-249",
+                triggers = { "@" },
+                min_prefix = 1,
+                timeout_ms = 5000,
+                complete = function(ev)
+                    if ev.token == "@s" then
+                        return { { label = "@src/", insert = "@src/" } }
+                    end
+                    if ev.token == "@sr" then
+                        REFRESH_STARTED = true
+                        WAIT249:recv()
+                        return { { label = "@src/main.rs", insert = "@src/main.rs " } }
+                    end
+                    return {}
+                end,
+            })
+            "#,
+        )
+        .await;
+
+        t.vt.type_str("check @s");
+        t.until("initial popup visible", |s| s.contains("@src/")).await;
+
+        // Type `r` so editor has `check @sr`; old `@src/` popup stays visible while `@sr` request is pending.
+        t.vt.type_str("r");
+        t.until_vt("refresh pending", |t| {
+            futures_util::FutureExt::now_or_never(eval::<bool>(&t.vt.host, "return REFRESH_STARTED")).unwrap_or(false)
+        })
+        .await;
+        assert!(t.screen().contains("@src/"), "old popup should still be visibly active during refresh:\n{}", t.screen());
+
+        // Press Enter while popup is visibly active and refreshing.
+        t.key(KeyCode::Enter, Modifiers::NONE);
+        t.step().await;
+        let submitted_count: i64 = eval(&t.vt.host, "return #SUBMITTED249").await;
+        let submitted_first: String = eval(&t.vt.host, "return tostring(SUBMITTED249[1] or '')").await;
+        exec(&t.vt.host, "GATE249:send(true)").await;
+        t.step().await;
+        assert_eq!(
+            submitted_count, 0,
+            "Enter prematurely submitted unfinished draft {submitted_first:?} while visible completion popup was refreshing"
+        );
     })
     .await
 }
