@@ -140,9 +140,46 @@ pub fn resolve_icons(
 fn rgb_to_16(r: u8, g: u8, b: u8) -> u8 {
     let lum = (u16::from(r) * 30 + u16::from(g) * 59 + u16::from(b) * 11) / 100;
     let max = r.max(g).max(b);
-    let thresh = (max / 2).max(64);
-    let code = u8::from(r >= thresh) | (u8::from(g >= thresh) << 1) | (u8::from(b >= thresh) << 2);
-    if lum > 140 { code + 8 } else { code }
+    let min = r.min(g).min(b);
+    let delta = max - min;
+
+    // Achromatic / near-neutral grays map strictly by perceptual luminance so dark-theme
+    // pastels keep their chromatic hue while light-theme dark grays stay dark (never white).
+    if delta < 44 && (max < 48 || u16::from(delta) * 3 < u16::from(max)) {
+        return if lum < 56 {
+            0
+        } else if lum < 136 {
+            8
+        } else if lum < 204 {
+            7
+        } else {
+            15
+        };
+    }
+
+    let d = i32::from(delta);
+    let (ri, gi, bi) = (i32::from(r), i32::from(g), i32::from(b));
+    let hue = if max == r {
+        (60 * (gi - bi) / d).rem_euclid(360)
+    } else if max == g {
+        120 + 60 * (bi - ri) / d
+    } else {
+        240 + 60 * (ri - gi) / d
+    };
+    let base = if !(30..330).contains(&hue) {
+        1 // red
+    } else if (30..90).contains(&hue) {
+        3 // yellow
+    } else if (90..155).contains(&hue) {
+        2 // green
+    } else if (155..200).contains(&hue) {
+        6 // cyan
+    } else if (200..270).contains(&hue) {
+        4 // blue
+    } else {
+        5 // magenta
+    };
+    if lum > 140 || (max >= 240 && min < 64) { base + 8 } else { base }
 }
 
 fn ansi256_to_16(n: u8) -> u8 {
@@ -319,4 +356,61 @@ pub fn line_to_ansi(line: &Line, width: usize, mode: ColorMode) -> String {
         out.push_str(raw);
     }
     out
+}
+
+#[cfg(test)]
+mod repro_213_tests {
+    use super::*;
+
+    #[test]
+    fn repro_213_ansi16_fallback_preserves_contrast_for_default_palettes() {
+        // Default dark theme colors from lua/theme-default/defaults.lua:125-138
+        let dark_text = rgb_to_16(0xcd, 0xd6, 0xf4);
+        let dark_accents = [
+            ("accent", rgb_to_16(0xa0, 0xa4, 0xff)),
+            ("accent2", rgb_to_16(0xff, 0xa3, 0x8f)),
+            ("green", rgb_to_16(0x9c, 0xd8, 0xb0)),
+            ("yellow", rgb_to_16(0xf0, 0xd3, 0x8f)),
+            ("red", rgb_to_16(0xf5, 0x7f, 0xa0)),
+            ("blue", rgb_to_16(0x85, 0xc1, 0xf5)),
+        ];
+        // Default light theme body text from lua/theme-default/defaults.lua:148
+        let light_text = rgb_to_16(0x44, 0x47, 0x5f);
+
+        let distinct_from_text: Vec<_> = dark_accents.iter().filter(|(_, code)| *code != dark_text).collect();
+        assert!(
+            !distinct_from_text.is_empty(),
+            "all dark theme semantic accents collapsed to body text ANSI code {dark_text}: {dark_accents:?}; light text mapped to ANSI code {light_text}"
+        );
+        assert!(
+            light_text != 7 && light_text != 15,
+            "light theme body text #44475f must not map to ANSI white/bright-white (got {light_text})"
+        );
+
+        // Every dark-theme semantic accent must keep a chromatic ANSI color (not white/gray).
+        for (name, code) in dark_accents {
+            assert!(
+                (9..=14).contains(&code),
+                "dark theme accent {name} should map to a bright chromatic ANSI code (9..=14), got {code}"
+            );
+        }
+        // Light-theme accents should map to darker normal chromatic ANSI codes (1..=6) for contrast on light bg.
+        for (name, (r, g, b)) in [
+            ("accent", (0x55, 0x58, 0xd6)),
+            ("accent2", (0xd8, 0x60, 0x4c)),
+            ("green", (0x2f, 0x8a, 0x5c)),
+            ("yellow", (0xa0, 0x78, 0x0f)),
+            ("red", (0xc8, 0x40, 0x6a)),
+            ("blue", (0x26, 0x75, 0xc4)),
+        ] {
+            let code = rgb_to_16(r, g, b);
+            assert!(
+                (1..=6).contains(&code),
+                "light theme accent {name} should map to a normal chromatic ANSI code (1..=6), got {code}"
+            );
+        }
+        // NoColor must still emit no color SGR at all (including bright 90..97).
+        let no_color = style_sgr(Style::new().fg(Color::Rgb(0xa0, 0xa4, 0xff)), ColorMode::NoColor);
+        assert_eq!(no_color, "\x1b[0m");
+    }
 }
