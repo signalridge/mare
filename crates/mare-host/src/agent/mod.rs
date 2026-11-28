@@ -232,6 +232,66 @@ fn resolve_cwd(lua: &Lua, spec: &serde_json::Value) -> PathBuf {
     })
 }
 
+pub(super) struct ChildTrust {
+    pub(super) project_trusted: bool,
+    pub(super) trust_arg: Option<String>,
+    pub(super) trust_source: Option<String>,
+    pub(super) approve_mcps: bool,
+}
+
+fn resolve_child_trust(lua: &Lua, child_cwd: &std::path::Path) -> ChildTrust {
+    let Some(host) = lua.app_data_ref::<ParentHost>().and_then(|p| p.0.upgrade()) else {
+        return ChildTrust { project_trusted: false, trust_arg: None, trust_source: None, approve_mcps: false };
+    };
+    let parent_args = lua.globals().get::<Table>("mare").and_then(|m| m.get::<Table>("args")).ok();
+    let parent_trust_arg = parent_args.as_ref().and_then(|a| a.get::<Option<String>>("trust").ok().flatten());
+    let parent_trust_source = parent_args.as_ref().and_then(|a| a.get::<Option<String>>("trust_source").ok().flatten());
+    let parent_approve_mcps =
+        parent_args.as_ref().and_then(|a| a.get::<Option<bool>>("approve_mcps").ok().flatten()).unwrap_or(false);
+
+    let rr = mare_shared::project::resource_root(child_cwd);
+    let subject = mare_shared::project::trust_subject(&rr);
+    let child_root = dunce::canonicalize(subject).unwrap_or_else(|_| subject.to_path_buf());
+    let same_ws = child_root == host.workspace_root();
+    let cli_trust = host.startup_cli_trust();
+    let project_trusted = if same_ws {
+        cli_trust != Some(false) && host.is_project_trusted()
+    } else {
+        crate::resolve_workspace_trust(child_cwd, false, host.is_project_trusted(), cli_trust, host.no_user_plugins())
+    };
+    if cli_trust == Some(false) {
+        return ChildTrust {
+            project_trusted,
+            trust_arg: Some("untrusted".into()),
+            trust_source: Some("cli".into()),
+            approve_mcps: false,
+        };
+    }
+    if same_ws {
+        let trust_arg = if project_trusted {
+            parent_trust_arg.as_ref().map(|_| "trusted".to_owned())
+        } else {
+            parent_trust_arg.as_deref().map(|v| match v {
+                "untrusted" | "undecided" | "none" => v.to_owned(),
+                _ => "untrusted".to_owned(),
+            })
+        };
+        ChildTrust {
+            project_trusted,
+            trust_arg,
+            trust_source: parent_trust_source,
+            approve_mcps: project_trusted && parent_approve_mcps,
+        }
+    } else {
+        ChildTrust {
+            project_trusted,
+            trust_arg: Some(if project_trusted { "trusted" } else { "untrusted" }.into()),
+            trust_source: project_trusted.then(|| "saved".into()),
+            approve_mcps: false,
+        }
+    }
+}
+
 enum StartError {
     Coded(&'static str, String),
     Other(mlua::Error),
@@ -371,6 +431,7 @@ fn start_with_spec(lua: &Lua, mut spec: serde_json::Value) -> Result<(AgentHandl
     })?;
     let cwd = resolve_cwd(lua, &spec);
     let inherits_preset = inherits_parent_preset(&spec);
+    let trust = resolve_child_trust(lua, &cwd);
     let (parent_policy, config, carried) = apply_inheritance(lua, &mut spec)?;
     let history_model = validate_and_resolve_history_model(lua, &spec)?;
 
@@ -463,6 +524,7 @@ fn start_with_spec(lua: &Lua, mut spec: serde_json::Value) -> Result<(AgentHandl
     spawn_child_thread(ChildRuntimeArgs {
         prompt,
         cwd,
+        trust,
         spec,
         config,
         history_model,
