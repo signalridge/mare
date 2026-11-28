@@ -46,7 +46,34 @@ pub fn commit_path(path: &Path) -> PathBuf {
 const ROLLBACK_MAGIC: &[u8; 8] = b"MRROLL01";
 const ROLLBACK_RECORD_LEN: usize = 32;
 
-fn rollback_record(path: &Path) -> std::io::Result<Option<(u64, u64, u64)>> {
+#[cfg(test)]
+thread_local! {
+    pub(crate) static FAIL_WRITE_ROLLBACK_MARKER: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static FAIL_CLEAR_ROLLBACK_MARKER: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static FAIL_LOCK_SYNC: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn take_injected_failure(
+    cell: &'static std::thread::LocalKey<std::cell::Cell<usize>>,
+    msg: &'static str,
+) -> std::io::Result<()> {
+    let fail = cell.with(|c| {
+        let remaining = c.get();
+        if remaining > 0 {
+            c.set(remaining - 1);
+            true
+        } else {
+            false
+        }
+    });
+    if fail {
+        return Err(std::io::Error::other(msg));
+    }
+    Ok(())
+}
+
+pub(crate) fn rollback_record(path: &Path) -> std::io::Result<Option<(u64, u64, u64)>> {
     use std::io::Read;
 
     let mut file = match File::open(rollback_path(path)) {
@@ -61,6 +88,18 @@ fn rollback_record(path: &Path) -> std::io::Result<Option<(u64, u64, u64)>> {
     }
     let read = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().expect("fixed rollback record"));
     Ok(Some((read(8), read(16), read(24))))
+}
+
+pub(crate) fn write_rollback_marker(session_path: &Path, file: &File, offset: u64) -> std::io::Result<()> {
+    #[cfg(test)]
+    take_injected_failure(&FAIL_WRITE_ROLLBACK_MARKER, "injected rollback marker write failure")?;
+    let (dev, ino) = file_id(file)?;
+    let mut marker = Vec::with_capacity(ROLLBACK_RECORD_LEN);
+    marker.extend_from_slice(ROLLBACK_MAGIC);
+    marker.extend_from_slice(&dev.to_le_bytes());
+    marker.extend_from_slice(&ino.to_le_bytes());
+    marker.extend_from_slice(&offset.to_le_bytes());
+    mare_shared::paths::write_atomic(&rollback_path(session_path), &marker, mare_shared::paths::WriteMode::Private)
 }
 
 pub(crate) fn rollback_pending(path: &Path) -> std::io::Result<bool> {
@@ -122,6 +161,8 @@ pub(crate) fn write_committed_prefix(path: &Path, file: &File, len: u64) -> std:
 }
 
 fn clear_rollback_marker(path: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    take_injected_failure(&FAIL_CLEAR_ROLLBACK_MARKER, "injected rollback marker clear failure")?;
     match std::fs::remove_file(rollback_path(path)) {
         Ok(()) => sync_dir(path)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -154,20 +195,15 @@ impl LockGuard {
         }
     }
 
+    /// Current persistent rollback revision (even = clean, odd = rollback in progress).
+    pub(crate) fn revision(&self) -> std::io::Result<u64> {
+        Ok(self._file.metadata()?.len())
+    }
+
     /// Begin a rollback by making the persistent per-session revision odd. While this writer holds
     /// the session lock, the index treats the odd revision as in progress and won't publish a row.
     pub(crate) fn begin_rollback_revision(&self, session_path: &Path, file: &File, offset: u64) -> std::io::Result<()> {
-        let (dev, ino) = file_id(file)?;
-        let mut marker = Vec::with_capacity(ROLLBACK_RECORD_LEN);
-        marker.extend_from_slice(ROLLBACK_MAGIC);
-        marker.extend_from_slice(&dev.to_le_bytes());
-        marker.extend_from_slice(&ino.to_le_bytes());
-        marker.extend_from_slice(&offset.to_le_bytes());
-        mare_shared::paths::write_atomic(
-            &rollback_path(session_path),
-            &marker,
-            mare_shared::paths::WriteMode::Private,
-        )?;
+        write_rollback_marker(session_path, file, offset)?;
 
         let next = self
             ._file
@@ -179,6 +215,13 @@ impl LockGuard {
             return Err(std::io::Error::other("session rollback revision is already in progress"));
         }
         self._file.set_len(next)?;
+        self._file.sync_data()
+    }
+
+    /// Sync the persistent lock file (revision metadata) to disk.
+    pub(crate) fn sync_data(&self) -> std::io::Result<()> {
+        #[cfg(test)]
+        take_injected_failure(&FAIL_LOCK_SYNC, "injected lock sync failure")?;
         self._file.sync_data()
     }
 
@@ -194,7 +237,7 @@ impl LockGuard {
             return Err(std::io::Error::other("session rollback revision was not in progress"));
         }
         self._file.set_len(next)?;
-        self._file.sync_data()
+        self.sync_data()
     }
 
     pub(crate) fn clear_rollback_marker(&self, session_path: &Path) -> std::io::Result<()> {
