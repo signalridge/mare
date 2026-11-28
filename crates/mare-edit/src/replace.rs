@@ -78,6 +78,21 @@ fn find_all(hay: &str, needle: &str) -> Vec<usize> {
     out
 }
 
+fn find_overlapping(hay: &str, needle: &str) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(i) = hay[from..].find(needle) {
+        let hit = from + i;
+        out.push(hit);
+        let step = hay[hit..].chars().next().map_or(1, char::len_utf8);
+        from = hit + step;
+        if from > hay.len() {
+            break;
+        }
+    }
+    out
+}
+
 /// Splice `new` into `content` at each range; the new text's line breaks take the line ending of
 /// the line where its range starts, so a mixed
 /// LF/CRLF file keeps every untouched line's ending.
@@ -221,7 +236,7 @@ fn replace_inner(content: &str, old: &str, new: &str, replace_all: bool) -> Resu
     let lf = Lf::new(content);
     let old_lf: Cow<'_, str> =
         if old.contains("\r\n") { Cow::Owned(old.replace("\r\n", "\n")) } else { Cow::Borrowed(old) };
-    let hits = find_all(&lf.text, &old_lf);
+    let hits = if replace_all { find_all(&lf.text, &old_lf) } else { find_overlapping(&lf.text, &old_lf) };
     if !hits.is_empty() {
         if hits.len() > 1 && !replace_all {
             return Err(ambiguous(&lf.text, &hits));
@@ -236,7 +251,7 @@ fn replace_inner(content: &str, old: &str, new: &str, replace_all: bool) -> Resu
     if no.is_empty() {
         return Err(ReplaceError::NotFound);
     }
-    let hits = find_all(&nc.text, &no);
+    let hits = if replace_all { find_all(&nc.text, &no) } else { find_overlapping(&nc.text, &no) };
     if hits.is_empty() {
         return Err(match whitespace_only_match(content, old) {
             Some(line) => ReplaceError::WhitespaceOnly(line),
@@ -361,5 +376,38 @@ mod tests {
         // Isolated CR file without LF keeps \r line endings.
         let cr = "a TOK\rb TOK\rc TOK";
         assert_eq!(replace(cr, "TOK", "X\nY", true).unwrap(), "a X\rY\rb X\rY\rc X\rY");
+    }
+
+    #[test]
+    fn repro_309_single_replace_rejects_overlapping_matches_as_ambiguous() {
+        let content = "#endif\n#endif\n#endif\n";
+        let needle = "#endif\n#endif";
+        // Overlapping starts exist at line 1 and line 2; single replacement must reject as ambiguous.
+        let res = replace(content, needle, "X", false);
+        match res {
+            Err(ReplaceError::Ambiguous { count, lines }) => {
+                assert_eq!((count, lines.as_str()), (2, "1, 2"));
+            }
+            other => {
+                panic!("repro #309: expected Ambiguous(2, \"1, 2\") for overlapping single replace, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn overlapping_utf8_fuzzy_and_replace_all_behavior() {
+        // Multi-byte UTF-8 overlapping matches advance by char boundary and report ambiguity.
+        match replace("ééé", "éé", "X", false) {
+            Err(ReplaceError::Ambiguous { count, lines }) => assert_eq!((count, lines.as_str()), (2, "1, 1")),
+            other => panic!("expected Ambiguous for UTF-8 overlap, got {other:?}"),
+        }
+        // replace_all keeps non-overlapping semantics.
+        assert_eq!(replace("#endif\n#endif\n#endif\n", "#endif\n#endif", "X", true).unwrap(), "X\n#endif\n");
+        // Fuzzy normalized overlapping matches are also rejected for single replace.
+        let fuzzy = "a = \u{201C}v\u{201D};\na = \u{201D}v\u{201C};\na = \u{201C}v\u{201D};\n";
+        match replace(fuzzy, "a = \"v\";\na = \"v\";", "X", false) {
+            Err(ReplaceError::Ambiguous { count, lines }) => assert_eq!((count, lines.as_str()), (2, "1, 2")),
+            other => panic!("expected Ambiguous for fuzzy overlap, got {other:?}"),
+        }
     }
 }
