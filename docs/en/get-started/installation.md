@@ -281,7 +281,7 @@ Restart the shell, or reload its completion system, to pick it up.
 
 mare does not replace its own binary. To update:
 
-- If you installed via a package manager (`brew upgrade mare`, `scoop update mare`, `yay -Syu mare-bin`, `nix profile upgrade mare`), use that package manager.
+- If you installed via a package manager (`brew upgrade mare`, `scoop update mare`, `yay -S mare-bin`, `nix profile upgrade mare`), use that package manager.
 - Otherwise, re-run the quick install script (`install.sh` / `install.ps1`) or download the newer archive, verify it, and overwrite the old `mare` binary.
 
 Release builds of the TUI check GitHub releases for a newer version every 24 hours by default (`update-check.interval_hours` adjusts the interval; debug builds skip automatic checks) and print one line if there is one. The request carries no identifier beyond `mare/<version>`. Turn the check off in `init.lua`:

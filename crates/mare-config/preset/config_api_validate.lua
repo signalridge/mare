@@ -10,16 +10,20 @@ return function(mare, deps)
 	local deepcopy = deps.deepcopy
 	local validate_ui_config = deps.validate_ui_config
 	local validate_working = deps.validate_working
+	local validate_update_check = deps.validate_update_check
 	local clear_sources = deps.clear_sources
 	local closest = deps.closest
 	local set_preset_state = deps.set_preset_state
 	local check_options
-	local function run_custom_validate(entry, v, path, say)
+	local function run_custom_validate(plugin, entry, v, path, say)
 		if type(entry.validate) == "function" then
 			return entry.validate(v, path, say)
 		end
-		if path == "ui.working" and type(validate_working) == "function" then
+		if not plugin and path == "ui.working" and type(validate_working) == "function" then
 			return validate_working(v, path, say)
+		end
+		if not plugin and path == "update_check" and type(validate_update_check) == "function" then
+			return validate_update_check(v, path, say)
 		end
 		return true
 	end
@@ -314,7 +318,7 @@ return function(mare, deps)
 			local actual = luatype(v)
 			for _, t in ipairs(want) do
 				if t == actual or (t == "integer" and math.type(v) == "integer") then
-					return run_custom_validate(entry, v, path, say)
+					return run_custom_validate(plugin, entry, v, path, say)
 				end
 			end
 			return say(("%s expects %s, got %s"):format(label, article(table.concat(want, " or ")), actual))
@@ -424,7 +428,7 @@ return function(mare, deps)
 				end
 			end
 		end
-		return run_custom_validate(entry, v, path, say)
+		return run_custom_validate(plugin, entry, v, path, say)
 	end
 
 	-- `plugins.<name>.enabled`: the slot switch, not a plugin option, for every known

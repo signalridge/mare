@@ -65,6 +65,32 @@ mare.config = {}
 mare.args = {}
 ---@type {config: string, state: string, data: string, auth: string, sessions: string, packages: string, runtime: string, log: string, crashes: string}
 mare.paths = {}
+---@class mare.InstallInfo
+---@field channel "brew"|"scoop"|"aur"|"nix"|"standalone"|"other"
+---@field managed boolean
+---@field command string|nil
+---@field argv string[]
+---@field steps string[][]
+---@field manual_hint string|nil
+---@field release_url string
+---@class mare.install
+mare.install = {}
+---@return "brew"|"scoop"|"aur"|"nix"|"standalone"|"other"
+function mare.install.channel() end
+---@param method? "brew"|"scoop"|"aur"|"nix"|"standalone"|"other"
+---@return mare.InstallInfo
+function mare.install.info(method) end
+---@return string|nil
+function mare.install.update_command() end
+---@return boolean
+function mare.install.is_managed() end
+---@return boolean
+function mare.install.update_check_disabled() end
+--- Effective update-check policy resolved from `mare.o.update_check`, plugin `enabled`, and env opt-outs.
+---@param config_update_check? boolean|"notify"|"auto"|string
+---@param plugin_enabled? boolean
+---@return "notify"|"auto"|"disabled"
+function mare.install.policy(config_update_check, plugin_enabled) end
 ---@class mare.Project
 ---@field root string|nil
 ---@field start string
