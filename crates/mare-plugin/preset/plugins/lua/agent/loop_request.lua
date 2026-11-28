@@ -1,6 +1,7 @@
 -- agent.loop_request: request assembly, stream coalescing, request execution, and recovery/outcome handling.
 return function(D)
 	local ctx, cfg, A = D.ctx, D.cfg, D.A
+	local lib = require("mare_lib")
 	local model_snapshot = require("agent.model_snapshot")
 	local outcome = require("agent.outcome")
 	local orphans, append, persist = D.persist.orphans, D.persist.append, D.persist.persist
@@ -479,10 +480,10 @@ return function(D)
 		-- 2) length stop with output == 0 and input + cache_read >= 99% context_window (MiMo style)
 		local cw = type(req.model) == "table" and tonumber(req.model.context_window) or nil
 		if cw and cw > 0 and msg.stop_reason ~= "error" and type(msg.usage) == "table" then
-			local input_tokens = (tonumber(msg.usage.input) or 0) + (tonumber(msg.usage.cache_read) or 0)
+			local input_tokens = lib.usage_window_input(msg.usage)
 			local silent_stop = msg.stop_reason == "stop" and input_tokens > cw
 			local silent_length = msg.stop_reason == "length"
-				and (tonumber(msg.usage.output) or 0) == 0
+				and lib.usage_window_output(msg.usage) == 0
 				and input_tokens >= cw * 0.99
 			if silent_stop or silent_length then
 				msg.stop_reason = "error"

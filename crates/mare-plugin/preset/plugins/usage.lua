@@ -85,7 +85,7 @@ return {
 		end
 
 		local function context_of(u)
-			return (u.input or 0) + (u.cache_read or 0) + (u.cache_write or 0) + (u.output or 0)
+			return require("mare_lib").usage_context_tokens(u)
 		end
 
 		local function snapshot_limits()
@@ -167,7 +167,7 @@ return {
 			local u = m.usage
 			add(u, model_of(m), m.subscription)
 			U.last_context = context_of(u)
-			U.last_cache_read = u.cache_read or 0
+			U.last_cache_read = u.context_cache_read or u.cache_read or 0
 			emit_changed()
 		end)
 		-- requests outside the conversation (llm reports them; compaction summaries, /btw)
@@ -276,7 +276,7 @@ return {
 					local m = ev.messages[i]
 					if m.role == "assistant" and m.usage then
 						U.last_context = context_of(m.usage)
-						U.last_cache_read = m.usage.cache_read or 0
+						U.last_cache_read = m.usage.context_cache_read or m.usage.cache_read or 0
 						break
 					end
 				end

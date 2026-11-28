@@ -647,28 +647,49 @@ function M.new_parser(sink, on_error, opts)
 			local function num(v)
 				return type(v) == "number" and v or nil
 			end
-			local iter_input, iter_cache_read, iter_cache_write
+			local iter_input, iter_output, iter_cache_read, iter_cache_write
+			local last_iter_ctx, last_iter_cr, last_iter_out, max_iter_input
 			if type(u.iterations) == "table" and #u.iterations > 0 then
-				local sum_in, sum_cr, sum_cw = 0, 0, 0
-				local has_in, has_cr, has_cw = false, false, false
+				local sum_in, sum_out, sum_cr, sum_cw = 0, 0, 0, 0
+				local has_in, has_out, has_cr, has_cw = false, false, false, false
 				for _, it in ipairs(u.iterations) do
 					if type(it) == "table" then
-						if num(it.input_tokens) then
-							sum_in = sum_in + it.input_tokens
+						local it_in = num(it.input_tokens)
+						local it_cr = num(it.cache_read_input_tokens)
+						local it_cw = num(it.cache_creation_input_tokens)
+						local it_out = num(it.output_tokens)
+						if it_in then
+							sum_in = sum_in + it_in
 							has_in = true
 						end
-						if num(it.cache_read_input_tokens) then
-							sum_cr = sum_cr + it.cache_read_input_tokens
+						if it_out then
+							sum_out = sum_out + it_out
+							has_out = true
+						end
+						if it_cr then
+							sum_cr = sum_cr + it_cr
 							has_cr = true
 						end
-						if num(it.cache_creation_input_tokens) then
-							sum_cw = sum_cw + it.cache_creation_input_tokens
+						if it_cw then
+							sum_cw = sum_cw + it_cw
 							has_cw = true
+						end
+						if it_in or it_cr or it_cw then
+							last_iter_ctx = (it_in or 0) + (it_cr or 0) + (it_cw or 0)
+							last_iter_cr = it_cr or 0
+							last_iter_out = it_out
+							local iter_in_cr = (it_in or 0) + (it_cr or 0)
+							if not max_iter_input or iter_in_cr > max_iter_input then
+								max_iter_input = iter_in_cr
+							end
 						end
 					end
 				end
 				if has_in then
 					iter_input = sum_in
+				end
+				if has_out then
+					iter_output = sum_out
 				end
 				if has_cr then
 					iter_cache_read = sum_cr
@@ -678,8 +699,20 @@ function M.new_parser(sink, on_error, opts)
 				end
 			end
 			P.usage.input = num(u.input_tokens) or iter_input or P.usage.input
-			P.usage.output = num(u.output_tokens) or P.usage.output
+			P.usage.output = num(u.output_tokens) or iter_output or P.usage.output
 			P.usage.cache_read = num(u.cache_read_input_tokens) or iter_cache_read or P.usage.cache_read
+			if last_iter_ctx ~= nil then
+				P.usage.context_input = last_iter_ctx
+				P.usage.context_cache_read = last_iter_cr
+				P.usage.max_iteration_input = max_iter_input
+				if last_iter_out ~= nil then
+					P.usage.context_output = last_iter_out
+					P.usage.context_tokens = last_iter_ctx + last_iter_out
+				else
+					P.usage.context_output = nil
+					P.usage.context_tokens = nil
+				end
+			end
 			if iter_cache_write and u.cache_creation_input_tokens == nil and type(u.cache_creation) ~= "table" then
 				apply_cache_write({ cache_creation_input_tokens = iter_cache_write })
 			else

@@ -81,6 +81,175 @@ async fn total_only_is_priced_as_5m() {
 }
 
 #[tokio::test]
+async fn repro_268_anthropic_server_tool_iterations_do_not_trigger_false_silent_overflow() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let server = MockServer::start().await;
+        let multi_iter = sse(
+            json!({"input_tokens": 80_000, "output_tokens": 1}),
+            &[json!({
+                "output_tokens": 20,
+                "iterations": [
+                    {"type": "message", "input_tokens": 80_000, "cache_read_input_tokens": 0},
+                    {"type": "message", "input_tokens": 85_000, "cache_read_input_tokens": 0},
+                    {"type": "message", "input_tokens": 90_000, "cache_read_input_tokens": 0}
+                ]
+            })],
+        );
+        let ok_after_compact = sse(json!({"input_tokens": 100, "output_tokens": 1}), &[out(5)]);
+        server.route("/anthropic", vec![Resp::sse(multi_iter), Resp::sse(ok_after_compact)]);
+        let h = provider_host(
+            &mut env,
+            &server,
+            json!({
+                "model": "anthropic/claude-sonnet-5-5",
+                "models": { "anthropic/claude-sonnet-5-5": { "context_window": 200_000 } }
+            }),
+        )
+        .await;
+        expose(&h);
+        global(&h, "USAGE", h.service_table("usage").unwrap());
+        exec(
+            &h,
+            r#"COMPACTED = 0
+            C.cordis:on("compact/overflow", function() COMPACTED = COMPACTED + 1 return { handled = true, succeeded = true, res = { status = "compacted", tokens_before = 0, tokens_after = 0 } } end, { prepend = true })"#,
+        )
+        .await;
+        let result = h.prompt("go", json!({})).await.unwrap();
+        let (compacted, billed_input, ctx_tokens): (i64, i64, i64) =
+            eval(&h, "return COMPACTED, USAGE:totals().input, USAGE:context_tokens()").await;
+        h.shutdown().await;
+        assert_eq!(
+            compacted, 0,
+            "3 server-tool iterations (max 90k <= 200k window, cumulative 255k) must NOT trigger silent context overflow compaction: {result}"
+        );
+        assert_eq!(server.count("/anthropic"), 1, "must not retry after false silent overflow");
+        assert_eq!(billed_input, 255_000, "cumulative billed input across iterations must be preserved");
+        assert_eq!(ctx_tokens, 90_020, "context occupancy must use the per-window iteration count, not cumulative sum");
+    })
+    .await
+}
+
+/// Review regression (#381):
+/// 1) Final-iteration context occupancy uses the final iteration's output tokens (not cumulative billed output).
+/// 2) Empty `stop_reason = "length"` (`max_tokens`) in `llm/stream.lua` uses the same per-window
+///    input measurement instead of misclassifying cumulative multi-iteration input as `context_overflow`.
+#[tokio::test]
+async fn anthropic_iterations_use_last_iteration_output_and_window_input_for_empty_length() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let server = MockServer::start().await;
+        // Case 1: two iterations with outputs 40 and 30 (cumulative billed output = 70),
+        // final iteration input = 12 -> context occupancy = 12 + 30 = 42, billed output = 70.
+        let two_iter_output = sse(
+            json!({"input_tokens": 10, "output_tokens": 0}),
+            &[json!({
+                "output_tokens": 70,
+                "iterations": [
+                    {"type": "message", "input_tokens": 10, "output_tokens": 40},
+                    {"type": "message", "input_tokens": 12, "output_tokens": 30}
+                ]
+            })],
+        );
+        // Case 2: empty max_tokens response with 3 iterations summing to 255k (> 200k window),
+        // max single iteration = 90k (< 200k), output = 0 -> must NOT report context_overflow.
+        let empty_length_multi_iter = [
+            json!({"type": "message_start", "message": {"id": "m_empty_len", "role": "assistant", "content": [],
+                "usage": {"input_tokens": 80_000, "output_tokens": 0}}}),
+            json!({"type": "message_delta", "delta": {"stop_reason": "max_tokens"}, "usage": {
+                "output_tokens": 0,
+                "iterations": [
+                    {"type": "message", "input_tokens": 80_000, "cache_read_input_tokens": 0, "output_tokens": 0},
+                    {"type": "message", "input_tokens": 85_000, "cache_read_input_tokens": 0, "output_tokens": 0},
+                    {"type": "message", "input_tokens": 90_000, "cache_read_input_tokens": 0, "output_tokens": 0}
+                ]
+            }}),
+            json!({"type": "message_stop"}),
+        ]
+        .iter()
+        .map(|e| format!("event: {}\ndata: {e}\n\n", e["type"].as_str().unwrap()))
+        .collect::<String>();
+
+        // Case 3: real single-iteration empty max_tokens at >=99% window still classifies as context_overflow.
+        let empty_length_real_overflow = [
+            json!({"type": "message_start", "message": {"id": "m_empty_ovf", "role": "assistant", "content": [],
+                "usage": {"input_tokens": 199_000, "output_tokens": 0}}}),
+            json!({"type": "message_delta", "delta": {"stop_reason": "max_tokens"}, "usage": {
+                "output_tokens": 0,
+                "iterations": [
+                    {"type": "message", "input_tokens": 199_000, "cache_read_input_tokens": 0, "output_tokens": 0}
+                ]
+            }}),
+            json!({"type": "message_stop"}),
+        ]
+        .iter()
+        .map(|e| format!("event: {}\ndata: {e}\n\n", e["type"].as_str().unwrap()))
+        .collect::<String>();
+
+        server.route(
+            "/anthropic",
+            vec![
+                Resp::sse(two_iter_output),
+                Resp::sse(empty_length_multi_iter),
+                Resp::sse(empty_length_real_overflow),
+            ],
+        );
+        let h = provider_host(
+            &mut env,
+            &server,
+            json!({
+                "model": "anthropic/claude-sonnet-5-5",
+                "models": { "anthropic/claude-sonnet-5-5": { "context_window": 200_000 } },
+                "plugins": { "llm": { "retries": 0 } }
+            }),
+        )
+        .await;
+        expose(&h);
+        global(&h, "USAGE", h.service_table("usage").unwrap());
+
+        let r1 = h.prompt("turn 1", json!({})).await.unwrap();
+        assert_eq!(r1["status"], "completed", "{r1}");
+        let (billed_out, ctx_tokens): (i64, i64) = eval(&h, "return USAGE:totals().output, USAGE:context_tokens()").await;
+        assert_eq!(billed_out, 70, "billed output must keep cumulative total 70");
+        assert_eq!(ctx_tokens, 42, "context occupancy must be final iteration input (12) + final iteration output (30)");
+
+        let r2 = h.prompt("turn 2", json!({})).await.unwrap();
+        assert_eq!(r2["status"], "failed", "{r2}");
+        assert_ne!(
+            r2["error"]["code"], "context_overflow",
+            "empty max_tokens with multi-iteration sum > window (max single iter 90k < 200k) must NOT misclassify as context_overflow: {r2}"
+        );
+        let err_msg = r2["error"]["message"].as_str().unwrap_or("");
+        assert!(
+            err_msg.contains("cut at max_tokens"),
+            "expected max_tokens empty-response classification, got: {r2}"
+        );
+
+        let r3_kind: String = eval(
+            &h,
+            r#"
+            local ok, res = pcall(function()
+                return LLM:stream({
+                    model = LLM:resolve("anthropic/claude-sonnet-5-5"),
+                    system = "sys",
+                    messages = { { role = "user", content = { { type = "text", text = "hi" } } } },
+                }, function() end)
+            end)
+            if ok then return tostring(res.error_kind or "ok") end
+            return type(res) == "table" and tostring(res.kind or res.code or "") or tostring(res)
+            "#,
+        )
+        .await;
+        assert_eq!(
+            r3_kind, "context_overflow",
+            "real single-iteration empty max_tokens at >=99% window must still report context_overflow"
+        );
+        h.shutdown().await;
+    })
+    .await
+}
+
+#[tokio::test]
 async fn total_with_matching_breakdown_in_message_start() {
     let start = json!({"input_tokens": 0, "output_tokens": 0, "cache_creation_input_tokens": M,
         "cache_creation": {"ephemeral_5m_input_tokens": 600_000, "ephemeral_1h_input_tokens": 400_000}});
