@@ -9,14 +9,14 @@ expression: t.snap().await
   │ ?  all key bindings (on an empty input) [when: editor_empty, … │
   │ Alt+,  lower reasoning effort (the model's levels)             │
   │ Alt+.  raise reasoning effort (the model's levels)             │
-  │ Alt+Enter  queue the input as a follow-up [when: working]      │
+  │ Alt+Enter  queue the input as a follow-up [when: working, kit… │
   │ Alt+M  next favorite / recent model                            │
   │ Alt+P  select model (keeps the input)                          │
   │ Alt+S  select text in the live area with the mouse, release c… │
   │ Ctrl+B  move the running command to the background             │
   │ Ctrl+D  exit when the input is empty                           │
   │ Ctrl+G  edit the input in $EDITOR                              │
-  ╰────────────────────────────────────────────────────── 1 of 76 ─╯
+  ╰────────────────────────────────────────────────────── 1 of 77 ─╯
 ╭────────────────────────────────────────────────────────────────────╮
 │ ❯ Ask mare anything… (@ files, / commands, ? keys)                 │
 ╰────────────────────────────────────────────────────────────────────╯

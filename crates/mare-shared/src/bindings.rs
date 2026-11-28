@@ -22,11 +22,13 @@ pub const EDITOR_EMPTY: u8 = 1;
 pub const COMPLETION_OPEN: u8 = 2;
 pub const PASTE_BURST: u8 = 4;
 pub const WORKING: u8 = 8;
-const PREDICATES: [(&str, u8); 4] = [
+pub const KITTY_KEYBOARD: u8 = 16;
+const PREDICATES: [(&str, u8); 5] = [
     ("editor_empty", EDITOR_EMPTY),
     ("completion_open", COMPLETION_OPEN),
     ("paste_burst", PASTE_BURST),
     ("working", WORKING),
+    ("kitty_keyboard", KITTY_KEYBOARD),
 ];
 
 /// A binding's condition: every predicate of `all` holds and none of `none` does.
@@ -71,12 +73,12 @@ impl When {
         (self.all & other.none) == 0 && (self.none & other.all) == 0
     }
 
-    /// 16-bit mask of all combinations of the 4 predicate bits (`0..16`) for which `self.holds(s)`.
-    pub fn state_mask(self) -> u16 {
-        let mut mask = 0u16;
-        for s in 0..16u8 {
+    /// 32-bit mask of all combinations of the 5 predicate bits (`0..32`) for which `self.holds(s)`.
+    pub fn state_mask(self) -> u32 {
+        let mut mask = 0u32;
+        for s in 0..32u8 {
             if self.holds(s) {
-                mask |= 1u16 << s;
+                mask |= 1u32 << s;
             }
         }
         mask
@@ -92,7 +94,8 @@ impl When {
         }
         for (idx, (_, bit)) in PREDICATES.iter().enumerate() {
             if (self.none & bit) != 0 {
-                const NEG: [&str; 4] = ["!editor_empty", "!completion_open", "!paste_burst", "!working"];
+                const NEG: [&str; 5] =
+                    ["!editor_empty", "!completion_open", "!paste_burst", "!working", "!kitty_keyboard"];
                 out.push(NEG[idx]);
             }
         }
@@ -478,9 +481,9 @@ impl Keymap {
     /// and a longer sequence whose `when` does not hold in `state` does not enter prefix mode.
     pub fn is_prefix_for_state(&self, chain: &[&str], key: &str, state: u8) -> bool {
         let prefix = format!("{key} ");
-        let state_bit = 1u16 << (state & 0xF);
+        let state_bit = 1u32 << (state & 0x1F);
         let mut key_blocked = false;
-        let mut seq_blocked: HashMap<&str, u16> = HashMap::new();
+        let mut seq_blocked: HashMap<&str, u32> = HashMap::new();
         for &ctx in chain {
             let Some(l) = self.maps.get(ctx) else { continue };
             if !key_blocked && let Some(stack) = l.binds.get(key) {
@@ -596,11 +599,11 @@ impl Keymap {
         out
     }
 
-    /// Every reachable `(context, key, entry)` along `chain` using the 16-state `When` coverage:
+    /// Every reachable `(context, key, entry)` along `chain` using the 32-state `When` coverage:
     /// disjoint predicates, declining Lua actions (`declines = true`), and non-masked fallbacks
     /// stay visible, while masks and non-declining core actions block the states they cover.
     pub fn reachable_in_chain<'a>(&'a self, chain: &[&'a str]) -> Vec<(&'a str, &'a str, &'a Entry)> {
-        let mut blocked: HashMap<&str, u16> = HashMap::new();
+        let mut blocked: HashMap<&str, u32> = HashMap::new();
         let mut out: Vec<(&'a str, &'a str, &'a Entry)> = Vec::new();
         let mut past_text = false;
         for &ctx in chain {
@@ -1004,6 +1007,10 @@ mod tests {
     #[test]
     fn when_and_contexts_reject_unknown_or_wrong_targets() {
         assert_eq!(When::parse(["working", "!paste_burst"]), Ok(When { all: WORKING, none: PASTE_BURST }));
+        let kitty_when = When::parse(["working", "kitty_keyboard"]).unwrap();
+        assert_ne!(kitty_when.state_mask(), 0);
+        assert_eq!(kitty_when.labels(), ["working", "kitty_keyboard"]);
+        assert_eq!(When::parse(["!kitty_keyboard"]).unwrap().labels(), ["!kitty_keyboard"]);
         assert!(When::parse(["typing"]).unwrap_err().contains("editor_empty"), "the error lists the known ones");
         let mut km = Keymap::default();
         assert!(km.check_bindable("n").unwrap_err().contains("unknown context \"n\""));

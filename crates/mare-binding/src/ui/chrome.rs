@@ -803,6 +803,9 @@ pub(super) fn install(lua: &Lua, ui: &Table, shared: &Arc<UiShared>) -> mlua::Re
                 if o.get::<Option<bool>>("paste_burst")?.unwrap_or(false) {
                     bits |= mare_shared::bindings::PASTE_BURST;
                 }
+                if o.get::<Option<bool>>("kitty_keyboard")?.unwrap_or(false) {
+                    bits |= mare_shared::bindings::KITTY_KEYBOARD;
+                }
             }
             let km = s.keymap.read().unwrap();
             let chain = km.chain_for(&context).map_err(mlua::Error::runtime)?;

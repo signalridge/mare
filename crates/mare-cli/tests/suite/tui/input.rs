@@ -868,3 +868,42 @@ async fn enter_does_not_accept_stale_completion_popup_after_typing() {
     })
     .await
 }
+
+#[tokio::test]
+async fn repro_245_alt_enter_while_working_inserts_newline_without_queuing_draft() {
+    local(async {
+        let mut t = Term::new(json!([{ "text": "x".repeat(400), "delay_ms": 40 }]), 80, 24).await;
+        t.until_vt("startup", |t| !t.vt.starting()).await;
+        t.vt.dismiss_notices();
+        expose(&t.vt.host);
+        exec(
+            &t.vt.host,
+            r#"
+            QUEUED_FOLLOWUPS = 0
+            C.cordis:on("queue/changed", function(ev)
+                if type(ev) == "table" and type(ev.follow_up) == "table" and #ev.follow_up > 0 then
+                    QUEUED_FOLLOWUPS = #ev.follow_up
+                end
+            end)
+            "#,
+        )
+        .await;
+
+        // Start a slow turn so `working` context is active.
+        t.vt.type_str("start slow turn");
+        t.key(KeyCode::Enter, Modifiers::NONE);
+        t.until_vt("turn working", |t| t.vt.turns_ended() == 0 && t.screen().contains("x")).await;
+
+        // While working, compose a draft and press Alt+Enter (what Apple Terminal sends for Shift+Enter as ESC+CR).
+        t.vt.type_str("draft line 1");
+        t.key(KeyCode::Enter, Modifiers::ALT);
+        t.step().await;
+        let draft = t.vt.editor_text();
+        let queued: i64 = eval(&t.vt.host, "return QUEUED_FOLLOWUPS").await;
+        assert_eq!(
+            draft, "draft line 1\n",
+            "Alt+Enter while working queued draft (queued={queued}) instead of inserting a newline; editor={draft:?}"
+        );
+    })
+    .await
+}

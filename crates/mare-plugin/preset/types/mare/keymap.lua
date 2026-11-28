@@ -8,12 +8,13 @@
 --- (`mare.keymap.context`).
 ---@alias mare.KeyContext "global"|"text"|"editor"|"editor.completion"|"editor.queue"|"editor.history"|"editor.selection"|"input"|"transcript"|"transcript.search"|"select"|"select.vim"|"select.search"|"confirm"|"help"|"info"|string
 --- Predicates the core evaluates (no Lua per key); "!x" negates, a list means all of them.
----@alias mare.KeyWhen "editor_empty"|"completion_open"|"paste_burst"|"working"|string
+---@alias mare.KeyWhen "editor_empty"|"completion_open"|"paste_burst"|"working"|"kitty_keyboard"|string
 ---@class mare.KeymapResolveOpts
 ---@field editor_empty? boolean
 ---@field working? boolean
 ---@field completion_open? boolean
 ---@field paste_burst? boolean
+---@field kitty_keyboard? boolean
 
 ---@class mare.KeymapResolveResult
 ---@field key string

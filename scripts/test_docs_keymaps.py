@@ -84,10 +84,13 @@ class KeymapsDocTests(unittest.TestCase):
         if shutil.which("lua") is None:
             self.skipTest("lua interpreter not available on PATH")
         actions = {"paste-image": "paste an image", "follow-up": "queue a follow-up"}
-        unix_list = [{"context": "editor", "key": "ctrl+v", "action": "paste-image", "desc": "paste an image"}]
+        unix_list = [
+            {"context": "editor", "key": "ctrl+v", "action": "paste-image", "desc": "paste an image"},
+            {"context": "editor", "key": "ctrl+q", "action": "follow-up", "when": ["working"], "desc": "queue a follow-up"},
+        ]
         win_list = [
             {"context": "editor", "key": "alt+v", "action": "paste-image", "desc": "paste an image"},
-            {"context": "editor", "key": "ctrl+q", "action": "follow-up", "desc": "queue a follow-up"},
+            {"context": "editor", "key": "ctrl+q", "action": "follow-up", "when": ["working"], "desc": "queue a follow-up"},
         ]
         from_unix = docs_keymaps.normalize_platform_keymaps(unix_list, actions, gen_docs.PRESET, "lua")
         from_win = docs_keymaps.normalize_platform_keymaps(win_list, actions, gen_docs.PRESET, "lua")
@@ -96,7 +99,7 @@ class KeymapsDocTests(unittest.TestCase):
         table_win = docs_keymaps.gen_keymaps_table(from_win, cols, gen_docs.cell)
         self.assertEqual(table_unix, table_win)
         self.assertIn("| `editor` | `Alt+V` | `paste-image` |  | paste an image (Windows) |", table_unix)
-        self.assertIn("| `editor` | `Ctrl+Q` | `follow-up` |  | queue a follow-up (Windows) |", table_unix)
+        self.assertIn("| `editor` | `Ctrl+Q` | `follow-up` | `working` | queue a follow-up |", table_unix)
         self.assertIn("| `editor` | `Ctrl+V` | `paste-image` |  | paste an image (Unix / macOS) |", table_unix)
 
 

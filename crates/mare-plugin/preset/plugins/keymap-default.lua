@@ -13,7 +13,11 @@ return {
 			{ "editor", "<C-o>", "toggle-expand" },
 			{ "editor", "<C-t>", "transcript" },
 			{ "editor", "<C-s>", "steer" },
-			{ "editor", "<M-CR>", "follow-up", { when = { "working" } } },
+			-- Only bind Alt+Enter to follow-up when Kitty keyboard is active (so Shift+Enter
+			-- and Alt+Enter are distinct); otherwise Alt+Enter stays newline (Apple Terminal
+			-- encodes Shift+Enter as ESC+CR) and Ctrl+Q queues follow-ups on all platforms.
+			{ "editor", "<M-CR>", "follow-up", { when = { "working", "kitty_keyboard" } } },
+			{ "editor", "<C-q>", "follow-up", { when = { "working" } } },
 			{ "editor", "<C-r>", "history-search" },
 			{ "editor", "<C-g>", "external-editor" },
 			{ "editor", mare.os == "windows" and "<M-v>" or "<C-v>", "paste-image" },
@@ -129,11 +133,6 @@ return {
 			{ "info", { "<End>" }, "info.bottom" },
 			{ "info", { "<Esc>" }, "info.close" },
 		}
-		-- Windows: the terminal owns Ctrl+V (text paste, handled above), and Windows Terminal
-		-- binds Alt+Enter to fullscreen unless forwarded (mare doctor explains).
-		if mare.os == "windows" then
-			table.insert(bindings, { "editor", "<C-q>", "follow-up" })
-		end
 		local handle = mare.keymap.set_many(bindings)
 		ctx:effect(function()
 			return function()

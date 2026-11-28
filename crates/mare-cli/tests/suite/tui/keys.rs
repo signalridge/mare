@@ -1350,8 +1350,8 @@ async fn editor_keys_beat_text_keys() {
         t.submit("go slowly").await;
         t.until("streaming", |s| s.contains("zzzzzzzz")).await;
         t.vt.type_str("follow up item");
-        t.key(KeyCode::Enter, Modifiers::ALT);
-        t.until("follow-up queued", |s| s.contains("↳ follow up item")).await;
+        t.ctrl('q');
+        t.until("follow-up queued via Ctrl+Q", |s| s.contains("↳ follow up item")).await;
         t.key(KeyCode::Escape, Modifiers::NONE);
         t.until_vt("turn settled", |t| !t.vt.busy()).await;
         t.ctrl('c');
