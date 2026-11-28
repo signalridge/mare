@@ -220,20 +220,30 @@ return function(D)
 	end
 
 	-- A summary request that doesn't fit first cuts each tool result (in the request copy only)
-	-- to this many characters, then drops oldest units.
+	-- to this many characters, then drops oldest units. Failed tool results keep both head and
+	-- tail within the same budget so final build/test diagnostics survive.
 	local SUMMARY_TOOL_RESULT_CHARS = 2000
+	local SUMMARY_ERROR_HEAD_CHARS = 800
+	local SUMMARY_ERROR_TAIL_CHARS = 1200
 	local function trim_result(m)
 		if m.role ~= "tool_result" then
 			return m
 		end
 		local content, cut = {}, false
 		for i, b in ipairs(m.content or {}) do
-			if b.type == "text" and cp_len(b.text or "") > SUMMARY_TOOL_RESULT_CHARS then
-				content[i] = {
-					type = "text",
+			local len = b.type == "text" and cp_len(b.text or "") or 0
+			if b.type == "text" and len > SUMMARY_TOOL_RESULT_CHARS then
+				local text
+				if m.is_error then
+					local omitted = len - SUMMARY_ERROR_HEAD_CHARS - SUMMARY_ERROR_TAIL_CHARS
+					text = cp_head(b.text, SUMMARY_ERROR_HEAD_CHARS)
+						.. ("\n\n[... %d characters omitted ...]\n\n"):format(omitted)
+						.. cp_tail(b.text, SUMMARY_ERROR_TAIL_CHARS)
+				else
 					text = cp_head(b.text, SUMMARY_TOOL_RESULT_CHARS)
-						.. ("\n\n[... %d more characters truncated]"):format(cp_len(b.text) - SUMMARY_TOOL_RESULT_CHARS),
-				}
+						.. ("\n\n[... %d more characters truncated]"):format(len - SUMMARY_TOOL_RESULT_CHARS)
+				end
+				content[i] = { type = "text", text = text }
 				cut = true
 			else
 				content[i] = b

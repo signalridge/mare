@@ -436,3 +436,71 @@ async fn custom_stage_setting_state_stop_halts_later_stages() {
     })
     .await
 }
+
+#[tokio::test]
+async fn repro_260_summary_trim_retains_tail_diagnostics() {
+    local(async {
+        let env = TestEnv::new().await;
+        let base = overhead(&env).await;
+        let cfg = json!({
+            "models": {
+                "faux/echo": { "context_window": base + 4000, "max_output": 500 }
+            },
+            "plugins": {
+                "compact": {
+                    "auto": false,
+                    "headroom_tokens": 500,
+                    "keep_recent_tokens": 100,
+                    "recent_user_tokens": 0,
+                    "stages": ["local"]
+                }
+            }
+        });
+        let h = env.host().builtins(&["compact", "usage"]).faux(json!([])).config(cfg).no_session().build().await;
+        expose(&h);
+        global(&h, "K", h.service_table("compact").unwrap());
+        global(&h, "L", h.service_table("llm").unwrap());
+
+        let (status, captured_json): (String, String) = eval(
+            &h,
+            r###"
+            local captured = ""
+            L.complete = function(_, req)
+                if req and req.purpose == "compact" then
+                    captured = mare.json.encode(req.messages)
+                end
+                return {
+                    role = "assistant",
+                    stop_reason = "stop",
+                    content = { { type = "text", text = "## Goal\nFix failure" } },
+                }
+            end
+            local big_err = "BUILD_START\n" .. string.rep("compiling crate-foo-0123456789\n", 800) .. "\nFINAL_ERROR_TAIL_DIAGNOSTIC_999"
+            A:set_messages({
+                { role = "user", content = { { type = "text", text = "run tests" } } },
+                { role = "assistant", content = { { type = "tool_call", id = "c1", name = "bash", arguments = { command = "cargo test" } } } },
+                { role = "tool_result", tool_call_id = "c1", tool_name = "bash", is_error = true, content = { { type = "text", text = big_err } } },
+                { role = "assistant", content = { { type = "text", text = "checking error" } } },
+                { role = "user", content = { { type = "text", text = "next" } } },
+                { role = "assistant", content = { { type = "text", text = "ok" } } },
+            })
+            local r = K:run()
+            return tostring(r.status), captured
+            "###,
+        )
+        .await;
+        h.shutdown().await;
+        assert_eq!(status, "compacted", "compaction must complete with trimmed summary input");
+        assert!(
+            captured_json.contains("BUILD_START"),
+            "trimmed summary input must retain head context alongside tail diagnostics:\n{}",
+            &captured_json[..captured_json.len().min(600)]
+        );
+        assert!(
+            captured_json.contains("FINAL_ERROR_TAIL_DIAGNOSTIC_999"),
+            "trimmed summary input must preserve tail diagnostics instead of head-only truncation:\n{}",
+            &captured_json[..captured_json.len().min(600)]
+        );
+    })
+    .await
+}
