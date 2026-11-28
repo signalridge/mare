@@ -202,7 +202,8 @@ return function(D)
 			if kind == "retry_delay_too_long" and res.original_error_kind then
 				kind = res.original_error_kind
 			end
-			return nil, res.error or "summarization failed", kind, res.fallback_worthy
+			local img_unsupported = type(res.error_data) == "table" and res.error_data.image_unsupported == true
+			return nil, res.error or "summarization failed", kind, res.fallback_worthy, img_unsupported
 		end
 		if res.stop_reason == "length" then
 			return nil, "summary hit the token cap and is incomplete"
@@ -430,14 +431,21 @@ return function(D)
 		return c
 	end
 
+	local function has_images_in_messages(msgs)
+		for _, m in ipairs(msgs or {}) do
+			for _, b in ipairs(m.content or {}) do
+				if type(b) == "table" and b.type == "image" then
+					return true
+				end
+			end
+		end
+		return false
+	end
+
 	local function has_images_in_units(units)
 		for _, u in ipairs(units) do
-			for _, m in ipairs(u) do
-				for _, b in ipairs(m.content or {}) do
-					if type(b) == "table" and b.type == "image" then
-						return true
-					end
-				end
+			if has_images_in_messages(u) then
+				return true
 			end
 		end
 		return false
@@ -462,7 +470,10 @@ return function(D)
 		local dropped, without_tools, trimmed, images_stripped = {}, false, false, false
 		local live_overflow_step = 0
 		while true do
-			local msgs = table.copy(prefix)
+			local msgs = {}
+			for _, m in ipairs(prefix) do
+				msgs[#msgs + 1] = images_stripped and strip_images(m) or m
+			end
 			for _, m in ipairs(flatten(units)) do
 				local msg_out = m
 				if trimmed then
@@ -480,7 +491,7 @@ return function(D)
 			msgs[#msgs + 1] = instr
 			local extra = tokens(system or "") + (#tools > 0 and tokens(tools) or 0)
 			local need = estimate(msgs) + extra
-			local s, err, kind, worthy
+			local s, err, kind, worthy, image_unsupported
 			local preflight_overflow = false
 			if need > input_budget then
 				preflight_overflow = true
@@ -488,7 +499,7 @@ return function(D)
 				err = "the summary request is longer than the window"
 			else
 				local input_limit = not (opts and opts.allow_expansion) and (need - extra) or nil
-				s, err, kind, worthy = request({
+				s, err, kind, worthy, image_unsupported = request({
 					model = model,
 					system = system,
 					tools = tools,
@@ -501,9 +512,14 @@ return function(D)
 			if s then
 				return s, dropped
 			end
-			local media_overflow = kind == "image_limit"
-				or (kind == "payload_too_large" and not images_stripped and has_images_in_units(units))
-			local is_overflow = kind == "context_overflow" or kind == "payload_too_large" or kind == "image_limit"
+			image_unsupported = kind == "image_limit" and image_unsupported == true
+			local has_images = has_images_in_messages(prefix) or has_images_in_units(units)
+			local media_overflow = (kind == "image_limit" or kind == "payload_too_large")
+				and not images_stripped
+				and has_images
+			local is_overflow = kind == "context_overflow"
+				or kind == "payload_too_large"
+				or (kind == "image_limit" and not image_unsupported)
 			if kind == "tool_call" and #tools > 0 and not without_tools then
 				tools, without_tools = {}, true
 			elseif media_overflow and not images_stripped then
