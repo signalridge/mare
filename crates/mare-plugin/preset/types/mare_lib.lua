@@ -545,4 +545,22 @@ function M.guard(cleanup) end
 ---@return mare_lib.Mutex
 function M.mutex() end
 
+--- Single-window input token count for silent context-overflow checks (prefers per-iteration
+--- window occupancy over cumulative billed totals).
+---@param u table|nil
+---@return number
+function M.usage_window_input(u) end
+
+--- Final-window output token count for silent length-overflow checks (prefers final-iteration
+--- output over cumulative billed output).
+---@param u table|nil
+---@return number
+function M.usage_window_output(u) end
+
+--- Final-window context occupancy (`context_tokens`, or `context_input + context_output`,
+--- falling back to total input + cache + output).
+---@param u table|nil
+---@return number
+function M.usage_context_tokens(u) end
+
 return M
