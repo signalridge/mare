@@ -1458,3 +1458,54 @@ async fn slash_skill_and_template_preserve_untyped_tui_images_and_file_parts() {
     })
     .await
 }
+
+#[tokio::test]
+async fn commands_list_available_evaluates_live_busy_state_and_rejects_unknown_conditions() {
+    local(async {
+        let env = TestEnv::new().await;
+        let h = env.host().builtins(&["compact"]).faux(json!([])).no_session().build().await;
+        expose(&h);
+        global(&h, "CM", h.service_table("commands").unwrap());
+        let ok: bool = eval(
+            &h,
+            r#"
+            local avail = require("commands.availability")
+            local why, cond = avail.refusal(C.cordis, { availability = "unknown_future_cond" }, false)
+            assert(why ~= nil and cond == "unknown_future_cond", "unknown availability condition must be refused")
+
+            CM:register("running-only", { availability = "running", run = function() end })
+            CM:register("idle-only", { availability = "idle", run = function() end })
+            CM:register("local-cmd", { local_only = true, run = function() end })
+            CM:register("tui-cmd", { availability = "tui", run = function() end })
+
+            local function names(opts)
+              local set = {}
+              for _, d in ipairs(CM:list(opts).data) do set[d.name] = true end
+              return set
+            end
+
+            local idle_set = names({ available = true })
+            assert(idle_set["idle-only"], "idle-only available when idle")
+            assert(not idle_set["running-only"], "running-only excluded when idle")
+            assert(not idle_set["local-cmd"], "local_only excluded by default")
+            assert(not idle_set["tui-cmd"], "tui command excluded headless")
+
+            local with_local = names({ available = true, allow_local = true })
+            assert(with_local["local-cmd"], "allow_local includes local_only")
+
+            local agent = C.cordis:get("agent")
+            local orig_activity = agent.activity
+            agent.activity = function() return { busy = true } end
+            local busy_set = names({ available = true })
+            agent.activity = orig_activity
+            assert(busy_set["running-only"], "running-only available when busy")
+            assert(not busy_set["idle-only"], "idle-only excluded when busy")
+            return true
+            "#,
+        )
+        .await;
+        assert!(ok);
+        h.shutdown().await;
+    })
+    .await
+}

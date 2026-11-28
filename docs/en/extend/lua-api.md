@@ -120,7 +120,7 @@ Defined in `types/mare/services/commands.gen.lua`.
 | | |
 |---|---|
 | `ctx.commands:get(name)` | Current definition data of command `name` (or alias), or nil if absent. |
-| `ctx.commands:list()` | Registered non-alias slash commands, sorted by name (data only, no callbacks). |
+| `ctx.commands:list(opts)` | Registered non-alias slash commands, sorted by name (data only, no callbacks). Pass `available = true` to filter to commands executable right now for the active frontend and turn state. |
 | `ctx.commands:register(name, opts)` | Register a slash command or alias (`alias_of`) owned by the caller; remote callers must pass `replace = true` to overwrite an existing name, and releasing a registration restores any previous definition. |
 | `ctx.commands:run(line, input, opts)` | Run a slash command line (optionally targeting a loaded `session_id`); returns {result?} on success and throws a coded error on failure. |
 
