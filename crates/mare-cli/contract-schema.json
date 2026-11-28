@@ -10407,6 +10407,9 @@
             "output": {
               "type": "integer"
             },
+            "reasoning": {
+              "type": "integer"
+            },
             "requests": {
               "type": "integer"
             },

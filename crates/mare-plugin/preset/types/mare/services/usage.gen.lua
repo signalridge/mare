@@ -15,7 +15,7 @@ function M:context_tokens() end
 function M:cost_text(format) end
 
 --- Totals, context tokens and rate limits of the session in one object.
----@return {context_tokens: integer, rate_limits: table<string, {credits?: string, limit_name?: string, primary?: {reset_at_ms?: integer, used_percent: number, window_minutes?: number, [string]: any}, reached?: string, received_at_ms: integer, secondary?: {reset_at_ms?: integer, used_percent: number, window_minutes?: number, [string]: any}, [string]: any}>, totals: {cache_read: integer, cache_write: integer, cache_write_1h?: integer, cost: number, cost_unknown?: boolean, input: integer, last_cache_read: integer, last_context: integer, output: integer, requests: integer, side_requests: integer, subscription_requests: integer}}
+---@return {context_tokens: integer, rate_limits: table<string, {credits?: string, limit_name?: string, primary?: {reset_at_ms?: integer, used_percent: number, window_minutes?: number, [string]: any}, reached?: string, received_at_ms: integer, secondary?: {reset_at_ms?: integer, used_percent: number, window_minutes?: number, [string]: any}, [string]: any}>, totals: {cache_read: integer, cache_write: integer, cache_write_1h?: integer, cost: number, cost_unknown?: boolean, input: integer, last_cache_read: integer, last_context: integer, output: integer, reasoning?: integer, requests: integer, side_requests: integer, subscription_requests: integer}}
 function M:get() end
 
 --- Subscription quota as display lines, one per window (/status, the statusline).
@@ -33,5 +33,5 @@ function M:rate_limits() end
 function M:set_context(tokens, opts) end
 
 --- The session's totals: reset by a new session, recounted on resume.
----@return {cache_read: integer, cache_write: integer, cache_write_1h?: integer, cost: number, cost_unknown?: boolean, input: integer, last_cache_read: integer, last_context: integer, output: integer, requests: integer, side_requests: integer, subscription_requests: integer}
+---@return {cache_read: integer, cache_write: integer, cache_write_1h?: integer, cost: number, cost_unknown?: boolean, input: integer, last_cache_read: integer, last_context: integer, output: integer, reasoning?: integer, requests: integer, side_requests: integer, subscription_requests: integer}
 function M:totals() end

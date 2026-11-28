@@ -1231,6 +1231,7 @@
 ---@field last_cache_read integer
 ---@field last_context integer
 ---@field output integer
+---@field reasoning? integer
 ---@field requests integer
 ---@field side_requests integer
 ---@field subscription_requests integer
