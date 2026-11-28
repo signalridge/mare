@@ -589,3 +589,369 @@ async fn mid_session_model_switch_and_all_four_wires_tolerate_undeclared_histori
     })
     .await
 }
+
+#[tokio::test]
+async fn repro_issue_195_selected_deferred_tool_lost_after_compaction() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        write_plugin(&env, "tool-loading-e2e", MULTI_DEFERRED_PLUGIN);
+        env.set_var("ANTHROPIC_API_KEY", "test-ant");
+
+        let server = MockServer::start().await;
+        let long_summary_source = "work ".repeat(400);
+        let long_text_sse = format!(
+            "event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\"id\":\"m_long\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-5-5\",\"usage\":{{\"input_tokens\":500,\"output_tokens\":200}}}}}}\n\n\
+             event: content_block_start\ndata: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{{\"type\":\"text\",\"text\":\"\"}}}}\n\n\
+             event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":\"{long_summary_source}\"}}}}\n\n\
+             event: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":0}}\n\n\
+             event: message_delta\ndata: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\"}},\"usage\":{{\"output_tokens\":200}}}}\n\n\
+             event: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n"
+        );
+        server.route(
+            "/anthropic",
+            vec![
+                // Turn 1: select deferred tool `alpha_lookup`, call it, produce long reply.
+                Resp::sse(anthropic_tool_use_sse("at1", "tool_search", r#"{"query":"select:alpha_lookup"}"#)),
+                Resp::sse(anthropic_tool_use_sse("at2", "alpha_lookup", r#"{"key":"k1"}"#)),
+                Resp::sse(long_text_sse),
+                // Compaction summary request.
+                Resp::sse(fixture("anthropic-text.sse")),
+                // Turn 2 after compaction: next model request.
+                Resp::sse(fixture("anthropic-text.sse")),
+            ],
+        );
+
+        let cfg = json!({
+            "model": "anthropic/claude-sonnet-5-5",
+            "plugins": {
+                "provider-anthropic": { "base_url": format!("{}/anthropic", server.base) },
+                "compact": { "keep_recent_tokens": 1, "recent_user_tokens": 0 },
+                "llm": { "retry_base_ms": 1 },
+            },
+        });
+        let h = env.host().builtins(&["compact", "usage"]).user_plugins().config(cfg).no_session().build().await;
+        expose(&h);
+        global(&h, "K", h.service_table("compact").unwrap());
+
+        let r1 = h.prompt("use alpha_lookup", json!({})).await.unwrap();
+        assert!(r1["error"].is_null(), "{r1}");
+
+        // Compact so the original `tool_search` result is removed from active history.
+        let compacted: bool = eval(&h, "return K:run().status == 'compacted'").await;
+        assert!(compacted, "compaction should succeed");
+
+        let r2 = h.prompt("continue using alpha_lookup", json!({})).await.unwrap();
+        assert!(r2["error"].is_null(), "{r2}");
+        h.shutdown().await;
+
+        let ant_reqs: Vec<_> = server.requests().into_iter().filter(|r| r.path.starts_with("/anthropic")).collect();
+        let post_compact_body = ant_reqs.last().expect("post-compaction request").json();
+        assert!(
+            post_compact_body["messages"].to_string().contains("tool_reference")
+                && post_compact_body["messages"].to_string().contains("alpha_lookup"),
+            "selected deferred tool alpha_lookup lost its activation after compaction: {post_compact_body}"
+        );
+    })
+    .await
+}
+
+#[tokio::test]
+async fn compaction_preserves_deferred_tools_across_reload_filters_unavailable_and_all_native_wires() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        write_plugin(&env, "tool-loading-e2e", MULTI_DEFERRED_PLUGIN);
+        env.set_var("ANTHROPIC_API_KEY", "test-ant");
+        env.set_var("OPENAI_API_KEY", "test-oai");
+
+        let server = MockServer::start().await;
+        let long_reply = "work ".repeat(400);
+        let long_text_sse = format!(
+            "event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\"id\":\"m_long\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-5-5\",\"usage\":{{\"input_tokens\":500,\"output_tokens\":200}}}}}}\n\n\
+             event: content_block_start\ndata: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{{\"type\":\"text\",\"text\":\"\"}}}}\n\n\
+             event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":\"{long_reply}\"}}}}\n\n\
+             event: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":0}}\n\n\
+             event: message_delta\ndata: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\"}},\"usage\":{{\"output_tokens\":200}}}}\n\n\
+             event: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n"
+        );
+        server.route(
+            "/anthropic",
+            vec![
+                // Turn 1: select both alpha_lookup and beta_query, then long reply.
+                Resp::sse(anthropic_tool_use_sse(
+                    "at1",
+                    "tool_search",
+                    r#"{"query":"select:alpha_lookup,beta_query"}"#,
+                )),
+                Resp::sse(long_text_sse.clone()),
+                // Compaction 1 summary.
+                Resp::sse(fixture("anthropic-text.sse")),
+                // Post-reload turn 2 (long reply so chained compaction 2 can shrink).
+                Resp::sse(long_text_sse),
+                // Compaction 2 summary (history update + split-turn prefix).
+                Resp::sse(fixture("anthropic-text.sse")),
+                Resp::sse(fixture("anthropic-text.sse")),
+                // Turn 3 after chained compaction.
+                Resp::sse(fixture("anthropic-text.sse")),
+            ],
+        );
+        server.route("/openai", vec![Resp::sse(responses_text("oai compact ok"))]);
+        server.route("/kimi/chat/completions", vec![chat_text_sse("kimi-test", "kimi compact ok")]);
+
+        let base = server.base.clone();
+        let cfg = json!({
+            "model": "anthropic/claude-sonnet-5-5",
+            "providers": {
+                "kimi-test": {
+                    "wire": "openai-chat",
+                    "base_url": format!("{base}/kimi"),
+                    "api_key": "test-kimi",
+                    "models": [{ "model_id": "kimi-test", "name": "Kimi Test", "tool_update": "addition_only" }],
+                },
+            },
+            "plugins": {
+                "provider-anthropic": { "base_url": format!("{base}/anthropic") },
+                "provider-openai": { "base_url": format!("{base}/openai") },
+                "compact": { "keep_recent_tokens": 1, "recent_user_tokens": 0 },
+                "llm": { "retry_base_ms": 1 },
+            },
+        });
+
+        // Session 1: select alpha_lookup + beta_query, compact, persist to disk, and shut down.
+        let h1 = env.host().builtins(&["compact", "usage"]).user_plugins().config(cfg.clone()).build().await;
+        expose(&h1);
+        global(&h1, "K", h1.service_table("compact").unwrap());
+        let prompt1 = format!("load alpha and beta {}", "detail ".repeat(300));
+        let r1 = h1.prompt(&prompt1, json!({})).await.unwrap();
+        assert!(r1["error"].is_null(), "{r1}");
+        let compacted1: bool = eval(&h1, "return K:run().status == 'compacted'").await;
+        assert!(compacted1, "first compaction should succeed");
+        h1.shutdown().await;
+
+        // Replace plugin before reload: keep alpha_lookup deferred, remove beta_query completely.
+        let alpha_only_plugin = r#"return {
+          name = "tool-loading-e2e",
+          inject = { "tools" },
+          apply = function(ctx)
+            ctx.tools:register("alpha_lookup", {
+              description = "Lookup alpha records by key",
+              exposure = "deferred",
+              side_effect = "read",
+              parameters = { type = "object", properties = { key = { type = "string" } }, required = { "key" } },
+              execute = function(a) return { content = "alpha_lookup:" .. tostring(a.key or "") } end,
+            })
+          end,
+        }"#;
+        write_plugin(&env, "tool-loading-e2e", alpha_only_plugin);
+
+        // Session 2 (resumed): verify reload preserves alpha_lookup, drops removed beta_query,
+        // survives chained compaction, and re-activates on OpenAI Responses and Kimi wires.
+        let h2 = env.host().builtins(&["compact", "usage"]).user_plugins().config(cfg).resume().build().await;
+        expose(&h2);
+        global(&h2, "LLM", h2.service_table("llm").unwrap());
+        global(&h2, "K", h2.service_table("compact").unwrap());
+
+        let prompt2 = format!("turn after reload {}", "detail ".repeat(300));
+        let r2 = h2.prompt(&prompt2, json!({})).await.unwrap();
+        assert!(r2["error"].is_null(), "{r2}");
+
+        let compacted2: bool = eval(&h2, "return K:run().status == 'compacted'").await;
+        assert!(compacted2, "chained compaction should succeed");
+
+        let r3 = h2.prompt("turn after chained compaction", json!({})).await.unwrap();
+        assert!(r3["error"].is_null(), "{r3}");
+
+        // Exercise OpenAI Responses and Kimi addition_only wires with compacted history carrying loaded_tools.
+        exec(
+            &h2,
+            r#"
+            local compacted_history = {
+              {
+                role = "user",
+                compaction = true,
+                summary = "earlier summary",
+                details = { loaded_tools = { "alpha_lookup", "removed_tool", "read" } },
+                content = { { type = "text", text = "The conversation history before this point was compacted." } },
+              },
+              { role = "user", content = { { type = "text", text = "continue" } } },
+            }
+            local live_tools = {
+              { name = "tool_search", description = "Search", parameters = { type = "object", properties = { query = { type = "string" } } } },
+              { name = "read", description = "Read", parameters = { type = "object", properties = {} } },
+              { name = "alpha_lookup", description = "Alpha", defer_loading = true, parameters = { type = "object", properties = { key = { type = "string" } } } },
+            }
+            for _, ref in ipairs({ "openai/gpt-6.1-terra", "kimi-test/kimi-test" }) do
+              local m = assert(LLM:resolve(ref), "missing " .. ref)
+              local r = LLM:stream({ model = m, system = "SYS", messages = compacted_history, tools = live_tools }, function() end)
+              assert(not r.error, ref .. " failed: " .. tostring(r.error))
+            end
+            "#,
+        )
+        .await;
+        h2.shutdown().await;
+
+        let reqs = server.requests();
+        let ant_reqs: Vec<_> = reqs.iter().filter(|r| r.path.starts_with("/anthropic")).collect();
+        assert_eq!(ant_reqs.len(), 7, "expected 7 Anthropic requests, got {}", ant_reqs.len());
+
+        // Post-reload request (ant_reqs[3]) and post-chained-compaction request (ant_reqs[6])
+        // both emit tool_reference for alpha_lookup inside a tool_result, and NOT removed beta_query.
+        for (label, body) in [("post-reload", ant_reqs[3].json()), ("post-chained-compact", ant_reqs[6].json())] {
+            let msgs = body["messages"].as_array().unwrap();
+            let refs: Vec<&str> = msgs
+                .iter()
+                .filter_map(|m| m["content"].as_array())
+                .flatten()
+                .filter(|b| b["type"] == "tool_result")
+                .filter_map(|b| b["content"].as_array())
+                .flatten()
+                .filter(|r| r["type"] == "tool_reference")
+                .filter_map(|r| r["tool_name"].as_str())
+                .collect();
+            assert_eq!(refs, vec!["alpha_lookup"], "{label}: expected only live deferred alpha_lookup: {body}");
+        }
+
+        // OpenAI Responses wire emits tool_search_call + tool_search_output with only live deferred alpha_lookup.
+        let oai_body = reqs.iter().find(|r| r.path.starts_with("/openai")).expect("openai req").json();
+        let oai_input = oai_body["input"].as_array().unwrap();
+        let tso = oai_input
+            .iter()
+            .find(|it| it["type"] == "tool_search_output")
+            .unwrap_or_else(|| panic!("missing tool_search_output in OpenAI post-compaction request: {oai_body}"));
+        let oai_names: Vec<&str> =
+            tso["tools"].as_array().unwrap().iter().filter_map(|t| t["name"].as_str()).collect();
+        assert_eq!(oai_names, vec!["alpha_lookup"], "OpenAI must re-activate only live deferred tools: {oai_body}");
+
+        // Kimi addition_only wire emits `{ role = "system", tools = [...] }` with only live deferred alpha_lookup.
+        let kimi_body = reqs.iter().find(|r| r.path.starts_with("/kimi")).expect("kimi req").json();
+        let kimi_msgs = kimi_body["messages"].as_array().unwrap();
+        let sys_add = kimi_msgs
+            .iter()
+            .find(|m| m["role"] == "system" && m.get("tools").is_some())
+            .unwrap_or_else(|| panic!("missing Kimi system tools addition after compaction: {kimi_body}"));
+        let kimi_names: Vec<&str> = sys_add["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["function"]["name"].as_str())
+            .collect();
+        assert_eq!(kimi_names, vec!["alpha_lookup"], "Kimi must re-activate only live deferred tools: {kimi_body}");
+    })
+    .await
+}
+
+#[tokio::test]
+async fn compaction_loaded_tools_avoids_call_id_collision_on_openai_and_anthropic() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        write_plugin(&env, "tool-loading-e2e", MULTI_DEFERRED_PLUGIN);
+        env.set_var("ANTHROPIC_API_KEY", "test-ant");
+        env.set_var("OPENAI_API_KEY", "test-oai");
+
+        let server = MockServer::start().await;
+        server.route("/openai", vec![Resp::sse(responses_text("oai ok"))]);
+        server.route("/anthropic", vec![Resp::sse(fixture("anthropic-text.sse"))]);
+
+        let cfg = json!({
+            "model": "anthropic/claude-sonnet-5-5",
+            "plugins": {
+                "provider-anthropic": { "base_url": format!("{}/anthropic", server.base) },
+                "provider-openai": { "base_url": format!("{}/openai", server.base) },
+                "llm": { "retry_base_ms": 1 },
+            },
+        });
+        let h = env.host().builtins(&["compact", "usage"]).user_plugins().config(cfg).no_session().build().await;
+        expose(&h);
+        global(&h, "LLM", h.service_table("llm").unwrap());
+
+        exec(
+            &h,
+            r#"
+            local history = {
+              {
+                role = "user",
+                compaction = true,
+                summary = "earlier summary",
+                details = { loaded_tools = { "alpha_lookup" } },
+                content = { { type = "text", text = "The conversation history before this point was compacted." } },
+              },
+              {
+                role = "assistant",
+                content = {
+                  { type = "tool_call", id = "compact_loaded_tools", name = "read", arguments = { path = "a.txt" } },
+                },
+              },
+              {
+                role = "tool_result",
+                tool_call_id = "compact_loaded_tools",
+                tool_name = "read",
+                content = { { type = "text", text = "normal read output" } },
+              },
+              { role = "user", content = { { type = "text", text = "continue" } } },
+            }
+            local live_tools = {
+              { name = "tool_search", description = "Search", parameters = { type = "object", properties = { query = { type = "string" } } } },
+              { name = "read", description = "Read", parameters = { type = "object", properties = { path = { type = "string" } } } },
+              { name = "alpha_lookup", description = "Alpha", defer_loading = true, parameters = { type = "object", properties = { key = { type = "string" } } } },
+            }
+            for _, ref in ipairs({ "openai/gpt-6.1-terra", "anthropic/claude-sonnet-5-5" }) do
+              local m = assert(LLM:resolve(ref), "missing " .. ref)
+              local r = LLM:stream({ model = m, system = "SYS", messages = history, tools = live_tools }, function() end)
+              assert(not r.error, ref .. " failed: " .. tostring(r.error))
+            end
+            "#,
+        )
+        .await;
+        h.shutdown().await;
+
+        let reqs = server.requests();
+        // OpenAI Responses: synthetic tool_search_call/output must pick a non-colliding call_id,
+        // and the real function_call/output with call_id="compact_loaded_tools" stays intact.
+        let oai_body = reqs.iter().find(|r| r.path.starts_with("/openai")).expect("openai req").json();
+        let oai_input = oai_body["input"].as_array().unwrap();
+        let tsc = oai_input
+            .iter()
+            .find(|it| it["type"] == "tool_search_call")
+            .unwrap_or_else(|| panic!("missing tool_search_call: {oai_body}"));
+        let tso = oai_input
+            .iter()
+            .find(|it| it["type"] == "tool_search_output")
+            .unwrap_or_else(|| panic!("missing tool_search_output (likely rewritten by call_id collision): {oai_body}"));
+        assert_eq!(tsc["call_id"], tso["call_id"], "{oai_body}");
+        assert_ne!(tsc["call_id"], "compact_loaded_tools", "synthetic call_id must avoid retained collision: {oai_body}");
+        let fco = oai_input
+            .iter()
+            .find(|it| it["type"] == "function_call_output" && it["call_id"] == "compact_loaded_tools")
+            .unwrap_or_else(|| panic!("missing retained function_call_output: {oai_body}"));
+        assert_eq!(fco["output"], "normal read output", "{oai_body}");
+
+        // Anthropic Messages: synthetic tool_use/tool_result must pick a non-colliding id,
+        // and the real read tool_use/tool_result with id="compact_loaded_tools" stays intact.
+        let ant_body = reqs.iter().find(|r| r.path.starts_with("/anthropic")).expect("anthropic req").json();
+        let ant_blocks: Vec<&serde_json::Value> = ant_body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|m| m["content"].as_array())
+            .flatten()
+            .collect();
+        let search_use = ant_blocks
+            .iter()
+            .find(|b| b["type"] == "tool_use" && b["name"] == "tool_search")
+            .unwrap_or_else(|| panic!("missing synthetic tool_search tool_use: {ant_body}"));
+        let search_id = search_use["id"].as_str().expect("search tool_use id");
+        assert_ne!(search_id, "compact_loaded_tools", "synthetic Anthropic tool_use id must avoid collision: {ant_body}");
+        assert!(
+            ant_blocks.iter().any(|b| b["type"] == "tool_result" && b["tool_use_id"] == search_id),
+            "missing matching synthetic tool_result for {search_id}: {ant_body}"
+        );
+        assert!(
+            ant_blocks.iter().any(|b| b["type"] == "tool_use" && b["name"] == "read" && b["id"] == "compact_loaded_tools"),
+            "missing retained read tool_use: {ant_body}"
+        );
+        assert!(
+            ant_blocks.iter().any(|b| b["type"] == "tool_result" && b["tool_use_id"] == "compact_loaded_tools"),
+            "missing retained read tool_result: {ant_body}"
+        );
+    })
+    .await
+}

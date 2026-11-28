@@ -38,14 +38,19 @@ return function(D)
 		return nil
 	end
 
-	--- cumulative file tracking from tool calls (+ lists carried by the previous summary)
+	--- cumulative file and selected deferred-tool tracking (+ lists carried by the previous summary)
 	local function track_files(msgs, prev)
-		local read, modified = {}, {}
+		local read, modified, loaded = {}, {}, {}
 		for _, p in ipairs(prev and prev.read_files or {}) do
 			read[p] = true
 		end
 		for _, p in ipairs(prev and prev.modified_files or {}) do
 			modified[p] = true
+		end
+		for _, name in ipairs(prev and prev.loaded_tools or {}) do
+			if type(name) == "string" and name ~= "" then
+				loaded[name] = true
+			end
 		end
 		for _, m in ipairs(msgs) do
 			if m.role == "assistant" then
@@ -66,6 +71,17 @@ return function(D)
 						end
 					end
 				end
+			elseif (m.role == "tool_result" and not m.is_error) or m.compaction then
+				local tools = type(m.details) == "table"
+					and type(m.details.loaded_tools) == "table"
+					and m.details.loaded_tools
+				if tools then
+					for _, name in ipairs(tools) do
+						if type(name) == "string" and name ~= "" then
+							loaded[name] = true
+						end
+					end
+				end
 			end
 		end
 		local function list(t, exclude)
@@ -78,7 +94,12 @@ return function(D)
 			table.sort(out)
 			return out
 		end
-		return { read_files = list(read, modified), modified_files = list(modified) }
+		local loaded_tools = list(loaded)
+		return {
+			read_files = list(read, modified),
+			modified_files = list(modified),
+			loaded_tools = #loaded_tools > 0 and loaded_tools or nil,
+		}
 	end
 
 	return { cut_point = cut_point, turn_start = turn_start, track_files = track_files }
