@@ -40,6 +40,10 @@ function M:definitions(model, names) end
 ---@return table
 function M:disable(name) end
 
+--- Tool-name prefixes advertised by registered lazy search sources.
+---@return string[]
+function M:discovery_prefixes() end
+
 --- Active edit tool strategy for `model` (`apply_patch` or `replace`).
 ---@param model? mare.Model
 ---@return "apply_patch"|"replace"
@@ -145,7 +149,7 @@ function M:register(name, opts) end
 function M:register_executor(executor_id, definition) end
 
 --- Register a search source prepared before `tool_search` reads the deferred catalog.
----@param definition {prepare: async fun()}
+---@param definition {prepare: async fun(), prefixes?: string[]|fun(): string[]}
 ---@return fun() dispose releases this registration
 function M:register_search_source(definition) end
 

@@ -534,15 +534,23 @@ return {
 			if cli_reason then
 				lib.fail(cli_error and "invalid_arguments" or "subagent.unknown_type", cli_reason)
 			end
-			local denied, allow = {}, mare.json.array()
+			local denied, denied_list, allow = {}, mare.json.array(), mare.json.array()
 			for _, name in ipairs(def.disallowed_tools or {}) do
-				denied[name] = true
+				if not denied[name] then
+					denied[name] = true
+					denied_list[#denied_list + 1] = name
+				end
+			end
+			for _, name in ipairs((parent_type and parent_type.disallowed_tools) or {}) do
+				if not denied[name] then
+					denied[name] = true
+					denied_list[#denied_list + 1] = name
+				end
 			end
 			for _, name in ipairs(parent_names) do
 				if
 					not denied[name]
 					and (not parent_type or parent_type.tools == nil or table.find(parent_type.tools, name))
-					and (not parent_type or not table.find(parent_type.disallowed_tools or {}, name))
 					and (def.tools == nil or table.find(def.tools, name))
 					and (wanted == nil or table.find(wanted, name))
 				then
@@ -550,6 +558,25 @@ return {
 				end
 			end
 			resolved.tools = allow
+			-- Eligible children with `tool_search` and no closed static tool allowlist can
+			-- lazily discover uncached deferred tools from registered search sources within
+			-- their advertised prefixes, still subject to explicit denials and `--exclude-tools`.
+			if
+				table.find(allow, "tool_search")
+				and wanted == nil
+				and def.tools == nil
+				and (not parent_type or parent_type.tools == nil)
+				and type(mare.config.tools_enabled) ~= "table"
+				and ctx.tools.discovery_prefixes
+			then
+				local prefixes = ctx.tools:discovery_prefixes()
+				if type(prefixes) == "table" and #prefixes > 0 then
+					resolved.tool_discovery_prefixes = prefixes
+					if #denied_list > 0 then
+						resolved.tool_ceiling_denied = denied_list
+					end
+				end
+			end
 			local snap, session, parent
 			local execution = mare.exec and mare.exec.current and mare.exec.current() or nil
 			local in_tool = execution ~= nil

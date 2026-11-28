@@ -24,8 +24,31 @@ return function(D)
 		return false
 	end
 
+	local function deferred_prefixes()
+		local out = {}
+		for _, n in ipairs(order) do
+			local e = servers[n]
+			if e and not e.rejected and enabled(e) and e.tier ~= "hidden" and not blocked(e) then
+				local has_def = resolve_tier(e.tier) == "deferred"
+				if not has_def then
+					for _, t in pairs(type(e.srv.tools) == "table" and e.srv.tools or {}) do
+						if resolve_tier(t) == "deferred" then
+							has_def = true
+							break
+						end
+					end
+				end
+				if has_def then
+					out[#out + 1] = "mcp__" .. D.sanitize(n) .. "__"
+				end
+			end
+		end
+		return out
+	end
+
 	if has_tier("deferred") and require("mare_lib").callable(ctx.tools.register_search_source) then
 		ctx.tools:register_search_source({
+			prefixes = deferred_prefixes,
 			prepare = function()
 				-- Uncached deferred servers connect on the first search.
 				for _, n in ipairs(order) do

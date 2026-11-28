@@ -27,7 +27,37 @@ pub use crate::approvals::child_events::{ChildApproval, ChildEvent, ChildEventsR
 /// The host that owns this VM, so `mare.subagent.start` can read the parent's permission preset.
 pub struct ParentHost(pub std::sync::Weak<Host>);
 pub struct ChildEvents(pub mpsc::UnboundedSender<ChildEvent>);
-struct ToolCeiling(Option<std::collections::HashSet<String>>);
+#[derive(Clone, Default)]
+struct ToolCeiling {
+    names: Option<std::collections::HashSet<String>>,
+    prefixes: Vec<String>,
+    denied: std::collections::HashSet<String>,
+}
+
+impl ToolCeiling {
+    fn allows(&self, name: &str) -> bool {
+        let Some(names) = &self.names else {
+            return true;
+        };
+        if names.contains(name) {
+            return true;
+        }
+        if self.denied.contains(name) {
+            return false;
+        }
+        self.prefixes.iter().any(|prefix| !prefix.is_empty() && name.starts_with(prefix))
+    }
+
+    fn allows_prefix(&self, prefix: &str) -> bool {
+        if prefix.is_empty() {
+            return false;
+        }
+        if self.names.is_none() {
+            return true;
+        }
+        self.prefixes.iter().any(|allowed| !allowed.is_empty() && prefix.starts_with(allowed))
+    }
+}
 struct SessionScopeState {
     active: crate::agent_tree::Scope,
     pending_drains: Vec<crate::agent_tree::Scope>,
@@ -343,11 +373,14 @@ fn start_with_spec(lua: &Lua, mut spec: serde_json::Value) -> Result<(AgentHandl
             return Err(StartError::coded("invalid_arguments", "start requires an options table"));
         }
     }
-    let inherited_tools = lua.app_data_ref::<ToolCeiling>().and_then(|ceiling| ceiling.0.clone());
+    let inherited_ceiling = lua.app_data_ref::<ToolCeiling>().map(|ceiling| ceiling.clone());
+    let has_inherited_ceiling = inherited_ceiling.as_ref().is_some_and(|c| c.names.is_some());
     match spec.get(crate::frontend::TOOLS) {
         None | Some(serde_json::Value::Null) => {
-            if let Some(inherited) = inherited_tools {
-                let mut names: Vec<_> = inherited.into_iter().collect();
+            if let Some(ceiling) = &inherited_ceiling
+                && let Some(inherited) = &ceiling.names
+            {
+                let mut names: Vec<_> = inherited.iter().cloned().collect();
                 names.sort();
                 spec[crate::frontend::TOOLS] = serde_json::json!(names);
             }
@@ -362,14 +395,76 @@ fn start_with_spec(lua: &Lua, mut spec: serde_json::Value) -> Result<(AgentHandl
                         .ok_or_else(|| StartError::coded("invalid_arguments", "tools must contain strings"))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            if let Some(inherited) = inherited_tools {
-                names.retain(|name| inherited.contains(name));
+            if let Some(ceiling) = &inherited_ceiling
+                && ceiling.names.is_some()
+            {
+                names.retain(|name| ceiling.allows(name));
                 names.sort();
                 names.dedup();
                 spec[crate::frontend::TOOLS] = serde_json::json!(names);
             }
         }
         Some(_) => return Err(StartError::coded("invalid_arguments", "tools must be an array")),
+    }
+    match spec.get("tool_discovery_prefixes") {
+        None | Some(serde_json::Value::Null) => {
+            if has_inherited_ceiling
+                && spec.get(crate::frontend::TOOLS).is_some()
+                && let Some(ceiling) = &inherited_ceiling
+                && !ceiling.prefixes.is_empty()
+            {
+                // When the caller didn't narrow `tools` explicitly and omitted prefixes, only
+                // propagate prefixes if `tool_discovery_prefixes` was not intentionally omitted;
+                // callers with an explicit allowlist leave `tool_discovery_prefixes` unset.
+            }
+        }
+        Some(serde_json::Value::Array(values)) => {
+            let mut prefixes = values
+                .iter()
+                .map(|value| {
+                    value.as_str().filter(|s| !s.is_empty()).map(str::to_owned).ok_or_else(|| {
+                        StartError::coded("invalid_arguments", "tool_discovery_prefixes must contain nonempty strings")
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if let Some(ceiling) = &inherited_ceiling {
+                prefixes.retain(|prefix| ceiling.allows_prefix(prefix));
+            }
+            prefixes.sort();
+            prefixes.dedup();
+            spec["tool_discovery_prefixes"] = serde_json::json!(prefixes);
+        }
+        Some(_) => {
+            return Err(StartError::coded("invalid_arguments", "tool_discovery_prefixes must be an array"));
+        }
+    }
+    match spec.get("tool_ceiling_denied") {
+        None | Some(serde_json::Value::Null) => {
+            if let Some(ceiling) = &inherited_ceiling
+                && !ceiling.denied.is_empty()
+            {
+                let mut denied: Vec<_> = ceiling.denied.iter().cloned().collect();
+                denied.sort();
+                spec["tool_ceiling_denied"] = serde_json::json!(denied);
+            }
+        }
+        Some(serde_json::Value::Array(values)) => {
+            let mut denied = values
+                .iter()
+                .map(|value| {
+                    value.as_str().map(str::to_owned).ok_or_else(|| {
+                        StartError::coded("invalid_arguments", "tool_ceiling_denied must contain strings")
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if let Some(ceiling) = &inherited_ceiling {
+                denied.extend(ceiling.denied.iter().cloned());
+            }
+            denied.sort();
+            denied.dedup();
+            spec["tool_ceiling_denied"] = serde_json::json!(denied);
+        }
+        Some(_) => return Err(StartError::coded("invalid_arguments", "tool_ceiling_denied must be an array")),
     }
     let prompt = spec
         .get("prompt")
@@ -671,12 +766,31 @@ pub fn install(lua: &Lua, mare: &Table) -> mlua::Result<()> {
     lua.set_app_data(ChildEvents(tx));
     lua.set_app_data(ChildBindings::default());
     lua.set_app_data(ChildEventsRx(std::sync::Mutex::new(Some(rx))));
-    let tool_ceiling = mare
-        .get::<Option<Table>>("args")?
-        .map(|args| args.get::<Option<Vec<String>>>("tool_ceiling"))
+    let args_table = mare.get::<Option<Table>>("args")?;
+    let tool_ceiling =
+        args_table.as_ref().map(|args| args.get::<Option<Vec<String>>>("tool_ceiling")).transpose()?.flatten();
+    let tool_discovery_prefixes = args_table
+        .as_ref()
+        .map(|args| args.get::<Option<Vec<String>>>("tool_discovery_prefixes"))
         .transpose()?
-        .flatten();
-    lua.set_app_data(ToolCeiling(tool_ceiling.map(|names| names.into_iter().collect())));
+        .flatten()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|prefix| !prefix.is_empty())
+        .collect();
+    let tool_ceiling_denied = args_table
+        .as_ref()
+        .map(|args| args.get::<Option<Vec<String>>>("tool_ceiling_denied"))
+        .transpose()?
+        .flatten()
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    lua.set_app_data(ToolCeiling {
+        names: tool_ceiling.map(|names| names.into_iter().collect()),
+        prefixes: tool_discovery_prefixes,
+        denied: tool_ceiling_denied,
+    });
     let root = lua.app_data_ref::<crate::agent_tree::Scope>().ok_or_else(|| rt_err("agent tree unavailable"))?.clone();
     lua.set_app_data(SessionScope(std::sync::Arc::new(std::sync::Mutex::new(SessionScopeState {
         active: root.session_scope(),
@@ -689,7 +803,7 @@ pub fn install(lua: &Lua, mare: &Table) -> mlua::Result<()> {
         "tool_allowed",
         lua.create_function(|lua, name: String| {
             let ceiling = lua.app_data_ref::<ToolCeiling>().ok_or_else(|| rt_err("tool ceiling unavailable"))?;
-            Ok(ceiling.0.as_ref().is_none_or(|names| names.contains(&name)))
+            Ok(ceiling.allows(&name))
         })?,
     )?;
     t.set(
