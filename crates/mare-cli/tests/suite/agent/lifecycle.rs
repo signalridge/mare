@@ -993,3 +993,255 @@ async fn queued_during_aborted_session_switch_wakes_on_switch_complete() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn repro_263_parallel_tool_result_persisted_before_slow_sibling_settles() {
+    local(async {
+        let env = TestEnv::new().await;
+        let h = env
+            .host()
+            .faux(json!([
+                {
+                    "tool_calls": [
+                        { "id": "c_slow", "name": "slow_read", "arguments": {} },
+                        { "id": "c_fast", "name": "fast_read", "arguments": {} }
+                    ]
+                },
+                { "text": "all done" }
+            ]))
+            .build()
+            .await;
+        expose(&h);
+
+        let (session_path, fast_persisted_while_slow_blocked, crashed_jsonl): (String, bool, String) = eval(
+            &h,
+            r#"
+            local slow_started_tx, slow_started_rx = mare.task.channel()
+            local slow_release_tx, slow_release_rx = mare.task.channel()
+            local fast_done_tx, fast_done_rx = mare.task.channel()
+
+            C.cordis:get("tools"):register("slow_read", {
+                description = "blocking read-only tool",
+                side_effect = "read",
+                concurrency_safe = true,
+                parameters = { type = "object", properties = {} },
+                execute = function()
+                    slow_started_tx:send(true)
+                    slow_release_rx:recv()
+                    return { content = { { type = "text", text = "SLOW_PARALLEL_RESULT_263" } } }
+                end,
+            })
+            C.cordis:get("tools"):register("fast_read", {
+                description = "immediate read-only tool",
+                side_effect = "read",
+                concurrency_safe = true,
+                parameters = { type = "object", properties = {} },
+                execute = function()
+                    fast_done_tx:send(true)
+                    return { content = { { type = "text", text = "FAST_PARALLEL_RESULT_263" } } }
+                end,
+            })
+
+            local turn = A:prompt("run parallel reads")
+            assert(slow_started_rx:recv() == true, "slow_read did not start")
+            assert(fast_done_rx:recv() == true, "fast_read did not finish while slow_read was running")
+            -- Wait with a bounded deadline until fast_read's completed result reaches the session journal
+            -- while slow_read remains blocked.
+            local path = S:info().path
+            local raw, persisted = "", false
+            for _ = 1, 500 do
+                raw = path and mare.fs.read(path) or ""
+                if raw:find("FAST_PARALLEL_RESULT_263", 1, true) ~= nil then
+                    persisted = true
+                    break
+                end
+                mare.task.sleep(10)
+            end
+
+            slow_release_tx:send(true)
+            A:wait(turn.turn_id)
+            return tostring(path), persisted, raw
+            "#,
+        )
+        .await;
+        h.shutdown().await;
+        assert!(
+            fast_persisted_while_slow_blocked,
+            "completed parallel tool result (c_fast) must be persisted to session file ({session_path}) before earlier slow sibling (c_slow) settles"
+        );
+
+        // Simulate crash recovery from the JSONL snapshot captured while `c_slow` was still pending:
+        // `c_fast` must retain its completed result and provider replay must stay in call order [c_slow, c_fast].
+        drop(env);
+        let env2 = TestEnv::new().await;
+        let recovered_path = env2
+            .home
+            .path()
+            .join("state/sessions")
+            .join(mare_store::cwd_slug(&env2.cwd))
+            .join("2026-01-01T00-00-00_repro263.jsonl");
+        std::fs::create_dir_all(recovered_path.parent().unwrap()).unwrap();
+        std::fs::write(&recovered_path, &crashed_jsonl).unwrap();
+        let h2 = env2.host().faux(json!([{ "text": "recovered ok" }])).resume().build().await;
+        expose(&h2);
+        let (replayed_order, fast_text, slow_interrupted): (String, String, bool) = eval(
+            &h2,
+            r#"
+            local seen = {}
+            C.cordis:on("request/build", function(req, next)
+                for _, m in ipairs(req.messages or {}) do
+                    if m.role == "tool_result" then
+                        seen[#seen + 1] = tostring(m.tool_name)
+                    end
+                end
+                return next()
+            end)
+            local turn = A:prompt("continue after crash")
+            local res = A:wait(turn.turn_id)
+            assert(res.text == "recovered ok", tostring(res.error))
+            local fast_t, slow_int = "", false
+            for _, m in ipairs(A:list_messages().data) do
+                if m.role == "tool_result" and m.tool_name == "fast_read" then
+                    fast_t = (m.content and m.content[1] and m.content[1].text) or ""
+                elseif m.role == "tool_result" and m.tool_name == "slow_read" then
+                    local t = (m.content and m.content[1] and m.content[1].text) or ""
+                    slow_int = t:find("interrupted", 1, true) ~= nil
+                end
+            end
+            return table.concat(seen, ","), fast_t, slow_int
+            "#,
+        )
+        .await;
+        h2.shutdown().await;
+        assert_eq!(fast_text, "FAST_PARALLEL_RESULT_263", "completed sibling result must survive crash recovery");
+        assert!(slow_interrupted, "unfinished earlier sibling c_slow must be settled as interrupted");
+        assert_eq!(replayed_order, "slow_read,fast_read", "provider replay must retain model call order");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn parallel_tool_result_persisted_while_earlier_item_completed_listener_blocks() {
+    local(async {
+        let env = TestEnv::new().await;
+        let h = env
+            .host()
+            .faux(json!([
+                {
+                    "tool_calls": [
+                        { "id": "c_first", "name": "first_read", "arguments": {} },
+                        { "id": "c_second", "name": "second_read", "arguments": {} }
+                    ]
+                },
+                { "text": "both published" }
+            ]))
+            .build()
+            .await;
+        expose(&h);
+
+        let (persisted_while_blocked, second_published_early, published_order): (bool, bool, String) = eval(
+            &h,
+            r#"
+            local listener_entered_tx, listener_entered_rx = mare.task.channel()
+            local listener_release_tx, listener_release_rx = mare.task.channel()
+            local second_go_tx, second_go_rx = mare.task.channel()
+            local second_done_tx, second_done_rx = mare.task.channel()
+            local completed_names = {}
+            local second_call_id = nil
+
+            C.cordis:on("item/started", function(ev)
+                if type(ev) == "table" and type(ev.item) == "table" and ev.item.type == "tool_call" then
+                    if ev.item.name == "second_read" then
+                        second_call_id = ev.item.tool_call_id
+                    end
+                end
+            end)
+
+            C.cordis:on("item/completed", function(ev)
+                if type(ev) == "table" and type(ev.item) == "table" and ev.item.type == "tool_call" then
+                    completed_names[#completed_names + 1] = tostring(ev.item.name)
+                    if ev.item.name == "first_read" then
+                        listener_entered_tx:send(true)
+                        listener_release_rx:recv()
+                    end
+                end
+            end)
+
+            C.cordis:get("tools"):register("first_read", {
+                description = "first parallel tool",
+                side_effect = "read",
+                concurrency_safe = true,
+                parameters = { type = "object", properties = {} },
+                execute = function()
+                    return { content = { { type = "text", text = "FIRST_RESULT_263" } } }
+                end,
+            })
+            C.cordis:get("tools"):register("second_read", {
+                description = "second parallel tool released after first listener blocks",
+                side_effect = "read",
+                concurrency_safe = true,
+                parameters = { type = "object", properties = {} },
+                execute = function()
+                    second_go_rx:recv()
+                    second_done_tx:send(true)
+                    return { content = { { type = "text", text = "SECOND_WHILE_LISTENER_BLOCKED_263" } } }
+                end,
+            })
+
+            local turn = A:prompt("run parallel with blocking completion listener")
+            assert(
+                mare.task.timeout(5000, function() return listener_entered_rx:recv() end) == true,
+                "first_read item/completed listener never ran"
+            )
+            -- Now first_read's item/completed listener is blocked; let second_read finish.
+            second_go_tx:send(true)
+            assert(
+                mare.task.timeout(5000, function() return second_done_rx:recv() end) == true,
+                "second_read did not finish"
+            )
+
+            -- Wait with a bounded deadline for second_read's result and completed state to land in
+            -- the session journal while first_read's item/completed listener is STILL blocked.
+            local path = S:info().path
+            local persisted = false
+            for _ = 1, 500 do
+                local raw = path and mare.fs.read(path) or ""
+                local has_result = raw:find("SECOND_WHILE_LISTENER_BLOCKED_263", 1, true) ~= nil
+                local has_completed_state = false
+                local needle = second_call_id and ('"tool_call_id":"' .. tostring(second_call_id) .. '"') or nil
+                for line in raw:gmatch("[^\n]+") do
+                    if
+                        needle
+                        and line:find(needle, 1, true) ~= nil
+                        and line:find('"state":"completed"', 1, true) ~= nil
+                    then
+                        has_completed_state = true
+                        break
+                    end
+                end
+                if has_result and has_completed_state then
+                    persisted = true
+                    break
+                end
+                mare.task.sleep(10)
+            end
+            local second_early = #completed_names > 1
+
+            listener_release_tx:send(true)
+            local res = A:wait(turn.turn_id)
+            assert(res.text == "both published", mare.json.encode(res))
+            return persisted, second_early, table.concat(completed_names, ",")
+            "#,
+        )
+        .await;
+        h.shutdown().await;
+
+        assert!(
+            persisted_while_blocked,
+            "completed sibling second_read must be persisted to the session journal even while first_read's item/completed listener is blocked"
+        );
+        assert!(!second_published_early, "ordered item/completed publication must still wait for first_read");
+        assert_eq!(published_order, "first_read,second_read");
+    })
+    .await;
+}

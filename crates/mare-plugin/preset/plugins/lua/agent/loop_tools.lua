@@ -1,7 +1,8 @@
 -- agent.loop_tools: tool call batching (parallel concurrency-safe + serialized barriers) and result commits.
 return function(D)
 	local ctx, cfg, A = D.ctx, D.cfg, D.A
-	local append_with_status = D.persist.append_with_status
+	local persist_message = D.persist.persist_message
+	local publish_message = D.persist.publish_message
 	local tool_calls, result_message = D.tool_exec.tool_calls, D.tool_exec.result_message
 	local tool_state, run_tool = D.tool_exec.tool_state, D.tool_exec.run_tool
 
@@ -85,9 +86,39 @@ return function(D)
 		return any and out or nil
 	end
 
-	local function commit_result(call, k, res, results, step_id, started_calls, output_gate)
+	--- Persist one completed tool result and its completion state marker to the session journal
+	--- immediately, returning a persisted record for ordered in-memory and event publication.
+	local function persist_result(call, res)
 		local rm = result_message(call, res)
-		local appended, append_error, message_persisted, result_entry_id = append_with_status(rm)
+		local persisted, persist_err = persist_message(rm)
+		local completion_persisted = false
+		local completion_checked = false
+		if persisted then
+			local st = A.tool_states[call.id]
+			if st and st.state == "started" then
+				completion_checked = true
+				completion_persisted = tool_state(call, "completed", st) == true
+			end
+		end
+		return {
+			res = res,
+			rm = persisted and persisted.msg or rm,
+			persisted = persisted,
+			persist_err = persist_err,
+			completion_checked = completion_checked,
+			completion_persisted = completion_persisted,
+		}
+	end
+
+	local function publish_result(call, k, record, results, step_id, started_calls, output_gate)
+		local res = record.res
+		local rm = record.rm
+		local appended, append_error, message_persisted, result_entry_id
+		if record.persisted then
+			appended, append_error, message_persisted, result_entry_id = publish_message(record.persisted)
+		else
+			appended, append_error, message_persisted = nil, record.persist_err, false
+		end
 		if not appended then
 			if output_gate then
 				output_gate.closed = true
@@ -97,16 +128,11 @@ return function(D)
 		end
 		results[k] = rm
 		local status = resolve_status(res)
-		-- one logical commit: the result, then the completion marker
-		local st = A.tool_states[call.id]
-		local completion_persisted = false
-		if st and st.state == "started" then
-			completion_persisted = tool_state(call, "completed", st) == true
-			if not completion_persisted then
-				status = "persist_failed"
-			end
+		-- one logical commit: the result, then the completion marker (both already persisted)
+		if record.completion_checked and not record.completion_persisted then
+			status = "persist_failed"
 		end
-		if not message_persisted and not completion_persisted then
+		if not message_persisted and not record.completion_persisted then
 			status = "persist_failed"
 		end
 		if output_gate then
@@ -160,9 +186,11 @@ return function(D)
 		return ctx.tools:readonly(call.name)
 	end
 
-	local function run_parallel_batch(calls, i, j, exec_fn, commit_fn)
-		local done_tx, done_rx = mare.task.channel()
+	local function run_parallel_batch(calls, i, j, exec_fn, publish_fn)
+		local raw_tx, raw_rx = mare.task.channel()
+		local ready_tx, ready_rx = mare.task.channel()
 		local batch, next_launch, next_commit, running = {}, i, i, 0
+		local total = j - i + 1
 		local function launch()
 			local k = next_launch
 			next_launch = next_launch + 1
@@ -170,33 +198,48 @@ return function(D)
 			-- tasks belong to the plugin's ctx: disposing the agent cancels them
 			ctx:spawn(function()
 				local ok, res = pcall(exec_fn, calls[k])
-				done_tx:send({
+				raw_tx:send({
 					k = k,
 					res = ok and res or { content = "Tool error: " .. tostring(res), is_error = true },
 				})
 			end)
 		end
+		-- Dedicated serial journal consumer: persists each completed sibling result and launches
+		-- queued siblings independently of ordered `item/completed` listeners, so a slow or hung
+		-- completion listener on an earlier call never delays journaling later completed calls.
+		local consumer = ctx:spawn(function()
+			for _ = 1, total do
+				local d = raw_rx:recv()
+				running = running - 1
+				if next_launch <= j then
+					launch()
+				end
+				local record = persist_result(calls[d.k], d.res)
+				ready_tx:send({ k = d.k, record = record })
+			end
+		end)
+		local cleanup_consumer <close> = setmetatable({}, {
+			__close = function()
+				consumer:abort()
+			end,
+		})
 		local limit = math.max(1, tonumber(cfg.max_parallel) or 10)
 		while next_launch <= j and running < limit do
 			launch()
 		end
 		while next_commit <= j do
-			local d = done_rx:recv()
-			running = running - 1
-			batch[d.k] = d.res
+			local d = ready_rx:recv()
+			batch[d.k] = d.record
 			while batch[next_commit] do
-				commit_fn(next_commit, batch[next_commit])
+				publish_fn(next_commit, batch[next_commit])
 				next_commit = next_commit + 1
-			end
-			if next_launch <= j then
-				launch()
 			end
 		end
 	end
 
 	-- consecutive concurrency-safe calls (decided per call from its arguments) overlap, at most
 	-- cfg.max_parallel at a time; anything else is an exclusive barrier and runs alone. Results
-	-- are committed one by one in the model's order as soon as every earlier call has finished.
+	-- are persisted as they finish and published one by one in the model's order.
 	local function dispatch_calls(msg, truncated, token, decl_holder, step_id)
 		local calls = tool_calls(msg)
 		local results = mare.json.array()
@@ -216,11 +259,11 @@ return function(D)
 		end
 		-- the batch ends the run when every result says so
 		local terminating = 0
-		local function commit_call(k, res)
-			if type(res) == "table" and res.terminate == true then
+		local function publish_call(k, record)
+			if type(record.res) == "table" and record.res.terminate == true then
 				terminating = terminating + 1
 			end
-			commit_result(calls[k], k, res, results, step_id, started_calls, output_gates[calls[k].id])
+			publish_result(calls[k], k, record, results, step_id, started_calls, output_gates[calls[k].id])
 		end
 		local i = 1
 		while i <= #calls do
@@ -231,9 +274,9 @@ return function(D)
 				end
 			end
 			if j == i then
-				commit_call(i, exec_call(calls[i]))
+				publish_call(i, persist_result(calls[i], exec_call(calls[i])))
 			else
-				run_parallel_batch(calls, i, j, exec_call, commit_call)
+				run_parallel_batch(calls, i, j, exec_call, publish_call)
 			end
 			i = j + 1
 		end
