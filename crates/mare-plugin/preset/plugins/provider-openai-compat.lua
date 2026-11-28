@@ -57,7 +57,6 @@ local PRESETS = {
 				context_window = 256000,
 				max_output = 32768,
 				reasoning = true,
-				efforts = { "high" },
 				cost = { input = 0.6, output = 2.5, cache_read = 0.15 },
 			},
 			{
@@ -88,7 +87,6 @@ local PRESETS = {
 				context_window = 262144,
 				max_output = 32768,
 				reasoning = true,
-				efforts = { "high" },
 			},
 		},
 	},

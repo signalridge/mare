@@ -433,7 +433,7 @@ async fn llm_guards_accessor_schema_validate_params_log_and_wire_history() {
 
             -- params_log fast_unloaded must return adjustments already recorded before params_api loads.
             assert(L:set_model("probe-guard/m1", { save = false }))
-            assert(L:set_effort("high", { save = false }))
+            assert(L:restore_selection({ effort = "high" }))
             local clamped_req = {
                 model = m,
                 messages = { { role = "user", content = { { type = "text", text = "clamp-me" } } } },

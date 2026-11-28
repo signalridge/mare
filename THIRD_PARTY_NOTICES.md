@@ -19,6 +19,10 @@ Release archives, Linux packages, package-manager installs, and the container im
   - `crates/mare-binding/src/sse/tests.rs`: `[eventsource-parser]` test cases translated from `test/parse.test.ts` and `test/fixtures.ts`.
 - **Kimi Code (`MoonshotAI/kimi-code`)** — MIT License & Apache License 2.0:
   - `crates/mare-shared/src/redact.rs`: includes key-name and raw secret redaction patterns (MIT, Copyright (c) 2026 Moonshot AI) and token redaction patterns (Apache-2.0).
+- **magpie (`https://github.com/yetone/magpie`)** — MIT License (Copyright (c) 2026 yetone):
+  - `crates/mare-plugin/preset/plugins/lua/llm/closest.lua`: ported model-name word-scoring suggestion matcher from `internal/provider/closest.go`.
+  - `crates/mare-plugin/preset/plugins/lua/llm/params.lua`: adapted nearest-effort clamping rules (tie-break upward, non-off never clamping to off/none, vendor effort aliases) from `internal/catalog/catalog.go`.
+  - `crates/mare-cli/tests/suite/providers/model_resolve.rs`: ported effort clamping and vendor-alias test cases from `internal/catalog/nearest_effort_test.go` and `internal/catalog/effort_alias_test.go`.
 
 ## OpenAI Codex Derived Files (Apache-2.0)
 

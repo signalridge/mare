@@ -2299,6 +2299,9 @@
         "unavailable_reason": {
           "type": "string"
         },
+        "unlisted": {
+          "type": "boolean"
+        },
         "wire_route": {
           "type": "string"
         }
@@ -2499,6 +2502,9 @@
               },
               "unavailable_reason": {
                 "type": "string"
+              },
+              "unlisted": {
+                "type": "boolean"
               },
               "wire_route": {
                 "type": "string"
@@ -2789,9 +2795,6 @@
                 "type": "string"
               },
               "reasoning": {
-                "type": "boolean"
-              },
-              "reasoning_default": {
                 "type": "boolean"
               },
               "route": {
@@ -3100,6 +3103,9 @@
         },
         "unavailable_reason": {
           "type": "string"
+        },
+        "unlisted": {
+          "type": "boolean"
         },
         "wire_route": {
           "type": "string"

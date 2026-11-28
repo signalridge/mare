@@ -78,6 +78,9 @@ function M.new(env)
 				end
 			end
 		end
+		if m.unlisted and env.warn_unlisted then
+			env.warn_unlisted(m)
+		end
 		refused[m.ref] = nil
 		local p = not m.unavailable and env.provider(m.provider)
 		if not p or not p.prepare or M.missing_credentials(p, provider_cfg(m.provider), env.how_to_login) then

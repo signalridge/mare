@@ -1254,7 +1254,7 @@ async fn google_thinking_level_maps_minimal_medium_xhigh_and_clamps_to_model_eff
             for _, eff in ipairs({ "minimal", "low", "medium", "high", "xhigh" }) do
                 LLM:stream({ model = flash, system = "S", messages = msgs, effort = eff }, function() end)
             end
-            -- gemini-3-pro-preview only supports { "low", "high" }: restored session medium clamps to low, xhigh clamps to high
+            -- gemini-3-pro-preview only supports { "low", "high" }: restored session medium ties up to high, xhigh clamps to high
             LLM:set_model("google/gemini-3-pro-preview", { save = false })
             LLM:restore_selection({ effort = "medium" })
             LLM:stream({ model = pro, system = "S", messages = msgs }, function() end)
@@ -1277,7 +1277,7 @@ async fn google_thinking_level_maps_minimal_medium_xhigh_and_clamps_to_model_eff
             .collect();
         assert_eq!(
             levels,
-            vec!["minimal", "low", "medium", "high", "xhigh", "low", "high"],
+            vec!["minimal", "low", "medium", "high", "xhigh", "high", "high"],
             "google thinkingLevel must map minimal/low/medium/high/xhigh directly and clamp per model efforts: {levels:?}"
         );
         h.shutdown().await;
