@@ -79,8 +79,8 @@ def generate_manifests(
 
     darwin_amd64 = f"mare-{tag}-x86_64-apple-darwin.tar.gz"
     darwin_arm64 = f"mare-{tag}-aarch64-apple-darwin.tar.gz"
-    linux_amd64 = f"mare-{tag}-x86_64-unknown-linux-gnu.tar.gz"
-    linux_arm64 = f"mare-{tag}-aarch64-unknown-linux-gnu.tar.gz"
+    linux_amd64 = f"mare-{tag}-x86_64-unknown-linux-musl.tar.gz"
+    linux_arm64 = f"mare-{tag}-aarch64-unknown-linux-musl.tar.gz"
     win_amd64 = f"mare-{tag}-x86_64-pc-windows-msvc.zip"
     win_arm64 = f"mare-{tag}-aarch64-pc-windows-msvc.zip"
 
@@ -107,15 +107,15 @@ cask "mare" do
   on_linux do
     on_intel do
       sha256 "{need_sum(linux_amd64)}"
-      url "https://github.com/signalridge/mare/releases/download/v#{{version}}/mare-v#{{version}}-x86_64-unknown-linux-gnu.tar.gz",
+      url "https://github.com/signalridge/mare/releases/download/v#{{version}}/mare-v#{{version}}-x86_64-unknown-linux-musl.tar.gz",
         verified: "github.com/signalridge/mare/"
-      binary "mare-v#{{version}}-x86_64-unknown-linux-gnu/mare"
+      binary "mare-v#{{version}}-x86_64-unknown-linux-musl/mare"
     end
     on_arm do
       sha256 "{need_sum(linux_arm64)}"
-      url "https://github.com/signalridge/mare/releases/download/v#{{version}}/mare-v#{{version}}-aarch64-unknown-linux-gnu.tar.gz",
+      url "https://github.com/signalridge/mare/releases/download/v#{{version}}/mare-v#{{version}}-aarch64-unknown-linux-musl.tar.gz",
         verified: "github.com/signalridge/mare/"
-      binary "mare-v#{{version}}-aarch64-unknown-linux-gnu/mare"
+      binary "mare-v#{{version}}-aarch64-unknown-linux-musl/mare"
     end
   end
 
@@ -177,7 +177,6 @@ pkgdesc="Hyperextensible AI coding agent harness (Rust core, Lua 5.5 plugins)"
 arch=('x86_64' 'aarch64')
 url="https://github.com/signalridge/mare"
 license=('Apache-2.0')
-depends=('gcc-libs')
 optdepends=('bubblewrap: Linux sandbox isolation')
 provides=('mare')
 conflicts=('mare')
@@ -188,7 +187,7 @@ sha256sums_aarch64=('{need_sum(linux_arm64)}')
 
 package() {{
   local target_arch="$CARCH"
-  local dir="$srcdir/mare-{tag}-$target_arch-unknown-linux-gnu"
+  local dir="$srcdir/mare-{tag}-$target_arch-unknown-linux-musl"
   install -Dm755 "$dir/mare" "$pkgdir/usr/bin/mare"
   install -Dm644 "$dir/LICENSE" "$pkgdir/usr/share/licenses/mare-bin/LICENSE"
   install -Dm644 "$dir/THIRD_PARTY_NOTICES.md" "$pkgdir/usr/share/licenses/mare-bin/THIRD_PARTY_NOTICES.md"
@@ -207,7 +206,6 @@ package() {{
 \tarch = x86_64
 \tarch = aarch64
 \tlicense = Apache-2.0
-\tdepends = gcc-libs
 \toptdepends = bubblewrap: Linux sandbox isolation
 \tprovides = mare
 \tconflicts = mare
@@ -226,7 +224,6 @@ pkgname = mare-bin
   lib,
   stdenv,
   fetchurl,
-  autoPatchelfHook,
 }}:
 
 let
@@ -262,9 +259,6 @@ stdenv.mkDerivation {{
   src = fetchurl {{
     inherit (srcInfo) url sha256;
   }};
-
-  nativeBuildInputs = lib.optionals stdenv.hostPlatform.isLinux [ autoPatchelfHook ];
-  buildInputs = lib.optionals stdenv.hostPlatform.isLinux [ stdenv.cc.cc.lib ];
 
   sourceRoot = srcInfo.dir;
   dontBuild = true;
@@ -340,8 +334,8 @@ class ReleaseManifestsSelfTests(unittest.TestCase):
         files = [
             f"mare-{tag}-x86_64-apple-darwin.tar.gz",
             f"mare-{tag}-aarch64-apple-darwin.tar.gz",
-            f"mare-{tag}-x86_64-unknown-linux-gnu.tar.gz",
-            f"mare-{tag}-aarch64-unknown-linux-gnu.tar.gz",
+            f"mare-{tag}-x86_64-unknown-linux-musl.tar.gz",
+            f"mare-{tag}-aarch64-unknown-linux-musl.tar.gz",
             f"mare-{tag}-x86_64-pc-windows-msvc.zip",
             f"mare-{tag}-aarch64-pc-windows-msvc.zip",
             f"mare_{ver}_linux_amd64.deb",
@@ -375,17 +369,32 @@ class ReleaseManifestsSelfTests(unittest.TestCase):
             self.assertIn("THIRD_PARTY_NOTICES.md", pkgbuild_text)
             self.assertIn("licenses/cordis-LICENSE", pkgbuild_text)
             self.assertIn("licenses/RUST-THIRD-PARTY-NOTICES.txt", pkgbuild_text)
+            self.assertIn("unknown-linux-musl", pkgbuild_text)
+            self.assertNotIn("unknown-linux-gnu", pkgbuild_text)
+            self.assertNotIn("gcc-libs", pkgbuild_text)
+            srcinfo_text = (manifests / "aur" / ".SRCINFO").read_text(encoding="utf-8")
+            self.assertIn("unknown-linux-musl", srcinfo_text)
+            self.assertNotIn("unknown-linux-gnu", srcinfo_text)
+            self.assertNotIn("gcc-libs", srcinfo_text)
             nur_text = (manifests / "nur" / "default.nix").read_text(encoding="utf-8")
             self.assertIn("THIRD_PARTY_NOTICES.md", nur_text)
             self.assertIn("licenses/cordis-LICENSE", nur_text)
             self.assertIn("licenses/RUST-THIRD-PARTY-NOTICES.txt", nur_text)
+            self.assertIn("unknown-linux-musl", nur_text)
+            self.assertNotIn("unknown-linux-gnu", nur_text)
+            self.assertNotIn("autoPatchelfHook", nur_text)
+            cask_text = (manifests / "Casks" / "mare.rb").read_text(encoding="utf-8")
+            self.assertIn("unknown-linux-musl", cask_text)
+            self.assertNotIn("unknown-linux-gnu", cask_text)
 
             decoded = base64.b64decode(outputs["hashes"]).decode("utf-8")
             self.assertIn("mare_1.2.3_linux_amd64.deb", decoded)
             self.assertIn("mare_1.2.3_linux_arm64.deb", decoded)
             self.assertIn("mare_1.2.3_linux_amd64.rpm", decoded)
             self.assertIn("mare_1.2.3_linux_arm64.rpm", decoded)
-            self.assertIn("mare-v1.2.3-x86_64-unknown-linux-gnu.tar.gz", decoded)
+            self.assertIn("mare-v1.2.3-x86_64-unknown-linux-musl.tar.gz", decoded)
+            self.assertNotIn("unknown-linux-gnu", decoded)
+            self.assertIn("x86_64-unknown-linux-musl", outputs["binary_matrix"])
             self.assertEqual(outputs["is_prerelease"], "false")
             self.assertEqual(outputs["make_latest"], "true")
             self.assertIn("ghcr.io/signalridge/mare:1.2.3", outputs["docker_tags"])

@@ -145,8 +145,8 @@ const OSES = [
 const TARGETS = [
 	{ os: 'macos', arch: 'arm', name: 'macOS', detail: t.install.apple, target: 'aarch64-apple-darwin', ext: 'tar.gz' },
 	{ os: 'macos', arch: 'x86', name: 'macOS', detail: t.install.intel, target: 'x86_64-apple-darwin', ext: 'tar.gz' },
-	{ os: 'linux', arch: 'x86', name: 'Linux', detail: 'x86-64', target: 'x86_64-unknown-linux-gnu', ext: 'tar.gz' },
-	{ os: 'linux', arch: 'arm', name: 'Linux', detail: 'ARM64', target: 'aarch64-unknown-linux-gnu', ext: 'tar.gz' },
+	{ os: 'linux', arch: 'x86', name: 'Linux', detail: 'x86-64', target: 'x86_64-unknown-linux-musl', ext: 'tar.gz' },
+	{ os: 'linux', arch: 'arm', name: 'Linux', detail: 'ARM64', target: 'aarch64-unknown-linux-musl', ext: 'tar.gz' },
 	{ os: 'windows', arch: 'x86', name: 'Windows', detail: 'x64', target: 'x86_64-pc-windows-msvc', ext: 'zip' },
 	{ os: 'windows', arch: 'arm', name: 'Windows', detail: 'ARM64', target: 'aarch64-pc-windows-msvc', ext: 'zip' },
 ];

@@ -46,9 +46,21 @@ jobs:
         with:
           python-version-file: .python-version
       - uses: ./.github/actions/setup-rust
+        with:
+          targets: x86_64-unknown-linux-musl
+      - name: Install Linux musl build tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+          {
+            echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc"
+            echo "CC_x86_64_unknown_linux_musl=musl-gcc"
+            echo "AWS_LC_SYS_NO_JITTER_ENTROPY=1"
+          } >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          key: release-dry-run
+          key: release-dry-run-musl
       - name: Run release script self-tests and policy checks
         run: |
           python3 scripts/release_manifests.py --self-test
@@ -57,11 +69,17 @@ jobs:
           python3 scripts/verify_release_archive.py --self-test
       - name: Build locked release binary and verify seams
         run: |
-          cargo build --release --locked -p mare-cli --bin mare
-          target/release/mare --version
+          cargo build --release --locked -p mare-cli --bin mare --target x86_64-unknown-linux-musl
+          bin="target/x86_64-unknown-linux-musl/release/mare"
+          "$bin" --version
+          if readelf -l "$bin" | grep -q 'INTERP'; then
+            echo "::error::Expected static musl binary, found PT_INTERP in $bin"
+            readelf -l "$bin"
+            exit 1
+          fi
           python3 scripts/check_seams.py \
-            --verify-release target/release/mare \
-            --verify-faux-absent target/release/mare
+            --verify-release "$bin" \
+            --verify-faux-absent "$bin"
       - uses: ./.github/actions/setup-cargo-about
       - name: Generate and verify Rust dependency notices
         run: |
@@ -81,15 +99,15 @@ jobs:
           version="$(python3 -c 'import json; print(json.load(open(".release-please-manifest.json"))["."])')"
           stage="${RUNNER_TEMP}/unix-archive-dry-run"
           rm -rf "$stage"
-          dir="${stage}/mare-v${version}-x86_64-unknown-linux-gnu"
+          dir="${stage}/mare-v${version}-x86_64-unknown-linux-musl"
           mkdir -p "$dir/licenses"
-          cp target/release/mare "$dir/"
+          cp target/x86_64-unknown-linux-musl/release/mare "$dir/"
           cp -r crates/mare-plugin/preset/types "$dir/"
           cp LICENSE THIRD_PARTY_NOTICES.md README.md "$dir/"
           cp crates/mare-kernel/lua/cordis/LICENSE "$dir/licenses/cordis-LICENSE"
           cp licenses/RUST-THIRD-PARTY-NOTICES.txt "$dir/licenses/"
-          tar czf "${dir}.tar.gz" -C "$stage" "mare-v${version}-x86_64-unknown-linux-gnu"
-          python3 scripts/verify_release_archive.py "${dir}.tar.gz" "mare-v${version}-x86_64-unknown-linux-gnu"
+          tar czf "${dir}.tar.gz" -C "$stage" "mare-v${version}-x86_64-unknown-linux-musl"
+          python3 scripts/verify_release_archive.py "${dir}.tar.gz" "mare-v${version}-x86_64-unknown-linux-musl"
       - uses: ./.github/actions/setup-nfpm
       - name: Dry-run .deb and .rpm packaging via nfpm
         shell: bash
@@ -112,7 +130,7 @@ jobs:
           license: Apache-2.0
           description: A hyperextensible agent harness (Rust core, Lua plugins).
           contents:
-            - src: target/release/mare
+            - src: target/x86_64-unknown-linux-musl/release/mare
               dst: /usr/bin/mare
               file_info:
                 mode: 0755

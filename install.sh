@@ -19,8 +19,7 @@ OS="$(uname -s)"
 ARCH="$(uname -m)"
 
 case "$OS" in
-  Darwin) OS_PART="apple-darwin" ;;
-  Linux)  OS_PART="unknown-linux-gnu" ;;
+  Darwin|Linux) ;;
   *)
     echo "mare install: unsupported operating system: $OS" >&2
     exit 1
@@ -36,8 +35,6 @@ case "$ARCH" in
     ;;
 esac
 
-TARGET="${ARCH_PART}-${OS_PART}"
-
 if [ -n "${MARE_VERSION:-}" ]; then
   case "$MARE_VERSION" in
     v*) TAG="$MARE_VERSION" ;;
@@ -52,15 +49,30 @@ else
   fi
 fi
 
-ARCHIVE="mare-${TAG}-${TARGET}.tar.gz"
 BASE_URL="https://github.com/${REPO}/releases/download/${TAG}"
 
 TMPDIR_MARE="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR_MARE"' EXIT
 
+curl -fsSL "${BASE_URL}/checksums.txt" -o "${TMPDIR_MARE}/checksums.txt"
+
+case "$OS" in
+  Darwin) OS_PART="apple-darwin" ;;
+  Linux)
+    MUSL_ARCHIVE="mare-${TAG}-${ARCH_PART}-unknown-linux-musl.tar.gz"
+    if awk -v f="$MUSL_ARCHIVE" 'BEGIN { found = 0 } $2 == f || $2 == ("*" f) { found = 1; exit } END { exit(found ? 0 : 1) }' "${TMPDIR_MARE}/checksums.txt"; then
+      OS_PART="unknown-linux-musl"
+    else
+      OS_PART="unknown-linux-gnu"
+    fi
+    ;;
+esac
+
+TARGET="${ARCH_PART}-${OS_PART}"
+ARCHIVE="mare-${TAG}-${TARGET}.tar.gz"
+
 echo "Installing mare ${TAG} (${TARGET})..."
 curl -fsSL "${BASE_URL}/${ARCHIVE}" -o "${TMPDIR_MARE}/${ARCHIVE}"
-curl -fsSL "${BASE_URL}/checksums.txt" -o "${TMPDIR_MARE}/checksums.txt"
 
 EXPECTED="$(awk -v f="$ARCHIVE" '$2 == f || $2 == ("*" f) { print tolower($1); exit }' "${TMPDIR_MARE}/checksums.txt")"
 if [ -z "$EXPECTED" ]; then

@@ -149,6 +149,17 @@ def check_release_workflow(root: pathlib.Path) -> list[str]:
         errors.append("release.yaml build job must need [validate-tag, gate, rust-notices]")
     if "scripts/verify_release_archive.py" not in build_block:
         errors.append("release.yaml build job must verify archives via scripts/verify_release_archive.py")
+    for target in ("x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"):
+        if target not in build_block:
+            errors.append(f"release.yaml build job must target {target}")
+    if "unknown-linux-gnu" in build_block:
+        errors.append("release.yaml build job must use *-unknown-linux-musl, not *-unknown-linux-gnu")
+    if "musl-tools" not in build_block:
+        errors.append("release.yaml build job must install musl-tools for Linux musl builds")
+    if "AWS_LC_SYS_NO_JITTER_ENTROPY=1" not in build_block:
+        errors.append("release.yaml build job must disable aws-lc jitter entropy on musl")
+    if "readelf -l" not in build_block or "INTERP" not in build_block:
+        errors.append("release.yaml build job must verify Linux musl binaries have no PT_INTERP")
 
     release_block = extract_job_block(text, "release")
     if not release_block:
@@ -172,6 +183,16 @@ def check_release_workflow(root: pathlib.Path) -> list[str]:
             errors.append("release.yaml container build must use conditional steps.metadata.outputs.docker_tags")
         if "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" in release_block:
             errors.append("release.yaml must not unconditionally push GHCR :latest")
+        if "unknown-linux-gnu" in release_block:
+            errors.append("release.yaml release job must package *-unknown-linux-musl, not *-unknown-linux-gnu")
+
+    verify_binary = extract_job_block(text, "verify-binary")
+    if not verify_binary:
+        errors.append("release.yaml missing verify-binary job")
+    else:
+        for image in ("ubuntu:20.04", "debian:11", "registry.access.redhat.com/ubi8/ubi"):
+            if image not in verify_binary:
+                errors.append(f"release.yaml verify-binary must verify Linux binary inside {image}")
 
     verify_aur = extract_job_block(text, "verify-aur")
     if not verify_aur:
@@ -321,6 +342,17 @@ def check_companion_workflows_and_files(root: pathlib.Path) -> list[str]:
 
     if not (root / "scripts" / "release_manifests.py").is_file():
         errors.append("missing scripts/release_manifests.py")
+
+    install_sh = root / "install.sh"
+    site_install_sh = root / "docs-site" / "public" / "install.sh"
+    if not install_sh.is_file():
+        errors.append("missing install.sh")
+    else:
+        inst_text = install_sh.read_text(encoding="utf-8")
+        if "unknown-linux-musl" not in inst_text:
+            errors.append("install.sh must support unknown-linux-musl archives on Linux")
+        if site_install_sh.is_file() and site_install_sh.read_text(encoding="utf-8") != inst_text:
+            errors.append("docs-site/public/install.sh must match install.sh")
 
     return errors
 
@@ -740,6 +772,96 @@ class ReleasePolicySelfTests(unittest.TestCase):
                 (root / "Dockerfile.release").write_text(body, encoding="utf-8")
                 errs = check_dockerfile_release(root)
                 self.assertTrue(errs, f"expected failure for {body!r}")
+
+    def test_install_sh_selects_linux_musl_targets(self):
+        if os.name == "nt":
+            self.skipTest("shell contract runs on Unix")
+        install_sh = (self._repo_root() / "install.sh").read_text(encoding="utf-8")
+        cases = (
+            ("x86_64", True, "x86_64-unknown-linux-musl"),
+            ("aarch64", True, "aarch64-unknown-linux-musl"),
+            ("x86_64", False, "x86_64-unknown-linux-gnu"),
+            ("aarch64", False, "aarch64-unknown-linux-gnu"),
+        )
+        for arch, has_musl, expected_target in cases:
+            with self.subTest(arch=arch, has_musl=has_musl), tempfile.TemporaryDirectory() as tmp:
+                d = pathlib.Path(tmp)
+                bindir = d / "bin"
+                bindir.mkdir()
+                uname_bin = bindir / "uname"
+                uname_bin.write_text(
+                    '#!/bin/sh\nif [ "$1" = "-s" ]; then echo Linux; else echo ' + arch + "; fi\n",
+                    encoding="utf-8",
+                )
+                uname_bin.chmod(stat.S_IRWXU)
+                curl_bin = bindir / "curl"
+                curl_bin.write_text(
+                    '#!/bin/sh\n'
+                    'out=""\n'
+                    'url=""\n'
+                    'while [ "$#" -gt 0 ]; do\n'
+                    '  case "$1" in\n'
+                    '    -o) out="$2"; shift 2 ;;\n'
+                    '    https://*) url="$1"; shift ;;\n'
+                    '    *) shift ;;\n'
+                    '  esac\n'
+                    'done\n'
+                    'case "$url" in\n'
+                    '  */checksums.txt)\n'
+                    '    printf "%s\\n" "$FAKE_CHECKSUMS" > "$out"\n'
+                    '    exit 0\n'
+                    '    ;;\n'
+                    '  *)\n'
+                    '    echo "CURL_URL:$url" >&2\n'
+                    '    exit 99\n'
+                    '    ;;\n'
+                    'esac\n',
+                    encoding="utf-8",
+                )
+                curl_bin.chmod(stat.S_IRWXU)
+                checksums = (
+                    f"{'a' * 64}  mare-v1.0.0-{arch}-unknown-linux-musl.tar.gz\n"
+                    if has_musl
+                    else f"{'a' * 64}  mare-v1.0.0-{arch}-unknown-linux-gnu.tar.gz\n"
+                )
+                script_path = d / "install.sh"
+                script_path.write_text(install_sh, encoding="utf-8")
+                res = subprocess.run(
+                    ["sh", str(script_path)],
+                    env=dict(
+                        os.environ,
+                        PATH=str(bindir) + os.pathsep + os.environ.get("PATH", ""),
+                        MARE_VERSION="v1.0.0",
+                        FAKE_CHECKSUMS=checksums,
+                    ),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(res.returncode, 99, res.stdout + res.stderr)
+                self.assertIn(f"mare-v1.0.0-{expected_target}.tar.gz", res.stderr)
+
+    def test_release_workflow_catches_linux_gnu_or_missing_musl_checks(self):
+        rel_text = (self._repo_root() / ".github" / "workflows" / "release.yaml").read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            wf_dir = root / ".github" / "workflows"
+            wf_dir.mkdir(parents=True)
+
+            (wf_dir / "release.yaml").write_text(rel_text.replace("unknown-linux-musl", "unknown-linux-gnu"), encoding="utf-8")
+            errs = check_release_workflow(root)
+            self.assertTrue(any("unknown-linux-musl" in e for e in errs), errs)
+
+            (wf_dir / "release.yaml").write_text(rel_text.replace("ubuntu:20.04", "ubuntu:24.04"), encoding="utf-8")
+            errs = check_release_workflow(root)
+            self.assertTrue(any("ubuntu:20.04" in e for e in errs), errs)
+
+            (wf_dir / "release.yaml").write_text(
+                rel_text.replace("registry.access.redhat.com/ubi8/ubi", "ubuntu:24.04"),
+                encoding="utf-8",
+            )
+            errs = check_release_workflow(root)
+            self.assertTrue(any("ubi8" in e for e in errs), errs)
 
 
 def main() -> int:

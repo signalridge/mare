@@ -10,8 +10,8 @@ Release artifacts are built for six targets (`.github/workflows/release.yaml`):
 | --- | --- | --- |
 | macOS, Apple silicon | `aarch64-apple-darwin` | `.tar.gz`, Homebrew cask, Nix |
 | macOS, Intel | `x86_64-apple-darwin` | `.tar.gz`, Homebrew cask, Nix |
-| Linux, x86-64 (glibc 2.39+) | `x86_64-unknown-linux-gnu` | `.tar.gz`, `.deb`, `.rpm`, Homebrew cask, AUR, Nix, GHCR container |
-| Linux, ARM64 (glibc 2.39+) | `aarch64-unknown-linux-gnu` | `.tar.gz`, `.deb`, `.rpm`, Homebrew cask, AUR, Nix, GHCR container |
+| Linux, x86-64 (static musl) | `x86_64-unknown-linux-musl` | `.tar.gz`, `.deb`, `.rpm`, Homebrew cask, AUR, Nix, GHCR container |
+| Linux, ARM64 (static musl) | `aarch64-unknown-linux-musl` | `.tar.gz`, `.deb`, `.rpm`, Homebrew cask, AUR, Nix, GHCR container |
 | Windows, x86-64 | `x86_64-pc-windows-msvc` | `.zip`, Scoop manifest |
 | Windows, ARM64 | `aarch64-pc-windows-msvc` | `.zip`, Scoop manifest |
 
@@ -73,7 +73,7 @@ fi
 
 ### Quick install script
 
-Download the latest Linux archive (`x86_64-unknown-linux-gnu` or `aarch64-unknown-linux-gnu`, glibc 2.39+) and verify its SHA-256 checksum against `checksums.txt`:
+Download the latest Linux archive (`x86_64-unknown-linux-musl` or `aarch64-unknown-linux-musl`, statically linked) and verify its SHA-256 checksum against `checksums.txt`:
 
 ```sh
 curl -fsSL https://signalridge.github.io/mare/install.sh | sh
@@ -131,7 +131,7 @@ Download `mare-$VERSION-$TARGET.tar.gz` and its `.sha256` file from [GitHub Rele
 
 ```sh
 VERSION=vX.Y.Z
-TARGET=x86_64-unknown-linux-gnu   # or aarch64-unknown-linux-gnu for ARM64
+TARGET=x86_64-unknown-linux-musl   # or aarch64-unknown-linux-musl for ARM64
 ARCHIVE="mare-$VERSION-$TARGET.tar.gz"
 EXPECTED=$(awk 'NR==1 && length($1)==64 && $1 ~ /^[[:xdigit:]]+$/{print tolower($1)}' "$ARCHIVE.sha256")
 ACTUAL=$(sha256sum "$ARCHIVE" | awk 'NR==1{print tolower($1)}')
