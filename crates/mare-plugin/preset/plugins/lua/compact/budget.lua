@@ -3,6 +3,7 @@
 local M = {}
 
 local mare_lib = require("mare_lib")
+local DEFAULT_HEADROOM_RATIO = 0.2
 
 function M.number(value, label, minimum, maximum, integer)
 	if
@@ -68,7 +69,10 @@ end
 
 --- Compute `{ limit, window, reserved, message, pressure, headroom }` for `model` and optional
 --- `request_max_tokens`, or `nil, error_message` when the configuration or model budget is invalid.
-function M.compute(cfg, model, request_max_tokens)
+--- When `headroom_explicit` is `false` and the model has no per-model `headroom_tokens` override,
+--- the default headroom scales down to `DEFAULT_HEADROOM_RATIO` of the message budget on small
+--- windows so default config does not exhaust the pressure budget.
+function M.compute(cfg, model, request_max_tokens, headroom_explicit)
 	local valid, config_error = M.validate_config(cfg)
 	if not valid then
 		return nil, config_error
@@ -80,6 +84,7 @@ function M.compute(cfg, model, request_max_tokens)
 	local name = model and (model.ref or model.id) or "the model"
 	local per = model and cfg.model_thresholds and cfg.model_thresholds[model.ref or ""] or {}
 	local headroom = per.headroom_tokens or cfg.headroom_tokens
+	local explicit_headroom = per.headroom_tokens ~= nil or headroom_explicit ~= false
 	local reserved = mare_lib.output_limit(request_max_tokens, model and model.max_output)
 	local _, window_error = M.number(window, tostring(name) .. " context_window", 1, nil, true)
 	local reserved_error = not reserved and ("compaction: invalid " .. tostring(name) .. " max_output/max_tokens")
@@ -94,6 +99,12 @@ function M.compute(cfg, model, request_max_tokens)
 				reserved,
 				window
 			) .. "configure a larger context_window or a smaller max_output for it"
+	end
+	if not explicit_headroom then
+		local scaled = math.max(1, math.floor(message * DEFAULT_HEADROOM_RATIO))
+		if headroom >= message - scaled then
+			headroom = scaled
+		end
 	end
 	local pressure = message - headroom
 	if pressure <= 0 then

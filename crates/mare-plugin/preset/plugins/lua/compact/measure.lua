@@ -131,7 +131,11 @@ function M.create(ctx, cfg, S)
 		if not model and S.prepared and request_max_tokens == nil then
 			return S.prepared.budget
 		end
-		return budget.compute(cfg, model or S.target_model or ctx.llm:current(), request_max_tokens)
+		local headroom_explicit = S.headroom_explicit
+		if type(headroom_explicit) == "function" then
+			headroom_explicit = headroom_explicit()
+		end
+		return budget.compute(cfg, model or S.target_model or ctx.llm:current(), request_max_tokens, headroom_explicit)
 	end
 
 	function m.threshold(model)

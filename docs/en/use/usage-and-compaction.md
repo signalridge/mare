@@ -25,7 +25,7 @@ Before each model request, mare computes the trigger threshold by kind in preced
 
 `min(configured_threshold, context_window - max_output - headroom_tokens)`
 
-Defaults are `threshold_ratio = 0.8` and `headroom_tokens = 32768`. The status line warns when usage exceeds 90% of the threshold. You can also compact manually at any time:
+Defaults are `threshold_ratio = 0.8` and `headroom_tokens = 32768` (when left at the default, `headroom_tokens` scales down to 20% of `context_window - max_output` on smaller windows so requests keep a usable pressure budget). The status line warns when usage exceeds 90% of the threshold. You can also compact manually at any time:
 
 ```text
 /compact

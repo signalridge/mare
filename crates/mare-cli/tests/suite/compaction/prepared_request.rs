@@ -518,6 +518,127 @@ async fn default_headroom_keeps_a_full_64k_output_reserve_with_a_128k_window() {
 }
 
 #[tokio::test]
+async fn default_headroom_scales_for_small_windows_while_keeping_explicit_and_impossible_errors() {
+    local(async {
+        let env = TestEnv::new().await;
+        let cfg = json!({
+            "plugins": {
+                "compact": {
+                    "model_thresholds": {
+                        "small/override": { "headroom_tokens": 2048 },
+                        "small/too-large": { "headroom_tokens": 32768 },
+                    }
+                }
+            }
+        });
+        let h = env.host().builtins(&["compact", "usage"]).faux(json!([])).config(cfg).no_session().build().await;
+        expose(&h);
+        global(&h, "L", h.service_table("llm").unwrap());
+        global(&h, "K", h.service_table("compact").unwrap());
+
+        let result_json: String = eval(
+            &h,
+            r#"
+            local out = {}
+            local sent = 0
+            L:register_provider({
+                provider = "small",
+                is_configured = function() return true end,
+                models = {
+                    { model_id = "w32k", context_window = 32000, max_output = 4096 },
+                    { model_id = "w32768", context_window = 32768, max_output = 4096 },
+                    { model_id = "w36865", context_window = 36865, max_output = 4096 },
+                    { model_id = "override", context_window = 32768, max_output = 4096 },
+                    { model_id = "too-large", context_window = 32768, max_output = 4096 },
+                    { model_id = "impossible-msg", context_window = 4096, max_output = 4096 },
+                    { model_id = "impossible-1", context_window = 4097, max_output = 4096 },
+                },
+                stream = function(_, sink)
+                    sent = sent + 1
+                    sink({ type = "text_delta", delta = "ok" })
+                    return { role = "assistant", stop_reason = "stop", content = { { type = "text", text = "ok" } } }
+                end,
+            })
+
+            local function prepare_err(ref)
+                local msg = { { role = "user", content = { { type = "text", text = "hi" } } } }
+                local ok, err = pcall(K.prepare_request, K, {
+                    model = L:resolve(ref),
+                    messages = msg,
+                    system = "",
+                    tools = {},
+                }, msg)
+                return ok, tostring(err or "")
+            end
+
+            local t32k = K:threshold(L:resolve("small/w32k"))
+            local t32768 = K:threshold(L:resolve("small/w32768"))
+            local t36865 = K:threshold(L:resolve("small/w36865"))
+            local tovr = K:threshold(L:resolve("small/override"))
+            local tbad = K:threshold(L:resolve("small/too-large"))
+            local timsg = K:threshold(L:resolve("small/impossible-msg"))
+            local ti1 = K:threshold(L:resolve("small/impossible-1"))
+            local ok_bad, ebad = prepare_err("small/too-large")
+            local ok_imsg, eimsg = prepare_err("small/impossible-msg")
+            local ok_i1, ei1 = prepare_err("small/impossible-1")
+
+            out.t32k = t32k
+            out.t32768 = t32768
+            out.t36865 = t36865
+            out.tovr = tovr
+            out.tbad_nil = tbad == nil and not ok_bad
+            out.ebad = ebad
+            out.timsg_nil = timsg == nil and not ok_imsg
+            out.eimsg = eimsg
+            out.ti1_nil = ti1 == nil and not ok_i1
+            out.ei1 = ei1
+
+            -- First real request on a 32k model and a window==headroom (32768) model must succeed.
+            assert(L:set_model("small/w32k"))
+            local r1 = K:prepare_request({
+                model = L:current(),
+                messages = { { role = "user", content = { { type = "text", text = "hi" } } } },
+                system = "",
+                tools = {},
+            }, { { role = "user", content = { { type = "text", text = "hi" } } } })
+            out.req_32k_ok = type(r1) == "table" and r1.compacted == false
+
+            assert(L:set_model("small/w32768"))
+            local r2 = K:prepare_request({
+                model = L:current(),
+                messages = { { role = "user", content = { { type = "text", text = "hi" } } } },
+                system = "",
+                tools = {},
+            }, { { role = "user", content = { { type = "text", text = "hi" } } } })
+            out.req_32768_ok = type(r2) == "table" and r2.compacted == false
+
+            return mare.json.encode(out)
+        "#,
+        )
+        .await;
+        let v: serde_json::Value = serde_json::from_str(&result_json).unwrap();
+        assert_eq!(v["t32k"], json!(22324), "{v}");
+        assert_eq!(v["t32768"], json!(22938), "{v}");
+        assert_eq!(v["t36865"], json!(26216), "{v}");
+        assert_eq!(v["tovr"], json!(26214), "{v}");
+        assert_eq!(v["tbad_nil"], json!(true), "{v}");
+        assert!(v["ebad"].as_str().unwrap_or("").contains("no pressure budget"), "{v}");
+        assert_eq!(v["timsg_nil"], json!(true), "{v}");
+        assert!(v["eimsg"].as_str().unwrap_or("").contains("no message budget"), "{v}");
+        assert_eq!(v["ti1_nil"], json!(true), "{v}");
+        assert!(v["ei1"].as_str().unwrap_or("").contains("no pressure budget"), "{v}");
+        assert_eq!(v["req_32k_ok"], json!(true), "{v}");
+        assert_eq!(v["req_32768_ok"], json!(true), "{v}");
+
+        // End-to-end prompt on the 32768-window model with default config must reach the provider.
+        let prompt_res = h.prompt("hello small window", json!({})).await.unwrap();
+        assert!(prompt_res["error"].is_null(), "small-window prompt must succeed: {prompt_res}");
+        h.shutdown().await;
+    })
+    .await
+}
+
+#[tokio::test]
 async fn budgets_honor_output_cap_and_reject_nonfinite_values() {
     local(async {
         let env = TestEnv::new().await;
@@ -587,7 +708,11 @@ async fn prepared_request_rejects_exhausted_pressure_and_unserializable_messages
     local(async {
         for mode in ["budget", "unserializable"] {
             let env = TestEnv::new().await;
-            let h = env.host().builtins(&["compact", "usage"]).faux(json!([])).no_session().build().await;
+            let mut builder = env.host().builtins(&["compact", "usage"]).faux(json!([])).no_session();
+            if mode == "budget" {
+                builder = builder.config(json!({ "plugins": { "compact": { "headroom_tokens": 32768 } } }));
+            }
+            let h = builder.build().await;
             expose(&h);
             global(&h, "L", h.service_table("llm").unwrap());
             global(&h, "K", h.service_table("compact").unwrap());
