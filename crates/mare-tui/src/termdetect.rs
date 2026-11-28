@@ -113,7 +113,7 @@ fn strip_trailing_commas(s: &str) -> String {
 /// Which of the keys mare needs are forwarded: a `sendInput` action, or `unbound` (the key then
 /// reaches the application). Returns `(shift_enter, alt_enter)`; None if the file isn't JSON.
 pub fn forwarded_keys(settings: &str) -> Option<(bool, bool)> {
-    let v: serde_json::Value = serde_json::from_str(&strip_jsonc(settings)).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&strip_jsonc(mare_shared::strip_utf8_bom(settings))).ok()?;
     let mut found = (false, false);
     let mut by_id = std::collections::HashMap::new();
     for list in ["actions", "keybindings"] {

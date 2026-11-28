@@ -460,3 +460,93 @@ fn mcp_zero_tools_without_capability_connects_with_hint_and_advertised_method_no
         "expected connected 0-tools hint in list-tools:\n{lt_out}"
     );
 }
+
+/// File-backed JSON readers (MCP config, state.json, auth.json, permissions.json) strip at most
+/// one leading UTF-8 BOM (`EF BB BF`), while `mare.json.decode*` keeps rejecting BOMs so network
+/// and model JSON contracts stay unchanged.
+#[tokio::test]
+async fn file_backed_json_readers_strip_single_utf8_bom_while_json_decode_stays_strict() {
+    local(async {
+        let env = TestEnv::new().await;
+        let fake = Fake::new(&env, "bom");
+        let entry = with(fake.entry(json!({ "tools": ["ping"] })), json!({ "tier": "direct" }));
+        let state_dir = mare_shared::paths::state_dir();
+        std::fs::create_dir_all(env.config_dir()).unwrap();
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        // Single UTF-8 BOM on user mcp.json, state.json, auth.json, and permissions.json.
+        std::fs::write(
+            env.config_dir().join("mcp.json"),
+            format!("\u{FEFF}{}", json!({ "mcpServers": { "bom_srv": entry } })),
+        )
+        .unwrap();
+        std::fs::write(state_dir.join("state.json"), format!("\u{FEFF}{}", json!({ "version": 1, "effort": "high" })))
+            .unwrap();
+        mare_shared::paths::write_atomic(
+            &mare_shared::paths::auth_file(),
+            format!("\u{FEFF}{}", json!({ "version": 1, "openai": { "api_key": "sk-bom-test" } })).as_bytes(),
+            mare_shared::paths::WriteMode::Private,
+        )
+        .unwrap();
+        std::fs::write(
+            env.config_dir().join("permissions.json"),
+            format!("\u{FEFF}{}", json!({ "version": 1, "rules": [] })),
+        )
+        .unwrap();
+
+        let h = env.host().builtins(&["mcp", "llm", "permissions"]).no_session().build().await;
+        expose(&h);
+        wait_until(15, "bom_srv tool registered", || {
+            let h = h.clone();
+            async move { eval::<bool>(&h, "return T:get('mcp__bom_srv__ping') ~= nil").await }
+        })
+        .await;
+
+        let (state_effort, auth_key, dec_ok, dec_u_ok, dec_l_ok): (String, String, bool, bool, bool) = eval(
+            &h,
+            r#"
+            local st, st_err = mare.state.read()
+            assert(st, "state.json with BOM must read: " .. tostring(st_err))
+            local L = C.cordis:get("llm")
+            local cred = L:auth_get("openai")
+            local bom_json = "\239\187\191{}"
+            local d1 = mare.json.decode(bom_json)
+            local d2 = mare.json.decode_unique(bom_json)
+            local d3 = mare.json.decode_lossless(bom_json)
+            return tostring(st.effort or ""), tostring(cred and cred.api_key or ""),
+                d1 ~= nil, d2 ~= nil, d3 ~= nil
+            "#,
+        )
+        .await;
+        assert_eq!(state_effort, "high");
+        assert_eq!(auth_key, "sk-bom-test");
+        assert!(!dec_ok, "mare.json.decode must still reject leading BOM");
+        assert!(!dec_u_ok, "mare.json.decode_unique must still reject leading BOM");
+        assert!(!dec_l_ok, "mare.json.decode_lossless must still reject leading BOM");
+        h.shutdown().await;
+        drop(env);
+
+        // Double UTF-8 BOM on mcp.json must still be rejected as invalid JSON.
+        let env2 = TestEnv::new().await;
+        std::fs::create_dir_all(env2.config_dir()).unwrap();
+        std::fs::write(
+            env2.config_dir().join("mcp.json"),
+            format!("\u{FEFF}\u{FEFF}{}", json!({ "mcpServers": { "bad_bom": { "command": "echo" } } })),
+        )
+        .unwrap();
+        let h2 = env2.host().builtins(&["mcp"]).no_session().build().await;
+        expose(&h2);
+        let errs: String = eval(
+            &h2,
+            r#"
+            local M = C.cordis:get("mcp")
+            local status = M:list_servers()
+            return mare.json.encode(status.errors or {})
+            "#,
+        )
+        .await;
+        assert!(errs.contains("invalid JSON"), "double BOM mcp.json must report invalid JSON: {errs}");
+        h2.shutdown().await;
+    })
+    .await
+}

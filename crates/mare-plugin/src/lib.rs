@@ -2234,4 +2234,29 @@ mod tests {
         assert_eq!(helper_res, "snap1:imgdata");
         assert!(helper_poisoned, "poison guard must remain enforced when session.fork loads via a D helper");
     }
+
+    #[test]
+    fn mare_lib_strip_utf8_bom_strips_at_most_one_leading_bom() {
+        let lua = mlua::Lua::new();
+        let src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("preset/plugins/lua/mare_lib.lua"),
+        )
+        .unwrap();
+        let (single, double, plain, empty): (String, String, String, String) = lua
+            .load(format!(
+                r###"
+                local lib = (function() {src} end)()
+                return lib.strip_utf8_bom("\239\187\191{{}}"),
+                    lib.strip_utf8_bom("\239\187\191\239\187\191{{}}"),
+                    lib.strip_utf8_bom("{{}}"),
+                    lib.strip_utf8_bom("")
+                "###
+            ))
+            .eval()
+            .unwrap();
+        assert_eq!(single, "{}");
+        assert_eq!(double, "\u{FEFF}{}");
+        assert_eq!(plain, "{}");
+        assert_eq!(empty, "");
+    }
 }

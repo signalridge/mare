@@ -171,7 +171,7 @@ pub const LOCK_VERSION: u32 = 1;
 /// Parse a JSON document enforcing an object root and an explicit integer `version` field
 /// (`CorruptPolicy::Refuse` forbids serde seq `[1]`/`[]` or missing-version `{}` coercions).
 pub(crate) fn parse_versioned_json_object<T: serde::de::DeserializeOwned>(s: &str, path: &Path) -> Result<T> {
-    let val: serde_json::Value = serde_json::from_str(s)?;
+    let val: serde_json::Value = serde_json::from_str(mare_shared::strip_utf8_bom(s))?;
     let obj = val.as_object().ok_or_else(|| anyhow::anyhow!("{} must be a JSON object", path.display()))?;
     if !obj.get("version").is_some_and(|v| v.is_u64()) {
         anyhow::bail!("{} is missing an integer `version` field", path.display());

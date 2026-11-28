@@ -6,6 +6,16 @@
 
 local M = {}
 
+local UTF8_BOM = "\239\187\191"
+
+--- Strip at most one leading UTF-8 BOM (`EF BB BF`) from file text before parsing JSON.
+function M.strip_utf8_bom(text)
+	if type(text) == "string" and text:sub(1, 3) == UTF8_BOM then
+		return text:sub(4)
+	end
+	return text
+end
+
 function M.positive_integer(value)
 	return type(value) == "number" and value == value and value ~= math.huge and value > 0 and value % 1 == 0
 end

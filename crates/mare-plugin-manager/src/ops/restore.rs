@@ -44,7 +44,8 @@ pub fn repair_lock(cfg: &serde_json::Value) -> Result<()> {
     for path in paths {
         match std::fs::read(&path) {
             Ok(bytes) => {
-                if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes)
+                if let Ok(value) =
+                    serde_json::from_slice::<serde_json::Value>(mare_shared::strip_utf8_bom_bytes(&bytes))
                     && let Some(version) = value.get("version").and_then(serde_json::Value::as_u64)
                     && version != u64::from(crate::lock::LOCK_VERSION)
                 {

@@ -59,7 +59,8 @@ fn read_at(path: &Path, namespace: &str) -> Result<StateSnapshot, StateFailure> 
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(absent(namespace)),
         Err(e) => return Err(failure(StateErrorCode::Io, e)),
     };
-    let value: Json = serde_json::from_slice(&bytes).map_err(|e| failure(StateErrorCode::Corrupt, e))?;
+    let value: Json = serde_json::from_slice(mare_shared::strip_utf8_bom_bytes(&bytes))
+        .map_err(|e| failure(StateErrorCode::Corrupt, e))?;
     let version = value
         .get("version")
         .and_then(Json::as_u64)

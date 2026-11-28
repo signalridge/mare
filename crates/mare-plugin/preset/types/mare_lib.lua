@@ -7,6 +7,12 @@
 ---@class mare_lib
 local M = {}
 
+--- Strip at most one leading UTF-8 BOM (`EF BB BF`) from file text before parsing JSON.
+---@generic T
+---@param text T
+---@return T
+function M.strip_utf8_bom(text) end
+
 ---@param value any
 ---@return boolean
 function M.positive_integer(value) end

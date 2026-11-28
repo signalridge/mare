@@ -51,7 +51,8 @@ fn now_ms() -> u64 {
 }
 
 fn parse_state(bytes: &[u8]) -> Result<State, String> {
-    let val: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| format!("invalid JSON: {e}"))?;
+    let val: serde_json::Value =
+        serde_json::from_slice(mare_shared::strip_utf8_bom_bytes(bytes)).map_err(|e| format!("invalid JSON: {e}"))?;
     let Some(obj) = val.as_object() else {
         return Err("top-level value is not a JSON object".into());
     };
