@@ -317,3 +317,76 @@ fn acp_in_place_session_rekey_preserves_client_session_id_and_inflight_prompt() 
 
     rpc.kill_and_wait();
 }
+
+/// ACP `session/list` must populate `updatedAt` from logical last activity time (RFC 3339) and
+/// order by logical activity rather than file mtime (touching/rewriting an older session's file
+/// without new messages must not bump its `updatedAt` or sort position).
+#[test]
+fn acp_session_list_returns_rfc3339_updated_at_and_ignores_file_mtime_drift() {
+    let home = tempfile::tempdir().unwrap();
+    let ws = tempfile::tempdir().unwrap();
+    let cwd = dunce::canonicalize(ws.path()).unwrap();
+    let cwd_str = cwd.to_string_lossy().to_string();
+
+    let sessions_dir = home.path().join("state/sessions/proj-updated-at");
+    std::fs::create_dir_all(&sessions_dir).unwrap();
+    let older_id = "11111111-1111-2222-3333-444444444444";
+    let newer_id = "22222222-1111-2222-3333-444444444444";
+    let empty_id = "33333333-1111-2222-3333-444444444444";
+
+    let newer_path = sessions_dir.join("newer.jsonl");
+    let older_path = sessions_dir.join("older.jsonl");
+    let empty_path = sessions_dir.join("empty.jsonl");
+
+    std::fs::write(
+        &newer_path,
+        format!(
+            "{}\n{}\n",
+            json!({"type":"session","version":mare_store::CURRENT_VERSION,"session_id":newer_id,"cwd":cwd_str,"name":"Newer","created_at_ms":1700000010000i64}),
+            json!({"type":"message","entry_id":"m1","created_at_ms":1700000020500i64,"message":{"role":"user","content":[{"type":"text","text":"latest activity"}]}}),
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        &empty_path,
+        format!(
+            "{}\n",
+            json!({"type":"session","version":mare_store::CURRENT_VERSION,"session_id":empty_id,"cwd":cwd_str,"name":"No Messages","created_at_ms":1700000015000i64}),
+        ),
+    )
+    .unwrap();
+    // Write the older-activity session LAST (and append a non-message name record) so its file
+    // mtime is strictly newer than `newer.jsonl` while its logical activity remains earlier.
+    std::thread::sleep(std::time::Duration::from_millis(25));
+    std::fs::write(
+        &older_path,
+        format!(
+            "{}\n{}\n{}\n",
+            json!({"type":"session","version":mare_store::CURRENT_VERSION,"session_id":older_id,"cwd":cwd_str,"name":"Older","created_at_ms":1700000001000i64}),
+            json!({"type":"message","entry_id":"m1","created_at_ms":1700000005000i64,"message":{"role":"user","content":[{"type":"text","text":"older activity"}]}}),
+            json!({"type":"name","name":"Older Renamed","created_at_ms":1700000099000i64}),
+        ),
+    )
+    .unwrap();
+
+    let mut rpc = acp_in_home(home.path(), json!([{ "text": "ok" }]), &[], &[]);
+    let _ = rpc.call_raw("initialize", json!({ "protocolVersion": 1, "clientCapabilities": {} }), |_| json!(null));
+
+    let listed = rpc.call_raw("session/list", json!({ "cwd": cwd_str }), |_| json!(null));
+    let sessions =
+        listed["result"]["sessions"].as_array().unwrap_or_else(|| panic!("expected sessions array: {listed}"));
+    assert_eq!(sessions.len(), 3, "expected 3 sessions: {sessions:?}");
+    let got: Vec<(&str, Option<&str>)> =
+        sessions.iter().map(|s| (s["sessionId"].as_str().unwrap_or(""), s["updatedAt"].as_str())).collect();
+    assert_eq!(
+        got,
+        vec![
+            (newer_id, Some("2023-11-14T22:13:40.5Z")),
+            (empty_id, Some("2023-11-14T22:13:35Z")),
+            (older_id, Some("2023-11-14T22:13:25Z")),
+        ],
+        "session/list must return logical RFC 3339 updatedAt and order descending by activity: {sessions:?}"
+    );
+
+    rpc.kill_and_wait();
+}

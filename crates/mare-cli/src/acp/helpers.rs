@@ -623,7 +623,11 @@ struct SessionMeta {
     cwd: PathBuf,
     title: Option<String>,
     path: PathBuf,
-    modified_ms: u128,
+    updated_at_ms: i64,
+}
+
+fn format_updated_at(ms: i64) -> Option<String> {
+    (ms > 0).then(|| jiff::Timestamp::from_millisecond(ms).ok().map(|ts| ts.to_string())).flatten()
 }
 
 fn collect_session_metas() -> Vec<SessionMeta> {
@@ -672,15 +676,19 @@ fn collect_session_metas() -> Vec<SessionMeta> {
         if !cwd.is_absolute() {
             continue;
         }
-        let modified_ms = if row.indexed_mtime > 0 {
-            (row.indexed_mtime as u128) / 1_000_000
+        let updated_at_ms = if row.updated_at_ms > 0 {
+            row.updated_at_ms
+        } else if row.created_at_ms > 0 {
+            row.created_at_ms
+        } else if row.indexed_mtime > 0 {
+            (row.indexed_mtime / 1_000_000).max(0)
         } else {
-            row.updated_at_ms.max(0) as u128
+            0
         };
         let title = row.title.filter(|t| !t.is_empty());
-        out.push(SessionMeta { id: row.session_id, cwd, title, path, modified_ms });
+        out.push(SessionMeta { id: row.session_id, cwd, title, path, updated_at_ms });
     }
-    out.sort_by(|a, b| b.modified_ms.cmp(&a.modified_ms).then_with(|| a.id.cmp(&b.id)));
+    out.sort_by(|a, b| b.updated_at_ms.cmp(&a.updated_at_ms).then_with(|| a.id.cmp(&b.id)));
     out
 }
 
@@ -690,7 +698,7 @@ pub(super) fn find_session(session_id: &str) -> Option<PersistedSession> {
     Some(PersistedSession { cwd: meta.cwd, path: meta.path })
 }
 
-fn parse_list_cursor(cursor: Option<&str>) -> Result<Option<(u128, &str)>, String> {
+fn parse_list_cursor(cursor: Option<&str>) -> Result<Option<(i64, &str)>, String> {
     let Some(c) = cursor else {
         return Ok(None);
     };
@@ -698,14 +706,17 @@ fn parse_list_cursor(cursor: Option<&str>) -> Result<Option<(u128, &str)>, Strin
     if id.is_empty() {
         return Err("session/list cursor is invalid".to_string());
     }
-    let ms = ms_str.parse::<u128>().map_err(|_| "session/list cursor is invalid".to_string())?;
+    let ms = ms_str.parse::<i64>().map_err(|_| "session/list cursor is invalid".to_string())?;
+    if ms < 0 {
+        return Err("session/list cursor is invalid".to_string());
+    }
     Ok(Some((ms, id)))
 }
 
 fn paginate_sessions(
     metas: Vec<SessionMeta>,
     cwd_filter: Option<&Path>,
-    after: Option<(u128, &str)>,
+    after: Option<(i64, &str)>,
     active_ids: &HashSet<String>,
     page_size: usize,
 ) -> ListSessionsResponse {
@@ -715,18 +726,21 @@ fn paginate_sessions(
         .filter(|s| cwd_filter.is_none_or(|c| same_directory(&s.cwd, c)))
         .filter(|s| match after {
             None => true,
-            Some((ms, id)) => s.modified_ms < ms || (s.modified_ms == ms && s.id.as_str() > id),
+            Some((ms, id)) => s.updated_at_ms < ms || (s.updated_at_ms == ms && s.id.as_str() > id),
         })
         .collect();
     let has_more = entries.len() > page_size;
     entries.truncate(page_size);
-    let next_cursor = has_more.then(|| entries.last().map(|s| format!("{}:{}", s.modified_ms, s.id))).flatten();
+    let next_cursor = has_more.then(|| entries.last().map(|s| format!("{}:{}", s.updated_at_ms, s.id))).flatten();
     let infos = entries
         .into_iter()
         .map(|s| {
             let mut si = SessionInfo::new(s.id, s.cwd);
             if let Some(t) = s.title {
                 si = si.title(t);
+            }
+            if let Some(updated_at) = format_updated_at(s.updated_at_ms) {
+                si = si.updated_at(updated_at);
             }
             si
         })
@@ -910,15 +924,15 @@ mod tests {
     #[test]
     fn list_sessions_keyset_cursor_survives_removals_and_equal_mtime_ties() {
         let cwd = PathBuf::from("/tmp/ws");
-        let make = |id: &str, modified_ms: u128| SessionMeta {
+        let make = |id: &str, updated_at_ms: i64| SessionMeta {
             id: id.to_string(),
             cwd: cwd.clone(),
             title: None,
             path: PathBuf::from(format!("/tmp/ws/{id}.jsonl")),
-            modified_ms,
+            updated_at_ms,
         };
         let mut metas = vec![make("s-a", 200), make("s-b", 100), make("s-c", 100), make("s-d", 100), make("s-e", 50)];
-        metas.sort_by(|a, b| b.modified_ms.cmp(&a.modified_ms).then_with(|| a.id.cmp(&b.id)));
+        metas.sort_by(|a, b| b.updated_at_ms.cmp(&a.updated_at_ms).then_with(|| a.id.cmp(&b.id)));
 
         let mut active = HashSet::new();
         let page1 = paginate_sessions(metas.clone(), Some(&cwd), None, &active, 2);
@@ -1019,5 +1033,48 @@ mod tests {
 
         assert!(has_truncated_image(&json!([{ "type": "image", "mime": "image/png", "truncated": true }])));
         assert!(!has_truncated_image(&json!([{ "type": "image", "data": "AQID", "mime": "image/png" }])));
+    }
+
+    #[test]
+    fn paginate_sessions_populates_rfc3339_updated_at_and_paginates_by_activity_time() {
+        let cwd = PathBuf::from("/tmp/ws");
+        let metas = vec![
+            SessionMeta {
+                id: "s-new".into(),
+                cwd: cwd.clone(),
+                title: Some("Newer".into()),
+                path: PathBuf::from("/tmp/new.jsonl"),
+                updated_at_ms: 1_700_000_002_500,
+            },
+            SessionMeta {
+                id: "s-old".into(),
+                cwd: cwd.clone(),
+                title: Some("Older".into()),
+                path: PathBuf::from("/tmp/old.jsonl"),
+                updated_at_ms: 1_700_000_001_000,
+            },
+            SessionMeta {
+                id: "s-zero".into(),
+                cwd: cwd.clone(),
+                title: None,
+                path: PathBuf::from("/tmp/zero.jsonl"),
+                updated_at_ms: 0,
+            },
+        ];
+        let active = HashSet::new();
+        let page1 = paginate_sessions(metas.clone(), Some(&cwd), None, &active, 1);
+        assert_eq!(page1.sessions.len(), 1);
+        assert_eq!(page1.sessions[0].session_id.0.as_ref(), "s-new");
+        assert_eq!(page1.sessions[0].updated_at.as_deref(), Some("2023-11-14T22:13:22.5Z"));
+        let cursor = page1.next_cursor.as_deref().expect("next_cursor");
+        let after = parse_list_cursor(Some(cursor)).expect("valid cursor");
+
+        let page2 = paginate_sessions(metas, Some(&cwd), after, &active, 10);
+        assert_eq!(page2.sessions.len(), 2);
+        assert_eq!(page2.sessions[0].session_id.0.as_ref(), "s-old");
+        assert_eq!(page2.sessions[0].updated_at.as_deref(), Some("2023-11-14T22:13:21Z"));
+        assert_eq!(page2.sessions[1].session_id.0.as_ref(), "s-zero");
+        assert_eq!(page2.sessions[1].updated_at, None);
+        assert!(parse_list_cursor(Some("-1:abc")).is_err());
     }
 }
