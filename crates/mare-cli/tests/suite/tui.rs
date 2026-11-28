@@ -139,12 +139,11 @@ struct Term {
     /// turns ended before the last submit
     ended: usize,
     saw_welcome_banner: bool,
-    skip_drop_invariants: bool,
 }
 
 impl Drop for Term {
     fn drop(&mut self) {
-        if self.owned.0.is_none() || self.skip_drop_invariants || std::thread::panicking() {
+        if self.owned.0.is_none() || std::thread::panicking() {
             return;
         }
         if let Err(msg) = self.check_invariants() {
@@ -253,11 +252,7 @@ impl Term {
     }
 
     fn from_vt(owned: OwnedVt, parser: vt100::Parser) -> Self {
-        Self { owned, parser, ended: 0, saw_welcome_banner: false, skip_drop_invariants: false }
-    }
-
-    fn set_skip_drop_invariants(&mut self, skip: bool) {
-        self.skip_drop_invariants = skip;
+        Self { owned, parser, ended: 0, saw_welcome_banner: false }
     }
 
     /// One frame: run what's queued, draw, feed the bytes to the virtual terminal.

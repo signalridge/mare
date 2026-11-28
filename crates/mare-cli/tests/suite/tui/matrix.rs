@@ -2,22 +2,12 @@
 //!
 //! Runs every built-in slash command and key entry point across 5 session states
 //! (`Empty`, `AfterTurn`, `MidStream`, `AfterCompaction`, `AfterResume`), asserting user-visible
-//! screen properties and global screen invariants. Known open failures are explicitly linked to
-//! their GitHub issues so each mark can be removed as its fix merges.
+//! screen properties and global screen invariants.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use super::*;
-
-#[derive(Clone, Copy, Debug)]
-struct KnownFailure {
-    issue: u32,
-    url: &'static str,
-}
-
-const KF_57: KnownFailure = KnownFailure { issue: 57, url: "https://github.com/signalridge/mare/issues/57" };
-const KF_129: KnownFailure = KnownFailure { issue: 129, url: "https://github.com/signalridge/mare/issues/129" };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SessionState {
@@ -229,35 +219,9 @@ async fn assert_input_usable(t: &mut Term, wait_idle: bool) -> Result<(), String
     Ok(())
 }
 
-fn evaluate_known_failure(
-    cell_name: &str,
-    state: SessionState,
-    known: Option<KnownFailure>,
-    t: &mut Term,
-    result: Result<(), String>,
-) {
-    match (known, result) {
-        (None, Ok(())) => {}
-        (None, Err(err)) => {
-            panic!("matrix cell [{cell_name} @ {}] failed:\n{err}", state.label());
-        }
-        (Some(kf), Err(err)) => {
-            t.set_skip_drop_invariants(true);
-            eprintln!(
-                "KNOWN FAILURE #{issue} ({url}) in [{cell_name} @ {}]: {err}",
-                state.label(),
-                issue = kf.issue,
-                url = kf.url
-            );
-        }
-        (Some(kf), Ok(())) => {
-            panic!(
-                "known failure #{issue} ({url}) unexpectedly passed in [{cell_name} @ {}]; remove its marker",
-                state.label(),
-                issue = kf.issue,
-                url = kf.url
-            );
-        }
+fn assert_matrix_cell(cell_name: &str, state: SessionState, result: Result<(), String>) {
+    if let Err(err) = result {
+        panic!("matrix cell [{cell_name} @ {}] failed:\n{err}", state.label());
     }
 }
 
@@ -342,7 +306,7 @@ async fn matrix_new_and_clear_redraw_welcome_banner_across_states() {
                     Ok(())
                 })
                 .await;
-                evaluate_known_failure(cmd, state, None, &mut t, res);
+                assert_matrix_cell(cmd, state, res);
             }
         }
     })
@@ -412,16 +376,13 @@ async fn matrix_side_and_btw_across_states() {
                     Ok(())
                 })();
 
-                let kf = (state == SessionState::AfterCompaction).then_some(KF_129);
-                evaluate_known_failure(cmd, state, kf, &mut t, res);
+                assert_matrix_cell(cmd, state, res);
 
                 // Cleanly close side conversation and verify the main editor input remains usable.
                 t.key(KeyCode::Escape, Modifiers::NONE);
                 t.step().await;
-                if kf.is_none() {
-                    let input_res = assert_input_usable(&mut t, false).await;
-                    evaluate_known_failure(cmd, state, None, &mut t, input_res);
-                }
+                let input_res = assert_input_usable(&mut t, false).await;
+                assert_matrix_cell(cmd, state, input_res);
             }
         }
     })
@@ -442,7 +403,7 @@ async fn matrix_ctrl_t_transcript_toggle_across_states() {
                 invariants::check_no_duplicated_prompt_box(&obs)
             })
             .await;
-            evaluate_known_failure("ctrl+t", state, None, &mut t, res);
+            assert_matrix_cell("ctrl+t", state, res);
         }
     })
     .await
@@ -490,7 +451,7 @@ async fn matrix_ctrl_o_expand_toggle_across_states() {
                 Ok(())
             })
             .await;
-            evaluate_known_failure("ctrl+o", state, None, &mut t, res);
+            assert_matrix_cell("ctrl+o", state, res);
         }
     })
     .await
@@ -555,7 +516,7 @@ async fn matrix_edit_write_patch_diffs_collapse_in_compact_view() {
                 Ok(())
             })
             .await;
-            evaluate_known_failure("diff_collapse_write_new", SessionState::AfterTurn, None, &mut t, res);
+            assert_matrix_cell("diff_collapse_write_new", SessionState::AfterTurn, res);
 
             for (prompt, done_marker, needle) in [
                 ("rewrite big.txt", "rewrote big file", "rewritten_070 = false"),
@@ -574,7 +535,7 @@ async fn matrix_edit_write_patch_diffs_collapse_in_compact_view() {
                     Ok(())
                 })
                 .await;
-                evaluate_known_failure("diff_collapse_replace", SessionState::AfterTurn, None, &mut t, res);
+                assert_matrix_cell("diff_collapse_replace", SessionState::AfterTurn, res);
             }
         }
 
@@ -609,7 +570,7 @@ async fn matrix_edit_write_patch_diffs_collapse_in_compact_view() {
                 Ok(())
             })
             .await;
-            evaluate_known_failure("diff_collapse_apply_patch", SessionState::AfterTurn, None, &mut t, res);
+            assert_matrix_cell("diff_collapse_apply_patch", SessionState::AfterTurn, res);
         }
     })
     .await
@@ -647,7 +608,7 @@ async fn matrix_retry_notice_delay_and_border() {
             }
             Ok(())
         })();
-        evaluate_known_failure("retry_notice", SessionState::MidStream, None, &mut t, res);
+        assert_matrix_cell("retry_notice", SessionState::MidStream, res);
     })
     .await
 }
@@ -660,7 +621,7 @@ async fn matrix_shift_tab_across_states() {
             t.key(KeyCode::BackTab, Modifiers::SHIFT);
             t.step().await;
             let res = check_standard_cell(&mut t, false, |_| Ok(())).await;
-            evaluate_known_failure("shift+tab", state, None, &mut t, res);
+            assert_matrix_cell("shift+tab", state, res);
         }
     })
     .await
@@ -727,7 +688,7 @@ async fn matrix_subagent_spawn_across_states() {
                 Ok(())
             })
             .await;
-            evaluate_known_failure("subagent_spawn", state, None, &mut t, res);
+            assert_matrix_cell("subagent_spawn", state, res);
         }
     })
     .await
@@ -741,8 +702,7 @@ async fn run_session_core_commands_for_state(state: SessionState) {
         run_slash_and_settle(&mut t, cmd).await;
         let wait_idle = state != SessionState::MidStream;
         let res = check_standard_cell(&mut t, wait_idle, |_| Ok(())).await;
-        let kf = if *cmd == "/reload" && state == SessionState::MidStream { Some(KF_57) } else { None };
-        evaluate_known_failure(cmd, state, kf, &mut t, res);
+        assert_matrix_cell(cmd, state, res);
     }
 }
 
@@ -788,7 +748,7 @@ async fn matrix_archive_across_states() {
                 Ok(())
             })
             .await;
-            evaluate_known_failure(ARCHIVE_COMMAND, state, None, &mut t, res);
+            assert_matrix_cell(ARCHIVE_COMMAND, state, res);
         }
     })
     .await
@@ -811,7 +771,7 @@ async fn matrix_exit_across_states() {
                 t.check_invariants()?;
                 Ok(())
             })();
-            evaluate_known_failure(EXIT_COMMAND, state, None, &mut t, res);
+            assert_matrix_cell(EXIT_COMMAND, state, res);
         }
     })
     .await
@@ -830,7 +790,7 @@ async fn matrix_info_and_picker_slash_commands_across_states() {
                 }
                 run_slash_and_settle(&mut t, cmd).await;
                 let res = check_standard_cell(&mut t, false, |_| Ok(())).await;
-                evaluate_known_failure(cmd, state, None, &mut t, res);
+                assert_matrix_cell(cmd, state, res);
                 t.vt.dismiss_notices();
                 t.step().await;
             }
