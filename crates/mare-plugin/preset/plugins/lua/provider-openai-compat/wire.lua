@@ -579,7 +579,7 @@ end
 function M.new_parser(sink, on_error, opts)
 	local stream = require("mare_lib")
 	local P = stream.stream_record(
-		{ text = "", thinking = "", calls = {}, by_index = {}, by_id = {}, usage = nil, finish = nil },
+		{ text = "", thinking = "", calls = {}, by_index = {}, by_id = {}, usage = nil, finish = nil, refused = false },
 		{ "text", "thinking" }
 	)
 	P.order = P.calls -- calls in arrival order
@@ -660,6 +660,10 @@ function M.new_parser(sink, on_error, opts)
 					end
 				elseif part.type == "text" and type(part.text) == "string" and part.text ~= "" then
 					append_visible_text(part.text)
+				elseif part.type == "refusal" and type(part.refusal) == "string" and part.refusal ~= "" then
+					P.refused = true
+					stream.stream_append(P, "text", part.refusal)
+					sink({ type = "text_delta", delta = part.refusal })
 				end
 			end
 		end
@@ -730,7 +734,9 @@ function M.new_parser(sink, on_error, opts)
 		if not c then
 			return
 		end
-		local delta = c.delta or {}
+		-- Chat Completions streams deliver `choices[1].delta`; non-streaming responses deliver
+		-- `choices[1].message` with the same fields (content, refusal, reasoning, tool_calls).
+		local delta = type(c.delta) == "table" and c.delta or (type(c.message) == "table" and c.message or {})
 		-- the field the reasoning text comes in is the one it goes back in (OpenRouter, Groq and
 		-- Cerebras use `reasoning`, DeepSeek-style servers `reasoning_content`)
 		local r, rfield = delta.reasoning_content, "reasoning_content"
@@ -780,10 +786,20 @@ function M.new_parser(sink, on_error, opts)
 		elseif type(delta.content) == "table" then
 			emit_content_array(delta.content)
 		end
+		if type(delta.refusal) == "string" and delta.refusal ~= "" then
+			P.refused = true
+			stream.stream_append(P, "text", delta.refusal)
+			sink({ type = "text_delta", delta = delta.refusal })
+		end
 		-- real servers send arguments before the name, or no id at all: buffer arguments until the
 		-- name is known, synthesize an id, take the name the first time only (never concatenate
 		-- repeats)
-		local lossless_calls = delta.tool_calls and mare.json.decode_lossless(data).choices[1].delta.tool_calls
+		local lossless_choice = delta.tool_calls and mare.json.decode_lossless(data).choices[1]
+		local lossless_calls = lossless_choice
+			and (
+				(lossless_choice.delta and lossless_choice.delta.tool_calls)
+				or (lossless_choice.message and lossless_choice.message.tool_calls)
+			)
 		for index, tc in ipairs(delta.tool_calls or {}) do
 			local fn = tc["function"] or {}
 			local raw_fn = lossless_calls[index]["function"] or {}
@@ -842,6 +858,17 @@ function M.new_parser(sink, on_error, opts)
 		if type(c.finish_reason) == "string" and c.finish_reason ~= "" then
 			P.finish = c.finish_reason
 		end
+	end
+
+	function P.feed_body(text, _headers)
+		local ok, decoded = pcall(mare.json.decode, text or "")
+		if not ok or type(decoded) ~= "table" then
+			error({
+				message = "openai-chat: response is neither SSE nor JSON",
+				kind = "malformed_response",
+			}, 0)
+		end
+		P.feed({ event = "message", data = text })
 	end
 
 	function P.finish_message()
@@ -940,6 +967,7 @@ function M.new_parser(sink, on_error, opts)
 		end
 		local FILTERED_REASONS = {
 			content_filter = true,
+			refusal = true,
 			sensitive = true,
 			data_inspection_failed = true,
 			DataInspectionFailed = true,
@@ -958,10 +986,11 @@ function M.new_parser(sink, on_error, opts)
 		end
 		if P.finish == "length" then
 			msg.stop_reason = "length"
-		elseif FILTERED_REASONS[P.finish] then
+		elseif FILTERED_REASONS[P.finish] or (P.refused and NORMAL_REASONS[P.finish]) then
 			msg.stop_reason = "filtered"
 			msg.raw_stop_reason = P.finish
-			msg.error = ("the model output was filtered (%s)"):format(P.finish)
+			msg.error = (P.refused and P.text ~= "" and P.text)
+				or ("the model output was filtered (%s)"):format(P.finish)
 		elseif NORMAL_REASONS[P.finish] then
 			msg.stop_reason = #P.calls > 0 and "tool_use" or "stop"
 		else
