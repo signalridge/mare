@@ -605,6 +605,7 @@ function M.new_parser(sink, on_error, opts)
 	)
 	P.order = P.calls -- calls in arrival order
 	local missing_id_seq = 0
+	local declared_tools = type(opts) == "table" and type(opts.tool_names) == "table" and opts.tool_names or nil
 	local heal_pattern = type(opts) == "table" and type(opts.markup_healing) == "string" and opts.markup_healing or nil
 	local healer_mod = heal_pattern and require("provider-openai-compat.markup_healing") or nil
 	local healer = healer_mod and healer_mod.new_scanner(heal_pattern) or nil
@@ -706,8 +707,10 @@ function M.new_parser(sink, on_error, opts)
 			end
 		end
 		if not cur then
-			cur = stream.stream_record({ name = "", args = "" }, { "args" })
+			cur = stream.stream_record({ name = "", args = "", started = false, tc_index = tc.index }, { "args" })
 			P.calls[#P.calls + 1] = cur
+		elseif cur.tc_index == nil and tc.index ~= nil then
+			cur.tc_index = tc.index
 		end
 		if tc.index ~= nil and not P.by_index[tc.index] then
 			P.by_index[tc.index] = cur
@@ -719,6 +722,55 @@ function M.new_parser(sink, on_error, opts)
 			P.by_id[cur.id] = cur
 		end
 		return cur
+	end
+
+	local function emit_call_start(cur)
+		if cur.started or cur.name == "" then
+			return
+		end
+		if not cur.id then
+			cur.id = mint_call_id(cur.name, cur.tc_index)
+			P.by_id[cur.id] = cur
+		end
+		cur.started = true
+		sink({ type = "tool_call_start", tool_call_id = cur.id, name = cur.name })
+		if cur.pending_deltas then
+			local deltas = cur.pending_deltas
+			cur.pending_deltas = nil
+			for _, d in ipairs(deltas) do
+				sink({ type = "tool_call_delta", tool_call_id = cur.id, delta = d })
+			end
+		elseif cur.args ~= "" then
+			sink({ type = "tool_call_delta", tool_call_id = cur.id, delta = cur.args })
+		end
+	end
+
+	local function has_longer_declared_prefix(name)
+		if not declared_tools then
+			return false
+		end
+		for tool_name in pairs(declared_tools) do
+			if #tool_name > #name and tool_name:sub(1, #name) == name then
+				return true
+			end
+		end
+		return false
+	end
+
+	local function can_emit_start_now(cur, name_changed, name_repeated)
+		if cur.started or cur.name == "" then
+			return false
+		end
+		if declared_tools then
+			if not declared_tools[cur.name] then
+				return false
+			end
+			if has_longer_declared_prefix(cur.name) then
+				return (not name_changed) and (name_repeated or cur.args ~= "")
+			end
+			return true
+		end
+		return (not name_changed) and (name_repeated or cur.args ~= "")
 	end
 
 	function P.feed(ev)
@@ -812,9 +864,9 @@ function M.new_parser(sink, on_error, opts)
 			stream.stream_append(P, "text", delta.refusal)
 			sink({ type = "text_delta", delta = delta.refusal })
 		end
-		-- real servers send arguments before the name, or no id at all: buffer arguments until the
-		-- name is known, synthesize an id, take the name the first time only (never concatenate
-		-- repeats)
+		-- real servers send arguments before the name, no id at all, repeated full names,
+		-- or split name fragments across deltas: buffer arguments until a name arrives,
+		-- synthesize an id when missing, ignore exact name repeats, and assemble fragments.
 		local lossless_choice = delta.tool_calls and mare.json.decode_lossless(data).choices[1]
 		local lossless_calls = lossless_choice
 			and (
@@ -837,30 +889,33 @@ function M.new_parser(sink, on_error, opts)
 					cur.signature, cur.signature_field = g.thought_signature, "extra_content"
 				end
 			end
-			if type(fn.name) == "string" and fn.name ~= "" and cur.name == "" then
-				cur.name = fn.name
-				if not cur.id then
-					missing_id_seq = missing_id_seq + 1
-					if P.record_id then
-						-- Deterministic across replays of the same response, <= 40 chars (Chat Completions limit)
-						local seed = ("%s:%s:%s"):format(
-							P.record_id,
-							tostring(cur.name or ""),
-							tostring(tc.index or "")
-						)
-						cur.id, missing_id_seq = stream.next_hashed_call_id(P.by_id, seed, 32, missing_id_seq)
+			local name_changed, name_repeated = false, false
+			if type(fn.name) == "string" and fn.name ~= "" then
+				if cur.name == "" then
+					cur.name = fn.name
+					name_changed = true
+				elseif fn.name == cur.name then
+					local joined = cur.name .. fn.name
+					if declared_tools and declared_tools[joined] and not declared_tools[cur.name] then
+						cur.name = joined
+						name_changed = true
 					else
-						local id
-						repeat
-							id = "call_" .. mare.crypto.random_hex(8)
-						until not P.by_id[id]
-						cur.id = id
+						name_repeated = true
 					end
-					P.by_id[cur.id] = cur
-				end
-				sink({ type = "tool_call_start", tool_call_id = cur.id, name = cur.name })
-				if cur.args ~= "" then
-					sink({ type = "tool_call_delta", tool_call_id = cur.id, delta = cur.args })
+				else
+					local joined = cur.name .. fn.name
+					if
+						declared_tools
+						and declared_tools[fn.name]
+						and not declared_tools[joined]
+						and #fn.name > #cur.name
+						and fn.name:sub(1, #cur.name) == cur.name
+					then
+						cur.name = fn.name
+					else
+						cur.name = joined
+					end
+					name_changed = true
 				end
 			end
 			if raw_fn.arguments ~= nil then
@@ -871,13 +926,22 @@ function M.new_parser(sink, on_error, opts)
 			end
 			if type(fn.arguments) == "string" and fn.arguments ~= "" then
 				stream.stream_append(cur, "args", fn.arguments)
-				if cur.name ~= "" then
+				if cur.started then
 					sink({ type = "tool_call_delta", tool_call_id = cur.id, delta = fn.arguments })
+				else
+					cur.pending_deltas = cur.pending_deltas or {}
+					cur.pending_deltas[#cur.pending_deltas + 1] = fn.arguments
 				end
+			end
+			if can_emit_start_now(cur, name_changed, name_repeated) then
+				emit_call_start(cur)
 			end
 		end
 		if type(c.finish_reason) == "string" and c.finish_reason ~= "" then
 			P.finish = c.finish_reason
+			for _, cur in ipairs(P.calls) do
+				emit_call_start(cur)
+			end
 		end
 	end
 
@@ -954,6 +1018,7 @@ function M.new_parser(sink, on_error, opts)
 			if c.name == "" then
 				error({ message = "tool call without a name", kind = "malformed_response" })
 			end
+			emit_call_start(c)
 			local args, perr
 			if c.healed_arguments ~= nil then
 				args = c.healed_arguments
