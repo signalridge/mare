@@ -306,7 +306,7 @@ return function(D)
 		return "custom"
 	end
 
-	local function append_with_status(msg, opts)
+	local function project_for_persist(msg)
 		if mare.projection.active() then
 			local msg_turn_id = type(msg) == "table" and msg.turn_id or nil
 			local to_project = msg
@@ -322,8 +322,15 @@ return function(D)
 				out.turn_id = type(msg_turn_id) == "string" and (mare.projection.project(msg_turn_id, { lossy = true }))
 					or msg_turn_id
 			end
-			msg = out
+			return out
 		end
+		return msg
+	end
+
+	--- Persist a message to the session journal without publishing it into `A.messages` yet.
+	--- Returns a persisted handle that `publish_message` commits in ordered call/turn sequence.
+	local function persist_message(msg, opts)
+		msg = project_for_persist(msg)
 		local held <close> = hold_write()
 		local record_owner = owner()
 		local id = (opts and opts.id) or mare.crypto.random_hex(8)
@@ -331,10 +338,28 @@ return function(D)
 		-- records are written again (checked in run_tool)
 		local saved, _, persisted_id = persist({ kind = "message", id = id, msg = msg }, record_owner)
 		if not same_owner(record_owner, owner()) then
-			return nil, "session changed while a message was being persisted", false
+			return nil, "session changed while a message was being persisted"
 		end
 		local entry_id = saved and (persisted_id or id) or nil
-		local event_id = (opts and opts.id) or entry_id or id
+		return {
+			msg = msg,
+			record_owner = record_owner,
+			saved = saved == true,
+			entry_id = entry_id,
+			id = id,
+			opts = opts,
+		}
+	end
+
+	--- Publish a previously persisted message into `A.messages`, `A.run_msgs`, and item events.
+	local function publish_message(persisted)
+		if not persisted or not same_owner(persisted.record_owner, owner()) then
+			return nil, "session changed while a message was being persisted", false
+		end
+		local msg = persisted.msg
+		local entry_id = persisted.entry_id
+		local opts = persisted.opts
+		local event_id = (opts and opts.id) or entry_id or persisted.id
 		table.insert(A.messages, msg)
 		if A.run_msgs then
 			-- messages of the current run, tracked by identity (robust to mid-run compaction)
@@ -365,7 +390,15 @@ return function(D)
 				item = item,
 			})
 		end
-		return true, nil, saved == true, entry_id
+		return true, nil, persisted.saved, entry_id
+	end
+
+	local function append_with_status(msg, opts)
+		local persisted, err = persist_message(msg, opts)
+		if not persisted then
+			return nil, err, false
+		end
+		return publish_message(persisted)
 	end
 
 	local function append(msg, opts)
@@ -386,6 +419,8 @@ return function(D)
 		persist = persist,
 		append = append,
 		append_with_status = append_with_status,
+		persist_message = persist_message,
+		publish_message = publish_message,
 		orphans = orphans,
 	}
 end
