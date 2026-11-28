@@ -721,3 +721,274 @@ async fn retain_ratio_scales_retained_tail_with_message_budget() {
     })
     .await
 }
+
+#[tokio::test]
+async fn repro_261_repeated_local_compactions_budget_file_lists() {
+    local(async {
+        let env = TestEnv::new().await;
+        let cfg = json!({
+            "plugins": {
+                "compact": {
+                    "auto": false,
+                    "keep_recent_tokens": 50,
+                    "recent_user_tokens": 0,
+                    "stages": ["local"]
+                }
+            }
+        });
+        let h = env.host().builtins(&["compact", "usage"]).faux(json!([])).config(cfg).no_session().build().await;
+        expose(&h);
+        global(&h, "K", h.service_table("compact").unwrap());
+        global(&h, "L", h.service_table("llm").unwrap());
+
+        let (read_count, modified_count, summary_len, full_read, full_mod, has_recent_mod, has_recent_read, has_omission_note): (i64, i64, i64, i64, i64, bool, bool, bool) = eval(
+            &h,
+            r###"
+            L.complete = function()
+                return {
+                    role = "assistant",
+                    stop_reason = "stop",
+                    content = { { type = "text", text = "## Goal\nMaintain repo\n## Progress\nChecked files" } },
+                }
+            end
+            local function make_batch(prefix, n)
+                local msgs = {}
+                local calls = {}
+                for i = 1, n do
+                    calls[#calls + 1] = { type = "tool_call", id = prefix .. "_r" .. i, name = "read", arguments = { path = string.format("src/%s/read_%03d.rs", prefix, i) } }
+                    calls[#calls + 1] = { type = "tool_call", id = prefix .. "_e" .. i, name = "edit", arguments = { path = string.format("src/%s/edit_%03d.rs", prefix, i) } }
+                end
+                msgs[#msgs + 1] = { role = "user", content = { { type = "text", text = "batch " .. prefix } } }
+                msgs[#msgs + 1] = { role = "assistant", content = calls }
+                for i = 1, n do
+                    msgs[#msgs + 1] = { role = "tool_result", tool_call_id = prefix .. "_r" .. i, tool_name = "read", content = { { type = "text", text = "ok" } } }
+                    msgs[#msgs + 1] = { role = "tool_result", tool_call_id = prefix .. "_e" .. i, tool_name = "edit", content = { { type = "text", text = "ok" } } }
+                end
+                msgs[#msgs + 1] = { role = "assistant", content = { { type = "text", text = "done " .. prefix } } }
+                msgs[#msgs + 1] = { role = "user", content = { { type = "text", text = "tail " .. prefix } } }
+                msgs[#msgs + 1] = { role = "assistant", content = { { type = "text", text = "ack " .. prefix } } }
+                return msgs
+            end
+
+            A:set_messages(make_batch("round1", 100))
+            local r1 = K:run()
+            assert(r1.status == "compacted", tostring(r1.error or r1.status))
+
+            local cur = A:list_messages().data
+            for _, m in ipairs(make_batch("round2", 100)) do
+                cur[#cur + 1] = m
+            end
+            A:set_messages(cur)
+            local r2 = K:run()
+            assert(r2.status == "compacted", tostring(r2.error or r2.status))
+
+            local summary = A:list_messages().data[1].content[1].text or ""
+            local function count_tag(tag)
+                local open_tag = "<" .. tag .. ">\n"
+                local close_tag = "\n</" .. tag .. ">"
+                local s = summary:find(open_tag, 1, true)
+                if not s then return 0 end
+                local e = summary:find(close_tag, s + #open_tag, true)
+                if not e then return 0 end
+                local body = summary:sub(s + #open_tag, e - 1)
+                local n = 0
+                for line in body:gmatch("[^\n]+") do
+                    if line:match("^src/") then n = n + 1 end
+                end
+                return n
+            end
+            local details = A:list_messages().data[1].details or {}
+            local full_read = type(details.read_files) == "table" and #details.read_files or 0
+            local full_mod = type(details.modified_files) == "table" and #details.modified_files or 0
+            local has_recent_mod = summary:find("src/round2/edit_100.rs", 1, true) ~= nil
+            local has_recent_read = summary:find("src/round2/read_100.rs", 1, true) ~= nil
+            local has_omission_note = summary:find("earlier path(s)", 1, true) ~= nil
+            return count_tag("read-files"), count_tag("modified-files"), #summary, full_read, full_mod, has_recent_mod, has_recent_read, has_omission_note
+            "###,
+        )
+        .await;
+        h.shutdown().await;
+        assert!(read_count > 0 && modified_count > 0, "expected tracked files in summary (read={read_count}, modified={modified_count})");
+        assert!(
+            read_count + modified_count < 400,
+            "file lists carried across local compactions must be budgeted rather than dumping all paths unboundedly (read={read_count}, modified={modified_count}, summary_len={summary_len})"
+        );
+        assert!(modified_count > read_count, "budget should favour modified paths over read-only paths (read={read_count}, modified={modified_count})");
+        assert!(has_recent_mod && has_recent_read, "budgeted lists must favour recent paths from round2");
+        assert!(has_omission_note, "budgeted lists should note omitted earlier paths in session log");
+        assert_eq!((full_read, full_mod), (200, 200), "full cumulative lists must remain in compaction details for recovery");
+    })
+    .await
+}
+
+#[tokio::test]
+async fn long_file_paths_in_tight_window_stay_within_candidate_budget() {
+    local(async {
+        let env = TestEnv::new().await;
+        let base = overhead(&env).await;
+        let limit = (base + 400) * 10 / 9;
+        let cfg = json!({
+            "plugins": {
+                "compact": {
+                    "auto": false,
+                    "threshold_tokens": limit,
+                    "keep_recent_tokens": 1,
+                    "recent_user_tokens": 0,
+                    "stages": ["local"]
+                }
+            }
+        });
+        let h = env.host().builtins(&["compact", "usage"]).faux(json!([])).config(cfg).no_session().build().await;
+        expose(&h);
+        global(&h, "K", h.service_table("compact").unwrap());
+        global(&h, "L", h.service_table("llm").unwrap());
+
+        let (status, err, summary_len, full_mod, has_omission_note): (String, String, i64, i64, bool) = eval(
+            &h,
+            r###"
+            L.complete = function()
+                return {
+                    role = "assistant",
+                    stop_reason = "stop",
+                    content = { { type = "text", text = "## Goal\nRefactor deep tree\n## Progress\nEdited files" } },
+                }
+            end
+            local deep_dir = "src/" .. string.rep("nested_dir/", 180)
+            local calls, msgs = {}, {}
+            for i = 1, 40 do
+                calls[#calls + 1] = {
+                    type = "tool_call",
+                    id = "e" .. i,
+                    name = "edit",
+                    arguments = { path = string.format("%sfile_%02d.rs", deep_dir, i) },
+                }
+            end
+            msgs[#msgs + 1] = { role = "user", content = { { type = "text", text = "edit deep files" } } }
+            msgs[#msgs + 1] = { role = "assistant", content = calls }
+            for i = 1, 40 do
+                msgs[#msgs + 1] = {
+                    role = "tool_result",
+                    tool_call_id = "e" .. i,
+                    tool_name = "edit",
+                    content = { { type = "text", text = "ok" } },
+                }
+            end
+            msgs[#msgs + 1] = { role = "assistant", content = { { type = "text", text = "done" } } }
+            A:set_messages(msgs)
+            local r, rerr = K:run()
+            local first = A:list_messages().data[1] or {}
+            local summary = (first.content and first.content[1] and first.content[1].text) or ""
+            local details = first.details or {}
+            local full_mod = type(details.modified_files) == "table" and #details.modified_files or 0
+            local has_omission_note = summary:find("earlier path(s)", 1, true) ~= nil
+            return tostring(r and r.status or "failed"), tostring(rerr or (r and r.error) or ""), #summary, full_mod, has_omission_note
+            "###,
+        )
+        .await;
+        h.shutdown().await;
+        assert_eq!(status, "compacted", "40 x 2KiB paths must not blow candidate budget: err={err}");
+        assert!(
+            summary_len < 3000,
+            "rendered summary must stay within token budget rather than dumping 80 KiB of paths (summary_len={summary_len})"
+        );
+        assert!(has_omission_note, "tight-budget rendered file list should note omitted paths");
+        assert_eq!(full_mod, 40, "full cumulative modified_files list must remain in details");
+        drop(env);
+
+        // Sub-case 2: fewer than 40 long paths (~500B each) where only a subset fits in the
+        // remaining token budget — must select the most recent paths, include the omission note
+        // within budget, and keep all 10 paths in details.
+        let env2 = TestEnv::new().await;
+        let base2 = overhead(&env2).await;
+        let limit2 = (base2 + 500) * 10 / 9;
+        let cfg2 = json!({
+            "plugins": {
+                "compact": {
+                    "auto": false,
+                    "threshold_tokens": limit2,
+                    "keep_recent_tokens": 1,
+                    "recent_user_tokens": 0,
+                    "stages": ["local"]
+                }
+            }
+        });
+        let h2 = env2.host().builtins(&["compact", "usage"]).faux(json!([])).config(cfg2).no_session().build().await;
+        expose(&h2);
+        global(&h2, "K", h2.service_table("compact").unwrap());
+        global(&h2, "L", h2.service_table("llm").unwrap());
+
+        let (status2, err2, rendered_mod2, full_mod2, has_newest, has_oldest, has_omission2): (
+            String,
+            String,
+            i64,
+            i64,
+            bool,
+            bool,
+            bool,
+        ) = eval(
+            &h2,
+            r###"
+            L.complete = function()
+                return {
+                    role = "assistant",
+                    stop_reason = "stop",
+                    content = { { type = "text", text = "## Goal\nEdit deep modules\n## Progress\nDone" } },
+                }
+            end
+            local deep_dir = "src/" .. string.rep("sub_module/", 42)
+            local calls, msgs = {}, {}
+            for i = 1, 10 do
+                calls[#calls + 1] = {
+                    type = "tool_call",
+                    id = "m" .. i,
+                    name = "edit",
+                    arguments = { path = string.format("%smod_%02d.rs", deep_dir, i) },
+                }
+            end
+            msgs[#msgs + 1] = { role = "user", content = { { type = "text", text = "edit modules" } } }
+            msgs[#msgs + 1] = { role = "assistant", content = calls }
+            for i = 1, 10 do
+                msgs[#msgs + 1] = {
+                    role = "tool_result",
+                    tool_call_id = "m" .. i,
+                    tool_name = "edit",
+                    content = { { type = "text", text = "ok" } },
+                }
+            end
+            msgs[#msgs + 1] = { role = "assistant", content = { { type = "text", text = "done" } } }
+            A:set_messages(msgs)
+            local r, rerr = K:run()
+            local first = A:list_messages().data[1] or {}
+            local summary = (first.content and first.content[1] and first.content[1].text) or ""
+            local details = first.details or {}
+            local full_mod = type(details.modified_files) == "table" and #details.modified_files or 0
+            local rendered = 0
+            local open_tag = "<modified-files>\n"
+            local close_tag = "\n</modified-files>"
+            local s = summary:find(open_tag, 1, true)
+            local e = s and summary:find(close_tag, s + #open_tag, true)
+            if s and e then
+                for line in summary:sub(s + #open_tag, e - 1):gmatch("[^\n]+") do
+                    if line:match("^src/") then rendered = rendered + 1 end
+                end
+            end
+            local has_newest = summary:find("mod_10.rs", 1, true) ~= nil
+            local has_oldest = summary:find("mod_01.rs", 1, true) ~= nil
+            local has_omission = summary:find("earlier path(s)", 1, true) ~= nil
+            return tostring(r and r.status or "failed"), tostring(rerr or (r and r.error) or ""), rendered, full_mod, has_newest, has_oldest, has_omission
+            "###,
+        )
+        .await;
+        h2.shutdown().await;
+        assert_eq!(status2, "compacted", "partial long-path budget must compact cleanly: err={err2}");
+        assert!(
+            (1..10).contains(&rendered_mod2),
+            "token budget must select a strict subset of the 10 long paths (rendered={rendered_mod2})"
+        );
+        assert!(has_newest, "most recent path mod_10.rs must be prioritized under token budget");
+        assert!(!has_oldest, "oldest path mod_01.rs must be omitted when over token budget");
+        assert!(has_omission2, "omitted earlier paths must be noted within the budget");
+        assert_eq!(full_mod2, 10, "all 10 modified paths must remain in compaction details");
+    })
+    .await
+}
