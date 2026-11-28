@@ -93,6 +93,7 @@ impl Host {
             None,
             None,
             None,
+            None,
             Some(orchestrator),
             true,
         )
@@ -100,8 +101,21 @@ impl Host {
     }
 
     pub async fn new_with_web(opts: HostOptions, web: std::rc::Rc<crate::WebRegistry>) -> Result<Arc<Self>> {
-        Self::with_ui_inherited_ready(opts, UiShared::new(), None, None, None, None, None, None, Some(web), None, true)
-            .await
+        Self::with_ui_inherited_ready(
+            opts,
+            UiShared::new(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(web),
+            None,
+            true,
+        )
+        .await
     }
 
     /// Build a [`Host`] sharing `web` with a pre-bound [`crate::SessionOrchestrator`] attached
@@ -114,6 +128,7 @@ impl Host {
         Self::with_ui_inherited_ready(
             opts,
             UiShared::new(),
+            None,
             None,
             None,
             None,
@@ -147,6 +162,7 @@ impl Host {
             None,
             None,
             None,
+            None,
             Some(web),
             orchestrator,
             false,
@@ -168,6 +184,7 @@ impl Host {
             None,
             None,
             None,
+            None,
             fork_images,
             Some(web),
             orchestrator,
@@ -177,7 +194,7 @@ impl Host {
     }
 
     pub async fn with_ui(opts: HostOptions, ui: Arc<UiShared>) -> Result<Arc<Self>> {
-        Self::with_ui_inherited(opts, ui, None, None, None, None, None, None, None).await
+        Self::with_ui_inherited(opts, ui, None, None, None, None, None, None, None, None).await
     }
 
     /// For the interactive frontend: signal when package installation would start, then wait for
@@ -187,7 +204,7 @@ impl Host {
         ui: Arc<UiShared>,
         before_install: tokio::sync::oneshot::Sender<InstallStart>,
     ) -> Result<Arc<Self>> {
-        Self::with_ui_inherited(opts, ui, None, Some(before_install), None, None, None, None, None).await
+        Self::with_ui_inherited(opts, ui, None, Some(before_install), None, None, None, None, None, None).await
     }
 
     pub(crate) async fn new_child(
@@ -196,6 +213,7 @@ impl Host {
         carried: mare_shared::carry::Carried,
         scope: crate::agent_tree::Scope,
         net_approver: Option<mare_binding::netauth::NetApprover>,
+        snapshot_journal: Option<mare_binding::snapshot::SnapshotJournal>,
         child_session_id: String,
     ) -> Result<Arc<Self>> {
         let mut args = opts.args.as_object().cloned().unwrap_or_default();
@@ -209,6 +227,7 @@ impl Host {
             Some(carried),
             Some(scope),
             net_approver,
+            snapshot_journal,
             None,
             None,
         )
@@ -224,6 +243,7 @@ impl Host {
         carried: Option<mare_shared::carry::Carried>,
         scope: Option<crate::agent_tree::Scope>,
         net_approver: Option<mare_binding::netauth::NetApprover>,
+        snapshot_journal: Option<mare_binding::snapshot::SnapshotJournal>,
         fork_images: Option<std::collections::HashMap<String, String>>,
         web: Option<std::rc::Rc<crate::WebRegistry>>,
     ) -> Result<Arc<Self>> {
@@ -235,6 +255,7 @@ impl Host {
             carried,
             scope,
             net_approver,
+            snapshot_journal,
             fork_images,
             web,
             None,
@@ -252,6 +273,7 @@ impl Host {
         carried: Option<mare_shared::carry::Carried>,
         scope: Option<crate::agent_tree::Scope>,
         net_approver: Option<mare_binding::netauth::NetApprover>,
+        snapshot_journal: Option<mare_binding::snapshot::SnapshotJournal>,
         fork_images: Option<std::collections::HashMap<String, String>>,
         web: Option<std::rc::Rc<crate::WebRegistry>>,
         orchestrator: Option<std::rc::Rc<crate::SessionOrchestrator>>,
@@ -276,6 +298,11 @@ impl Host {
             .collect();
         let env =
             Env { cwd: opts.cwd.clone(), mode: opts.mode, ui: ui.clone(), config: opts.config.clone(), args: lua_args };
+        // Share the parent session's snapshot journal before `lua::install` installs `mare.snapshot`
+        // so file edits made by subagents (and nested grandchildren) are recorded under the parent turn.
+        if let Some(journal) = snapshot_journal {
+            lua.set_app_data(journal);
+        }
         mare_shared::profile::mark("host: before lua install");
         let mare = lua::install(&lua, &env)?;
         // Overlap capability probes with host initialization while retaining their temp/process

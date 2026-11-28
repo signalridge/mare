@@ -76,6 +76,7 @@ pub(super) struct ChildRuntimeArgs {
     pub(super) scope: crate::agent_tree::Scope,
     pub(super) reservation: crate::agent_tree::Reservation,
     pub(super) parent_net_approver: Option<mare_binding::netauth::NetApprover>,
+    pub(super) parent_snapshot: Option<mare_binding::snapshot::SnapshotJournal>,
     pub(super) transcript: Option<Transcript>,
     pub(super) origin: serde_json::Value,
     pub(super) shares_rules: bool,
@@ -244,6 +245,7 @@ fn run_child_thread(mut args: ChildRuntimeArgs) {
             carried: args.carried,
             scope: args.scope,
             parent_net_approver: args.parent_net_approver,
+            parent_snapshot: args.parent_snapshot,
             transcript,
             origin: args.origin,
             shares_rules: args.shares_rules,
@@ -312,6 +314,7 @@ struct ChildHostArgs {
     carried: mare_shared::carry::Carried,
     scope: crate::agent_tree::Scope,
     parent_net_approver: Option<mare_binding::netauth::NetApprover>,
+    parent_snapshot: Option<mare_binding::snapshot::SnapshotJournal>,
     transcript: Option<std::rc::Rc<std::cell::RefCell<Transcript>>>,
     origin: serde_json::Value,
     shares_rules: bool,
@@ -369,6 +372,7 @@ async fn run_child_host(mut args: ChildHostArgs) -> Result<serde_json::Value, su
         args.carried,
         args.scope,
         args.parent_net_approver,
+        args.parent_snapshot,
         args.session_id,
     );
     let host = tokio::select! {

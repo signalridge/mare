@@ -23,6 +23,17 @@ return {
 		},
 	},
 	apply = function(ctx, cfg)
+		ctx:on("pipeline/tool-dispatching", function(ev)
+			local name = ev and ev.call and ev.call.name
+			if name == "bash" or name == "powershell" or name == "shell" then
+				mare.snapshot.mark_shell()
+			end
+		end)
+		-- Subagents share the parent session's SnapshotJournal; only forward shell usage and
+		-- never reconfigure, rotate turns, or clear the parent journal from a child VM.
+		if mare.mode == "child" then
+			return
+		end
 		-- the optional services, read on each call
 		local svc = require("mare_lib").followers(ctx, { "session", "tools", "agent" })
 		local turns_meta = {} -- turn id -> {text, shell = bool, n}
@@ -105,7 +116,7 @@ return {
 			-- the conversation point before this turn's prompt (agent/start comes before the
 			-- prompt is written): false = the start of the session
 			local before = svc.session and svc.session:leaf() or false
-			turns_meta[id] = { text = ev and ev.text or nil, shell = false, n = #order, before = before }
+			turns_meta[id] = { text = ev and ev.text or nil, n = #order, before = before }
 			if svc.session and svc.session.add_record then
 				local text = ev and ev.text
 				pcall(svc.session.add_record, svc.session, "changes/turn", {
@@ -115,21 +126,6 @@ return {
 				})
 			end
 			mare.snapshot.begin_turn(id)
-		end)
-		ctx:on("pipeline/tool-dispatching", function(ev)
-			local name = ev and ev.call and ev.call.name
-			if current and (name == "bash" or name == "powershell" or name == "shell") then
-				local meta = turns_meta[current]
-				if meta and not meta.shell then
-					meta.shell = true
-					if svc.session and svc.session.add_record then
-						pcall(svc.session.add_record, svc.session, "changes/turn", {
-							turn = current,
-							shell = true,
-						})
-					end
-				end
-			end
 		end)
 
 		local rel = require("mare_lib").rel
@@ -144,7 +140,7 @@ return {
 					out[#out + 1] = {
 						turn = t.turn,
 						label = m.text and mare.text.trunc_width((m.text:gsub("%s+", " ")), 60) or ("turn " .. t.turn),
-						shell = m.shell or false,
+						shell = m.shell or t.shell or false,
 						files = t.files,
 					}
 				end

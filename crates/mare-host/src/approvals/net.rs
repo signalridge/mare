@@ -467,6 +467,7 @@ mod tests {
                     Default::default(),
                     scope,
                     None,
+                    None,
                     "child-startup-id".into(),
                 )
                 .await
@@ -545,6 +546,7 @@ mod tests {
                     Default::default(),
                     scope,
                     approver(p1.lua()),
+                    None,
                     "child-net-1".into(),
                 )
                 .await
@@ -572,6 +574,7 @@ mod tests {
                     None,
                     Default::default(),
                     scope2,
+                    None,
                     None,
                     "child-net-2".into(),
                 )
@@ -891,6 +894,7 @@ mod tests {
                     Default::default(),
                     scope,
                     approver(lua),
+                    None,
                     "child-recheck".into(),
                 )
                 .await
