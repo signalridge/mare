@@ -11,6 +11,42 @@ return function(D)
 
 	-- installed packages' `skills/`, read by the plugin's apply
 	local pkg_skill_dirs = D.pkg_skill_dirs
+	local function within_dir(candidate_real, base_real)
+		if candidate_real == base_real then
+			return true
+		end
+		if candidate_real:sub(1, #base_real) ~= base_real then
+			return false
+		end
+		local sep = candidate_real:sub(#base_real + 1, #base_real + 1)
+		return sep == "/" or sep == "\\"
+	end
+
+	local function resolve_project_skill_dir(dir)
+		local resolved = lib.resolve_project_dir(dir)
+		if resolved then
+			return resolved
+		end
+		local norm = dir:gsub("^%.[/\\]", "")
+		if norm == ".mare" or norm:match("^%.mare[/\\]") then
+			return nil
+		end
+		local dirs, bound = D.ancestor_dirs()
+		local candidates = bound and dirs or { mare.cwd }
+		local cfg_real = mare.paths and mare.paths.config and mare.fs.realpath(mare.paths.config) or nil
+		for _, base in ipairs(candidates) do
+			local base_real = mare.fs.realpath(base)
+			if not (cfg_real and base_real == cfg_real) then
+				local candidate = base .. "/" .. norm
+				local st = mare.fs.stat(candidate)
+				if st and st.kind == "dir" and within_dir(mare.fs.realpath(candidate), base_real) then
+					return candidate
+				end
+			end
+		end
+		return nil
+	end
+
 	--- every skill directory as {root, project}: the configured ones (project-level =
 	--- relative, loaded only in trusted projects), then the packages' (first name wins, so
 	--- the user's own skills shadow a package's)
@@ -18,7 +54,7 @@ return function(D)
 		local out = {}
 		for _, dir in ipairs(cfg.skill_dirs or {}) do
 			local project = lib.is_project_relative(dir)
-			local root = lib.resolve_project_dir(dir)
+			local root = project and resolve_project_skill_dir(dir) or lib.resolve_project_dir(dir)
 			if root then
 				out[#out + 1] = { root = root, project = project }
 			end
