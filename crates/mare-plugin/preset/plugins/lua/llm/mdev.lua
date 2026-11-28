@@ -268,6 +268,29 @@ local function build_provider_index(pm)
 	return { exact = pm, bare = bare, same = same }
 end
 
+local function vote_single(bucket, bare, val)
+	if val == nil then
+		return
+	end
+	bucket[bare] = bucket[bare] or {}
+	bucket[bare][val] = (bucket[bare][val] or 0) + 1
+end
+
+--- Record one provider's value for an attribute of `bare`.
+--- Same-provider conflict rule: if multiple entries within the same provider disagree on an
+--- attribute for the same bare id, that provider abstains for that attribute (order-independent).
+local function record_provider_value(slot, val)
+	if val == nil or slot.conflict then
+		return
+	end
+	if slot.value == nil then
+		slot.value = val
+	elseif slot.value ~= val then
+		slot.value = nil
+		slot.conflict = true
+	end
+end
+
 local function build_consensus(providers_map)
 	local spelt = {}
 	local named = {}
@@ -276,56 +299,60 @@ local function build_consensus(providers_map)
 	local reasons = {}
 	local inputs = {}
 	local levels = {}
-	local voted = {}
 
-	for pid, pm in pairs(providers_map) do
+	for _, pm in pairs(providers_map) do
 		if type(pm) == "table" then
+			local per_bare = {}
 			for mid, e in pairs(pm) do
 				if type(mid) == "string" and type(e) == "table" then
 					local bare = M.bare_id(mid)
 					if bare ~= "" then
-						spelt[bare] = (spelt[bare] or 0) + 1
+						local g = per_bare[bare]
+						if not g then
+							g = { name = {}, eff = {}, reason = {}, input = {}, win = {}, out = {} }
+							per_bare[bare] = g
+						end
 						if type(e.name) == "string" and e.name ~= "" and e.name ~= mid and e.name ~= bare then
-							named[bare] = named[bare] or {}
-							named[bare][e.name] = (named[bare][e.name] or 0) + 1
+							record_provider_value(g.name, e.name)
 						end
 						-- Consensus votes never apply provider-specific toggle-off.
 						local eff = M.efforts_from_entry(e, false)
 						if eff then
-							local key = table.concat(eff, ",")
-							local vk = pid .. "\0" .. bare .. "\0e\0" .. key
-							if not voted[vk] then
-								voted[vk] = true
-								levels[bare] = levels[bare] or {}
-								levels[bare][key] = (levels[bare][key] or 0) + 1
-							end
+							record_provider_value(g.eff, table.concat(eff, ","))
 						end
 						if e.reasoning == true or eff ~= nil then
-							reasons[bare] = (reasons[bare] or 0) + 1
+							record_provider_value(g.reason, true)
 						elseif e.reasoning == false then
-							reasons[bare] = (reasons[bare] or 0) - 1
+							record_provider_value(g.reason, false)
 						end
 						local ikey = canonical_input_key(e.input)
 						if ikey then
-							local vk = pid .. "\0" .. bare .. "\0i\0" .. ikey
-							if not voted[vk] then
-								voted[vk] = true
-								inputs[bare] = inputs[bare] or {}
-								inputs[bare][ikey] = (inputs[bare][ikey] or 0) + 1
-							end
+							record_provider_value(g.input, ikey)
 						end
 						local win = M.window_of_limit(e.limit)
 						if win then
-							sizes[bare] = sizes[bare] or {}
-							sizes[bare][win] = (sizes[bare][win] or 0) + 1
+							record_provider_value(g.win, win)
 						end
 						local lim_out = type(e.limit) == "table" and tonumber(e.limit.output) or nil
 						if lim_out and lim_out > 0 then
-							outs[bare] = outs[bare] or {}
-							outs[bare][lim_out] = (outs[bare][lim_out] or 0) + 1
+							record_provider_value(g.out, lim_out)
 						end
 					end
 				end
+			end
+			-- Each provider casts at most one vote per attribute per bare id.
+			for bare, g in pairs(per_bare) do
+				spelt[bare] = (spelt[bare] or 0) + 1
+				vote_single(named, bare, g.name.value)
+				vote_single(levels, bare, g.eff.value)
+				if g.reason.value == true then
+					reasons[bare] = (reasons[bare] or 0) + 1
+				elseif g.reason.value == false then
+					reasons[bare] = (reasons[bare] or 0) - 1
+				end
+				vote_single(inputs, bare, g.input.value)
+				vote_single(sizes, bare, g.win.value)
+				vote_single(outs, bare, g.out.value)
 			end
 		end
 	end

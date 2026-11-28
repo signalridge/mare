@@ -1994,7 +1994,6 @@ async fn models_dev_reasoning_options_normalised_lookup_hidden_signals_and_missi
               local s = m and LLM:model_sources(ref) or nil
               return {
                 found = m ~= nil,
-                unlisted = m and m.unlisted == true or false,
                 name = m and m.name or nil,
                 ctx = m and m.context_window or nil,
                 out = m and m.max_output or nil,
@@ -2013,7 +2012,8 @@ async fn models_dev_reasoning_options_normalised_lookup_hidden_signals_and_missi
             -- Verify built-in anthropic/claude-sonnet-4-5 stays visible because its seed sets hidden = false.
             local sonnet45 = info("anthropic/claude-sonnet-4-5")
 
-            -- Verify backoff math (2m -> 4m -> 8m -> 16m -> 32m -> 60m -> 60m).
+            -- Verify backoff math (2m -> 4m -> 8m -> 16m -> 32m -> 60m -> 60m) and per-provider
+            -- consensus voting (at most 1 vote per provider per bare id, abstaining on intra-provider conflict).
             local mdev = require("llm.mdev")
             local seq = {}
             local cur = 0
@@ -2021,6 +2021,26 @@ async fn models_dev_reasoning_options_normalised_lookup_hidden_signals_and_missi
               cur = mdev.next_retry_ms(cur)
               seq[i] = cur
             end
+            local vote_md = {
+              providers = {
+                prov_a = {
+                  ["ns1/vote-model"] = { name = "Alias A", reasoning = true, limit = { context = 128000, output = 16384 } },
+                  ["ns2/vote-model"] = { name = "Alias A", reasoning = true, limit = { context = 128000, output = 16384 } },
+                  ["ns3/vote-model"] = { name = "Alias A", reasoning = true, limit = { context = 128000, output = 16384 } },
+                  ["ns1/conflict-model"] = { limit = { context = 128000, output = 16384 } },
+                  ["ns2/conflict-model"] = { limit = { context = 64000, output = 16384 } },
+                },
+                prov_b = {
+                  ["vote-model"] = { name = "Consensus B", reasoning = false, limit = { context = 32000, output = 8192 } },
+                  ["conflict-model"] = { limit = { context = 32000, output = 4096 } },
+                },
+                prov_c = {
+                  ["vote-model"] = { name = "Consensus B", reasoning = false, limit = { context = 32000, output = 8192 } },
+                },
+              },
+            }
+            local vote_entry = mdev.lookup(vote_md, "absent", "vote-model")
+            local conflict_entry = mdev.lookup(vote_md, "absent", "conflict-model")
 
             return mare.json.encode({
               ds_toggled = info("deepseek/ds-toggled"),
@@ -2038,6 +2058,12 @@ async fn models_dev_reasoning_options_normalised_lookup_hidden_signals_and_missi
               unlisted_alias = unlisted_alias,
               sonnet45 = sonnet45,
               backoff_seq = mare.json.array(seq),
+              vote_ctx = vote_entry and vote_entry.limit and vote_entry.limit.context or nil,
+              vote_out = vote_entry and vote_entry.limit and vote_entry.limit.output or nil,
+              vote_name = vote_entry and vote_entry.name or nil,
+              vote_reasoning = vote_entry and vote_entry.reasoning,
+              conflict_ctx = conflict_entry and conflict_entry.limit and conflict_entry.limit.context or nil,
+              conflict_out = conflict_entry and conflict_entry.limit and conflict_entry.limit.output or nil,
             })
             "#,
         )
@@ -2097,8 +2123,26 @@ async fn models_dev_reasoning_options_normalised_lookup_hidden_signals_and_missi
             "consensus must NOT leak deepseek's verified toggle-off into other providers: {v}"
         );
         assert_eq!(
-            v["unlisted_alias"]["unlisted"], true,
-            "normalised metadata lookup must NEVER affect model resolution: {v}"
+            v["unlisted_alias"]["found"], false,
+            "normalised metadata lookup must NEVER turn an unlisted alias into a resolved model: {v}"
+        );
+        assert_eq!(
+            v["vote_ctx"], 32_000,
+            "one provider with 3 aliases (128k) must cast 1 vote and lose to 2 providers (32k): {v}"
+        );
+        assert_eq!(
+            v["vote_out"], 8_192,
+            "one provider with 3 aliases (16k) must cast 1 vote and lose to 2 providers (8k): {v}"
+        );
+        assert_eq!(v["vote_name"], "Consensus B");
+        assert_eq!(v["vote_reasoning"], false);
+        assert_eq!(
+            v["conflict_ctx"], 32_000,
+            "provider with conflicting context windows for same bare id must abstain so unambiguous provider wins: {v}"
+        );
+        assert_eq!(
+            v["conflict_out"], 16_384,
+            "tie between agreeing provider A (16384) and provider B (4096) picks larger number deterministically: {v}"
         );
 
         // Part 4: hidden signals + explicit seed hidden=false override.

@@ -5,7 +5,7 @@ x-api-key: <absent>
 anthropic-version: 2023-06-01
 accept: text/event-stream
 x-opencode-session: sess-golden
-{"max_tokens":131072,"messages":[{"content":[{"cache_control":{"type":"ephemeral"},"text":"hi","type":"text"}],"role":"user"}],"model":"glm-5.3-flash","output_config":{"effort":"medium"},"stream":true,"system":[{"cache_control":{"type":"ephemeral"},"text":"S","type":"text"}],"thinking":{"type":"adaptive"}}
+{"max_tokens":131072,"messages":[{"content":[{"cache_control":{"type":"ephemeral"},"text":"hi","type":"text"}],"role":"user"}],"model":"glm-5.3-flash","output_config":{"effort":"high"},"stream":true,"system":[{"cache_control":{"type":"ephemeral"},"text":"S","type":"text"}],"thinking":{"type":"adaptive"}}
 
 # opencode-go/deepseek-v4.1-flash default
 POST /gw/anthropic/v1/messages

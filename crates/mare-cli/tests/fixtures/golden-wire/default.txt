@@ -12,7 +12,7 @@ POST /openai/responses
 
 # opencode-go/glm-5.3-flash default
 POST /og/responses
-{"include":["reasoning.encrypted_content"],"input":[{"content":[{"text":"hi","type":"input_text"}],"role":"user"}],"instructions":"S","max_output_tokens":131072,"model":"glm-5.3-flash","parallel_tool_calls":true,"prompt_cache_key":"sess-golden","reasoning":{"effort":"medium"},"store":false,"stream":true,"tool_choice":"auto"}
+{"include":["reasoning.encrypted_content"],"input":[{"content":[{"text":"hi","type":"input_text"}],"role":"user"}],"instructions":"S","max_output_tokens":131072,"model":"glm-5.3-flash","parallel_tool_calls":true,"prompt_cache_key":"sess-golden","reasoning":{"effort":"high"},"store":false,"stream":true,"tool_choice":"auto"}
 
 # myresp/some-model default
 POST /myresp/responses
