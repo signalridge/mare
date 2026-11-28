@@ -956,3 +956,73 @@ async fn default_stream_idle_timeout_is_300s_and_max_effort_scales_by_4x() {
     })
     .await
 }
+
+/// Issue #192: when a completed OpenAI Responses `reasoning` item has an empty `summary` and
+/// carries plaintext reasoning in `content` (`type: "reasoning_text"`), the finalized reasoning
+/// block must preserve that text rather than collapsing to `""`.
+#[tokio::test]
+async fn openai_responses_persists_plaintext_reasoning_content_when_summary_is_empty() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let server = MockServer::start().await;
+        let sse = concat!(
+            "event: response.reasoning_text.delta\n",
+            "data: {\"type\":\"response.reasoning_text.delta\",\"item_id\":\"rs_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"step 1: verify inputs\"}\n\n",
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"summary\":[],\"content\":[{\"type\":\"reasoning_text\",\"text\":\"step 1: verify inputs\"}]}}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":1,\"content_index\":0,\"delta\":\"All set.\"}\n\n",
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"All set.\"}]}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":8}}}\n\n",
+        );
+        let sse_with_both = concat!(
+            "event: response.reasoning_summary_text.delta\n",
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_2\",\"output_index\":0,\"summary_index\":0,\"delta\":\"concise summary\"}\n\n",
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"rs_2\",\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"concise summary\"}],\"content\":[{\"type\":\"reasoning_text\",\"text\":\"raw reasoning text\"}]}}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_2\",\"output_index\":1,\"content_index\":0,\"delta\":\"Done.\"}\n\n",
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"id\":\"msg_2\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Done.\"}]}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_2\",\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":8}}}\n\n",
+        );
+        server.route("/openai", vec![Resp::sse(sse), Resp::sse(sse_with_both)]);
+        let h = provider_host(&mut env, &server, json!({})).await;
+
+        let msg = ask(&h, "openai/gpt-6.1-terra").await;
+        let reasoning = msg["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["type"] == "reasoning")
+            .expect("reasoning block present");
+        assert_eq!(
+            reasoning["text"].as_str(),
+            Some("step 1: verify inputs"),
+            "completed Responses reasoning block lost plaintext content when summary was empty: {reasoning}"
+        );
+        assert_eq!(
+            reasoning["native"]["openai-responses"]["item"]["content"][0]["text"].as_str(),
+            Some("step 1: verify inputs"),
+            "original native reasoning payload must be preserved: {reasoning}"
+        );
+
+        let msg_both = ask(&h, "openai/gpt-6.1-terra").await;
+        let reasoning_both = msg_both["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["type"] == "reasoning")
+            .expect("reasoning block present when both summary and content exist");
+        assert_eq!(
+            reasoning_both["text"].as_str(),
+            Some("concise summary"),
+            "summary should be preferred without duplicating content when both are present: {reasoning_both}"
+        );
+        h.shutdown().await;
+    })
+    .await
+}
