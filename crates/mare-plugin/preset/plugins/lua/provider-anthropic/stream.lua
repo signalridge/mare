@@ -48,6 +48,7 @@ return function(D)
 		local cache_control = (req_native and type(req_native.cache_control) == "table" and req_native.cache_control)
 			or lib.anthropic_cache_control(retention, supports_long, read_only)
 		local system_cc = (req.system and req.system ~= "" and cache_control ~= nil) and 1 or 0
+		local msg_state = {}
 		local body = {
 			model = model.id,
 			max_tokens = max_tokens,
@@ -58,6 +59,7 @@ return function(D)
 				deferred_tools = has_deferred and deferred_tools or nil,
 				cache_control = cache_control,
 				max_cache_breakpoints = 4 - system_cc,
+				state = msg_state,
 			}),
 		}
 		if req.system and req.system ~= "" then
@@ -98,12 +100,26 @@ return function(D)
 			url = endpoint.url,
 			headers = headers,
 			body = body,
-		}, { has_deferred = has_deferred, tools = tools }
+		}, {
+			has_deferred = has_deferred,
+			tools = tools,
+			invalidated_current_turn = msg_state.invalidated_current_turn == true,
+		}
 	end
 
 	local function finalize(req, endpoint, wire, state)
 		local headers, body, model = wire.headers, wire.body, req.model
 		local has_deferred, tools = state.has_deferred, state.tools
+		if state.invalidated_current_turn then
+			-- A signed thinking block in the active tool turn was modified (e.g. secret projection
+			-- or lossy UTF-8 replacement) and omitted to avoid replaying a stale signature.
+			-- Explicitly disable thinking rather than deleting `body.thinking` (some models keep
+			-- thinking enabled when the parameter is omitted); if the endpoint still rejects a
+			-- thinking-less active tool turn, `retry` surfaces a recoverable error instead of
+			-- silently stripping `body.thinking`.
+			body.thinking = { type = "disabled" }
+			wire._invalidated_current_turn = true
+		end
 		local function add_beta(tag)
 			local beta_key
 			for k in pairs(headers) do
@@ -160,14 +176,29 @@ return function(D)
 	end
 
 	local function retry(wire, err)
-		if
-			(err.status ~= 400 and err.status ~= 422)
-			or type(wire.body.thinking) ~= "table"
-			or wire.body.thinking.type ~= "disabled"
-		then
+		if err.status ~= 400 and err.status ~= 422 then
 			return false
 		end
 		local msg = type(err.message) == "string" and err.message:lower() or ""
+		if wire._invalidated_current_turn then
+			if
+				msg:find("thinking", 1, true)
+				or msg:find("redacted_thinking", 1, true)
+				or msg:find("signature", 1, true)
+			then
+				error({
+					message = "Anthropic: active tool turn thinking block was modified and cannot be replayed safely ("
+						.. tostring(err.message or "endpoint rejected continuation without original thinking block")
+						.. "); send a new user message to continue on a fresh turn boundary",
+					kind = "invalid",
+					retryable = false,
+				}, 0)
+			end
+			return false
+		end
+		if type(wire.body.thinking) ~= "table" or wire.body.thinking.type ~= "disabled" then
+			return false
+		end
 		if
 			msg:find("thinking", 1, true)
 			and (

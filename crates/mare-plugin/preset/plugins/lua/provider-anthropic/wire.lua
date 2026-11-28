@@ -104,6 +104,17 @@ end
 --- so) goes back as it came, but only within the current tool loop — the assistant messages after
 --- the last user message (Anthropic keeps thinking only for the turn's tool use; an earlier
 --- turn's is dropped, like CLIProxyAPI's `is-compat` keeps empty-signature blocks)
+local PROJECTION_MARKER = "[[mare-value:"
+
+local function is_mutated_thinking_payload(value, hash)
+	if type(hash) == "string" and hash ~= "" then
+		return type(value) ~= "string" or mare.crypto.sha256(value) ~= hash
+	end
+	-- Legacy pre-upgrade persisted blocks carry no stored digest; detect projection
+	-- placeholders so restored projected blocks never replay stale signatures.
+	return type(value) == "string" and value:find(PROJECTION_MARKER, 1, true) ~= nil
+end
+
 function M.convert_messages(messages, no_cache, opts)
 	opts = opts or {}
 	local provider = opts.provider or "anthropic"
@@ -111,11 +122,9 @@ function M.convert_messages(messages, no_cache, opts)
 	local block_cc_budget = no_cache and max_cc or math.max(0, max_cc - 1)
 	local apply_block_cache_control, cc_used = make_cache_applier(block_cc_budget)
 	local turn_start = 0
-	if opts.replay_unsigned then
-		for i, m in ipairs(messages) do
-			if m.role == "user" then
-				turn_start = i
-			end
+	for i, m in ipairs(messages) do
+		if m.role == "user" then
+			turn_start = i
 		end
 	end
 	local unreferenced
@@ -196,15 +205,29 @@ function M.convert_messages(messages, no_cache, opts)
 				if b.type == "reasoning" then
 					if same and b.redacted then
 						local data = na and na.redacted_data
-						if type(data) == "string" and data ~= "" then
+						local hash = na and na.redacted_hash
+						local mutated = is_mutated_thinking_payload(data, hash)
+						if mutated then
+							if i > turn_start and type(opts.state) == "table" then
+								opts.state.invalidated_current_turn = true
+							end
+						elseif type(data) == "string" and data ~= "" then
 							blocks[#blocks + 1] =
 								apply_block_cache_control({ type = "redacted_thinking", data = data }, b)
 						end
 					elseif na and type(na.signature) == "string" and na.signature ~= "" then
-						blocks[#blocks + 1] = apply_block_cache_control(
-							{ type = "thinking", thinking = b.text or "", signature = na.signature },
-							b
-						)
+						local text = b.text or ""
+						local hash = na.text_hash
+						if is_mutated_thinking_payload(text, hash) then
+							if i > turn_start and type(opts.state) == "table" then
+								opts.state.invalidated_current_turn = true
+							end
+						else
+							blocks[#blocks + 1] = apply_block_cache_control(
+								{ type = "thinking", thinking = text, signature = na.signature },
+								b
+							)
+						end
 					elseif unsigned_ok and b.text and b.text ~= "" then
 						blocks[#blocks + 1] =
 							apply_block_cache_control({ type = "thinking", thinking = b.text, signature = "" }, b)
@@ -500,6 +523,7 @@ function M.new_parser(sink, on_error, opts)
 				b.native = b.native or {}
 				b.native[WIRE] = b.native[WIRE] or {}
 				b.native[WIRE].signature = sig
+				b.native[WIRE].text_hash = mare.crypto.sha256(b.text or "")
 			end
 			b._sig = nil
 		elseif b._hosted_result_for then
@@ -600,11 +624,15 @@ function M.new_parser(sink, on_error, opts)
 			elseif cb.type == "thinking" then
 				b = { type = "reasoning", text = cb.thinking or "", _sig = cb.signature or "" }
 			elseif cb.type == "redacted_thinking" then
+				local native_wire = { redacted_data = cb.data }
+				if type(cb.data) == "string" and cb.data ~= "" then
+					native_wire.redacted_hash = mare.crypto.sha256(cb.data)
+				end
 				b = {
 					type = "reasoning",
 					text = "",
 					redacted = true,
-					native = { [WIRE] = { redacted_data = cb.data } },
+					native = { [WIRE] = native_wire },
 				}
 			elseif cb.type == "tool_use" then
 				-- blocks are typed here: a tool call without id or name is a protocol error
