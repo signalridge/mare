@@ -87,7 +87,7 @@ variables:
       [ \t]*
       (
         \1                    # the backtick/tilde combination that opened the code fence
-        (?:(?:\2)*|(?:\3)*)   # plus optional additional closing characters
+        (?:(?<=`)`*|(?<=~)~*) # plus optional additional closing characters
       )
       ({{wspace_eol}})        # any amount of whitespace until EOL (fold end marker)
     )
