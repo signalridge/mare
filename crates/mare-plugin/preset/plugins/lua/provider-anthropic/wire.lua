@@ -136,6 +136,30 @@ function M.convert_messages(messages, no_cache, opts)
 			end
 		end
 	end
+	local used_call_ids = {}
+	for _, msg in ipairs(messages) do
+		if type(msg.tool_call_id) == "string" and msg.tool_call_id ~= "" then
+			used_call_ids[msg.tool_call_id] = true
+			used_call_ids[clean_id(msg.tool_call_id)] = true
+		end
+		if type(msg.content) == "table" then
+			for _, b in ipairs(msg.content) do
+				if type(b) == "table" and b.type == "tool_call" and type(b.id) == "string" and b.id ~= "" then
+					used_call_ids[b.id] = true
+					used_call_ids[clean_id(b.id)] = true
+				end
+			end
+		end
+	end
+	local function allocate_call_id(base)
+		local id, seq = base, 1
+		while used_call_ids[id] do
+			seq = seq + 1
+			id = base .. "_" .. seq
+		end
+		used_call_ids[id] = true
+		return id
+	end
 	local out = {}
 	local function push(role, blocks)
 		if #blocks == 0 then
@@ -194,6 +218,41 @@ function M.convert_messages(messages, no_cache, opts)
 			else
 				flush_displaced()
 				push("user", blocks)
+				if
+					m.compaction
+					and unreferenced
+					and #blocks > 0
+					and type(m.details) == "table"
+					and type(m.details.loaded_tools) == "table"
+				then
+					local refs, names = {}, {}
+					for _, name in ipairs(m.details.loaded_tools) do
+						if type(name) == "string" and unreferenced[name] then
+							unreferenced[name] = nil
+							refs[#refs + 1] = { type = "tool_reference", tool_name = name }
+							names[#names + 1] = name
+						end
+					end
+					if #refs > 0 then
+						local call_id = allocate_call_id("compact_loaded_tools")
+						push("assistant", {
+							{
+								type = "tool_use",
+								id = call_id,
+								name = "tool_search",
+								input = { query = "select:" .. table.concat(names, ",") },
+							},
+						})
+						push("user", {
+							{
+								type = "tool_result",
+								tool_use_id = call_id,
+								content = mare.json.array(refs),
+								is_error = false,
+							},
+						})
+					end
+				end
 			end
 		elseif m.role == "assistant" then
 			flush_displaced()

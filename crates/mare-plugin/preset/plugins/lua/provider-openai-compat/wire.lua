@@ -381,6 +381,21 @@ function M.convert_messages(system, messages, endpoint, opts)
 				end
 				out[#out + 1] = { role = "user", content = table.concat(texts, "\n") }
 			end
+			if
+				m.compaction
+				and undeclared
+				and type(m.details) == "table"
+				and type(m.details.loaded_tools) == "table"
+			then
+				for _, name in ipairs(m.details.loaded_tools) do
+					local tool_def = undeclared[name]
+					if tool_def then
+						undeclared[name] = nil
+						pending_tool_additions[#pending_tool_additions + 1] = tool_def
+					end
+				end
+				flush_tool_additions()
+			end
 		elseif m.role == "assistant" then
 			flush_tool_additions()
 			flush_tool_images()

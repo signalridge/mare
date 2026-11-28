@@ -172,6 +172,78 @@ function M.convert_messages(messages, model_id, provider, opts)
 		}
 	end
 	local input = {}
+	local activated_deferred = {}
+	local used_call_ids = {}
+	for _, m in ipairs(messages) do
+		if type(m.tool_call_id) == "string" and m.tool_call_id ~= "" then
+			used_call_ids[m.tool_call_id] = true
+		end
+		if type(m.content) == "table" then
+			for _, b in ipairs(m.content) do
+				if type(b) == "table" and b.type == "tool_call" and type(b.id) == "string" and b.id ~= "" then
+					used_call_ids[b.id] = true
+				end
+			end
+		end
+		if type(m.remote) == "table" and type(m.remote.items) == "table" then
+			for _, item in ipairs(m.remote.items) do
+				if type(item) == "table" then
+					if type(item.call_id) == "string" and item.call_id ~= "" then
+						used_call_ids[item.call_id] = true
+					end
+					if type(item.id) == "string" and item.id ~= "" then
+						used_call_ids[item.id] = true
+					end
+				end
+			end
+		end
+	end
+	local function allocate_call_id(base)
+		local id, seq = base, 1
+		while used_call_ids[id] do
+			seq = seq + 1
+			id = base .. "_" .. seq
+		end
+		used_call_ids[id] = true
+		return id
+	end
+	local function append_compaction_loaded_tools(m)
+		if
+			not client_tool_search
+			or not wire_tools_by_name
+			or type(m.details) ~= "table"
+			or type(m.details.loaded_tools) ~= "table"
+		then
+			return
+		end
+		local tools_out, names = {}, {}
+		for _, name in ipairs(m.details.loaded_tools) do
+			if type(name) == "string" and not activated_deferred[name] then
+				local existing = wire_tools_by_name[name]
+				if type(existing) == "table" and existing.defer_loading == true then
+					activated_deferred[name] = true
+					tools_out[#tools_out + 1] = table.copy(existing)
+					names[#names + 1] = name
+				end
+			end
+		end
+		if #tools_out > 0 then
+			local call_id = allocate_call_id("compact_loaded_tools")
+			input[#input + 1] = {
+				type = "tool_search_call",
+				call_id = call_id,
+				execution = "client",
+				arguments = { query = "select:" .. table.concat(names, ",") },
+			}
+			input[#input + 1] = {
+				type = "tool_search_output",
+				call_id = call_id,
+				execution = "client",
+				status = "completed",
+				tools = mare.json.array(tools_out),
+			}
+		end
+	end
 	for _, m in ipairs(messages) do
 		if m.compaction and remote_items_valid(m.remote, model_id, provider) then
 			-- remote compaction: the server's compacted history replaces
@@ -182,6 +254,7 @@ function M.convert_messages(messages, model_id, provider, opts)
 					input[#input + 1] = item
 				end
 			end
+			append_compaction_loaded_tools(m)
 		elseif m.role == "user" then
 			local content = {}
 			for _, b in ipairs(m.content) do
@@ -199,6 +272,9 @@ function M.convert_messages(messages, model_id, provider, opts)
 				end
 			end
 			input[#input + 1] = { role = "user", content = content }
+			if m.compaction then
+				append_compaction_loaded_tools(m)
+			end
 		elseif m.role == "assistant" then
 			local same_provider = (m.provider_id == nil or m.provider_id == (provider or "openai"))
 				and (model_id == nil or m.model_id == nil or m.model_id == model_id)
