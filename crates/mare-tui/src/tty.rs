@@ -538,13 +538,15 @@ impl Events {
                     batch.push(Ok(TimedEvent { event: normalize_platform_event(ev), at }));
                 }
             };
-            let remaining_esc_timeout = |decoder: &crate::live_input::LiveDecoder| {
-                decoder.esc_deadline().map(|deadline| {
+            let remaining_timeout = |deadline: Option<std::time::Instant>| {
+                deadline.map(|deadline| {
                     let rem = deadline.saturating_duration_since(std::time::Instant::now());
                     // Round up sub-millisecond remainders so `poll(2)` does not wake early and spin.
                     Duration::from_millis(rem.as_nanos().div_ceil(1_000_000) as u64)
                 })
             };
+            let remaining_esc_timeout =
+                |decoder: &crate::live_input::LiveDecoder| remaining_timeout(decoder.esc_deadline());
             while requests.recv().is_ok() {
                 {
                     let mut active = s.active_poll.lock().unwrap_or_else(|e| e.into_inner());
@@ -571,7 +573,9 @@ impl Events {
                         if s.paused.load(Ordering::SeqCst) {
                             break;
                         }
-                        match poll_unix_fds(tty_fd, wake_fd, remaining_esc_timeout(&decoder)) {
+                        let wait_deadline =
+                            if batch.is_empty() { decoder.next_deadline() } else { decoder.esc_deadline() };
+                        match poll_unix_fds(tty_fd, wake_fd, remaining_timeout(wait_deadline)) {
                             Ok((tty_ready, wake_ready)) => {
                                 if wake_ready {
                                     drain_wake_pipe(&mut wake_read);
@@ -584,7 +588,21 @@ impl Events {
                                 }
                                 if !tty_ready {
                                     if !wake_ready {
-                                        flush_pending_esc(&mut decoder, &mut decoded, &mut batch);
+                                        if decoder.esc_deadline().is_some() {
+                                            flush_pending_esc(&mut decoder, &mut decoded, &mut batch);
+                                        } else {
+                                            decoded.clear();
+                                            if let Some(at) =
+                                                decoder.flush_expired_esc(std::time::Instant::now(), &mut decoded)
+                                            {
+                                                for ev in decoded.drain(..) {
+                                                    batch.push(Ok(TimedEvent {
+                                                        event: normalize_platform_event(ev),
+                                                        at,
+                                                    }));
+                                                }
+                                            }
+                                        }
                                         if !batch.is_empty() {
                                             break;
                                         }
