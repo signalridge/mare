@@ -716,3 +716,277 @@ async fn retain_ratio_scales_retained_tail_with_message_budget() {
     })
     .await
 }
+
+/// When prune falls back to rewriting inside a prompt-cached prefix and local summarisation runs
+/// next on the same model within `input_budget`, the summary request reuses the original unpruned
+/// cached prefix; when the unpruned prefix does not fit `input_budget`, it keeps the pruned input.
+#[tokio::test]
+async fn local_summary_reuses_cached_prefix_after_cache_breaking_prune_when_budget_allows() {
+    local(async {
+        let env = TestEnv::new().await;
+        let base = overhead(&env).await;
+        let threshold = (base + 1400) * 10 / 9;
+
+        // Case 1: unpruned history fits the summary model's window -> summary request preserves
+        // the original unpruned tool_result verbatim (no prune marker).
+        {
+            let cfg = json!({
+                "models": {
+                    "faux/echo": { "context_window": 40000, "max_output": 2000 }
+                },
+                "plugins": {
+                    "compact": {
+                        "auto": false,
+                        "threshold_tokens": threshold,
+                        "keep_recent_tokens": 50,
+                        "recent_user_tokens": 0,
+                        "prune_tool_result_chars": 400,
+                        "prune_head_chars": 80,
+                        "prune_tail_chars": 40,
+                        "prune_protect_tokens": 50,
+                        "prune_min_saving_tokens": 20,
+                        "stages": ["prune", "local"]
+                    }
+                }
+            });
+            let h = env
+                .host()
+                .builtins(&["compact", "usage"])
+                .faux(json!([{ "text": "## Summary\nCompact overview" }]))
+                .config(cfg)
+                .no_session()
+                .build()
+                .await;
+            expose(&h);
+            global(&h, "K", h.service_table("compact").unwrap());
+            global(&h, "L", h.service_table("llm").unwrap());
+            global(&h, "U", h.service_table("usage").unwrap());
+            let (status, summary_req): (String, String) = eval(
+                &h,
+                r#"
+                local big_cached_output = "CACHED-HEAD " .. string.rep("cached-tool-body ", 220) .. " CACHED-TAIL"
+                local big_recent_reply = string.rep("subsequent work details ", 360)
+                A:set_messages({
+                    { role = "user", content = { { type = "text", text = "inspect repository" } } },
+                    { role = "assistant", content = { { type = "tool_call", id = "c1", name = "read", arguments = {} } } },
+                    { role = "tool_result", tool_call_id = "c1", content = { { type = "text", text = big_cached_output } } },
+                    { role = "assistant", content = { { type = "text", text = big_recent_reply } } },
+                    { role = "user", content = { { type = "text", text = "final question" } } },
+                    { role = "assistant", content = { { type = "text", text = "short answer" } } },
+                })
+                -- Record real provider cache_read usage on the latest assistant message so both
+                -- usage.last_cache_read and compact's usage_current() reflect the cached prefix.
+                C.cordis:get("bus"):emit("item/completed", {
+                    item = {
+                        message = {
+                            role = "assistant",
+                            provider_id = "faux",
+                            model_id = "echo",
+                            usage = { input = 100, output = 20, cache_read = 5000 },
+                        },
+                    },
+                })
+                local captured = ""
+                local orig_complete = L.complete
+                L.complete = function(self, req)
+                    if req.purpose == "compact" then
+                        captured = mare.json.encode(req.messages)
+                    end
+                    return orig_complete(self, req)
+                end
+                local res = K:run()
+                return tostring(res and res.status or ""), captured
+                "#,
+            )
+            .await;
+            assert_eq!(status, "compacted");
+            assert!(
+                summary_req.contains("CACHED-HEAD ") && summary_req.contains("cached-tool-body "),
+                "summary request must reuse original unpruned cached prefix: {summary_req}"
+            );
+            assert!(
+                !summary_req.contains("tool result middle pruned"),
+                "summary request must not rewrite the cached prefix when unpruned fits budget: {summary_req}"
+            );
+            h.shutdown().await;
+        }
+
+        // Case 2: tight window where the unpruned tool output exceeds input_budget -> falls back
+        // to the pruned input so compaction still succeeds cleanly.
+        {
+            let tight_window = base + 3200;
+            let tight_threshold = (base + 1400) * 10 / 9;
+            let cfg = json!({
+                "models": {
+                    "faux/echo": { "context_window": tight_window, "max_output": 1000 }
+                },
+                "plugins": {
+                    "compact": {
+                        "auto": false,
+                        "threshold_tokens": tight_threshold,
+                        "headroom_tokens": 500,
+                        "summary_max_tokens": 1000,
+                        "keep_recent_tokens": 50,
+                        "recent_user_tokens": 0,
+                        "prune_tool_result_chars": 400,
+                        "prune_head_chars": 80,
+                        "prune_tail_chars": 40,
+                        "prune_protect_tokens": 50,
+                        "prune_min_saving_tokens": 20,
+                        "stages": ["prune", "local"]
+                    }
+                }
+            });
+            let h = env
+                .host()
+                .builtins(&["compact", "usage"])
+                .faux(json!([{ "text": "## Summary\nCompact tight" }]))
+                .config(cfg)
+                .no_session()
+                .build()
+                .await;
+            expose(&h);
+            global(&h, "K", h.service_table("compact").unwrap());
+            global(&h, "L", h.service_table("llm").unwrap());
+            global(&h, "U", h.service_table("usage").unwrap());
+            let (status, summary_req): (String, String) = eval(
+                &h,
+                r#"
+                -- Huge tool output (~3000+ tokens) exceeds tight input_budget (~2200 tokens)
+                -- unless pruned, while pruned output + remaining messages fit easily.
+                local huge_cached_output = "HUGE-HEAD " .. string.rep("overflow-body-chunk ", 700) .. " HUGE-TAIL"
+                local medium_reply = string.rep("subsequent work details ", 260)
+                A:set_messages({
+                    { role = "user", content = { { type = "text", text = "inspect huge file" } } },
+                    { role = "assistant", content = { { type = "tool_call", id = "c1", name = "read", arguments = {} } } },
+                    { role = "tool_result", tool_call_id = "c1", content = { { type = "text", text = huge_cached_output } } },
+                    { role = "assistant", content = { { type = "text", text = medium_reply } } },
+                    { role = "user", content = { { type = "text", text = "final question" } } },
+                    { role = "assistant", content = { { type = "text", text = "short answer" } } },
+                })
+                C.cordis:get("bus"):emit("item/completed", {
+                    item = {
+                        message = {
+                            role = "assistant",
+                            provider_id = "faux",
+                            model_id = "echo",
+                            usage = { input = 100, output = 20, cache_read = 5000 },
+                        },
+                    },
+                })
+                local captured = ""
+                local orig_complete = L.complete
+                L.complete = function(self, req)
+                    if req.purpose == "compact" then
+                        captured = mare.json.encode(req.messages)
+                    end
+                    return orig_complete(self, req)
+                end
+                local res = K:run()
+                return tostring(res and res.status or ""), captured
+                "#,
+            )
+            .await;
+            assert_eq!(status, "compacted");
+            assert!(
+                summary_req.contains("tool result middle pruned"),
+                "tight budget must keep pruned input when unpruned prefix does not fit: {summary_req}"
+            );
+            h.shutdown().await;
+        }
+
+        // Case 3: hybrid budget — full pre-prune history exceeds input_budget, but restoring ONLY
+        // the messages inside `cached_tokens` while keeping post-cache messages pruned fits the
+        // budget. The summary request must preserve the unpruned cached prefix and keep the
+        // post-cache suffix pruned.
+        {
+            let hybrid_window = base + 3400;
+            let hybrid_threshold = (base + 1400) * 10 / 9;
+            let cfg = json!({
+                "models": {
+                    "faux/echo": { "context_window": hybrid_window, "max_output": 800 }
+                },
+                "plugins": {
+                    "compact": {
+                        "auto": false,
+                        "threshold_tokens": hybrid_threshold,
+                        "headroom_tokens": 500,
+                        "summary_max_tokens": 800,
+                        "keep_recent_tokens": 50,
+                        "recent_user_tokens": 0,
+                        "prune_tool_result_chars": 400,
+                        "prune_head_chars": 80,
+                        "prune_tail_chars": 40,
+                        "prune_protect_tokens": 50,
+                        "prune_min_saving_tokens": 3500,
+                        "stages": ["prune", "local"]
+                    }
+                }
+            });
+            let h = env
+                .host()
+                .builtins(&["compact", "usage"])
+                .faux(json!([{ "text": "## Summary\nCompact hybrid" }]))
+                .config(cfg)
+                .no_session()
+                .build()
+                .await;
+            expose(&h);
+            global(&h, "K", h.service_table("compact").unwrap());
+            global(&h, "L", h.service_table("llm").unwrap());
+            let (status, summary_req): (String, String) = eval(
+                &h,
+                r#"
+                -- Cached prefix tool output (~900 tokens) + post-cache huge tool output (~2600 tokens):
+                -- Full pre-prune (~3500+) exceeds input_budget (~2600), while cached pre-prune (~900)
+                -- + pruned post-cache (~150) fits cleanly.
+                local cached_out = "CACHED-PREFIX-HEAD " .. string.rep("cached-prefix-body ", 130) .. " CACHED-PREFIX-MIDDLE-MARKER " .. string.rep("cached-prefix-body ", 130) .. " CACHED-PREFIX-TAIL"
+                local post_out = "POST-CACHE-HEAD " .. string.rep("post-cache-huge-chunk ", 375) .. " POST-CACHE-MIDDLE-MARKER " .. string.rep("post-cache-huge-chunk ", 375) .. " POST-CACHE-TAIL"
+                local m1 = { role = "user", content = { { type = "text", text = "step 1" } } }
+                local m2 = { role = "assistant", content = { { type = "tool_call", id = "c1", name = "read", arguments = {} } } }
+                local m3 = { role = "tool_result", tool_call_id = "c1", content = { { type = "text", text = cached_out } } }
+                local m4 = { role = "assistant", content = { { type = "tool_call", id = "c2", name = "read", arguments = {} } } }
+                local m5 = { role = "tool_result", tool_call_id = "c2", content = { { type = "text", text = post_out } } }
+                local m6 = { role = "assistant", content = { { type = "text", text = "done reading" } } }
+                local m7 = { role = "user", content = { { type = "text", text = "final question" } } }
+                local m8 = { role = "assistant", content = { { type = "text", text = "short answer" } } }
+                A:set_messages({ m1, m2, m3, m4, m5, m6, m7, m8 })
+                -- Cache covers m1..m3 only; m5 is outside the cached prefix.
+                local cached_boundary = mare.text.tokens(m1) + mare.text.tokens(m2) + mare.text.tokens(m3) + 10
+                C.cordis:get("bus"):emit("item/completed", {
+                    item = {
+                        message = {
+                            role = "assistant",
+                            provider_id = "faux",
+                            model_id = "echo",
+                            usage = { input = 100, output = 20, cache_read = cached_boundary },
+                        },
+                    },
+                })
+                local captured = ""
+                local orig_complete = L.complete
+                L.complete = function(self, req)
+                    if req.purpose == "compact" then
+                        captured = mare.json.encode(req.messages)
+                    end
+                    return orig_complete(self, req)
+                end
+                local res = K:run()
+                return tostring(res and res.status or ""), captured
+                "#,
+            )
+            .await;
+            assert_eq!(status, "compacted");
+            assert!(
+                summary_req.contains("CACHED-PREFIX-MIDDLE-MARKER"),
+                "hybrid summary request must preserve unpruned cached prefix: {summary_req}"
+            );
+            assert!(
+                summary_req.contains("tool result middle pruned") && !summary_req.contains("POST-CACHE-MIDDLE-MARKER"),
+                "hybrid summary request must keep post-cache suffix pruned so total fits budget: {summary_req}"
+            );
+            h.shutdown().await;
+        }
+    })
+    .await
+}

@@ -141,8 +141,10 @@ return function(deps)
 			return map, n, saved
 		end
 		local map, n, saved = plan(cached > 0)
+		local broke_cache = false
 		if saved < cfg.prune_min_saving_tokens and cached > 0 and st.over then
 			map, n, saved = plan(false)
+			broke_cache = true
 		end
 		if n == 0 or (saved < cfg.prune_min_saving_tokens and not st.force_prune) then
 			return false, n == 0 and "no old tool output to prune" or "pruning would save too little"
@@ -151,6 +153,14 @@ return function(deps)
 		if not new then
 			st.stop = before or "failed to persist pruning"
 			return false, st.stop
+		end
+		if broke_cache and not st.cached_prefix_snapshot then
+			local cur_model = ctx.llm:current()
+			st.cached_prefix_snapshot = {
+				messages = table.copy(msgs),
+				model_ref = cur_model and cur_model.ref or nil,
+				cached_tokens = cached,
+			}
 		end
 		st.pruned_count = (st.pruned_count or 0) + n
 		return true

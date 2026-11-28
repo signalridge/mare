@@ -438,6 +438,30 @@ return function(D)
 		return nil, dropped, kind
 	end
 
+	local function fits_budget(model, prefix, units_in, instruction)
+		if not model then
+			return false
+		end
+		local b = budgets(model)
+		if not b then
+			return false
+		end
+		local out_cap = math.min(cfg.summary_max_tokens or b.headroom, model.max_output or b.headroom)
+		local input_budget = b.window - out_cap
+		local system = S.svc.context and S.svc.context:system_prompt(model) or SYSTEM
+		local tools = S.svc.tools and S.svc.tools:definitions(model) or {}
+		local msgs = table.copy(prefix)
+		for _, m in ipairs(flatten(units_in)) do
+			msgs[#msgs + 1] = m
+		end
+		if missing_result(msgs) then
+			return false
+		end
+		msgs[#msgs + 1] = { role = "user", content = { { type = "text", text = instruction } } }
+		local extra = tokens(system or "") + (#tools > 0 and tokens(tools) or 0)
+		return estimate(msgs) + extra <= input_budget
+	end
+
 	return {
 		text_of = text_of,
 		cp_len = cp_len,
@@ -445,6 +469,8 @@ return function(D)
 		cp_tail = cp_tail,
 		id_of = id_of,
 		session_path = session_path,
+		summary_model = summary_model,
+		fits_budget = fits_budget,
 		repair_tool_order = repair_tool_order,
 		units_of = units_of,
 		summarize = summarize,
