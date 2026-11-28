@@ -111,6 +111,131 @@ async fn context_overflow_patterns_cover_providers_and_exclude_rate_limits() {
     .await
 }
 
+/// Issue #109: "Input too long: model limit N tokens, requested M tokens" classifies as
+/// `context_overflow` without a dedicated error code, while plain 400, generic
+/// `invalid_request_error`, and rate-limit responses are not misclassified.
+#[tokio::test]
+async fn input_too_long_model_limit_classifies_as_context_overflow() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let server = MockServer::start().await;
+        server.route(
+            "/compat",
+            vec![
+                // 1) "Input too long: model limit ..., requested ..." without error code -> context_overflow
+                Resp::status(
+                    400,
+                    json!({
+                        "error": {
+                            "message": "Input too long: model limit 131072 tokens, requested 150000 tokens"
+                        }
+                    })
+                    .to_string(),
+                ),
+                // 2) Same wording under generic `invalid_request_error` -> still context_overflow
+                Resp::status(
+                    400,
+                    json!({
+                        "error": {
+                            "type": "invalid_request_error",
+                            "message": "Input too long: model limit 131072 tokens, requested 150000 tokens"
+                        }
+                    })
+                    .to_string(),
+                ),
+                // 3) Plain 400 (including non-token parameter length wording) -> invalid
+                Resp::status(
+                    400,
+                    json!({ "error": { "message": "Invalid parameter: field name input too long" } }).to_string(),
+                ),
+                // 3b) Field character-length 400 with "Input too long for" -> invalid (must not trigger compaction)
+                Resp::status(
+                    400,
+                    json!({ "error": { "message": "Input too long for field name (64 characters)" } }).to_string(),
+                ),
+                // 4) Generic invalid_request_error -> invalid
+                Resp::status(
+                    400,
+                    json!({
+                        "error": {
+                            "type": "invalid_request_error",
+                            "message": "temperature must be between 0 and 2"
+                        }
+                    })
+                    .to_string(),
+                ),
+                // 5) Explicit overflow code with generic message -> context_overflow
+                Resp::status(
+                    400,
+                    json!({
+                        "error": {
+                            "code": "context_length_exceeded",
+                            "message": "request rejected"
+                        }
+                    })
+                    .to_string(),
+                ),
+                // 6) Rate-limit negative case (429 + rate_limit_exceeded) -> retried as rate_limit, not overflow
+                Resp::status(
+                    429,
+                    json!({
+                        "error": {
+                            "code": "rate_limit_exceeded",
+                            "message": "Input too long: model limit 131072 tokens, requested 150000 tokens"
+                        }
+                    })
+                    .to_string(),
+                )
+                .header("retry-after", "0"),
+                Resp::sse(fixture("openai-compat.sse")),
+            ],
+        );
+
+        let h = provider_host(
+            &mut env,
+            &server,
+            json!({ "providers": { "llm": { "retries": 1, "retry_base_ms": 1, "retry_max_ms": 2 } } }),
+        )
+        .await;
+
+        let m1 = stream(&h, "deepseek/deepseek-chat").await;
+        assert_eq!(m1["error_kind"], "context_overflow", "model-limit wording must be context_overflow: {m1}");
+
+        let m2 = stream(&h, "deepseek/deepseek-chat").await;
+        assert_eq!(
+            m2["error_kind"], "context_overflow",
+            "model-limit wording under invalid_request_error must be context_overflow: {m2}"
+        );
+
+        let m3 = stream(&h, "deepseek/deepseek-chat").await;
+        assert_eq!(m3["error_kind"], "invalid", "plain 400 must remain invalid: {m3}");
+
+        let m3b = stream(&h, "deepseek/deepseek-chat").await;
+        assert_eq!(
+            m3b["error_kind"], "invalid",
+            "field character-length 400 ('Input too long for field name (64 characters)') must remain invalid: {m3b}"
+        );
+
+        let m4 = stream(&h, "deepseek/deepseek-chat").await;
+        assert_eq!(m4["error_kind"], "invalid", "generic invalid_request_error must remain invalid: {m4}");
+
+        let m5 = stream(&h, "deepseek/deepseek-chat").await;
+        assert_eq!(m5["error_kind"], "context_overflow", "explicit overflow code must be context_overflow: {m5}");
+
+        let m6 = stream(&h, "deepseek/deepseek-chat").await;
+        assert_ne!(
+            m6["stop_reason"], "error",
+            "429 rate-limit negative case must retry and succeed instead of context_overflow: {m6}"
+        );
+
+        // 6 non-retried 400 responses + 2 attempts for the retried 429 = 8 total requests.
+        assert_eq!(server.count("/compat"), 8, "only the 429 rate-limit case should be retried");
+
+        h.shutdown().await;
+    })
+    .await
+}
+
 /// PROV-E1 / others #2: Silent overflow (z.ai stop with input+cache_read > context_window;
 /// Xiaomi MiMo length stop with output==0 and input >= 99% context_window) triggers compaction
 /// (pi `overflow.ts:159-175`, `overflow.test.ts:192-234`).
