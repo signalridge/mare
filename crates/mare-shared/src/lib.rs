@@ -9,6 +9,7 @@ pub mod cancel;
 pub mod carry;
 pub mod config_env;
 pub mod config_schema;
+pub mod env;
 pub mod errors;
 pub mod exec_ctx;
 pub mod flags;
@@ -30,6 +31,7 @@ pub mod session_barrier;
 pub mod style;
 pub mod txn_scope;
 pub mod ui;
+pub mod version;
 pub mod wire_projection;
 
 pub mod image_resource;

@@ -13,6 +13,7 @@ Usage: mare [OPTIONS] [PROMPT]... [COMMAND]
 
 Commands:
   plugin      Manage plugins
+  update      Update mare and/or installed plugins
   acp         Run as an Agent Client Protocol server over stdio
   trust       Trust (or revoke trust for) a directory (default: current project root, git worktree root, or cwd)
   session     Sessions: create, list, fork, archive, unarchive, or delete saved sessions
@@ -398,6 +399,40 @@ Arguments:
   <NAMES>...
 
 Options:
+  -m, --model <MODEL>                Model, e.g. openai/gpt-6.1-terra
+      --agent <NAME>                 Use a registered agent type for the initial session
+  -e, --effort <EFFORT>              Reasoning effort (off, minimal, low, medium, high, xhigh, max)
+      --tools <TOOLS>                Only enable these tools (comma separated), e.g. --tools read,bash
+      --exclude-tools <TOOLS>        Exclude these tools (repeatable or comma separated; supports `*`), e.g. --exclude-tools bash,write
+      --append-system-prompt <TEXT>  Append text to the system prompt
+      --name <NAME>                  Name the session (also `mare session new --name …`)
+      --set <KEY=VALUE>              Override config values: --set plugins.tools.edit_mode=replace
+      --strict-config                Refuse to start (exit code 2) when the configuration has warnings (unknown options, type errors, unparseable MARE_* values) or init.lua errors instead of continuing
+      --trust                        Trust this project for this run (load its plugins, skills, prompts, system prompt); overrides the saved decision and saves nothing
+      --no-trust                     Don't trust this project for this run, whatever was saved
+      --approve-mcps                 Approve the project's and $MARE_MCP_CONFIG's MCP servers (remembered by name and configuration hash) without asking — for headless runs
+      --clean                        Like `nvim --clean`: no user/project config, user plugins, or packages
+      --startuptime <FILE>           Write startup timing to a file (like Neovim's --startuptime)
+      --profile-startup              Start the TUI, quit once it is ready, and print how long each startup stage took
+  -C, --cwd <CWD>                    Working directory
+  -h, --help                         Print help
+```
+
+## mare update
+
+```text
+Update mare and/or installed plugins
+
+Usage: mare update [OPTIONS]
+
+Options:
+      --self                         Update mare itself
+      --plugins                      Update installed plugins
+      --all                          Update both mare and installed plugins (default when neither --self nor --plugins is given)
+  -y, --yes                          Skip confirmation prompts
+      --method <METHOD>              Override install channel detection (brew, scoop, aur, nix, standalone, other)
+      --stash                        Save local plugin changes before updating plugins
+      --json                         Print machine-readable JSON output
   -m, --model <MODEL>                Model, e.g. openai/gpt-6.1-terra
       --agent <NAME>                 Use a registered agent type for the initial session
   -e, --effort <EFFORT>              Reasoning effort (off, minimal, low, medium, high, xhigh, max)

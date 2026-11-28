@@ -146,6 +146,30 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         action: PluginCmd,
     },
+    /// Update mare and/or installed plugins
+    Update {
+        /// Update mare itself
+        #[arg(long = "self")]
+        self_update: bool,
+        /// Update installed plugins
+        #[arg(long)]
+        plugins: bool,
+        /// Update both mare and installed plugins (default when neither --self nor --plugins is given)
+        #[arg(long, conflicts_with_all = ["self_update", "plugins"])]
+        all: bool,
+        /// Skip confirmation prompts
+        #[arg(short = 'y', long)]
+        yes: bool,
+        /// Override install channel detection (brew, scoop, aur, nix, standalone, other)
+        #[arg(long, value_name = "METHOD")]
+        method: Option<String>,
+        /// Save local plugin changes before updating plugins
+        #[arg(long)]
+        stash: bool,
+        /// Print machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
     /// Run as an Agent Client Protocol server over stdio
     Acp,
     /// Trust (or revoke trust for) a directory (default: current project root, git worktree root, or cwd)

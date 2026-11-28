@@ -38,6 +38,7 @@ mod signals;
 mod startup_error;
 mod terminal;
 mod test_cmd;
+mod update_cmd;
 mod web;
 
 use mare_config::Config;
@@ -149,6 +150,9 @@ pub fn main() -> Result<()> {
     }
     // before any thread exists: no core dumps / debugger attach / LD_* or DYLD_* injection
     hardening::apply();
+    if !matches!(first_arg, Some(a) if a == "askpass") {
+        maybe_relaunch_with_staged_update();
+    }
     mare_shared::ui::install_hooks(mare_tui::hooks());
     mare_shared::profile::start();
     // Actor model: the main Lua VM is owned by this single-threaded runtime; everything that
@@ -774,6 +778,37 @@ fn report_peer_start(host: &std::sync::Arc<Host>, result: Result<bool>) {
         eprintln!("mare: warning: {msg}");
     } else if let Err(e) = notify() {
         tracing::warn!("peer socket notice: {e}");
+    }
+}
+
+/// Apply any staged standalone update at startup and re-exec the newly swapped binary.
+fn maybe_relaunch_with_staged_update() {
+    let applied = match mare_plugin::update::apply_staged_update() {
+        Ok(Some(applied)) => applied,
+        Ok(None) => return,
+        Err(e) => {
+            tracing::warn!("staged update swap skipped: {e:#}");
+            return;
+        }
+    };
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let err =
+            std::process::Command::new(&applied.exe_path).args(&args).env(mare_plugin::update::REEXEC_ENV, "1").exec();
+        tracing::warn!("re-exec after staged update failed: {err}");
+    }
+    #[cfg(not(unix))]
+    {
+        match std::process::Command::new(&applied.exe_path)
+            .args(&args)
+            .env(mare_plugin::update::REEXEC_ENV, "1")
+            .status()
+        {
+            Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+            Err(err) => tracing::warn!("re-exec after staged update failed: {err}"),
+        }
     }
 }
 

@@ -312,6 +312,11 @@ fn client() -> mlua::Result<&'static reqwest::Client> {
     C.get_or_init(|| base_builder().and_then(build_client)).as_ref().map_err(|e| rt_err(e.clone()))
 }
 
+/// Shared offline-guarded HTTP client (user agent, custom CAs, proxy/DNS policy) for internal callers.
+pub(crate) fn shared_client() -> anyhow::Result<&'static reqwest::Client> {
+    client().map_err(|e| anyhow::anyhow!("{e}"))
+}
+
 #[cfg(test)]
 #[derive(Clone)]
 pub(crate) struct TestClient(reqwest::Client);

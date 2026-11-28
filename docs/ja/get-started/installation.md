@@ -281,7 +281,7 @@ mare completion fish > ~/.config/fish/completions/mare.fish
 
 mare は自分自身のバイナリを置き換えません。アップデート方法:
 
-- パッケージマネージャーから導入した場合は、それぞれの更新コマンド (`brew upgrade mare`、`scoop update mare`、`yay -Syu mare-bin`、`nix profile upgrade mare` など) を使います。
+- パッケージマネージャーから導入した場合は、それぞれの更新コマンド (`brew upgrade mare`、`scoop update mare`、`yay -S mare-bin`、`nix profile upgrade mare` など) を使います。
 - それ以外の場合は、ワンラインインストーラー (`install.sh` / `install.ps1`) を再実行するか、新しいアーカイブをダウンロード・検証して上記のとおり古い `mare` を上書きしてください。
 
 リリースビルドの TUI は、既定で 24 時間ごとに GitHub のリリースを確認し (`update-check.interval_hours` で間隔を変更可能、デバッグビルドは自動確認をスキップ)、新しいバージョンがあれば 1 行表示します。リクエストには `mare/<version>` 以外の識別情報は含まれません。確認を止めるには `init.lua` に次を書きます。

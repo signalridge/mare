@@ -49,7 +49,7 @@
 ---@field theme? table<mare.StyleName, string|mare.Style> named style overrides { MareX = spec }
 ---@field trust_default? string project trust for a folder with no saved decision (after --trust/--no-trust and trust/resolve plugins): ask|trust|distrust
 ---@field ui? mare.UiOpts UI configuration: { layout = { ... }, working = ..., tool_call = { ... }, stopping = { ... } }
----@field update_check? boolean check GitHub releases for a newer mare (at most daily, interactive sessions; nothing else is sent)
+---@field update_check? false|"notify"|"auto" check GitHub releases for a newer mare: "notify" | "auto" (stage standalone updates) | false (at most daily, interactive sessions; nothing else is sent)
 ---@field watchdog_ms? integer per-callback limit for Lua that never yields (ms). CLI/env only: --set watchdog_ms=… or MARE_WATCHDOG_MS (the watchdog starts before init.lua, so a value written in init.lua has no effect)
 ---@field webserver? mare.WebserverOpts Host HTTP/WebSocket RPC listener: { enabled, host, port, token?, trusted_hosts, allowed_origins, remote_admin, tls_cert?, tls_key?, plain_http?, max_connections, header_read_timeout_ms, ws_max_message_bytes, ws_max_frame_bytes, ws_ping_interval_ms, ws_pong_timeout_ms, accept_partial }
 -- END GENERATED SetupOpts
