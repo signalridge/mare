@@ -1217,7 +1217,7 @@ return function(D)
 			local ok, err = pcall(fresh_oauth, false, opts and opts.cancel)
 			if ok then
 				return
-			elseif type(err) == "table" and err.kind == "auth" then
+			elseif type(err) == "table" and (err.kind == "auth" or err.retryable == false) then
 				error(err, 0)
 			end
 			local t = type(err) == "table" and err or {}

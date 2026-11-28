@@ -794,6 +794,7 @@ Defined in `types/mare.lua`, `types/mare/config.lua`, `types/mare/loader.lua`, `
 | `mare.reload_config()` | Re-run init.lua and reload plugins whose options changed (`/reload config`). `pending`: plugins left waiting for a service nobody provides (not failures; they start when it appears). |
 | `mare.reload()` | plugins started, plugins of removed packages disposed, everything else reloaded (a plugin whose new definition fails keeps the old one), packages' config() again. Also emitted as `reload/completed`. |
 | `mare.reload_version()` | The host's reload state as an opaque string: it changes with every config or plugin reload (and while one is running or incomplete). Compare it with an earlier value to tell whether a cached decision (e.g. a tool approval) predates a reload. `"closed"` once the host is gone. |
+| `mare.is_shutting_down()` | Whether the host has begun shutting down (true as soon as shutdown starts, before subagent tree draining and `app/shutdown`). |
 | `mare.log(level, msg)` | Write a log line attributed to the running plugin. |
 | `mare.caller_site(skip)` | "file:line" of the nearest Lua caller outside the core prelude and the config API (`/config` shows where an option was set, like Neovim's `:verbose set`); `skip` skips that many more frames first (a helper names its caller's line, not its own). nil when there is none. |
 | `mare.date(fmt, ms)` |  |

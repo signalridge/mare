@@ -12,6 +12,10 @@ function mare.reload() end
 --- cached decision (e.g. a tool approval) predates a reload. `"closed"` once the host is gone.
 ---@return string
 function mare.reload_version() end
+--- Whether the host has begun shutting down (true as soon as shutdown starts, before
+--- subagent tree draining and `app/shutdown`).
+---@return boolean
+function mare.is_shutting_down() end
 --- Bytecode cache (Neovim `vim.loader`, ~/.cache/mare/luac).
 ---@class mare.loader
 mare.loader = {}

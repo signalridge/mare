@@ -209,7 +209,19 @@ return {
 			EFFORTS = EFFORTS,
 			IDLE_MULT = IDLE_MULT,
 			startup_done = mare.g[STARTUP_DONE_KEY] == true,
+			shutting_down = false,
 		}
+		function D.is_shutting_down()
+			return D.shutting_down or (mare.is_shutting_down and mare.is_shutting_down() == true)
+		end
+		-- Reject new OAuth refreshes once graceful shutdown begins, and drain any already-dispatched
+		-- token rotation within the host's shutdown grace window so rotated tokens are persisted.
+		ctx:on("app/shutdown", function()
+			D.shutting_down = true
+			if D.drain_refreshes then
+				D.drain_refreshes()
+			end
+		end)
 		-- optional services read on each call
 		D.follow = { session = lib.follow(ctx, "session") }
 		local ensure_errors = lib.lazy(function()
