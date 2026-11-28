@@ -91,6 +91,10 @@ function mare.install.update_check_disabled() end
 ---@param plugin_enabled? boolean
 ---@return "notify"|"auto"|"disabled"
 function mare.install.policy(config_update_check, plugin_enabled) end
+---@async
+---@param api_url? string
+---@return {ok: boolean, up_to_date?: boolean, staged?: {version: string, tag: string}, error?: string}
+function mare.install.stage_update(api_url) end
 ---@class mare.Project
 ---@field root string|nil
 ---@field start string

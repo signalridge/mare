@@ -980,6 +980,7 @@ Defined in `types/mare.lua`.
 | `mare.install.is_managed()` |  |
 | `mare.install.update_check_disabled()` |  |
 | `mare.install.policy(config_update_check, plugin_enabled)` | Effective update-check policy resolved from `mare.o.update_check`, plugin `enabled`, and env opt-outs. |
+| `mare.install.stage_update(api_url)` |  |
 
 ## mare.json
 

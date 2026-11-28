@@ -127,6 +127,16 @@ return {
 			ctx:spawn(function()
 				local res = svc.check()
 				if res and res.newer and mare.ui.connected() then
+					if res.policy == "auto" and res.channel == "standalone" and mare.install.stage_update then
+						local ok, stage = pcall(mare.install.stage_update, cfg.url)
+						if ok and type(stage) == "table" and stage.ok and stage.staged then
+							mare.ui.notify(
+								("mare %s staged (restart mare to apply)"):format(tostring(stage.staged.version)),
+								"info"
+							)
+							return
+						end
+					end
 					mare.ui.notify(format_self_notice(res), "info")
 				end
 			end)

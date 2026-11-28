@@ -15,6 +15,7 @@ pub mod runtime;
 #[cfg(not(debug_assertions))]
 pub(crate) mod runtime_archive;
 mod test_host;
+pub mod update;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -829,6 +830,33 @@ pub fn install(lua: &Lua, env: &Env) -> mlua::Result<Table> {
                 mare_shared::env::is_update_check_disabled_env(),
             )
             .as_str())
+        })?,
+    )?;
+    install_tbl.set(
+        "stage_update",
+        lua.create_async_function(|lua, api_url: Option<String>| async move {
+            let info = crate::install::InstallInfo::detect_current();
+            if info.managed {
+                return mare_shared::lua::json_to_lua(
+                    &lua,
+                    &serde_json::json!({ "ok": false, "error": "managed install channel cannot self-stage" }),
+                );
+            }
+            let url = crate::update::resolve_api_url(api_url.as_deref());
+            let exe = std::env::current_exe().map_err(mare_shared::lua::rt_err)?;
+            let out = match crate::update::check_latest_release(&url, env!("CARGO_PKG_VERSION")).await {
+                Ok(rel) if !rel.newer => serde_json::json!({ "ok": true, "up_to_date": true }),
+                Ok(rel) => {
+                    match crate::update::stage_release(&rel, &url, &crate::update::staging_dir(), &exe, info.channel)
+                        .await
+                    {
+                        Ok(staged) => serde_json::json!({ "ok": true, "staged": staged }),
+                        Err(e) => serde_json::json!({ "ok": false, "error": format!("{e:#}") }),
+                    }
+                }
+                Err(e) => serde_json::json!({ "ok": false, "error": format!("{e:#}") }),
+            };
+            mare_shared::lua::json_to_lua(&lua, &out)
         })?,
     )?;
     mare.set("install", install_tbl)?;

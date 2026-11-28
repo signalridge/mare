@@ -39,6 +39,18 @@ pub(crate) async fn dispatch(
             plugin_cli(action, cli, cwd).await?;
             Ok(Some(0))
         }
+        Cmd::Update { self_update, plugins, all, yes, method, stash, json } => {
+            let args = crate::update_cmd::UpdateArgs {
+                self_update: *self_update,
+                plugins: *plugins,
+                all: *all,
+                yes: *yes,
+                method: method.clone(),
+                stash: *stash,
+                json: *json,
+            };
+            Ok(Some(crate::update_cmd::run(args, cli, cwd).await?))
+        }
         Cmd::Trust { dir, revoke } => {
             let target = match dir {
                 Some(d) => {

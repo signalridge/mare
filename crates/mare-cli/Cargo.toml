@@ -115,6 +115,7 @@ pretty_assertions.workspace = true
 mare-edit.workspace = true
 # writes a picture big enough that preparing it takes a while (already built by mare-binding)
 image.workspace = true
+flate2.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 signal-hook-registry.workspace = true

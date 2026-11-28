@@ -2207,6 +2207,7 @@ dependencies = [
  "clap_complete",
  "dirs",
  "dunce",
+ "flate2",
  "futures-util",
  "http",
  "http-body-util",
