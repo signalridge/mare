@@ -38,14 +38,23 @@ return function(D)
 		return nil
 	end
 
-	--- cumulative file and selected deferred-tool tracking (+ lists carried by the previous summary)
+	--- cumulative file and selected deferred-tool tracking (+ lists carried by the previous summary),
+	--- preserving recency order (oldest to newest) so rendered checkpoints can favour recent paths
+	--- while retaining the complete lists in the compaction details record.
 	local function track_files(msgs, prev)
 		local read, modified, loaded = {}, {}, {}
+		local seq = 0
+		local function touch(t, path)
+			if type(path) == "string" and path ~= "" then
+				seq = seq + 1
+				t[path] = seq
+			end
+		end
 		for _, p in ipairs(prev and prev.read_files or {}) do
-			read[p] = true
+			touch(read, p)
 		end
 		for _, p in ipairs(prev and prev.modified_files or {}) do
-			modified[p] = true
+			touch(modified, p)
 		end
 		for _, name in ipairs(prev and prev.loaded_tools or {}) do
 			if type(name) == "string" and name ~= "" then
@@ -58,15 +67,15 @@ return function(D)
 					if b.type == "tool_call" then
 						local a = b.arguments or {}
 						if b.name == "read" and a.path then
-							read[a.path] = true
+							touch(read, a.path)
 						elseif (b.name == "write" or b.name == "edit") and a.path then
-							modified[a.path] = true
+							touch(modified, a.path)
 						elseif b.name == "apply_patch" and a.input then
 							for _, path in string.gmatch(a.input, "%*%*%* (%a+) File: ([^\r\n]-)%s*\r?\n") do
-								modified[path] = true
+								touch(modified, path)
 							end
 							for path in string.gmatch(a.input, "%*%*%* Move to: ([^\r\n]-)%s*\r?\n") do
-								modified[path] = true
+								touch(modified, path)
 							end
 						end
 					end
@@ -91,7 +100,12 @@ return function(D)
 					out[#out + 1] = p
 				end
 			end
-			table.sort(out)
+			table.sort(out, function(a, b)
+				if t[a] ~= t[b] then
+					return t[a] < t[b]
+				end
+				return a < b
+			end)
 			return out
 		end
 		local loaded_tools = list(loaded)

@@ -562,13 +562,10 @@ return function(D)
 				)
 			end
 		end
-		if #files.read_files > 0 then
-			full = full .. "\n\n<read-files>\n" .. table.concat(files.read_files, "\n") .. "\n</read-files>"
-		end
-		if #files.modified_files > 0 then
-			full = full .. "\n\n<modified-files>\n" .. table.concat(files.modified_files, "\n") .. "\n</modified-files>"
-		end
-		-- include the live todo list, not the model's paraphrase of it
+		-- Include the live todo list (not the model's paraphrase of it) and recovery footer first
+		-- so we can budget rendered file lists against the actual remaining token headroom while
+		-- retaining the full cumulative lists in `details` / the session log.
+		local tail_sections = ""
 		local TODO_MARK = { pending = "[ ]", in_progress = "[~]", completed = "[x]" }
 		local todo = S.svc.todo
 		if todo and type(todo.snapshot) == "function" then
@@ -584,17 +581,115 @@ return function(D)
 					end
 				end
 				if #lines > 0 then
-					full = full .. "\n\n## Current Todo List\n" .. table.concat(lines, "\n")
+					tail_sections = tail_sections .. "\n\n## Current Todo List\n" .. table.concat(lines, "\n")
 				end
 			end
 		end
-		full = full .. recovery_footer(summarized[1] or prev, summarized[#summarized] or prev)
+		tail_sections = tail_sections .. recovery_footer(summarized[1] or prev, summarized[#summarized] or prev)
 
 		local kept = {}
 		for i = cut, #msgs do
 			kept[#kept + 1] = msgs[i]
 		end
 		local tokens_before = estimate(msgs)
+		local kept_tokens = estimate(kept)
+		local function wrap_summary(read_part, mod_part)
+			return SUMMARY_PREFIX .. full .. read_part .. mod_part .. tail_sections .. SUMMARY_SUFFIX
+		end
+		local base_summary_tokens = msg_tokens({ content = { { type = "text", text = wrap_summary("", "") } } })
+		local target_cap = math.floor(D.threshold() * 0.9) - D.overhead() - kept_tokens
+		local planned_user_budget = attempt == 3 and math.max(0, target_cap - base_summary_tokens)
+			or math.floor(retain(cfg.recent_user_tokens) * scale)
+		local planned_users = preserve_users(msgs, start, cut, planned_user_budget, attempt == 3 and 1 or nil)
+		local planned_user_tokens = estimate(planned_users)
+		local target_room = target_cap - planned_user_tokens - base_summary_tokens
+		local shrink_room = plan.force_portable_remote and math.huge
+			or (tokens_before - 1 - kept_tokens - planned_user_tokens - base_summary_tokens)
+		local MAX_FILE_LIST_TOKENS = 1000
+		local file_budget = math.max(0, math.min(MAX_FILE_LIST_TOKENS, target_room, shrink_room))
+		local MAX_RENDERED_READ_FILES = 25
+		local MAX_RENDERED_MODIFIED_FILES = 40
+		local function format_file_list(tag, items, omitted)
+			local lines = {}
+			for i = 1, #items do
+				lines[i] = items[i]
+			end
+			table.sort(lines)
+			if omitted > 0 then
+				lines[#lines + 1] = ("... and %d earlier path(s) (see session log)"):format(omitted)
+			end
+			if #lines == 0 then
+				return ""
+			end
+			return ("\n\n<%s>\n%s\n</%s>"):format(tag, table.concat(lines, "\n"), tag)
+		end
+		local function render_file_list(tag, list, count_limit, max_total_tokens, combine)
+			if #list == 0 then
+				return "", base_summary_tokens
+			end
+			local base_tokens = msg_tokens({ content = { { type = "text", text = combine("") } } })
+			if max_total_tokens <= base_tokens then
+				return "", base_tokens
+			end
+			if #list <= count_limit then
+				local all_rendered = format_file_list(tag, list, 0)
+				local all_tokens = msg_tokens({ content = { { type = "text", text = combine(all_rendered) } } })
+				if all_tokens <= max_total_tokens then
+					return all_rendered, all_tokens
+				end
+			end
+			local selected = {}
+			local first_idx = math.max(1, #list - count_limit + 1)
+			for i = #list, first_idx, -1 do
+				selected[#selected + 1] = list[i]
+				local candidate_text = format_file_list(tag, selected, #list - #selected)
+				if
+					msg_tokens({ content = { { type = "text", text = combine(candidate_text) } } }) > max_total_tokens
+				then
+					selected[#selected] = nil
+					break
+				end
+			end
+			local rendered = format_file_list(tag, selected, #list - #selected)
+			local total_tokens = msg_tokens({ content = { { type = "text", text = combine(rendered) } } })
+			if total_tokens <= max_total_tokens then
+				return rendered, total_tokens
+			end
+			return "", base_tokens
+		end
+		local max_summary_tokens = base_summary_tokens + file_budget
+		local read_reserve = 0
+		if #files.read_files > 0 and #files.modified_files > 0 and file_budget > 0 then
+			local _, probe_tokens = render_file_list(
+				"read-files",
+				files.read_files,
+				MAX_RENDERED_READ_FILES,
+				base_summary_tokens + math.floor(file_budget * 0.35),
+				function(part)
+					return wrap_summary(part, "")
+				end
+			)
+			read_reserve = math.max(0, probe_tokens - base_summary_tokens)
+		end
+		local mod_rendered = render_file_list(
+			"modified-files",
+			files.modified_files,
+			MAX_RENDERED_MODIFIED_FILES,
+			max_summary_tokens - read_reserve,
+			function(part)
+				return wrap_summary("", part)
+			end
+		)
+		local read_rendered = render_file_list(
+			"read-files",
+			files.read_files,
+			MAX_RENDERED_READ_FILES,
+			max_summary_tokens,
+			function(part)
+				return wrap_summary(part, mod_rendered)
+			end
+		)
+		full = full .. read_rendered .. mod_rendered .. tail_sections
 		local wrapped = SUMMARY_PREFIX .. full .. SUMMARY_SUFFIX
 		-- The last tier may discard the tail, but never the latest user message: retain
 		-- as much of it as fits after the fixed overhead and the actual summary.
