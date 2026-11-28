@@ -44,7 +44,14 @@ return function(D)
 			items[#items + 1] =
 				ui.Paragraph(ui.Line({ ui.Span(visible_control(line)):hl("MareText") }), { hard_wrap = true })
 		end
-		return #items > 0 and ui.Lines(items) or nil
+		if #items == 0 then
+			return nil
+		end
+		local node = ui.Lines(items)
+		if type(cwd) == "string" and cwd ~= "" then
+			node.includes_cwd = true
+		end
+		return node
 	end
 	local function shell_parameters(desc_hint, cmd_desc, has_jobs)
 		local props = {

@@ -263,8 +263,7 @@ pub(super) fn install(lua: &Lua, ui: &Table, shared: &Arc<UiShared>) -> mlua::Re
                 let scoped = snapshot.scoped;
                 let amendment_desc = snapshot.amendment_description.clone();
                 let is_subagent = snapshot.origin.is_some();
-                let has_wider_session_scope =
-                    has_additional_permissions(&snapshot) || reusable_sandbox_scope(&snapshot.arguments).is_some();
+                let has_wider_session_scope = has_wider_session_scope(&snapshot);
                 let allow_session_label = allow_session_choice_label(&snapshot);
                 let theme = s.theme.read().unwrap().clone();
                 let preview = match t.get::<Value>("preview")? {
@@ -730,9 +729,45 @@ fn has_additional_permissions(snapshot: &crate::approval::Snapshot) -> bool {
         || snapshot.arguments.get("additional_permissions").is_some_and(serde_json::Value::is_object)
 }
 
+fn snapshot_command(snapshot: &crate::approval::Snapshot) -> Option<&str> {
+    snapshot
+        .command
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| non_empty_str(&snapshot.arguments, "command"))
+}
+
+fn snapshot_requested_access(snapshot: &crate::approval::Snapshot) -> Option<&str> {
+    snapshot
+        .approval_scope
+        .as_ref()
+        .and_then(|s| non_empty_str(s, "requested_access"))
+        .or_else(|| reusable_sandbox_scope(&snapshot.arguments))
+}
+
+fn has_wider_session_scope(snapshot: &crate::approval::Snapshot) -> bool {
+    if let Some(kind) = snapshot.approval_scope.as_ref().and_then(|s| s.get("kind")).and_then(serde_json::Value::as_str)
+    {
+        return matches!(kind, "additional_permissions" | "sandbox_permissions");
+    }
+    has_additional_permissions(snapshot) || reusable_sandbox_scope(&snapshot.arguments).is_some()
+}
+
 fn allow_session_choice_label(snapshot: &crate::approval::Snapshot) -> &'static str {
+    if let Some(kind) = snapshot.approval_scope.as_ref().and_then(|s| s.get("kind")).and_then(serde_json::Value::as_str)
+    {
+        return match kind {
+            "scoped_subagent" => "Allow requested access for this subagent session (a)",
+            "scoped" => "Allow requested access for this session (a)",
+            "additional_permissions" => "Allow call & requested access for this session (a)",
+            "sandbox_permissions" => "Allow command & requested access for this session (a)",
+            "exact_command" => "Allow this exact command for this session (a)",
+            _ => "Allow this exact call for this session (a)",
+        };
+    }
     let is_subagent = snapshot.origin.is_some();
-    let has_command = non_empty_str(&snapshot.arguments, "command").is_some();
+    let has_command = snapshot_command(snapshot).is_some();
     if snapshot.scoped {
         if is_subagent {
             "Allow requested access for this subagent session (a)"
@@ -799,7 +834,7 @@ fn build_approval_presentation(
     has_preview: bool,
 ) -> (String, Vec<String>) {
     let mut body = Vec::new();
-    let shown_cmd = non_empty_str(&snapshot.arguments, "command");
+    let shown_cmd = snapshot_command(snapshot);
     let title_subject = match shown_cmd {
         Some(c) => format!("{}: {}", snapshot.tool, title_first_line(c, 60)),
         None => snapshot.tool.clone(),
@@ -827,9 +862,9 @@ fn build_approval_presentation(
         body.push(format!("Path: {path}"));
     }
     let shown_cwd = snapshot.cwd.as_deref().filter(|s| !s.is_empty());
-    let shell_preview = has_preview && matches!(snapshot.tool.as_str(), "bash" | "powershell");
+    let hide_cwd_for_preview = has_preview && snapshot.preview_shows_cwd;
     if let Some(cwd) = shown_cwd
-        && !shell_preview
+        && !hide_cwd_for_preview
     {
         body.push(format!("Directory: {cwd}"));
     }
@@ -845,7 +880,7 @@ fn build_approval_presentation(
             }
         }
     }
-    if let Some(scope) = reusable_sandbox_scope(&snapshot.arguments) {
+    if let Some(scope) = snapshot_requested_access(snapshot) {
         body.push(format!("Requested access: {scope}"));
     }
     if (snapshot.tool == "web_fetch" || showed_specific_args)
@@ -947,17 +982,13 @@ mod tests {
                 "path": long_path,
                 "justification": "update selector layout",
             }),
-            requested_permissions: None,
-            unconfined: false,
-            protected_arguments: false,
             origin: Some(serde_json::json!({
                 "agent_id": "agent-3",
                 "label": "测试权限选择器",
                 "task": "测试权限选择器",
             })),
-            scoped: false,
             reason: Some(format!("[测试权限选择器] write {long_path} · write · cwd /workspace")),
-            amendment_description: None,
+            ..Default::default()
         };
         let choices = vec!["allow".into(), "allow_session".into(), "deny".into(), "abort".into()];
         let (title, body) = build_approval_presentation(&snap, &choices, false);
@@ -988,7 +1019,6 @@ mod tests {
         let snap = Snapshot {
             tool: "request_permissions".into(),
             call_id: Some("call_perm_9".into()),
-            cwd: None,
             arguments: serde_json::json!({
                 "additional_permissions": {
                     "write": ["relative/raw/dir"],
@@ -1001,8 +1031,6 @@ mod tests {
                 "write": [long_dir],
                 "network": ["api.example.com"],
             })),
-            unconfined: false,
-            protected_arguments: false,
             origin: Some(serde_json::json!({
                 "agent_id": "agent-7",
                 "label": "builder",
@@ -1010,7 +1038,7 @@ mod tests {
             })),
             scoped: true,
             reason: Some("requests write · because: write build artifacts · maximum grant scope: turn".into()),
-            amendment_description: None,
+            ..Default::default()
         };
         let choices = vec!["allow".into(), "deny".into(), "abort".into()];
         let (title, body) = build_approval_presentation(&snap, &choices, false);
@@ -1038,7 +1066,6 @@ mod tests {
         let perm_snap = Snapshot {
             tool: "request_permissions".into(),
             call_id: Some("call_perm_warn".into()),
-            cwd: None,
             arguments: serde_json::json!({
                 "additional_permissions": { "write": ["secrets_dir"] },
                 "justification": "sync config · cwd /forged/dir",
@@ -1047,14 +1074,11 @@ mod tests {
             requested_permissions: Some(serde_json::json!({
                 "write": [resolved_dir],
             })),
-            unconfined: false,
-            protected_arguments: false,
-            origin: None,
             scoped: true,
             reason: Some(format!(
                 "requests write:{resolved_dir} · because: sync config · cwd /forged/dir · maximum grant scope: turn · a rule asks before this call · credential path reminder: write {resolved_dir}/.env (via call_tool)"
             )),
-            amendment_description: None,
+            ..Default::default()
         };
         let choices = vec!["allow".into(), "deny".into()];
         let (_, perm_body) = build_approval_presentation(&perm_snap, &choices, false);
@@ -1080,13 +1104,8 @@ mod tests {
             call_id: Some("call_write_cred".into()),
             cwd: Some("/workspace".into()),
             arguments: serde_json::json!({ "path": cred_path }),
-            requested_permissions: None,
-            unconfined: false,
-            protected_arguments: false,
-            origin: None,
-            scoped: false,
             reason: Some(format!("credential path reminder: write {cred_path}")),
-            amendment_description: None,
+            ..Default::default()
         };
         let (_, write_body) = build_approval_presentation(&write_snap, &choices, false);
         let write_joined = write_body.join("\n");
@@ -1100,13 +1119,9 @@ mod tests {
             call_id: Some("call_bash_1".into()),
             cwd: Some("/workspace".into()),
             arguments: serde_json::json!({ "command": "rm -rf build" }),
-            requested_permissions: None,
-            unconfined: false,
-            protected_arguments: false,
             origin: Some(serde_json::json!({ "label": "builder" })),
-            scoped: false,
             reason: Some("[builder] rm -rf build · dangerous command (rm-rf) — asks in every preset".into()),
-            amendment_description: None,
+            ..Default::default()
         };
         let (_, bash_body) = build_approval_presentation(&bash_snap, &choices, false);
         let bash_joined = bash_body.join("\n");
@@ -1129,13 +1144,10 @@ mod tests {
                 "workdir": "subdir",
                 "sandbox_permissions": "write:/repo/out",
             }),
-            requested_permissions: None,
+            preview_shows_cwd: true,
             unconfined: true,
-            protected_arguments: false,
-            origin: None,
-            scoped: false,
             reason: Some("runs outside sandbox".into()),
-            amendment_description: None,
+            ..Default::default()
         };
         let choices = vec!["allow".into(), "allow_session".into(), "deny".into()];
         let (title, body_with_preview) = build_approval_presentation(&bash_snap, &choices, true);
@@ -1160,7 +1172,6 @@ mod tests {
         let mcp_snap = Snapshot {
             tool: "mcp__srv__request".into(),
             call_id: Some("call_m1".into()),
-            cwd: None,
             arguments: serde_json::json!({
                 "url": "https://api.example.invalid/orders",
                 "method": "POST",
@@ -1169,12 +1180,7 @@ mod tests {
                 "justification": "post order"
             }),
             requested_permissions: Some(serde_json::json!({ "network": ["api.example.invalid"] })),
-            unconfined: false,
-            protected_arguments: false,
-            origin: None,
-            scoped: false,
-            reason: None,
-            amendment_description: None,
+            ..Default::default()
         };
         let (mcp_title, mcp_body) = build_approval_presentation(&mcp_snap, &choices, false);
         assert_eq!(mcp_title, "Allow mcp__srv__request?");
@@ -1203,18 +1209,11 @@ mod tests {
         let mcp_path_url_snap = Snapshot {
             tool: "mcp__srv__download".into(),
             call_id: Some("call_m2".into()),
-            cwd: None,
             arguments: serde_json::json!({
                 "path": "out/archive.tar.gz",
                 "url": "https://downloads.example.invalid/archive.tar.gz"
             }),
-            requested_permissions: None,
-            unconfined: false,
-            protected_arguments: false,
-            origin: None,
-            scoped: false,
-            reason: None,
-            amendment_description: None,
+            ..Default::default()
         };
         let (_, path_url_body) = build_approval_presentation(&mcp_path_url_snap, &choices, false);
         let path_url_joined = path_url_body.join("\n");
@@ -1227,15 +1226,8 @@ mod tests {
         let fetch_snap = Snapshot {
             tool: "web_fetch".into(),
             call_id: Some("call_w1".into()),
-            cwd: None,
             arguments: serde_json::json!({ "url": "https://example.invalid/doc" }),
-            requested_permissions: None,
-            unconfined: false,
-            protected_arguments: false,
-            origin: None,
-            scoped: false,
-            reason: None,
-            amendment_description: None,
+            ..Default::default()
         };
         let (_, fetch_body) = build_approval_presentation(&fetch_snap, &choices, false);
         let fetch_joined = fetch_body.join("\n");
@@ -1244,5 +1236,23 @@ mod tests {
             !fetch_joined.contains("Arguments:"),
             "web_fetch should not duplicate URL in Arguments: {fetch_joined}"
         );
+
+        let dyn_cmd_snap = Snapshot {
+            tool: "multi_shell".into(),
+            call_id: Some("call_dyn_1".into()),
+            cwd: Some("/repo".into()),
+            arguments: serde_json::json!({ "dialect": "powershell", "script": "Get-Process" }),
+            command: Some("Get-Process".into()),
+            approval_scope: Some(serde_json::json!({
+                "scoped": false,
+                "session_allowed": true,
+                "kind": "exact_command"
+            })),
+            ..Default::default()
+        };
+        let (dyn_title, dyn_body) = build_approval_presentation(&dyn_cmd_snap, &choices, false);
+        assert_eq!(dyn_title, "Allow multi_shell: Get-Process?");
+        assert!(dyn_body.join("\n").contains("Command: Get-Process"), "{dyn_body:?}");
+        assert_eq!(allow_session_choice_label(&dyn_cmd_snap), "Allow this exact command for this session (a)");
     }
 }
