@@ -1212,6 +1212,7 @@ Defined in `types/mare/fs.lua`.
 |---|---|
 | `mare.snapshot.configure(opts)` |  |
 | `mare.snapshot.begin_turn(id)` |  |
+| `mare.snapshot.mark_shell()` | Record that the active turn ran a shell command (whose file changes cannot be snapshotted). |
 | `mare.snapshot.turns()` |  |
 | `mare.snapshot.content(hash)` |  |
 | `mare.snapshot.restore(turn, opts)` | Restore files touched in `turn` or later to their content before it. Files changed outside mare since are `conflicts` (left alone unless `force`); links now are `refused`; trimmed backups are `missing`. |
