@@ -533,26 +533,64 @@ return function(D)
 	end
 	P.offers = offers
 
-	--- nearest offered option (lower on a tie); an alias (a model's effort_map) wins first. The
-	--- ranks come from the full option list: an option no layer defines ranks as the middle (4)
-	--- for the distance and lowest for the tie, the long-standing effort rule.
+	-- Canonical effort aliases and nearest-effort rules adapted from magpie
+	-- (`https://github.com/yetone/magpie`, `internal/catalog/catalog.go`, MIT License,
+	-- Copyright (c) 2026 yetone).
+	local EFFORT_ALIASES = {
+		none = "off",
+		light = "low",
+		extra_high = "xhigh",
+	}
+
+	local function is_off_effort(v)
+		return v == "off" or v == "none"
+	end
+
+	local function option_rank(d, v)
+		local r = d.rank
+		if d.id == "effort" and type(v) == "string" then
+			local c = EFFORT_ALIASES[v]
+			if c and r[c] ~= nil then
+				return r[c]
+			end
+			if v == "ultra" then
+				return (r.max or 7) + 1
+			end
+		end
+		return r[v]
+	end
+
+	--- nearest offered option (higher on a tie; non-off effort requests never clamp to off/none);
+	--- an explicit alias (a model's effort_map) wins first, then an exact offered option.
+	--- For effort parameters, vendor words (`light`, `extra_high`, `none`) map to canonical ranks.
+	--- An option no layer defines ranks as the middle (`medium` / 4) so clamping always lands on an
+	--- offered value.
 	function P.clamp(d, want)
 		if d.type == "bool" then
 			return want
 		end
 		local mapped = d.aliases[want]
-		if mapped then
+		if mapped ~= nil then
 			return mapped
 		end
-		local r = d.rank
-		local mid = r.medium or 4
-		local w = r[want] or mid
-		local best, bestd = nil, math.huge
+		if offers(d, want) then
+			return want
+		end
+		local mid = d.rank.medium or 4
+		local w = option_rank(d, want) or mid
+		local skip_off = d.id == "effort" and not is_off_effort(want)
+		local best, bestd, bestr = nil, math.huge, -math.huge
 		for _, e in ipairs(d.list) do
-			local dist = math.abs((r[e] or mid) - w)
-			if dist < bestd or (dist == bestd and (r[e] or 0) < (r[best] or 0)) then
-				best, bestd = e, dist
+			if not (skip_off and is_off_effort(e)) then
+				local re = option_rank(d, e) or mid
+				local dist = math.abs(re - w)
+				if dist < bestd or (dist == bestd and re > bestr) then
+					best, bestd, bestr = e, dist, re
+				end
 			end
+		end
+		if best == nil and #d.list > 0 then
+			best = d.list[1]
 		end
 		return best
 	end

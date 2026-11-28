@@ -1,14 +1,18 @@
 //! Acceptance tests for consistent model resolution across CLI, `/model`, ACP, and Lua
 //! (`signalridge/mare#33`):
 //! 1. Explicit unresolvable model never falls back to another configured provider (0 requests sent).
-//! 2. Providers with a catalog reject unknown `provider/<id>` at the `/model` command.
+//! 2. Explicit `provider/<id>` not in a provider's catalog is allowed, marked `unlisted`, and emits
+//!    a warning with up to 3 closest catalog candidates.
 //! 3. CLI, `/model`, ACP, and Lua share one deterministic bare-id disambiguator independent of
 //!    provider registration order.
 //! 4. Family aliases pick the newest dated snapshot (and prefer undated alias over dated).
-//! 5. Effort is either sent in the request body (`kimi-k3` -> `reasoning_effort`) or omitted for unmapped
-//!    routes, and `reasoning_format` / `effort_param` are validated at load time.
+//! 5. Effort is either sent in the request body (`kimi` models with declared `efforts` ->
+//!    `reasoning_effort`) or omitted for unmapped routes, and `reasoning_format` / `effort_param`
+//!    are validated at load time.
 //! 6. An open `/model` picker refreshes live when a background catalog fetch completes, and
 //!    selecting the newly added model sends the next request with it.
+//! 7. Nearest-effort clamping never clamps non-off requests to off, breaks ties upward, and maps
+//!    vendor effort aliases (`light`, `extra_high`, `none`).
 
 use std::process::Stdio;
 
@@ -90,20 +94,27 @@ mare.provider("localmock", {{
     .await;
 }
 
-/// Criterion 2: providers with a catalog reject unknown `provider/<id>` when set via `/model`.
-/// Asserts the error text surfaced by the `/model` command itself (not only `resolve`).
+/// Criterion 2: explicit `provider/<id>` not in a catalogued provider's catalog is allowed,
+/// marked `unlisted = true`, and warns with up to 3 closest catalog candidates.
 #[tokio::test]
-async fn model_command_rejects_unknown_id_on_catalogued_provider() {
+async fn model_command_allows_unlisted_id_with_warning_and_closest_candidates() {
     local(async {
         let mut env = TestEnv::new().await;
         let server = MockServer::start().await;
         let h = provider_host(&mut env, &server, json!({ "model": "anthropic/claude-sonnet-5-5" })).await;
         expose(&h);
 
-        let (before, run_ok, run_err, notes_json, after): (String, bool, String, String, String) = eval(
+        let (run_ok, after, unlisted_cur, unlisted_cap, notes_json, wrong_prov_note, no_hit_note): (
+            bool,
+            String,
+            bool,
+            bool,
+            String,
+            String,
+            String,
+        ) = eval(
             &h,
             r#"
-            local before = assert(LLM:current()).ref
             local notes = {}
             mare.ui.notify = function(msg, lvl)
               notes[#notes + 1] = tostring(lvl) .. ":" .. tostring(msg)
@@ -111,20 +122,60 @@ async fn model_command_rejects_unknown_id_on_catalogued_provider() {
             local ok, err = pcall(function()
               return C.cordis:get("commands"):run("/model anthropic/claude-sonet-4-5")
             end)
-            local after = assert(LLM:current()).ref
-            return before, ok, tostring(type(err) == "table" and err.message or err), mare.json.encode(notes), after
+            assert(ok, tostring(err))
+            local cur = assert(LLM:current())
+            local cap = assert(LLM:capabilities(cur.ref))
+
+            -- Wrong provider for an existing model still surfaces cross-provider closest matches.
+            notes_wrong = {}
+            mare.ui.notify = function(msg, lvl)
+              notes_wrong[#notes_wrong + 1] = tostring(lvl) .. ":" .. tostring(msg)
+            end
+            LLM:set_model("openai/claude-sonnet-5-5", { save = false })
+
+            -- Completely unrelated id still warns without bogus provider-only matches.
+            notes_none = {}
+            mare.ui.notify = function(msg, lvl)
+              notes_none[#notes_none + 1] = tostring(lvl) .. ":" .. tostring(msg)
+            end
+            LLM:set_model("anthropic/zzzz-totally-new-model", { save = false })
+
+            return ok, cur.ref, cur.unlisted == true, cap.unlisted == true,
+              mare.json.encode(notes),
+              table.concat(notes_wrong, "\n"),
+              table.concat(notes_none, "\n")
             "#,
         )
         .await;
-        assert_eq!(before, "anthropic/claude-sonnet-5-5");
-        assert_eq!(after, "anthropic/claude-sonnet-5-5", "current model must stay unchanged");
+        assert!(run_ok, "/model with explicit provider/id must succeed");
+        assert_eq!(after, "anthropic/claude-sonet-4-5", "current model must switch to unlisted explicit ref");
+        assert!(unlisted_cur, "resolved unlisted model must carry unlisted = true");
+        assert!(unlisted_cap, "capabilities descriptor must expose unlisted = true");
         assert!(
-            !run_ok && run_err.contains("anthropic/claude-sonet-4-5"),
-            "/model command must fail naming typo ref: {run_err}"
+            notes_json.contains("warning:")
+                && notes_json.contains("anthropic/claude-sonet-4-5")
+                && notes_json.contains("closest:")
+                && notes_json.contains("anthropic/claude-sonnet-4-5"),
+            "/model command must warn with closest catalog candidates: {notes_json}"
+        );
+        // Verify at most 3 closest candidates are listed.
+        let notes: Vec<String> = serde_json::from_str(&notes_json).unwrap();
+        let warn_line = notes.iter().find(|n| n.starts_with("warning:")).expect("warning notification");
+        let after_closest = warn_line.split("closest: ").nth(1).unwrap().trim_end_matches(')');
+        let cand_count = after_closest.split(", ").count();
+        assert!(
+            (1..=3).contains(&cand_count),
+            "warning must list 1..=3 closest candidates, got {cand_count}: {warn_line}"
         );
         assert!(
-            notes_json.contains("error:") && notes_json.contains("anthropic/claude-sonet-4-5"),
-            "/model command must notify error naming typo ref: {notes_json}"
+            wrong_prov_note.contains("warning:") && wrong_prov_note.contains("anthropic/claude-sonnet-5-5"),
+            "wrong-provider ref must suggest real model from catalog: {wrong_prov_note}"
+        );
+        assert!(
+            no_hit_note.contains("warning:")
+                && no_hit_note.contains("anthropic/zzzz-totally-new-model")
+                && !no_hit_note.contains("closest:"),
+            "zero-overlap id must warn without provider-only noise: {no_hit_note}"
         );
         h.shutdown().await;
     })
@@ -984,7 +1035,9 @@ async fn reset_session_model_keeps_unresolvable_default_and_catalogless_default_
 /// Regression: pending disk caches are hydrated before resolving non-exact refs so that
 /// (1) a bare id present statically on `alpha` and only in `beta`'s disk cache reports ambiguity
 /// identically across Lua `set_model`, `/model`, and headless `-p --model` with zero generation
-/// requests, and (2) `beta/typo` is rejected against `beta`'s pending disk-cached catalog.
+/// requests, and (2) `beta/shared-cachd` resolves as `unlisted = true` against `beta`'s pending
+/// disk-cached catalog and warns with `beta/shared-cached` as closest candidate while still
+/// allowing the request to proceed.
 #[tokio::test]
 async fn pending_disk_cache_hydrates_before_bare_id_and_catalog_typo_resolution() {
     local(async {
@@ -1020,7 +1073,8 @@ mare.provider("beta", {{
         std::fs::write(cfg_dir.join("init.lua"), &init_lua).unwrap();
 
         // 1. In-process host (disk cache pending, ui/ready not emitted):
-        //    set_model("shared-cached") must report ambiguity, and set_model("beta/typo") must fail.
+        //    set_model("shared-cached") must report ambiguity; set_model("beta/shared-cachd")
+        //    hydrates beta's cache, allows the unlisted model, and warns with beta/shared-cached.
         let env = TestEnv::new().await;
         std::fs::create_dir_all(env.config_dir()).unwrap();
         std::fs::write(env.config_dir().join("init.lua"), &init_lua).unwrap();
@@ -1036,15 +1090,26 @@ mare.provider("beta", {{
             .await;
         global(&h, "LLM", h.service_table("llm").unwrap());
 
-        let (resolved_nil, bare_ok, bare_err, typo_ok, typo_err): (bool, bool, String, bool, String) = eval(
+        let (resolved_nil, bare_ok, bare_err, typo_ok, typo_unlisted, typo_notes): (
+            bool,
+            bool,
+            String,
+            bool,
+            bool,
+            String,
+        ) = eval(
             &h,
             r#"
             -- Cold-cache Lua LLM:resolve must hydrate pending disk caches and return nil on ambiguity.
             local res = LLM:resolve("shared-cached")
             local ok1, e1 = pcall(function() return LLM:set_model("shared-cached", { save = false }) end)
-            local ok2, e2 = pcall(function() return LLM:set_model("beta/typo", { save = false }) end)
+            local notes = {}
+            mare.ui.notify = function(msg, lvl)
+              notes[#notes + 1] = tostring(lvl) .. ":" .. tostring(msg)
+            end
+            local ok2, d2 = pcall(function() return LLM:set_model("beta/shared-cachd", { save = false }) end)
             return res == nil, ok1, tostring(type(e1) == "table" and e1.message or e1),
-              ok2, tostring(type(e2) == "table" and e2.message or e2)
+              ok2, ok2 and d2.unlisted == true or false, table.concat(notes, "\n")
             "#,
         )
         .await;
@@ -1054,10 +1119,13 @@ mare.provider("beta", {{
             bare_err.contains("alpha/shared-cached, beta/shared-cached"),
             "bare id error must list both static and disk-cached candidates: {bare_err}"
         );
-        assert!(!typo_ok, "typo on provider with pending disk cache must be rejected");
+        assert!(typo_ok, "explicit provider/id on provider with pending disk cache must be allowed");
+        assert!(typo_unlisted, "explicit id missing from beta disk cache must be marked unlisted");
         assert!(
-            typo_err.contains("unknown model: beta/typo") && typo_err.contains("not in beta catalog"),
-            "typo error must name beta/typo and beta catalog: {typo_err}"
+            typo_notes.contains("warning:")
+                && typo_notes.contains("beta/shared-cachd")
+                && typo_notes.contains("beta/shared-cached"),
+            "unlisted warning must name beta/shared-cachd and closest disk-cached beta/shared-cached: {typo_notes}"
         );
         h.shutdown().await;
         drop(env);
@@ -1117,7 +1185,11 @@ mare.provider("beta", {{
             "headless bare id must list sorted candidates: {cli_bare_out}"
         );
 
-        // 3. Headless CLI `-p --model beta/typo`: must fail against beta's pending disk cache.
+        assert_eq!(server.count("/alpha/chat/completions"), 0, "alpha must receive 0 requests");
+        assert_eq!(server.count("/beta/chat/completions"), 0, "beta must receive 0 requests before unlisted run");
+
+        // 3. Headless CLI `-p --model beta/shared-cachd`: unlisted explicit provider/id is allowed
+        //    and routes directly to beta while logging an unlisted warning with closest candidate.
         let home_path2 = home.path().to_path_buf();
         let cfg_dir_cli2 = cfg_dir.clone();
         let cli_typo = tokio::task::spawn_blocking(move || {
@@ -1129,7 +1201,7 @@ mare.provider("beta", {{
                 .env_remove("MARE_MODEL")
                 .current_dir(&home_path2)
                 .stdin(Stdio::null())
-                .args(["-p", "--set", "plugins.provider-faux.enabled=false", "--model", "beta/typo", "hi"])
+                .args(["-p", "--set", "plugins.provider-faux.enabled=false", "--model", "beta/shared-cachd", "hi"])
                 .output()
                 .unwrap()
         })
@@ -1137,55 +1209,62 @@ mare.provider("beta", {{
         .unwrap();
         let cli_typo_out =
             format!("{}\n{}", String::from_utf8_lossy(&cli_typo.stdout), String::from_utf8_lossy(&cli_typo.stderr));
-        assert!(!cli_typo.status.success(), "headless beta/typo must fail: {cli_typo_out}");
-        assert!(
-            cli_typo_out.contains("unknown model: beta/typo"),
-            "headless beta/typo must report unknown model: {cli_typo_out}"
-        );
-
+        assert!(cli_typo.status.success(), "headless unlisted beta/shared-cachd must succeed: {cli_typo_out}");
         assert_eq!(server.count("/alpha/chat/completions"), 0, "alpha must receive 0 requests");
-        assert_eq!(server.count("/beta/chat/completions"), 0, "beta must receive 0 requests");
+        assert_eq!(server.count("/beta/chat/completions"), 1, "beta must receive the unlisted model request");
+        let sent_model =
+            server.requests().into_iter().find(|r| r.path == "/beta/chat/completions").unwrap().json()["model"]
+                .as_str()
+                .unwrap()
+                .to_string();
+        assert_eq!(sent_model, "shared-cachd");
     })
     .await;
 }
 
-/// Regression: custom Moonshot/Kimi providers with `kimi-k3` (`reasoning = true`, no `efforts`)
-/// inherit the Kimi K3 effort list (`low/high/max`) rather than the generic `low/medium/high`
-/// fallback, and never emit `reasoning_effort = "medium"`.
+/// P9: Kimi effort rule is data-driven (`m.reasoning == true` and non-empty `m.efforts`), with no
+/// hardcoded `is_kimi_k3` model-id check or hardcoded `only`, and `host_matches` recognizes
+/// `kimi.ai` alongside `moonshot.ai`, `moonshot.cn`, and `kimi.com`.
 #[tokio::test]
-async fn custom_moonshot_kimi_without_efforts_uses_low_high_max_and_never_sends_medium() {
+async fn kimi_effort_rule_is_data_driven_and_detects_kimi_ai_host() {
     local(async {
         let mut env = TestEnv::new().await;
         let server = MockServer::start().await;
         let ok_sse = compat_events(&[compat_text("ok"), compat_stop()]);
-        server.route("/moonshot-custom/chat/completions", vec![Resp::sse(ok_sse.clone())]);
-        server.route("/moonshot-budget/chat/completions", vec![Resp::sse(ok_sse)]);
+        server.route("/kimi-custom/chat/completions", vec![Resp::sse(ok_sse.clone()), Resp::sse(ok_sse.clone())]);
+        server.route("/kimi-budget/chat/completions", vec![Resp::sse(ok_sse)]);
 
         let h = provider_host(
             &mut env,
             &server,
             json!({
                 "providers": {
-                    "moonshot-host": {
+                    "kimi-ai-host": {
                         "wire": "openai-chat",
-                        "base_url": "https://api.moonshot.ai/v1",
-                        "api_key": "k-host",
+                        "base_url": "https://api.kimi.ai/v1",
+                        "api_key": "k-kimi-ai",
                         "list_models": false,
-                        "models": [{ "model_id": "kimi-k3", "reasoning": true, "context_window": 262144, "max_output": 131072 }]
+                        "models": [
+                            { "model_id": "kimi-future", "reasoning": true, "efforts": ["low", "high", "max"], "context_window": 262144, "max_output": 131072 },
+                            { "model_id": "kimi-no-efforts", "reasoning": true, "context_window": 262144, "max_output": 32768 }
+                        ]
                     },
-                    "moonshot-mock": {
+                    "kimi-mock": {
                         "wire": "openai-chat",
                         "dialect": "kimi",
-                        "base_url": format!("{}/moonshot-custom", server.base),
+                        "base_url": format!("{}/kimi-custom", server.base),
                         "api_key": "k-mock",
                         "list_models": false,
-                        "models": [{ "model_id": "kimi-k3", "reasoning": true, "context_window": 262144, "max_output": 131072 }]
+                        "models": [
+                            { "model_id": "kimi-next", "reasoning": true, "efforts": ["low", "medium", "high"], "context_window": 262144, "max_output": 65536 },
+                            { "model_id": "kimi-plain-reasoning", "reasoning": true, "context_window": 262144, "max_output": 32768 }
+                        ]
                     },
-                    "moonshot-budget": {
+                    "kimi-budget": {
                         "wire": "openai-chat",
                         "dialect": "kimi",
                         "reasoning_budget_field": "thinking_budget",
-                        "base_url": format!("{}/moonshot-budget", server.base),
+                        "base_url": format!("{}/kimi-budget", server.base),
                         "api_key": "k-budget",
                         "list_models": false,
                         "models": [{ "model_id": "kimi-budget-custom", "reasoning": true, "context_window": 128000, "max_output": 16384 }]
@@ -1195,68 +1274,161 @@ async fn custom_moonshot_kimi_without_efforts_uses_low_high_max_and_never_sends_
         )
         .await;
 
-        let (host_opts, mock_opts, med_ok, budget_opts, budget_med_ok): (String, String, bool, String, bool) = eval(
+        let (ai_host_opts, ai_no_eff_nil, mock_next_opts, mock_plain_nil, budget_opts): (
+            String,
+            bool,
+            String,
+            bool,
+            String,
+        ) = eval(
             &h,
             r#"
-            local mh = assert(LLM:resolve("moonshot-host/kimi-k3"))
-            local mm = assert(LLM:resolve("moonshot-mock/kimi-k3"))
-            local mb = assert(LLM:resolve("moonshot-budget/kimi-budget-custom"))
-            LLM:set_model("moonshot-mock/kimi-k3", { save = false })
-            local ok_med = pcall(LLM.set_effort, LLM, "medium", { save = false })
-            LLM:set_model("moonshot-budget/kimi-budget-custom", { save = false })
-            local ok_budget_med = pcall(LLM.set_effort, LLM, "medium", { save = false })
-            LLM:set_model("moonshot-mock/kimi-k3", { save = false })
-            return table.concat(LLM:effort_options(mh) or {}, ","),
-              table.concat(LLM:effort_options(mm) or {}, ","),
-              ok_med,
-              table.concat(LLM:effort_options(mb) or {}, ","),
-              ok_budget_med
+            local m_ai = assert(LLM:resolve("kimi-ai-host/kimi-future"))
+            local m_ai_plain = assert(LLM:resolve("kimi-ai-host/kimi-no-efforts"))
+            local m_next = assert(LLM:resolve("kimi-mock/kimi-next"))
+            local m_plain = assert(LLM:resolve("kimi-mock/kimi-plain-reasoning"))
+            local m_budget = assert(LLM:resolve("kimi-budget/kimi-budget-custom"))
+            return table.concat(LLM:effort_options(m_ai) or {}, ","),
+              LLM:effort_options(m_ai_plain) == nil,
+              table.concat(LLM:effort_options(m_next) or {}, ","),
+              LLM:effort_options(m_plain) == nil,
+              table.concat(LLM:effort_options(m_budget) or {}, ",")
             "#,
         )
         .await;
-        assert_eq!(host_opts, "low,high,max", "host-detected moonshot kimi-k3 must offer low,high,max");
-        assert_eq!(mock_opts, "low,high,max", "custom kimi dialect kimi-k3 must offer low,high,max");
-        assert!(!med_ok, "custom kimi-k3 without efforts must reject 'medium'");
+        assert_eq!(ai_host_opts, "low,high,max", "kimi.ai host must auto-detect kimi dialect and use model efforts");
+        assert!(ai_no_eff_nil, "kimi reasoning model without efforts must not offer an effort parameter");
+        assert_eq!(mock_next_opts, "low,medium,high", "kimi dialect must honor model-declared efforts without hardcoded only");
+        assert!(mock_plain_nil, "kimi reasoning model without efforts must omit effort parameter");
         assert_eq!(
             budget_opts, "low,medium,high",
-            "non-K3 kimi budget model without efforts must keep default low,medium,high"
+            "kimi budget model without efforts must keep default low,medium,high"
         );
-        assert!(budget_med_ok, "non-K3 kimi budget model must allow selecting 'medium'");
 
-        let res = h.prompt("hi", json!({})).await.unwrap();
-        assert!(res["error"].is_null(), "default prompt on custom kimi-k3 must succeed: {res}");
-        let req = server
+        // Prompt on data-driven kimi-next sends reasoning_effort = "medium"; plain reasoning sends none.
+        exec(&h, r#"LLM:set_model("kimi-mock/kimi-next", { save = false })"#).await;
+        let res = h.prompt("hi next", json!({})).await.unwrap();
+        assert!(res["error"].is_null(), "prompt on kimi-next must succeed: {res}");
+        exec(&h, r#"LLM:set_model("kimi-mock/kimi-plain-reasoning", { save = false })"#).await;
+        let res_plain = h.prompt("hi plain", json!({})).await.unwrap();
+        assert!(res_plain["error"].is_null(), "prompt on kimi-plain-reasoning must succeed: {res_plain}");
+
+        let mock_reqs: Vec<Value> = server
             .requests()
             .into_iter()
-            .find(|r| r.path == "/moonshot-custom/chat/completions")
-            .expect("moonshot-custom request sent")
-            .json();
-        let eff = req["reasoning_effort"].as_str().unwrap_or("");
-        assert_ne!(eff, "medium", "custom kimi-k3 must never emit reasoning_effort=medium: {req}");
+            .filter(|r| r.path == "/kimi-custom/chat/completions")
+            .map(|r| r.json())
+            .collect();
+        assert_eq!(mock_reqs.len(), 2);
+        assert_eq!(
+            mock_reqs[0]["reasoning_effort"], "medium",
+            "data-driven kimi model with efforts must send reasoning_effort: {}",
+            mock_reqs[0]
+        );
         assert!(
-            matches!(eff, "low" | "high" | "max"),
-            "custom kimi-k3 must emit a valid K3 reasoning_effort: {req}"
+            mock_reqs[1].get("reasoning_effort").is_none() && mock_reqs[1].get("thinking").is_none(),
+            "kimi model without efforts must not send reasoning_effort or thinking: {}",
+            mock_reqs[1]
         );
 
-        // Non-K3 kimi model with reasoning_budget_field must keep default medium budget (8192)
-        // and not send K3's reasoning_effort.
-        exec(&h, r#"LLM:set_model("moonshot-budget/kimi-budget-custom", { save = false })"#).await;
+        // Kimi model with reasoning_budget_field and no efforts sends thinking_budget = 8192.
+        exec(&h, r#"LLM:set_model("kimi-budget/kimi-budget-custom", { save = false })"#).await;
         let res_b = h.prompt("hi budget", json!({})).await.unwrap();
-        assert!(res_b["error"].is_null(), "default prompt on non-K3 kimi budget model must succeed: {res_b}");
+        assert!(res_b["error"].is_null(), "prompt on kimi budget model must succeed: {res_b}");
         let req_b = server
             .requests()
             .into_iter()
-            .find(|r| r.path == "/moonshot-budget/chat/completions")
-            .expect("moonshot-budget request sent")
+            .find(|r| r.path == "/kimi-budget/chat/completions")
+            .expect("kimi-budget request sent")
             .json();
         assert_eq!(
             req_b["thinking_budget"], 8192,
-            "non-K3 kimi budget model default medium must send 8192 budget: {req_b}"
+            "kimi budget model default medium must send 8192 budget: {req_b}"
         );
         assert!(
             req_b.get("reasoning_effort").is_none() && req_b.get("thinking").is_none(),
-            "non-K3 kimi budget model must not send reasoning_effort or thinking: {req_b}"
+            "kimi budget model must not send reasoning_effort or thinking: {req_b}"
         );
+        h.shutdown().await;
+    })
+    .await;
+}
+
+/// P8: nearest-effort clamping rules ported from magpie (`nearest_effort_test.go` and
+/// `effort_alias_test.go`, MIT License):
+/// - exact offered level wins
+/// - non-off requests never clamp down to `off`/`none`
+/// - ties break upward (higher rank wins)
+/// - vendor effort words (`light`, `extra_high`, `none`) map to canonical ranks.
+#[tokio::test]
+async fn nearest_effort_clamping_never_clamps_to_off_ties_up_and_supports_vendor_aliases() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let server = MockServer::start().await;
+        let h = provider_host(
+            &mut env,
+            &server,
+            json!({
+                "providers": {
+                    "clamp": {
+                        "wire": "openai-chat",
+                        "effort_param": "reasoning_effort",
+                        "base_url": format!("{}/clamp", server.base),
+                        "api_key": "k-clamp",
+                        "list_models": false,
+                        "models": [
+                            { "model_id": "m-all", "reasoning": true, "efforts": ["low", "medium", "high", "xhigh", "max"] },
+                            { "model_id": "m-lhm", "reasoning": true, "efforts": ["low", "high", "max"] },
+                            { "model_id": "m-lmh", "reasoning": true, "efforts": ["low", "medium", "high"] },
+                            { "model_id": "m-lh", "reasoning": true, "efforts": ["low", "high"] },
+                            { "model_id": "m-off-lh", "reasoning": true, "efforts": ["off", "low", "high"] },
+                            { "model_id": "m-none-lh", "reasoning": true, "efforts": ["none", "low", "high"] },
+                            { "model_id": "m-trae", "reasoning": true, "efforts": ["light", "high", "extra_high"] }
+                        ]
+                    }
+                }
+            }),
+        )
+        .await;
+
+        let cases: &[(&str, &str, &str)] = &[
+            // nearest_effort_test.go cases
+            ("clamp/m-all", "xhigh", "xhigh"),
+            ("clamp/m-lhm", "xhigh", "max"),       // tie between high and max -> goes up to max
+            ("clamp/m-lmh", "xhigh", "high"),
+            ("clamp/m-lmh", "max", "high"),
+            ("clamp/m-lh", "medium", "high"),      // tie between low and high -> goes up to high
+            ("clamp/m-off-lh", "minimal", "low"),  // non-off never clamps to off
+            ("clamp/m-none-lh", "minimal", "low"), // non-off never clamps to none
+            ("clamp/m-lhm", "none", "low"),
+            ("clamp/m-lhm", "off", "low"),
+            ("clamp/m-off-lh", "none", "off"),
+            ("clamp/m-none-lh", "off", "none"),
+            // effort_alias_test.go cases (vendor words light / extra_high)
+            ("clamp/m-trae", "low", "light"),
+            ("clamp/m-trae", "light", "light"),
+            ("clamp/m-trae", "minimal", "light"),
+            ("clamp/m-trae", "medium", "high"),    // tie between light(low) and high -> goes up to high
+            ("clamp/m-trae", "xhigh", "extra_high"),
+            ("clamp/m-trae", "extra_high", "extra_high"),
+            ("clamp/m-trae", "max", "extra_high"),
+            ("clamp/m-lh", "light", "low"),
+            ("clamp/m-lhm", "extra_high", "max"),  // extra_high(xhigh) ties high/max -> max
+            ("clamp/m-lh", "low", "low"),
+            ("clamp/m-lhm", "medium", "high"),
+        ];
+
+        for &(model_ref, want, expected) in cases {
+            let got: String = eval(
+                &h,
+                &format!(
+                    r#"local m = assert(LLM:resolve({model_ref:?}))
+                       return tostring(LLM:clamp_effort(m, {want:?}))"#
+                ),
+            )
+            .await;
+            assert_eq!(got, expected, "clamp_effort({model_ref}, {want}) = {got}, want {expected}");
+        }
         h.shutdown().await;
     })
     .await;

@@ -10,10 +10,12 @@ return function(ctx, args)
 		local target = llm.alias_target and llm:alias_target(args)
 		local ok, res = pcall(llm.set_model, llm, args)
 		if ok and res then
-			if target and target ~= args then
-				ui.notify(("Model: %s (alias %s)"):format(res.ref, args))
-			else
-				ui.notify("Model: " .. res.ref)
+			if not res.unlisted then
+				if target and target ~= args then
+					ui.notify(("Model: %s (alias %s)"):format(res.ref, args))
+				else
+					ui.notify("Model: " .. res.ref)
+				end
 			end
 			return
 		end

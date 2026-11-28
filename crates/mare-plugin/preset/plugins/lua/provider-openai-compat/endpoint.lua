@@ -53,6 +53,7 @@ local function resolve_reasoning_format(entry, base_url)
 		or host_matches(url, "moonshot.ai")
 		or host_matches(url, "moonshot.cn")
 		or host_matches(url, "kimi.com")
+		or host_matches(url, "kimi.ai")
 	then
 		return "kimi"
 	elseif d == "zai" or host_matches(url, "z.ai") or host_matches(url, "bigmodel.cn") then
@@ -67,8 +68,8 @@ local function resolve_reasoning_format(entry, base_url)
 	return nil
 end
 
-local function is_kimi_k3(id)
-	return type(id) == "string" and (id == "kimi-k3" or id:match("^kimi%-k3[%.%-]") ~= nil)
+local function has_efforts(m)
+	return type(m) == "table" and type(m.efforts) == "table" and #m.efforts > 0
 end
 
 local function build_param_rules(name, entry, live_entry, live_base_url)
@@ -123,10 +124,8 @@ local function build_param_rules(name, entry, live_entry, live_base_url)
 					req.body.reasoning_effort = c.value
 				end
 			elseif cur_tf == "kimi" then
-				-- Moonshot Kimi K3 OpenAI-compat API takes top-level reasoning_effort
-				-- (low | high | max; always-on thinking). Leave kimi-k2-thinking and
-				-- kimi-for-coding untouched.
-				if on and is_kimi_k3(c.model and c.model.id) then
+				-- Kimi OpenAI-compat models declaring effort levels take top-level reasoning_effort.
+				if on and has_efforts(c.model) then
 					req.body.reasoning_effort = c.value
 				end
 			elseif cur_tf == "zai" then
@@ -150,11 +149,10 @@ local function build_param_rules(name, entry, live_entry, live_base_url)
 					provider = name,
 					route = "chat",
 					when = function(m)
-						return m.reasoning == true and is_kimi_k3(m.id)
+						return m.reasoning == true and has_efforts(m)
 					end,
 					define = {
 						effort = {
-							only = { "low", "high", "max" },
 							wire = { chat = wire_chat },
 						},
 					},
@@ -165,7 +163,7 @@ local function build_param_rules(name, entry, live_entry, live_base_url)
 					provider = name,
 					route = "chat",
 					when = function(m)
-						return m.reasoning == true and not is_kimi_k3(m.id)
+						return m.reasoning == true and not has_efforts(m)
 					end,
 					define = {
 						effort = {
