@@ -75,13 +75,15 @@ impl Editor {
 
     /// Bracketed paste. Large pastes collapse into an atomic placeholder token. A pasted Tab
     /// becomes two spaces wherever it sits, not a jump to the next tab stop.
-    pub fn handle_paste(&mut self, text: &str) {
+    /// Insert pasted text inline when short (returns `true`), or fold large pastes into an atomic
+    /// `[Pasted text #N ...]` token (returns `false`).
+    pub fn handle_paste(&mut self, text: &str) -> bool {
         let norm = normalize_newlines(text).replace('\t', "  ");
         let nlines = norm.split('\n').count();
         let nchars = norm.chars().count();
         if nlines <= 10 && nchars <= 800 {
             self.paste_inline(&norm);
-            return;
+            return true;
         }
         self.begin(LastOp::Other);
         self.delete_selection_internal();
@@ -93,6 +95,7 @@ impl Editor {
         };
         self.push_element(&token, &norm);
         self.last_op = LastOp::Other;
+        false
     }
 
     /// Snapshot tracked atomic elements in document order: `(id, placeholder_token, expanded_content)`.

@@ -62,7 +62,9 @@ impl StartupInput {
                     self.refused |= !text.trim().is_empty();
                 }
             }
-            Event::Paste(text) => self.editor.handle_paste(&text),
+            Event::Paste(text) => {
+                self.editor.handle_paste(&text);
+            }
             Event::FocusIn => {
                 ui.focused.store(true, Relaxed);
                 ui.focus_known.store(true, Relaxed);
