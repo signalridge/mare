@@ -427,3 +427,315 @@ async fn prune_and_offload_persist_tokens_after_in_session_journal() {
     })
     .await
 }
+
+#[tokio::test]
+async fn repro_issue_197_truncating_preserved_user_message_drops_attachment_reference() {
+    local(async {
+        let env = TestEnv::new().await;
+        let cfg = json!({
+            "plugins": {
+                "compact": { "keep_recent_tokens": 1, "recent_user_tokens": 40 }
+            }
+        });
+        let h = env
+            .host()
+            .builtins(&["compact", "usage"])
+            .faux(json!([{ "text": "## Summary\nCompacted summary." }]))
+            .config(cfg)
+            .no_session()
+            .build()
+            .await;
+        expose(&h);
+        global(&h, "K", h.service_table("compact").unwrap());
+
+        let (ok, kept_json): (bool, String) = eval(
+            &h,
+            r#"
+            local long_prose = "Please inspect this architecture " .. string.rep("background context ", 200)
+            local msgs = {
+                {
+                    role = "user",
+                    content = {
+                        { type = "text", text = long_prose },
+                        { type = "text", text = "[Attachment: /workspace/assets/diagram.png — call `read` to view it]" },
+                    },
+                },
+                { role = "assistant", content = { { type = "text", text = "Reviewing " .. string.rep("notes ", 250) } } },
+                { role = "assistant", content = { { type = "text", text = "Final step" } } },
+            }
+            A:set_messages(msgs)
+            local r = K:run()
+            for _, m in ipairs(A:list_messages().data) do
+                if m.role == "user" and not m.compaction then
+                    return r.status == "compacted", mare.json.encode(m.content)
+                end
+            end
+            return r.status == "compacted", ""
+            "#,
+        )
+        .await;
+        h.shutdown().await;
+        assert!(ok, "compaction should succeed");
+        assert!(
+            kept_json.contains("diagram.png"),
+            "truncating preserved user message dropped its attachment reference: {kept_json}"
+        );
+    })
+    .await
+}
+
+#[tokio::test]
+async fn truncating_preserved_user_message_keeps_mentions_and_minimal_tier_attachments() {
+    local(async {
+        let env = TestEnv::new().await;
+        // Part 1: mention + offloaded attachment reference survive normal recent_user_tokens truncation
+        // in their original relative order while staying within budget.
+        let cfg = json!({
+            "plugins": {
+                "compact": { "keep_recent_tokens": 1, "recent_user_tokens": 55 }
+            }
+        });
+        let h = env
+            .host()
+            .builtins(&["compact", "usage"])
+            .faux(json!([{ "text": "## Summary\nCompacted with mentions and attachments." }]))
+            .config(cfg)
+            .no_session()
+            .build()
+            .await;
+        expose(&h);
+        global(&h, "K", h.service_table("compact").unwrap());
+
+        let (ok, kept_json): (bool, String) = eval(
+            &h,
+            r#"
+            local long_prose = "Refactor module " .. string.rep("detailed requirement ", 200)
+            A:set_messages({
+                {
+                    role = "user",
+                    content = {
+                        { type = "mention", path = "src/arch.rs" },
+                        { type = "text", text = long_prose },
+                        { type = "text", text = "[Attachment: /workspace/assets/diagram.png — call `read` to view it]" },
+                    },
+                },
+                { role = "assistant", content = { { type = "text", text = "Reviewing " .. string.rep("notes ", 250) } } },
+                { role = "assistant", content = { { type = "text", text = "Final step" } } },
+            })
+            local r = K:run()
+            for _, m in ipairs(A:list_messages().data) do
+                if m.role == "user" and not m.compaction then
+                    return r.status == "compacted", mare.json.encode(m.content)
+                end
+            end
+            return r.status == "compacted", ""
+            "#,
+        )
+        .await;
+        h.shutdown().await;
+        assert!(ok, "compaction should succeed");
+        let blocks: Vec<serde_json::Value> = serde_json::from_str(&kept_json).unwrap();
+        assert_eq!(blocks.len(), 3, "expected mention + truncated prose + attachment ref: {kept_json}");
+        assert_eq!(blocks[0]["type"], "mention");
+        assert_eq!(blocks[0]["path"], "src/arch.rs");
+        assert!(blocks[1]["text"].as_str().unwrap().contains("truncated to fit"), "{kept_json}");
+        assert!(blocks[2]["text"].as_str().unwrap().contains("diagram.png"), "{kept_json}");
+
+        // Part 2: minimal preservation path (attempt 3 under tight threshold) also retains
+        // offloaded attachment references alongside the minimal latest-user message.
+        let base = super::stages::overhead(&env).await;
+        let limit = (base + 320) * 10 / 9;
+        let cfg2 = json!({
+            "plugins": {
+                "compact": {
+                    "threshold_tokens": limit,
+                    "keep_recent_tokens": 10000,
+                    "recent_user_tokens": 10000,
+                    "stages": ["local"]
+                }
+            }
+        });
+        let h2 = env
+            .host()
+            .builtins(&["compact", "usage"])
+            .faux(json!([{ "text": "## Summary\nCompact." }, { "text": "## Summary\nCompact." }]))
+            .config(cfg2)
+            .no_session()
+            .build()
+            .await;
+        expose(&h2);
+        global(&h2, "K", h2.service_table("compact").unwrap());
+        global(&h2, "L", h2.service_table("llm").unwrap());
+        let (ok2, err2, kept_json2): (bool, String, String) = eval(
+            &h2,
+            r#"
+            local long_prose = "Check this diagram " .. string.rep("explanation ", 400)
+            A:set_messages({
+                { role = "user", content = { { type = "text", text = string.rep("older ", 400) } } },
+                { role = "assistant", content = { { type = "text", text = string.rep("reply ", 400) } } },
+                {
+                    role = "user",
+                    content = {
+                        { type = "text", text = long_prose },
+                        { type = "text", text = "[Attachment: /workspace/assets/minimal-tier.png (read-only image offloaded to save context; re-read the file to view it)]" },
+                    },
+                },
+            })
+            local after = nil
+            C.cordis:on("compact/completed", function(ev) after = ev end)
+            local model = L:current()
+            local context, tools = C.cordis:get("context"), C.cordis:get("tools")
+            local msgs = A:list_messages().data
+            K:prepare_request({ model = model, messages = msgs, system = context:system_prompt(model), tools = tools:definitions(model) }, msgs)
+            for _, m in ipairs(A:list_messages().data) do
+                if m.preserved and m.role == "user" then
+                    return after and after.status == "completed", tostring(after and after.error or ""), mare.json.encode(m.content)
+                end
+            end
+            return after and after.status == "completed", tostring(after and after.error or ""), ""
+            "#,
+        )
+        .await;
+        h2.shutdown().await;
+        assert!(ok2, "attempt-3 minimal compaction should succeed: err={err2} kept={kept_json2}");
+        assert!(
+            kept_json2.contains("minimal-tier.png"),
+            "minimal preservation tier dropped attachment reference: {kept_json2}"
+        );
+    })
+    .await
+}
+
+#[tokio::test]
+async fn truncating_preserved_user_message_preserves_block_order_and_fits_tight_multi_ref_tier() {
+    local(async {
+        let env = TestEnv::new().await;
+        // Part 1: [text A, mention, long text B] keeps exact block order rather than merging B before mention.
+        let cfg = json!({
+            "plugins": {
+                "compact": { "keep_recent_tokens": 1, "recent_user_tokens": 45 }
+            }
+        });
+        let h = env
+            .host()
+            .builtins(&["compact", "usage"])
+            .faux(json!([{ "text": "## Summary\nCompacted ordered user message." }]))
+            .config(cfg)
+            .no_session()
+            .build()
+            .await;
+        expose(&h);
+        global(&h, "K", h.service_table("compact").unwrap());
+
+        let (ok, kept_json): (bool, String) = eval(
+            &h,
+            r#"
+            A:set_messages({
+                {
+                    role = "user",
+                    content = {
+                        { type = "text", text = "Intro note" },
+                        { type = "mention", path = "src/core.rs" },
+                        { type = "text", text = "Followup " .. string.rep("detail ", 200) },
+                    },
+                },
+                { role = "assistant", content = { { type = "text", text = "Reviewing " .. string.rep("notes ", 250) } } },
+                { role = "assistant", content = { { type = "text", text = "Final step" } } },
+            })
+            local r = K:run()
+            for _, m in ipairs(A:list_messages().data) do
+                if m.role == "user" and not m.compaction then
+                    return r.status == "compacted", mare.json.encode(m.content)
+                end
+            end
+            return r.status == "compacted", ""
+            "#,
+        )
+        .await;
+        h.shutdown().await;
+        assert!(ok, "compaction should succeed");
+        let blocks: Vec<serde_json::Value> = serde_json::from_str(&kept_json).unwrap();
+        assert_eq!(blocks.len(), 3, "expected text A + mention + truncated text B: {kept_json}");
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[0]["text"], "Intro note", "first prose block must stay before mention: {kept_json}");
+        assert_eq!(blocks[1]["type"], "mention");
+        assert_eq!(blocks[1]["path"], "src/core.rs");
+        assert_eq!(blocks[2]["type"], "text");
+        let tail = blocks[2]["text"].as_str().unwrap();
+        assert!(tail.starts_with("Followup") && tail.contains("truncated to fit"), "{kept_json}");
+
+        // Part 2: Tier-3 minimal bound must not require all optional refs when only a subset fits.
+        let base = super::stages::overhead(&env).await;
+        // 5 attachment refs below total ~240 tokens; budget leaves room for summary + 1-2 refs, not all 5.
+        let limit = (base + 180) * 10 / 9;
+        let cfg2 = json!({
+            "plugins": {
+                "compact": {
+                    "threshold_tokens": limit,
+                    "keep_recent_tokens": 10000,
+                    "recent_user_tokens": 10000,
+                    "stages": ["local"]
+                }
+            }
+        });
+        let h2 = env
+            .host()
+            .builtins(&["compact", "usage"])
+            .faux(json!([{ "text": "## Summary\nOk." }, { "text": "## Summary\nOk." }]))
+            .config(cfg2)
+            .no_session()
+            .build()
+            .await;
+        expose(&h2);
+        global(&h2, "K", h2.service_table("compact").unwrap());
+        global(&h2, "L", h2.service_table("llm").unwrap());
+        let (ok2, err2, kept_refs): (bool, String, i64) = eval(
+            &h2,
+            r#"
+            local user_content = {
+                { type = "text", text = "Inspect " .. string.rep("context ", 300) },
+            }
+            for i = 1, 5 do
+                user_content[#user_content + 1] = {
+                    type = "text",
+                    text = string.format(
+                        "[Attachment: /workspace/assets/very-long-screenshot-artifact-name-000%d-%s.png (read-only image offloaded to save context; re-read the file to view it)]",
+                        i,
+                        string.rep("x", 60)
+                    ),
+                }
+            end
+            A:set_messages({
+                { role = "user", content = { { type = "text", text = string.rep("older ", 400) } } },
+                { role = "assistant", content = { { type = "text", text = string.rep("reply ", 400) } } },
+                { role = "user", content = user_content },
+            })
+            local after = nil
+            C.cordis:on("compact/completed", function(ev) after = ev end)
+            local model = L:current()
+            local context, tools = C.cordis:get("context"), C.cordis:get("tools")
+            local msgs = A:list_messages().data
+            K:prepare_request({ model = model, messages = msgs, system = context:system_prompt(model), tools = tools:definitions(model) }, msgs)
+            local refs = 0
+            for _, m in ipairs(A:list_messages().data) do
+                if m.preserved and m.role == "user" then
+                    for _, b in ipairs(m.content or {}) do
+                        if b.type == "text" and b.text:find("[Attachment:", 1, true) then
+                            refs = refs + 1
+                        end
+                    end
+                end
+            end
+            return after and after.status == "completed", tostring(after and after.error or ""), refs
+            "#,
+        )
+        .await;
+        h2.shutdown().await;
+        assert!(ok2, "tight tier-3 budget with multiple refs must still compact: err={err2}");
+        assert!(
+            (1..5).contains(&kept_refs),
+            "expected a fitting subset (1..4) of the 5 attachment refs under tight budget, got {kept_refs}"
+        );
+    })
+    .await
+}

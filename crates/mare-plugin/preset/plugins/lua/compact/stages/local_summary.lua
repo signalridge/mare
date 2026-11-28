@@ -25,6 +25,136 @@ return function(D)
 		return budget and math.min(n, math.floor(budget.message * cfg.retain_ratio)) or n
 	end
 
+	local function is_reference_block(b)
+		if type(b) ~= "table" then
+			return false
+		end
+		if b.type == "mention" or b.type == "image" then
+			return true
+		end
+		if b.type == "text" and type(b.text) == "string" then
+			return b.text:match("^%s*%[Attachment:") ~= nil or b.text:match("^%s*Attachment:") ~= nil
+		end
+		return false
+	end
+
+	local function is_prose_block(b)
+		return type(b) == "table"
+			and type(b.text) == "string"
+			and (b.type == "text" or (type(b.type) == "string" and b.type:find(".", 1, true) ~= nil))
+	end
+
+	local function split_user_blocks(m)
+		local prose, refs = {}, {}
+		for idx, b in ipairs(m.content or {}) do
+			if is_reference_block(b) then
+				refs[#refs + 1] = { idx = idx, block = b }
+			elseif is_prose_block(b) and b.text ~= "" then
+				prose[#prose + 1] = { idx = idx, text = b.text }
+			end
+		end
+		return prose, refs
+	end
+
+	local function assemble_user_content(m, prose_by_idx, kept_ref_idx)
+		local out = {}
+		for idx, b in ipairs(m.content or {}) do
+			if kept_ref_idx[idx] then
+				out[#out + 1] = b
+			elseif prose_by_idx[idx] ~= nil then
+				out[#out + 1] = prose_by_idx[idx]
+			end
+		end
+		return out
+	end
+
+	--- Truncate a preserved user message to `remaining` tokens, budgeting attachment and mention
+	--- reference blocks separately and truncating prose in-place without reordering blocks.
+	local function truncate_user_message(m, remaining)
+		local prose_entries, refs = split_user_blocks(m)
+		local kept_ref_idx, ref_blocks = {}, {}
+		for _, entry in ipairs(refs) do
+			ref_blocks[#ref_blocks + 1] = entry.block
+			if msg_tokens({ content = ref_blocks }) <= remaining then
+				kept_ref_idx[entry.idx] = true
+			else
+				ref_blocks[#ref_blocks] = nil
+			end
+		end
+		local content
+		if #prose_entries > 0 then
+			local all_prose = {}
+			for _, entry in ipairs(prose_entries) do
+				all_prose[entry.idx] = { type = "text", text = entry.text }
+			end
+			local full = assemble_user_content(m, all_prose, kept_ref_idx)
+			if msg_tokens({ content = full }) <= remaining then
+				content = full
+			else
+				local kept_prose = {}
+				local notice = TRUNCATED:gsub("^%s+", "")
+				for i, entry in ipairs(prose_entries) do
+					local kept_whole = false
+					if i < #prose_entries then
+						local next_entry = prose_entries[i + 1]
+						kept_prose[entry.idx] = { type = "text", text = entry.text }
+						kept_prose[next_entry.idx] = { type = "text", text = notice }
+						local fits_with_next = msg_tokens({
+							content = assemble_user_content(m, kept_prose, kept_ref_idx),
+						}) <= remaining
+						kept_prose[next_entry.idx] = nil
+						if fits_with_next then
+							kept_whole = true
+						else
+							kept_prose[entry.idx] = nil
+						end
+					end
+					if not kept_whole then
+						local base_tokens = msg_tokens({ content = assemble_user_content(m, kept_prose, kept_ref_idx) })
+						local prose_budget = remaining - base_tokens
+						local n = prose_budget > 0 and math.min(#entry.text, math.max(1, prose_budget * 3)) or 0
+						local cut_text = n > 0 and cp_head(entry.text, n) or ""
+						while n > 0 do
+							kept_prose[entry.idx] = { type = "text", text = cut_text .. TRUNCATED }
+							if
+								msg_tokens({ content = assemble_user_content(m, kept_prose, kept_ref_idx) })
+								<= remaining
+							then
+								break
+							end
+							n = n * 3 // 4
+							cut_text = cp_head(entry.text, n)
+						end
+						if n > 0 then
+							content = assemble_user_content(m, kept_prose, kept_ref_idx)
+						else
+							kept_prose[entry.idx] = { type = "text", text = notice }
+							local with_notice = assemble_user_content(m, kept_prose, kept_ref_idx)
+							if msg_tokens({ content = with_notice }) <= remaining then
+								content = with_notice
+							else
+								kept_prose[entry.idx] = nil
+								local fallback = assemble_user_content(m, kept_prose, kept_ref_idx)
+								if #fallback > 0 then
+									content = fallback
+								end
+							end
+						end
+						break
+					end
+				end
+			end
+		elseif #ref_blocks > 0 then
+			content = assemble_user_content(m, {}, kept_ref_idx)
+		end
+		if not content or #content == 0 then
+			return nil
+		end
+		local c = table.copy(m)
+		c.content = content
+		return c
+	end
+
 	--- user messages kept verbatim, newest first: while within `budget` (`recent_user_tokens`, see
 	--- retain); the one that doesn't fit is truncated to what is left, older ones live on in the
 	--- summary only. Candidates are the user messages of the summarized range and those an
@@ -53,25 +183,11 @@ return function(D)
 					table.insert(preserved, 1, m)
 					remaining = remaining - t
 				else
-					local text = text_of(m)
-					local n = math.max(1, remaining * 3)
-					local cut_text = cp_head(text, n)
-					local suffix = TRUNCATED
-					while
-						n > 0
-						and msg_tokens({ content = { { type = "text", text = cut_text .. suffix } } }) > remaining
-					do
-						n = n * 3 // 4
-						cut_text = cp_head(text, n)
-					end
-					if n == 0 then
+					local truncated = truncate_user_message(m, remaining)
+					if not truncated then
 						break
 					end
-					local c = table.copy(m)
-					c.content = {
-						{ type = "text", text = cut_text .. suffix },
-					}
-					table.insert(preserved, 1, c)
+					table.insert(preserved, 1, truncated)
 					break
 				end
 			end
@@ -87,8 +203,20 @@ return function(D)
 		if not latest then
 			return {}
 		end
-		local smallest =
-			msg_tokens({ content = { { type = "text", text = cp_head(text_of(latest), 1) .. TRUNCATED } } })
+		local prose_entries, refs = split_user_blocks(latest)
+		local smallest = msg_tokens(latest)
+		if #prose_entries > 0 then
+			local stub_tokens = msg_tokens({
+				content = { { type = "text", text = cp_head(prose_entries[1].text, 1) .. TRUNCATED } },
+			})
+			smallest = math.min(smallest, stub_tokens)
+		end
+		for _, entry in ipairs(refs) do
+			smallest = math.min(smallest, msg_tokens({ content = { entry.block } }))
+		end
+		if #prose_entries == 0 and #refs == 0 then
+			smallest = math.min(smallest, msg_tokens({ content = { { type = "text", text = TRUNCATED } } }))
+		end
 		return preserve_users(msgs, start, cut, smallest, 1)
 	end
 
