@@ -43,7 +43,7 @@ async fn fallback_triggers_on_exhausted_rate_limit_5xx_and_plan_refusal() {
         .await;
 
         let probe = r#"
-local m = assert(LLM:resolve("deepseek/deepseek-chat"))
+local m = assert(LLM:resolve("compat/chat-model"))
 return LLM:stream({
     model = m,
     messages = { { role = "user", content = { { type = "text", text = "hi" } } } },
@@ -54,7 +54,7 @@ return LLM:stream({
             let v: mlua::Value = h.lua().load(probe).eval_async().await.unwrap();
             let msg = mare_shared::lua::lua_to_json(h.lua(), v).unwrap();
             assert!(msg.get("error").is_none_or(Value::is_null), "{label}: expected fallback success, got {msg}");
-            assert_eq!(msg["fallback_from"], json!("deepseek/deepseek-chat"), "{label}: {msg}");
+            assert_eq!(msg["fallback_from"], json!("compat/chat-model"), "{label}: {msg}");
         }
 
         // Ordinary 400 invalid must NOT trigger fallback
@@ -159,7 +159,7 @@ async fn fallback_emits_reset_after_partial_stream_before_5xx() {
                 C.cordis:on("llm/retry", function(ev)
                     resets[#resets + 1] = ev.reset == true
                 end)
-                local m = assert(LLM:resolve("deepseek/deepseek-chat"))
+                local m = assert(LLM:resolve("compat/chat-model"))
                 local msg = LLM:stream({
                     model = m,
                     messages = { { role = "user", content = { { type = "text", text = "hi" } } } },
@@ -171,7 +171,7 @@ async fn fallback_emits_reset_after_partial_stream_before_5xx() {
             .await
             .unwrap();
         let out = mare_shared::lua::lua_to_json(h.lua(), v).unwrap();
-        assert_eq!(out["msg"]["fallback_from"], json!("deepseek/deepseek-chat"), "{out}");
+        assert_eq!(out["msg"]["fallback_from"], json!("compat/chat-model"), "{out}");
         assert_eq!(out["resets"], json!([true]), "must emit llm/retry reset=true before fallback: {out}");
         assert_eq!(text_of(&out["msg"]), "All done.", "{out}");
 
@@ -208,7 +208,7 @@ async fn fallback_handles_model_unserved_and_rejects_plain_401_403() {
         .await;
 
         let probe = r#"
-local m = assert(LLM:resolve("deepseek/deepseek-chat"))
+local m = assert(LLM:resolve("compat/chat-model"))
 return LLM:stream({
     model = m,
     messages = { { role = "user", content = { { type = "text", text = "hi" } } } },
@@ -217,7 +217,7 @@ return LLM:stream({
 
         let v1: mlua::Value = h.lua().load(probe).eval_async().await.unwrap();
         let m1 = mare_shared::lua::lua_to_json(h.lua(), v1).unwrap();
-        assert_eq!(m1["fallback_from"], json!("deepseek/deepseek-chat"), "{m1}");
+        assert_eq!(m1["fallback_from"], json!("compat/chat-model"), "{m1}");
 
         for status_label in ["plain_401", "plain_403"] {
             let v: mlua::Value = h.lua().load(probe).eval_async().await.unwrap();
@@ -249,7 +249,7 @@ async fn host_prompt_emits_reset_and_replaces_partial_stream_on_fallback() {
             &mut env,
             &server,
             json!({
-                "model": "deepseek/deepseek-chat",
+                "model": "compat/chat-model",
                 "fallback_models": ["anthropic/claude-sonnet-5-5"],
                 "plugins": { "llm": { "retries": 0 } }
             }),

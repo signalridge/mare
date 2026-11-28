@@ -117,7 +117,7 @@ mare.provider("lit-vendor", {{
     assert_eq!(ds["state"], "registered", "{ds}");
     assert_eq!(ds["origin"], "plugin", "{ds}");
     assert_eq!(ds["plugin"], "provider-openai-compat", "{ds}");
-    assert_eq!(ds["wire"], "openai-chat", "{ds}");
+    assert_eq!(ds["wire"], "openai-responses", "{ds}");
 
     let lit = row_of(rpc_rows, "lit-vendor");
     assert_eq!(lit["state"], "registered", "{lit}");
@@ -752,12 +752,10 @@ async fn effective_config_drops_deleted_fields_and_endpoint_reads_live_headers_d
         let server = MockServer::start().await;
         let base = &server.base;
         let chat_sse = compat_events(&[compat_text("ok"), compat_stop()]);
-        for path in [
-            "/ds-v1/chat/completions",
-            "/ds-v2/chat/completions",
-            "/cust-v1/chat/completions",
-            "/cust-v2/chat/completions",
-        ] {
+        for path in ["/ds-v1/responses", "/ds-v2/responses"] {
+            server.route(path, vec![Resp::sse(responses_text("ok"))]);
+        }
+        for path in ["/cust-v1/chat/completions", "/cust-v2/chat/completions"] {
             server.route(path, vec![Resp::sse(chat_sse.clone())]);
         }
 
@@ -806,7 +804,7 @@ async fn effective_config_drops_deleted_fields_and_endpoint_reads_live_headers_d
                     assert(msg.stop_reason ~= "error", ref .. ": " .. tostring(msg.error))
                 end
 
-                call_once("deepseek/deepseek-chat")
+                call_once("deepseek/deepseek-flash")
                 call_once("cust/neutral-m")
 
                 mare.config.providers.deepseek.headers = nil
@@ -815,7 +813,7 @@ async fn effective_config_drops_deleted_fields_and_endpoint_reads_live_headers_d
                 mare.config.providers.cust.dialect = nil
                 mare.config.providers.cust.base_url = base .. "/cust-v2"
 
-                call_once("deepseek/deepseek-chat")
+                call_once("deepseek/deepseek-flash")
                 call_once("cust/neutral-m")
 
                 return LLM:provider_config("deepseek").headers ~= nil,
@@ -838,9 +836,9 @@ async fn effective_config_drops_deleted_fields_and_endpoint_reads_live_headers_d
             reqs.iter().find(|r| r.path == p).unwrap_or_else(|| panic!("missing request for {p}"))
         };
 
-        assert_eq!(req_for("/ds-v1/chat/completions").header("x-temp"), Some("initial"));
+        assert_eq!(req_for("/ds-v1/responses").header("x-temp"), Some("initial"));
         assert_eq!(
-            req_for("/ds-v2/chat/completions").header("x-temp"),
+            req_for("/ds-v2/responses").header("x-temp"),
             None,
             "endpoint must stop sending deleted overlay header on subsequent requests"
         );
@@ -964,6 +962,7 @@ async fn reasoning_placeholder_precedence_user_model_provider_models_dev_preset_
                 },
                 "providers": {
                     "deepseek": {
+                        "wire": "openai-chat",
                         "base_url": format!("{base}/ds"),
                         "api_key": "k-ds",
                         "needs_reasoning_placeholder": false
@@ -1037,6 +1036,171 @@ async fn reasoning_placeholder_precedence_user_model_provider_models_dev_preset_
             asst_for("/pack/chat/completions", "deepseek-seed-off").get("reasoning_content").is_none(),
             "preset needs_reasoning_placeholder=false must beat deepseek substring fallback"
         );
+
+        h.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn all_builtin_provider_presets_expose_current_models_and_metadata() {
+    local(async {
+        let env = TestEnv::new().await;
+        let h = env.host().no_session().config(json!({ "model": "faux/echo" })).build().await;
+        global(&h, "LLM", h.service_table("llm").unwrap());
+
+        let info_json: String = eval(
+            &h,
+            r#"
+            local by_prov = {}
+            for _, m in ipairs(LLM:models()) do
+                by_prov[m.provider] = by_prov[m.provider] or {}
+                by_prov[m.provider][m.id] = m
+            end
+            local ds_p = assert(LLM:provider("deepseek"))
+            local kimi_p = assert(LLM:provider("kimi"))
+            local kc_p = assert(LLM:provider("kimi-code"))
+            local ant_p = assert(LLM:provider("anthropic"))
+            local oai_p = assert(LLM:provider("openai"))
+            local goo_p = assert(LLM:provider("google"))
+            local og_p = assert(LLM:provider("opencode-go"))
+
+            local flash = assert(by_prov.deepseek["deepseek-flash"])
+            local pro = assert(by_prov.deepseek["deepseek-v4-pro"])
+            local k31 = assert(by_prov.kimi["kimi-k3.1-pro"])
+            local k3 = assert(by_prov.kimi["kimi-k3"])
+            local kc31 = assert(by_prov["kimi-code"]["k3.1-pro"])
+            local or_sonnet = assert(by_prov.openrouter["anthropic/claude-sonnet-5.5"])
+            local or_ds = assert(by_prov.openrouter["deepseek/deepseek-v4.1-flash"])
+            local or_gem = assert(by_prov.openrouter["google/gemini-4-argon"])
+            local fable = assert(by_prov.anthropic["claude-fable-5-2"])
+            local sonnet = assert(by_prov.anthropic["claude-sonnet-5-5"])
+            local gpt62 = assert(by_prov.openai["gpt-6.2-sol"])
+            local gpt62a = assert(by_prov.openai["gpt-6.2-astra"])
+            local luna = assert(by_prov.openai["gpt-6-luna"])
+            local argon = assert(by_prov.google["gemini-4-argon"])
+            local hydro = assert(by_prov.google["gemini-4-hydrogen"])
+            local g38 = assert(by_prov.google["gemini-3.8-flash"])
+            local og_pro = assert(by_prov["opencode-go"]["deepseek-v4-pro"])
+
+            return mare.json.encode({
+                ds_default = ds_p.default_model,
+                ds_wire = ds_p.wire,
+                ds_has_legacy = by_prov.deepseek["deepseek-chat"] ~= nil
+                    or by_prov.deepseek["deepseek-reasoner"] ~= nil
+                    or by_prov.deepseek["deepseek-v4-flash"] ~= nil,
+                flash_ctx = flash.context_window,
+                flash_out = flash.max_output,
+                flash_images = flash.images,
+                flash_efforts = flash.efforts,
+                flash_default_effort = flash.default_effort,
+                flash_clamped_xhigh = LLM:clamp_effort(flash, "xhigh"),
+                flash_tool_update = flash.tool_update,
+                flash_cost = flash.cost,
+                pro_ctx = pro.context_window,
+                pro_out = pro.max_output,
+                pro_images = pro.images,
+                pro_tool_update = pro.tool_update or mare.json.null,
+                pro_cost = pro.cost,
+                kimi_default = kimi_p.default_model,
+                kimi_has_k2 = by_prov.kimi["kimi-k2-0905-preview"] ~= nil or by_prov.kimi["kimi-k2-thinking"] ~= nil,
+                k31_ctx = k31.context_window,
+                k31_out = k31.max_output,
+                k31_images = k31.images,
+                k3_ctx = k3.context_window,
+                kc_default = kc_p.default_model,
+                kc_mdev = kc_p.models_dev,
+                kc31_ctx = kc31.context_window,
+                or_default = LLM:provider("openrouter").default_model,
+                or_sonnet_ctx = or_sonnet.context_window,
+                or_has_legacy = by_prov.openrouter["deepseek/deepseek-chat"] ~= nil or by_prov.openrouter["google/gemini-2.5-pro"] ~= nil,
+                or_ds_ctx = or_ds.context_window,
+                or_gem_ctx = or_gem.context_window,
+                ant_default = ant_p.default_model,
+                ant_has_fable51 = by_prov.anthropic["claude-fable-5-1"] ~= nil,
+                fable_ctx = fable.context_window,
+                fable_out = fable.max_output,
+                fable_cost = fable.cost,
+                sonnet_ctx = sonnet.context_window,
+                sonnet_out = sonnet.max_output,
+                sonnet_cost = sonnet.cost,
+                oai_default = oai_p.default_model,
+                luna_efforts = luna.efforts,
+                luna_default_effort = luna.default_effort,
+                gpt62_ctx = gpt62.context_window,
+                gpt62_out = gpt62.max_output,
+                gpt62_cost = gpt62.cost,
+                gpt62a_cost = gpt62a.cost,
+                goo_default = goo_p.default_model,
+                goo_has_legacy25 = by_prov.google["gemini-2.5-pro"] ~= nil or by_prov.google["gemini-2.5-flash"] ~= nil,
+                argon_ctx = argon.context_window,
+                argon_efforts = argon.efforts,
+                hydro_efforts = hydro.efforts,
+                g38_cost = g38.cost,
+                og_default = og_p.default_model,
+                og_mdev = og_p.models_dev,
+                og_has_crouton = by_prov["opencode-go"]["crouton-alpha-free"] ~= nil,
+                og_pro_ctx = og_pro.context_window,
+            })
+            "#,
+        )
+        .await;
+        let v: Value = serde_json::from_str(&info_json).unwrap();
+        assert_eq!(v["ds_default"], "deepseek-flash", "{v}");
+        assert_eq!(v["ds_wire"], "openai-responses", "{v}");
+        assert_eq!(v["ds_has_legacy"], false, "{v}");
+        assert_eq!(v["flash_ctx"], 1_000_000, "{v}");
+        assert_eq!(v["flash_out"], 384_000, "{v}");
+        assert_eq!(v["flash_images"], true, "{v}");
+        assert_eq!(v["flash_efforts"], json!(["off", "low", "high", "max"]), "{v}");
+        assert_eq!(v["flash_default_effort"], "high", "{v}");
+        assert_eq!(v["flash_clamped_xhigh"], "max", "{v}");
+        assert_eq!(v["flash_tool_update"], "addition_only", "{v}");
+        assert_eq!(v["flash_cost"], json!({ "input": 0.30, "output": 1.20, "cache_read": 0.006 }), "{v}");
+        assert_eq!(v["pro_ctx"], 1_000_000, "{v}");
+        assert_eq!(v["pro_out"], 384_000, "{v}");
+        assert_eq!(v["pro_images"], false, "{v}");
+        assert_eq!(v["pro_tool_update"], Value::Null, "{v}");
+        assert_eq!(v["pro_cost"], json!({ "input": 1.32, "output": 3.96, "cache_read": 0.044 }), "{v}");
+        assert_eq!(v["kimi_default"], "kimi-k3.1-pro", "{v}");
+        assert_eq!(v["kimi_has_k2"], false, "{v}");
+        assert_eq!(v["k31_ctx"], 1_048_576, "{v}");
+        assert_eq!(v["k31_out"], 131_072, "{v}");
+        assert_eq!(v["k31_images"], true, "{v}");
+        assert_eq!(v["k3_ctx"], 1_048_576, "{v}");
+        assert_eq!(v["kc_default"], "kimi-for-coding", "{v}");
+        assert_eq!(v["kc_mdev"], "kimi-code-plan-global", "{v}");
+        assert_eq!(v["kc31_ctx"], 1_048_576, "{v}");
+        assert_eq!(v["or_default"], "anthropic/claude-sonnet-5.5", "{v}");
+        assert_eq!(v["or_sonnet_ctx"], 1_000_000, "{v}");
+        assert_eq!(v["or_has_legacy"], false, "{v}");
+        assert_eq!(v["or_ds_ctx"], 1_000_000, "{v}");
+        assert_eq!(v["or_gem_ctx"], 1_048_576, "{v}");
+        assert_eq!(v["ant_default"], "claude-sonnet-5-5", "{v}");
+        assert_eq!(v["ant_has_fable51"], false, "{v}");
+        assert_eq!(v["fable_ctx"], 1_000_000, "{v}");
+        assert_eq!(v["fable_out"], 128_000, "{v}");
+        assert_eq!(v["fable_cost"], json!({ "input": 8, "output": 40, "cache_read": 0.2, "cache_write": 10 }), "{v}");
+        assert_eq!(v["sonnet_ctx"], 1_000_000, "{v}");
+        assert_eq!(v["sonnet_out"], 128_000, "{v}");
+        assert_eq!(v["sonnet_cost"], json!({ "input": 2, "output": 10, "cache_read": 0.1, "cache_write": 2.5 }), "{v}");
+        assert_eq!(v["oai_default"], "gpt-6-luna", "{v}");
+        assert_eq!(v["luna_efforts"], json!(["off", "low", "medium", "high", "xhigh", "max"]), "{v}");
+        assert_eq!(v["luna_default_effort"], "max", "{v}");
+        assert_eq!(v["gpt62_ctx"], 922_000, "{v}");
+        assert_eq!(v["gpt62_out"], 128_000, "{v}");
+        assert_eq!(v["gpt62_cost"], json!({ "input": 2, "output": 10, "cache_read": 0.1, "cache_write": 2.5 }), "{v}");
+        assert_eq!(v["gpt62a_cost"], json!({ "input": 8, "output": 40, "cache_read": 0.4, "cache_write": 10 }), "{v}");
+        assert_eq!(v["goo_default"], "gemini-4-argon", "{v}");
+        assert_eq!(v["goo_has_legacy25"], false, "{v}");
+        assert_eq!(v["argon_ctx"], 1_048_576, "{v}");
+        assert_eq!(v["argon_efforts"], json!(["low", "medium", "high"]), "{v}");
+        assert_eq!(v["hydro_efforts"], json!(["low", "medium", "high", "xhigh"]), "{v}");
+        assert_eq!(v["g38_cost"], json!({ "input": 0.75, "output": 3.75, "cache_read": 0.075 }), "{v}");
+        assert_eq!(v["og_default"], "glm-5.3-flash", "{v}");
+        assert_eq!(v["og_mdev"], "opencode-go", "{v}");
+        assert_eq!(v["og_has_crouton"], false, "{v}");
+        assert_eq!(v["og_pro_ctx"], 1_000_000, "{v}");
 
         h.shutdown().await;
     })

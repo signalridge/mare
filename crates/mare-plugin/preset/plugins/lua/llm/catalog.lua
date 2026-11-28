@@ -355,7 +355,7 @@ return function(D)
 	-- when a provider list is refreshed (background), never on the startup path
 	local mdev_path = catalog_dir .. "/models.dev.json"
 	local mdev_mem
-	local function models_dev(force)
+	local function models_dev(force, timeout_ms)
 		if cfg.models_dev == false then
 			return nil
 		end
@@ -375,7 +375,8 @@ return function(D)
 			and (force or age >= (cfg.catalog_refresh_ms or 0))
 			and not (mare.debug_build and default_url)
 		then
-			local ok, r = pcall(mare.http.request, { method = "GET", url = cfg.models_dev_url, timeout_ms = 15000 })
+			local ok, r =
+				pcall(mare.http.request, { method = "GET", url = cfg.models_dev_url, timeout_ms = timeout_ms or 15000 })
 			local j = ok and r.ok and r:json()
 			if type(j) == "table" then
 				local trimmed = {}
@@ -588,6 +589,9 @@ return function(D)
 	--- a listed model keeps what the listing (merged with models.dev) says — reasoning, efforts,
 	--- input modalities, price, limits; only what nobody knows gets the conservative defaults.
 	--- A static entry keeps its curated metadata and merges server capabilities/defaults.
+	--- When `replace` is true and the live listing is non-empty, the live list is authoritative:
+	--- static seed entries omitted by the provider are pruned (unless pinned by user overrides)
+	--- and act only as an offline fallback.
 	local function add_listed(p, list, replace, pm)
 		if has_catalog(p) and active_scopes[p.name] == nil and not replace then
 			active_scopes[p.name] = catalog_scope(p)
@@ -595,9 +599,11 @@ return function(D)
 		local added, removed, changed = 0, 0, 0
 		if replace then
 			local keep = {}
+			local has_live = false
 			for _, l in ipairs(list or {}) do
 				if type(l) == "table" and type(l.id) == "string" then
 					keep[p.name .. "/" .. l.id] = true
+					has_live = true
 				end
 			end
 			for ref, m in pairs(models) do
@@ -607,14 +613,29 @@ return function(D)
 						model_sources[ref] = nil
 						removed = removed + 1
 					elseif static_models[ref] then
-						local restored = apply_overrides(
-							clone_model(static_models[ref]),
-							init_sources(ref, static_models[ref], "static", p)
-						)
-						if model_changed(m, restored) then
-							changed = changed + 1
+						if has_live and p._builtin_seeds ~= false and not overrides[ref] then
+							models[ref] = nil
+							model_sources[ref] = nil
+							removed = removed + 1
+						else
+							local restored = apply_overrides(
+								clone_model(static_models[ref]),
+								init_sources(ref, static_models[ref], "static", p)
+							)
+							if model_changed(m, restored) then
+								changed = changed + 1
+							end
+							models[ref] = restored
 						end
-						models[ref] = restored
+					end
+				end
+			end
+			if not has_live then
+				-- Empty live listing: restore any previously pruned static seed entries as fallback.
+				for ref, sm in pairs(static_models) do
+					if sm.provider == p.name and models[ref] == nil then
+						models[ref] = apply_overrides(clone_model(sm), init_sources(ref, sm, "static", p))
+						added = added + 1
 					end
 				end
 			end
@@ -719,17 +740,24 @@ return function(D)
 		local inv_gen = refresh_gen[name]
 		local changed = false
 		for ref, m in pairs(models) do
-			if m.provider == name then
-				if m.listed then
-					models[ref] = nil
-					changed = true
-				elseif static_models[ref] then
-					models[ref] = apply_overrides(clone_model(static_models[ref]))
-					changed = true
-				end
+			if m.provider == name and m.listed then
+				models[ref] = nil
+				model_sources[ref] = nil
+				changed = true
 			end
 		end
+		-- Restore all static seed entries for this provider (including any previously pruned by a
+		-- live GET /models response) so offline fallback is intact if the new scope has no cache.
 		local p = providers[name]
+		for ref, sm in pairs(static_models) do
+			if sm.provider == name then
+				local restored = apply_overrides(clone_model(sm), init_sources(ref, sm, "static", p))
+				if models[ref] == nil or model_changed(models[ref], restored) then
+					changed = true
+				end
+				models[ref] = restored
+			end
+		end
 		if has_catalog(p) then
 			local scope = catalog_scope(p)
 			local c = read_catalog(name, scope)
@@ -737,8 +765,9 @@ return function(D)
 				active_scopes[name] = scope
 				local pid = models_dev_id(p, name)
 				local pm = pid and mdev_mem and mdev_mem.providers and mdev_mem.providers[pid] or nil
-				local added = add_listed(p, c and c.models, false, pm)
-				if added > 0 then
+				local has_cached = type(c) == "table" and type(c.models) == "table" and #c.models > 0
+				local added, removed, updated = add_listed(p, c and c.models, has_cached, pm)
+				if added > 0 or removed > 0 or updated > 0 then
 					changed = true
 				end
 			end
@@ -832,7 +861,7 @@ return function(D)
 		return port ~= "" and (scheme .. "://" .. host .. ":" .. port) or (scheme .. "://" .. host)
 	end
 
-	local function fetch_catalog(p)
+	local function fetch_catalog(p, opts)
 		if type(p.catalog) ~= "function" then
 			return p.list_models()
 		end
@@ -890,13 +919,14 @@ return function(D)
 				error(label .. ": provider/request changed origin", 0)
 			end
 		end
+		local req_timeout = (opts and tonumber(opts.timeout_ms)) or wire.timeout_ms or desc.timeout_ms or 15000
 		local resp = mare.http.request({
 			method = wire.method or "GET",
 			url = wire.url,
 			headers = wire.headers,
 			proxy = wire.proxy,
 			connect_timeout_ms = wire.connect_timeout_ms,
-			timeout_ms = wire.timeout_ms or desc.timeout_ms or 15000,
+			timeout_ms = req_timeout,
 			redirect = "same-origin",
 		})
 		if not resp.ok then
@@ -918,9 +948,12 @@ return function(D)
 			return 0
 		end
 		local scope = catalog_scope(p)
-		local gen = (refresh_gen[name] or 0) + 1
-		refresh_gen[name] = gen
-		local list, snapshot = fetch_catalog(p)
+		local gen = refresh_gen[name] or 0
+		local deadline = opts and tonumber(opts.timeout_ms) and (mare.task.now() + tonumber(opts.timeout_ms)) or nil
+		local function remaining_ms()
+			return deadline and math.max(1, math.floor(deadline - mare.task.now())) or nil
+		end
+		local list, snapshot = fetch_catalog(p, deadline and { timeout_ms = remaining_ms() } or opts)
 		if type(list) ~= "table" or not is_array(list) then
 			return 0
 		end
@@ -936,7 +969,7 @@ return function(D)
 		if not scope or not same_refresh_state(name, p, gen, scope) then
 			return 0
 		end
-		local md = (opts and opts._models_dev) or models_dev(opts and opts.force)
+		local md = (opts and opts._models_dev) or models_dev(opts and opts.force and not deadline, remaining_ms())
 		if not same_refresh_state(name, p, gen, scope) then
 			return 0
 		end
@@ -1005,7 +1038,7 @@ return function(D)
 			or cfg.catalog_refresh_ms
 			or 0
 		local forced_mdev
-		if opts.force then
+		if opts.force and not opts.timeout_ms then
 			local ok_md, md_val = pcall(models_dev, true) -- once for all providers
 			if ok_md then
 				forced_mdev = md_val
@@ -1018,12 +1051,18 @@ return function(D)
 				invalidate(name)
 			end
 			local wanted = match and (not opts.configured or not p.is_configured or p.is_configured())
-			local c = wanted and read_catalog(name, scope)
-			local delta = c and (os.time() - (tonumber(c.fetched_at) or 0)) or nil
-			local age = (delta and delta >= 0) and (delta * 1000) or math.huge
+			local age = math.huge
+			if wanted and not opts.force then
+				local c = read_catalog(name, scope)
+				local delta = c and (os.time() - (tonumber(c.fetched_at) or 0)) or nil
+				age = (delta and delta >= 0) and (delta * 1000) or math.huge
+			end
 			if wanted and age >= min_age then
-				local ok, res =
-					pcall(llm.refresh_models, llm, caller, name, forced_mdev and { _models_dev = forced_mdev } or nil)
+				local r_opts
+				if forced_mdev or opts.timeout_ms then
+					r_opts = { _models_dev = forced_mdev, timeout_ms = opts.timeout_ms }
+				end
+				local ok, res = pcall(llm.refresh_models, llm, caller, name, r_opts)
 				out[name] = ok and res or tostring(res)
 				if not ok then
 					mare.log("info", ("model catalogue %s: %s"):format(name, tostring(res)))
@@ -1086,7 +1125,8 @@ return function(D)
 				active_scopes[pname] = scope
 				local pid = models_dev_id(cur_p, pname)
 				local pm = pid and mdev_mem and mdev_mem.providers and mdev_mem.providers[pid] or nil
-				local added, removed, changed = add_listed(cur_p, c.models, false, pm)
+				local has_cached = type(c.models) == "table" and #c.models > 0
+				local added, removed, changed = add_listed(cur_p, c.models, has_cached, pm)
 				if added > 0 or removed > 0 or changed > 0 then
 					hydrated_gen[pname] = (hydrated_gen[pname] or 0) + 1
 					ctx.bus:emit("llm/providers-changed")

@@ -46,7 +46,7 @@ async fn anthropic_stream_and_request_shape_with_cache_markers() {
 #[tokio::test]
 async fn openai_compat_stream_and_request_shape() {
     local(replay(
-        "deepseek/deepseek-reasoner",
+        "compat/reasoner-model",
         "/compat",
         "openai-compat.sse",
         0,
@@ -272,7 +272,7 @@ async fn anthropic_deferred_mcp_tool_search_preserves_tools_array_and_cache() {
         // Models without native defer_loading keep deferred MCP tools hidden until tool_search loads them.
         let non_native_has_echo: bool = eval(
             &h,
-            r#"for _, ref in ipairs({ "deepseek/deepseek-chat", "openai/gpt-5.3" }) do
+            r#"for _, ref in ipairs({ "compat/chat-model", "openai/gpt-5.3" }) do
                  local m = LLM:resolve(ref)
                  for _, d in ipairs(T:definitions(m)) do
                    if d.name == "mcp__fake__echo" then return true end

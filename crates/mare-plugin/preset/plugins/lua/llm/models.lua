@@ -163,6 +163,7 @@ return function(D)
 			entry.models = normalized_models
 		end
 		if is_rpc then
+			entry._builtin_seeds = false
 			entry.is_configured = function()
 				return true
 			end

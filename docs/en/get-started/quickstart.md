@@ -141,7 +141,7 @@ Start a line with `!` to run a shell command yourself. The command and its outpu
 `/model` opens a picker. Providers without credentials are grouped as needing login. Give a model reference directly to switch:
 
 ```text
-/model openai/gpt-6.1-terra
+/model openai/gpt-6-luna
 ```
 
 `/effort` sets the reasoning effort for the active model. You can also pass `-m/--model` and `-e/--effort` at start-up (or set `MARE_EFFORT`). `effort` is invocation-only as a global override: global `effort` in `init.lua` is ignored, whereas `model` in `init.lua` overrides the choice saved in `~/.local/state/mare/state.json`.
@@ -169,7 +169,7 @@ Run `mare init` to create `~/.config/mare/init.lua` with commented examples (an 
 ```lua
 -- ~/.config/mare/init.lua
 mare.setup {
-  model = "openai/gpt-6.1-terra",
+  model = "openai/gpt-6-luna",
 }
 
 -- give long shell commands more time

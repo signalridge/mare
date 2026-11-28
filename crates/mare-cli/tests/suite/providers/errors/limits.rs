@@ -73,7 +73,7 @@ async fn context_overflow_patterns_cover_providers_and_exclude_rate_limits() {
         .await;
 
         for (idx, expected_msg) in overflow_msgs.iter().enumerate() {
-            let msg = stream(&h, "deepseek/deepseek-chat").await;
+            let msg = stream(&h, "compat/chat-model").await;
             assert_eq!(msg["error_kind"], "context_overflow", "case {idx} ({expected_msg}): {msg}");
         }
         assert_eq!(server.count("/compat"), overflow_msgs.len(), "overflows must not be retried");
@@ -100,7 +100,7 @@ async fn context_overflow_patterns_cover_providers_and_exclude_rate_limits() {
             cerebras_msg["error_kind"], "context_overflow",
             "Cerebras bodyless 400 must be context_overflow: {cerebras_msg}"
         );
-        let deepseek_msg = stream(&h, "deepseek/deepseek-chat").await;
+        let deepseek_msg = stream(&h, "compat/chat-model").await;
         assert_eq!(
             deepseek_msg["error_kind"], "invalid",
             "Non-Cerebras bodyless 400 must not be context_overflow: {deepseek_msg}"
@@ -131,8 +131,8 @@ async fn silent_overflow_is_detected_by_agent_loop_and_triggers_compaction() {
             ]);
             server.route("/compat", vec![Resp::sse(first), Resp::sse(second)]);
             let h = provider_host(&mut env, &server, json!({
-                "model": "deepseek/deepseek-chat",
-                "models": { "deepseek/deepseek-chat": { "context_window": 128000 } }
+                "model": "compat/chat-model",
+                "models": { "compat/chat-model": { "context_window": 128000 } }
             })).await;
             expose(&h);
             exec(&h, r#"COMPACTED = 0
@@ -185,7 +185,7 @@ async fn max_tokens_exceeding_remaining_window_retries_with_remaining_room() {
         );
         let h = provider_host(&mut env, &server, json!({})).await;
 
-        let msg = stream(&h, "deepseek/deepseek-reasoner").await;
+        let msg = stream(&h, "compat/reasoner-model").await;
         assert_ne!(msg["stop_reason"], "error", "should retry with remaining window and succeed: {msg}");
         assert_eq!(server.count("/compat"), 2, "must retry once with capped max_tokens");
         let reqs = server.requests();
@@ -193,7 +193,7 @@ async fn max_tokens_exceeding_remaining_window_retries_with_remaining_room() {
         assert_eq!(second_body["max_tokens"], 293216, "second request must cap max_tokens to 1000000 - 706784");
 
         // Room < 8192 but valid (4000 left) must ALSO retry with capped max_tokens = 4000
-        let msg_4k = stream(&h, "deepseek/deepseek-reasoner").await;
+        let msg_4k = stream(&h, "compat/reasoner-model").await;
         assert_ne!(msg_4k["stop_reason"], "error", "4000 remaining room must retry and succeed: {msg_4k}");
         assert_eq!(server.count("/compat"), 4, "4000 remaining room must retry once");
         let reqs = server.requests();
@@ -201,7 +201,7 @@ async fn max_tokens_exceeding_remaining_window_retries_with_remaining_room() {
         assert_eq!(fourth_body["max_tokens"], 4000, "fourth request must cap max_tokens to 4000");
 
         // Genuinely tiny room (500 left) must NOT retry and must surface as context_overflow
-        let overflow = stream(&h, "deepseek/deepseek-reasoner").await;
+        let overflow = stream(&h, "compat/reasoner-model").await;
         assert_eq!(overflow["error_kind"], "context_overflow", "{overflow}");
         assert_eq!(server.count("/compat"), 5, "tiny room (500) must not retry");
         h.shutdown().await;
@@ -252,25 +252,25 @@ async fn chinese_error_wording_and_per_minute_429_classification() {
         )
         .await;
 
-        let m1 = stream(&h, "deepseek/deepseek-chat").await;
+        let m1 = stream(&h, "compat/chat-model").await;
         assert_ne!(m1["stop_reason"], "error", "DashScope 429 Allocated quota exceeded must retry: {m1}");
 
-        let m2 = stream(&h, "deepseek/deepseek-chat").await;
+        let m2 = stream(&h, "compat/chat-model").await;
         assert_ne!(m2["stop_reason"], "error", "Chinese TPM rate limit must retry: {m2}");
 
-        let m3 = stream(&h, "deepseek/deepseek-chat").await;
+        let m3 = stream(&h, "compat/chat-model").await;
         assert_eq!(m3["error_kind"], "quota", "Chinese 余额不足 must be non-retryable quota: {m3}");
 
-        let m4 = stream(&h, "deepseek/deepseek-chat").await;
+        let m4 = stream(&h, "compat/chat-model").await;
         assert_eq!(m4["error_kind"], "quota", "429 with longer window (hours) must be quota: {m4}");
 
-        let m5 = stream(&h, "deepseek/deepseek-chat").await;
+        let m5 = stream(&h, "compat/chat-model").await;
         assert_eq!(m5["error_kind"], "quota", "429 exceeded your current quota must be quota: {m5}");
 
-        let m6 = stream(&h, "deepseek/deepseek-chat").await;
+        let m6 = stream(&h, "compat/chat-model").await;
         assert_eq!(m6["error_kind"], "quota", "429 with type=insufficient_quota and no code must be quota: {m6}");
 
-        let m7 = stream(&h, "deepseek/deepseek-chat").await;
+        let m7 = stream(&h, "compat/chat-model").await;
         assert_ne!(m7["stop_reason"], "error", "429 minute rate with check billing must still retry: {m7}");
 
         assert_eq!(server.count("/compat"), 10);
@@ -304,7 +304,7 @@ async fn payload_too_large_413_offloads_images_and_retries() {
                 Resp::status(413, r#"{"error":{"message":"Request Entity Too Large"}}"#),
             ],
         );
-        let h = provider_host(&mut env, &server, json!({"model": "deepseek/deepseek-chat"})).await;
+        let h = provider_host(&mut env, &server, json!({"model": "compat/chat-model"})).await;
         expose(&h);
         exec(
             &h,
@@ -361,7 +361,7 @@ async fn thinking_exhaustion_empty_length_response_does_not_retry() {
             "providers": { "llm": { "retries": 2, "retry_base_ms": 1, "retry_max_ms": 2 } }
         })).await;
 
-        let msg = stream(&h, "deepseek/deepseek-reasoner").await;
+        let msg = stream(&h, "compat/reasoner-model").await;
         assert_eq!(msg["stop_reason"], "error", "{msg}");
         assert_ne!(msg["error_kind"], "server", "thinking exhaustion must not be classified as retryable server: {msg}");
         assert_eq!(server.count("/compat"), 1, "empty length response must not retry with same max_tokens");
@@ -455,23 +455,23 @@ async fn llm_errors_classify_stream_stalled_slow_down_and_402_billing_vs_in_flig
         assert!(unit_ok);
 
         // 1) 402 in-flight credit reservation retries and succeeds on primary model
-        let m1 = stream(&h, "deepseek/deepseek-chat").await;
+        let m1 = stream(&h, "compat/chat-model").await;
         assert_ne!(m1["stop_reason"], "error", "402 in-flight reservation must retry: {m1}");
-        assert_eq!(m1["provider_id"], "deepseek", "should succeed on retry without fallback: {m1}");
+        assert_eq!(m1["provider_id"], "compat", "should succeed on retry without fallback: {m1}");
 
         // 2) 402 billing_error classifies as quota and triggers fallback_models
-        let m2 = stream(&h, "deepseek/deepseek-chat").await;
+        let m2 = stream(&h, "compat/chat-model").await;
         assert_ne!(m2["stop_reason"], "error", "402 billing_error must fall back: {m2}");
         assert_eq!(m2["provider_id"], "openai", "expected fallback to openai: {m2}");
 
         // 3) 402 requires more credits -> quota (disable fallback to observe exact error_kind)
         exec(&h, r#"mare.config.fallback_models = {}"#).await;
-        let m3 = stream(&h, "deepseek/deepseek-chat").await;
+        let m3 = stream(&h, "compat/chat-model").await;
         assert_eq!(m3["stop_reason"], "error", "{m3}");
         assert_eq!(m3["error_kind"], "quota", "402 requires more credits must be quota: {m3}");
 
         // 4) 402 subscription-only -> invalid (not quota)
-        let m4 = stream(&h, "deepseek/deepseek-chat").await;
+        let m4 = stream(&h, "compat/chat-model").await;
         assert_eq!(m4["stop_reason"], "error", "{m4}");
         assert_eq!(m4["error_kind"], "invalid", "402 subscription-only must stay invalid: {m4}");
 

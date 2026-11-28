@@ -77,6 +77,9 @@ return {
 				mare.ui.notify("Login failed: " .. tostring(err) .. " — try /login later", "error")
 				return nil
 			end
+			-- Fetch live GET /models before opening the default-model picker so providers that
+			-- expose a model list show current models; falls back to offline seeds on failure/timeout.
+			pcall(ctx.llm.refresh_catalog, ctx.llm, { name = p.name, force = true, timeout_ms = 5000 })
 			local models = {}
 			for _, m in ipairs(ctx.llm:models()) do
 				if m.provider == p.name then

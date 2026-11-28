@@ -166,7 +166,7 @@ return function(D)
 	llm:register_provider({
 		provider = NAME,
 		label = LABEL,
-		models_dev = "opencode",
+		models_dev = "opencode-go",
 		login = {
 			methods = { "api_key" },
 			run = function(lio)
@@ -236,9 +236,11 @@ return function(D)
 				end
 			end,
 		},
+		-- Offline fallback seeds; live GET /models is authoritative once signed in.
+		-- Source: opencode.ai/inference/go /models snapshot (yetone/magpie opencode-go-models-2026-11-26.json)
+		-- & oh-my-pi opencode-go.kdl (verified 2026-11-28). No `route`: built-in seeds stay on the
+		-- default (responses) route unless routed via `model_routes` or `mare.model{ route = }`.
 		models = {
-			-- models.dev (2026-11): billed against the Go subscription (billing_source "go"). No
-			-- `route`: every built-in model stays on the default (responses) route
 			{
 				model_id = "glm-5.3-flash",
 				name = "GLM 5.3 Flash",
@@ -249,7 +251,18 @@ return function(D)
 				-- glm A/B — high wins on quality, but with the default prompt it multiplies
 				-- thinking and cost (~4-5x, one 19-minute runaway); `/effort high` when wanted
 				params = { effort = "medium" },
+				input = { "text", "image" },
 				cost = { input = 0.15, output = 0.50, cache_read = 0.03, cache_write = 0 },
+			},
+			{
+				model_id = "glm-5.3",
+				name = "GLM 5.3",
+				context_window = 1000000,
+				max_output = 131072,
+				reasoning = true,
+				efforts = { "off", "low", "high", "max" },
+				input = { "text" },
+				cost = { input = 1.40, output = 4.40, cache_read = 0.26, cache_write = 0 },
 			},
 			{
 				model_id = "deepseek-v4.1-flash",
@@ -263,16 +276,60 @@ return function(D)
 				-- back into `reasoning_content` when it is replayed (interleaved thinking).
 				efforts = { "off", "low", "high", "max" },
 				effort_map = { xhigh = "max" },
+				input = { "text", "image" },
+				-- Off-peak base rate; peak UTC hours are 2x.
 				cost = { input = 0.15, output = 0.60, cache_read = 0.003, cache_write = 0 },
 			},
-			-- still served by /models but no longer in the Go docs' model list
 			{
-				model_id = "crouton-alpha-free",
-				name = "Crouton Alpha (free)",
+				model_id = "deepseek-v4-pro",
+				name = "DeepSeek V4 Pro",
 				context_window = 1000000,
-				max_output = 32000,
+				max_output = 384000,
 				reasoning = true,
-				cost = { input = 0, output = 0, cache_read = 0, cache_write = 0 },
+				efforts = { "off", "high", "max" },
+				effort_map = { xhigh = "max" },
+				input = { "text" },
+				-- Off-peak base rate; peak UTC hours are 2x.
+				cost = { input = 0.66, output = 1.98, cache_read = 0.022, cache_write = 0 },
+			},
+			{
+				model_id = "gpt-6-luna",
+				name = "GPT-6 Luna",
+				context_window = 922000,
+				max_output = 128000,
+				reasoning = true,
+				efforts = { "off", "low", "medium", "high", "xhigh", "max" },
+				input = { "text", "image" },
+				cost = { input = 0.10, output = 0.50, cache_read = 0.01, cache_write = 0.125 },
+			},
+			{
+				model_id = "claude-haiku-5-5",
+				name = "Claude Haiku 5.5",
+				context_window = 1000000,
+				max_output = 128000,
+				reasoning = true,
+				efforts = { "off", "low", "medium", "high", "xhigh", "max" },
+				input = { "text", "image" },
+				cost = { input = 0.10, output = 0.50, cache_read = 0.01, cache_write = 0.125 },
+			},
+			{
+				model_id = "muse-spark-1.3-contributor",
+				name = "Muse Spark 1.3 Contributor",
+				context_window = 1048576,
+				max_output = 131072,
+				reasoning = true,
+				efforts = { "off", "minimal", "low", "medium", "high", "xhigh" },
+				input = { "text", "image" },
+				cost = { input = 0.10, output = 0.20, cache_read = 0.002, cache_write = 0 },
+			},
+			{
+				model_id = "mimo-v2.6-flash",
+				name = "MiMo V2.6 Flash",
+				context_window = 1048576,
+				max_output = 131072,
+				reasoning = true,
+				input = { "text", "image" },
+				cost = { input = 0.14, output = 0.28, cache_read = 0.0028, cache_write = 0 },
 			},
 		},
 	})

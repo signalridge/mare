@@ -54,7 +54,7 @@ Keep pull requests focused and squash-merge through `main` with a Conventional C
 
 Release Please owns `CHANGELOG.md`, `.release-please-manifest.json`, workspace versions in `Cargo.toml` / `Cargo.lock`, the release pull request, and `v*` tags. Do not hand-edit release versions or create release tags as part of an ordinary contribution.
 
-After changes reach `main`, Release Please opens or updates one release pull request (`chore: release <version>`). Before merging, ensure `crates/mare-plugin/preset/NEWS.md` has a matching `## <version>` section (checked by CI on the release PR) and review `CHANGELOG.md` and the version bump together.
+After changes reach `main`, Release Please opens or updates one release pull request (`chore: release <version>`). Before merging, ensure `crates/mare-plugin/preset/NEWS.md` has a matching `## <version>` section (checked by CI on the release PR), run `just presets-drift` locally (a networked developer check intentionally excluded from CI) to verify built-in provider seed models and `models_dev` IDs have not drifted from upstream catalogs, and review `CHANGELOG.md` and the version bump together.
 
 Three-platform release acceptance runs manually on the frozen release candidate via `.github/workflows/release-candidate.yml` (`Release Candidate`, `workflow_dispatch` only; there is no scheduled nightly run):
 

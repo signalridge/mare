@@ -3,7 +3,7 @@
 -- budget-based thinking (older models)
 local BUDGETS = { minimal = 1024, low = 4096, medium = 10240, high = 24576, xhigh = 32768 }
 -- adaptive thinking effort (newer models)
-local ADAPTIVE = { minimal = "low", low = "low", medium = "medium", high = "high", xhigh = "max" }
+local ADAPTIVE = { minimal = "low", low = "low", medium = "medium", high = "high", xhigh = "xhigh", max = "max" }
 
 return {
 	name = "provider-anthropic",
@@ -101,7 +101,7 @@ return {
 		local function build_anthropic_param_rules(provider_scope, budgets_cfg, display_cfg, headroom)
 			local display = (display_cfg == "summarized" or display_cfg == "omitted") and display_cfg or nil
 			local adaptive = { { value = "off", wire = { anthropic = {} } } }
-			for _, e in ipairs({ "minimal", "low", "medium", "high", "xhigh" }) do
+			for _, e in ipairs({ "minimal", "low", "medium", "high", "xhigh", "max" }) do
 				local wire = { ["thinking.type"] = "adaptive", ["output_config.effort"] = ADAPTIVE[e] }
 				if display then
 					wire["thinking.display"] = display
@@ -400,7 +400,8 @@ return {
 			return wire_stream(endpoint, req, sink)
 		end
 
-		local efforts = { "off", "low", "medium", "high", "xhigh" }
+		local efforts = { "off", "low", "medium", "high", "xhigh", "max" }
+		local always_on_efforts = { "low", "medium", "high", "xhigh", "max" }
 		llm:register_provider({
 			warm_url = function()
 				return (cfg.base_url or "https://api.anthropic.com")
@@ -453,54 +454,67 @@ return {
 				haiku = { family = "haiku" },
 			},
 			stream = stream,
+			-- Offline fallback seeds; live GET /v1/models is authoritative once signed in.
+			-- Source: https://platform.claude.com/docs/en/about-claude/models/overview,
+			-- /about-claude/pricing, /models/fable-5-2/whats-new-fable-5-2 (verified 2026-11-28;
+			-- cross-checked with pi-mono and oh-my-pi).
 			models = {
+				{
+					model_id = "claude-fable-5-2",
+					name = "Claude Fable 5.2",
+					context_window = 1000000,
+					max_output = 128000,
+					reasoning = true,
+					adaptive = true,
+					-- Fable 5.2 always thinks (rejects thinking.type = "disabled"); default high.
+					efforts = always_on_efforts,
+					default_effort = "high",
+					input = { "text", "image" },
+					cost = { input = 8, output = 40, cache_read = 0.2, cache_write = 10 },
+				},
 				{
 					model_id = "claude-opus-5-5",
 					name = "Claude Opus 5.5",
-					context_window = 200000,
-					max_output = 64000,
+					context_window = 1000000,
+					max_output = 128000,
 					reasoning = true,
 					adaptive = true,
-					efforts = efforts,
-					cost = { input = 5, output = 25, cache_read = 0.5, cache_write = 6.25 },
+					efforts = always_on_efforts,
+					input = { "text", "image" },
+					cost = { input = 4, output = 20, cache_read = 0.2, cache_write = 5 },
 				},
 				{
 					model_id = "claude-sonnet-5-5",
 					name = "Claude Sonnet 5.5",
-					context_window = 200000,
-					max_output = 64000,
+					context_window = 1000000,
+					max_output = 128000,
 					reasoning = true,
 					adaptive = true,
 					efforts = efforts,
-					cost = { input = 3, output = 15, cache_read = 0.3, cache_write = 3.75 },
+					input = { "text", "image" },
+					cost = { input = 2, output = 10, cache_read = 0.1, cache_write = 2.5 },
 				},
 				{
 					model_id = "claude-haiku-5-5",
+					-- Standard <=100k input tier ($0.10/$0.50); >100k prompts bill $0.50/$2.50.
 					name = "Claude Haiku 5.5",
-					context_window = 200000,
-					max_output = 64000,
+					context_window = 1000000,
+					max_output = 128000,
 					reasoning = true,
 					adaptive = true,
 					efforts = efforts,
-					cost = { input = 1, output = 5, cache_read = 0.1, cache_write = 1.25 },
-				},
-				{
-					model_id = "claude-fable-5-1",
-					name = "Claude Fable 5.1",
-					context_window = 200000,
-					max_output = 64000,
-					reasoning = true,
-					adaptive = true,
-					efforts = efforts,
-					cost = { input = 3, output = 15, cache_read = 0.3, cache_write = 3.75 },
+					input = { "text", "image" },
+					cost = { input = 0.1, output = 0.5, cache_read = 0.01, cache_write = 0.125 },
 				},
 				{
 					model_id = "claude-sonnet-4-5",
+					-- Legacy budget-thinking tier (non-adaptive).
 					name = "Claude Sonnet 4.5",
 					context_window = 200000,
 					max_output = 64000,
 					reasoning = true,
 					efforts = { "off", "minimal", "low", "medium", "high", "xhigh" },
+					input = { "text", "image" },
 					cost = { input = 3, output = 15, cache_read = 0.3, cache_write = 3.75 },
 				},
 			},

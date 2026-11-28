@@ -91,7 +91,7 @@ async fn streams_without_their_end_signal_are_retried() {
         let h = provider_host(&mut env, &server, json!({})).await;
         for (model, prefix, cw) in [
             ("anthropic/claude-sonnet-5-5", "/anthropic", 5),
-            ("deepseek/deepseek-reasoner", "/compat", 0),
+            ("compat/reasoner-model", "/compat", 0),
             ("google/gemini-2.5-pro", "/google", 0),
         ] {
             let msg = stream(&h, model).await;
@@ -191,7 +191,7 @@ async fn x_should_retry_overrides_the_status() {
         );
         server.route("/google", vec![Resp::status(503, "{}").header("x-should-retry", "false")]);
         let h = provider_host(&mut env, &server, json!({})).await;
-        assert_fixture_message("compat", &stream(&h, "deepseek/deepseek-reasoner").await, 0);
+        assert_fixture_message("compat", &stream(&h, "compat/reasoner-model").await, 0);
         assert_eq!(server.count("/compat"), 2, "400 + x-should-retry: true is retried");
         let msg = stream(&h, "google/gemini-2.5-pro").await;
         assert_eq!(msg["stop_reason"], "error", "{msg}");
@@ -211,7 +211,7 @@ async fn exhausted_quota_is_not_retried_but_a_per_minute_limit_is() {
         let per_minute = r#"[{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"Quota exceeded for metric generate_content_requests per minute"}}]"#;
         server.route("/google", vec![Resp::status(429, per_minute), Resp::sse(fixture("google.sse"))]);
         let h = provider_host(&mut env, &server, json!({})).await;
-        let msg = stream(&h, "deepseek/deepseek-reasoner").await;
+        let msg = stream(&h, "compat/reasoner-model").await;
         assert_eq!(msg["error_kind"], "quota", "{msg}");
         assert_eq!(server.count("/compat"), 1);
         assert_fixture_message("google", &stream(&h, "google/gemini-2.5-pro").await, 0);
@@ -252,9 +252,9 @@ async fn an_empty_answer_is_retried_unless_it_was_filtered() {
         let filtered = compat_events(&[json!({"choices":[{"index":0,"delta":{},"finish_reason":"content_filter"}]})]);
         server.route("/compat", vec![Resp::sse(empty), Resp::sse(fixture("openai-compat.sse")), Resp::sse(filtered)]);
         let h = provider_host(&mut env, &server, json!({})).await;
-        assert_fixture_message("compat", &stream(&h, "deepseek/deepseek-reasoner").await, 0);
+        assert_fixture_message("compat", &stream(&h, "compat/reasoner-model").await, 0);
         assert_eq!(server.count("/compat"), 2, "an empty answer is retried");
-        let msg = stream(&h, "deepseek/deepseek-reasoner").await;
+        let msg = stream(&h, "compat/reasoner-model").await;
         assert_eq!(msg["stop_reason"], "filtered", "{msg}");
         assert_eq!(server.count("/compat"), 3, "a filtered empty answer is not retried");
         h.shutdown().await;
@@ -288,7 +288,7 @@ async fn a_failed_error_body_read_is_retried() {
         let cut = Resp::status(400, r#"{"error":{"message":"bad"#).header("content-length", "1000").cut(10);
         server.route("/compat", vec![cut, Resp::sse(fixture("openai-compat.sse"))]);
         let h = provider_host(&mut env, &server, json!({})).await;
-        assert_fixture_message("compat", &stream(&h, "deepseek/deepseek-reasoner").await, 0);
+        assert_fixture_message("compat", &stream(&h, "compat/reasoner-model").await, 0);
         assert_eq!(server.count("/compat"), 2);
         h.shutdown().await;
     })
@@ -334,7 +334,7 @@ return out"#,
             "/compat",
             vec![Resp::status(409, r#"{"error":{"message":"busy"}}"#), Resp::sse(fixture("openai-compat.sse"))],
         );
-        assert_fixture_message("compat", &stream(&h, "deepseek/deepseek-reasoner").await, 0);
+        assert_fixture_message("compat", &stream(&h, "compat/reasoner-model").await, 0);
         assert_eq!(server.count("/compat"), 2);
         h.shutdown().await;
     })
@@ -354,7 +354,7 @@ async fn compat_network_error_finish_is_retried() {
         ]);
         server.route("/compat", vec![Resp::sse(broken), Resp::sse(fixture("openai-compat.sse"))]);
         let h = provider_host(&mut env, &server, json!({})).await;
-        let msg = stream(&h, "deepseek/deepseek-reasoner").await;
+        let msg = stream(&h, "compat/reasoner-model").await;
         assert_fixture_message("compat", &msg, 0);
         let texts = msg["content"].as_array().unwrap().iter().filter(|b| b["type"] == "text").count();
         assert_eq!(texts, 1, "{msg}");
@@ -490,7 +490,7 @@ return LLM:stream({
         let v_err: mlua::Value = eval(
             &h,
             r#"
-local m = assert(LLM:resolve("deepseek/deepseek-reasoner"))
+local m = assert(LLM:resolve("compat/reasoner-model"))
 return LLM:stream({
     model = m,
     messages = { { role = "user", content = { { type = "text", text = "hi" } } } },
@@ -949,7 +949,7 @@ async fn response_header_timeout_and_compat_google_idle_streams_retry() {
         assert_eq!(server.count("/openai"), 2, "stalled response headers must time out and retry");
         hold_headers.notify_one();
 
-        let compat = stream(&h, "deepseek/deepseek-reasoner").await;
+        let compat = stream(&h, "compat/reasoner-model").await;
         assert_fixture_message("compat", &compat, 0);
         assert_eq!(server.count("/compat"), 2, "stalled compat stream must time out and retry");
 
@@ -973,7 +973,7 @@ async fn http_408_without_timeout_text_is_retried() {
             vec![Resp::status(408, r#"{"error":{"message":"opaque"}}"#), Resp::sse(fixture("openai-compat.sse"))],
         );
         let h = provider_host(&mut env, &server, json!({})).await;
-        let msg = stream(&h, "deepseek/deepseek-reasoner").await;
+        let msg = stream(&h, "compat/reasoner-model").await;
         assert_fixture_message("compat", &msg, 0);
         assert_eq!(server.count("/compat"), 2, "HTTP 408 must retry by status code alone");
         h.shutdown().await;

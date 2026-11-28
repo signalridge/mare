@@ -43,7 +43,12 @@ return function(D)
 				require("mare_lib").decode_models_envelope(raw, "data", "id", ("%s GET /models"):format(name))
 			local out = {}
 			for _, m in ipairs(lossless_data) do
-				out[#out + 1] = { id = m.id, name = type(m.name) == "string" and m.name or nil }
+				out[#out + 1] = {
+					id = m.id,
+					name = type(m.name) == "string" and m.name or nil,
+					context_window = tonumber(m.context_length or m.context_window),
+					max_output = tonumber(m.max_output_tokens or m.max_completion_tokens),
+				}
 			end
 			return out
 		end
@@ -1194,7 +1199,7 @@ return function(D)
 				return llm:base_url("openai", cfg.base_url or "https://api.openai.com/v1")
 			end, api_key, false)(for_fetch)
 		end,
-		default_model = "gpt-6.1-terra",
+		default_model = "gpt-6-luna",
 		default_context = 400000,
 		default_max_output = 128000,
 		-- Responses call ids: [A-Za-z0-9_-], at most 64 characters
@@ -1287,8 +1292,40 @@ return function(D)
 				end
 			end,
 		},
+		-- Offline fallback seeds; live GET /models (or /codex/models) is authoritative once signed in.
+		-- Source: https://developers.openai.com/api/docs/models & /pricing (verified 2026-11-28;
+		-- cross-checked with openai/codex models.json, pi-mono, and magpie).
+		-- Standard <=272k input tier rates (prompts >272k bill 2x input / 1.5x output).
+		-- context_window = measured input limit, not the spec-sheet total window.
 		models = {
-			-- context_window = measured input limit, not the spec-sheet number
+			{
+				model_id = "gpt-6.2-sol",
+				name = "GPT-6.2 Sol",
+				context_window = 922000,
+				max_output = 128000,
+				reasoning = true,
+				reasoning_summary = true,
+				verbosity = "low",
+				truncation = { mode = "tokens", limit = 10000 },
+				efforts = { "low", "medium", "high", "xhigh", "max" },
+				input = { "text", "image" },
+				tool_update = "addition_only",
+				cost = { input = 2, output = 10, cache_read = 0.1, cache_write = 2.5 },
+			},
+			{
+				model_id = "gpt-6.2-astra",
+				name = "GPT-6.2 Astra",
+				context_window = 922000,
+				max_output = 128000,
+				reasoning = true,
+				reasoning_summary = true,
+				verbosity = "low",
+				truncation = { mode = "tokens", limit = 10000 },
+				efforts = { "low", "medium", "high", "xhigh", "max" },
+				input = { "text", "image" },
+				tool_update = "addition_only",
+				cost = { input = 8, output = 40, cache_read = 0.4, cache_write = 10 },
+			},
 			{
 				model_id = "gpt-6.1-terra",
 				name = "GPT-6.1 Terra",
@@ -1300,7 +1337,8 @@ return function(D)
 				reasoning_summary = true,
 				verbosity = "low",
 				truncation = { mode = "tokens", limit = 10000 },
-				efforts = { "off", "low", "medium", "high", "xhigh" },
+				efforts = { "off", "low", "medium", "high", "xhigh", "max" },
+				input = { "text", "image" },
 				tool_update = "addition_only",
 				cost = { input = 1, output = 5, cache_read = 0.05, cache_write = 1.25 },
 			},
@@ -1315,7 +1353,8 @@ return function(D)
 				reasoning_summary = true,
 				verbosity = "low",
 				truncation = { mode = "tokens", limit = 10000 },
-				efforts = { "low", "medium", "high", "xhigh" },
+				efforts = { "low", "medium", "high", "xhigh", "max" },
+				input = { "text", "image" },
 				tool_update = "addition_only",
 				cost = { input = 2, output = 10, cache_read = 0.1, cache_write = 2.5 },
 			},
@@ -1330,54 +1369,11 @@ return function(D)
 				reasoning_summary = true,
 				verbosity = "low",
 				truncation = { mode = "tokens", limit = 10000 },
-				efforts = { "minimal", "low", "medium", "high" },
+				efforts = { "off", "low", "medium", "high", "xhigh", "max" },
+				default_effort = "max",
+				input = { "text", "image" },
 				tool_update = "addition_only",
 				cost = { input = 0.1, output = 0.5, cache_read = 0.01, cache_write = 0.125 },
-			},
-			{
-				model_id = "gpt-5.6-terra",
-				name = "GPT-5.6 Terra",
-				context_window = 400000,
-				context_window_measured = true,
-				max_output = 128000,
-				reasoning = true,
-				-- summaries + verbosity supported, token-based output truncation
-				reasoning_summary = true,
-				verbosity = "low",
-				truncation = { mode = "tokens", limit = 10000 },
-				efforts = { "low", "medium", "high", "xhigh" },
-				tool_update = "addition_only",
-				cost = { input = 2, output = 12, cache_read = 0.2, cache_write = 2.5 },
-			},
-			{
-				model_id = "gpt-5.6-sol",
-				name = "GPT-5.6 Sol",
-				context_window = 400000,
-				context_window_measured = true,
-				max_output = 128000,
-				reasoning = true,
-				-- summaries + verbosity supported, token-based output truncation
-				reasoning_summary = true,
-				verbosity = "low",
-				truncation = { mode = "tokens", limit = 10000 },
-				efforts = { "low", "medium", "high", "xhigh" },
-				tool_update = "addition_only",
-				cost = { input = 4, output = 20, cache_read = 0.4, cache_write = 5 },
-			},
-			{
-				model_id = "gpt-5.6-luna",
-				name = "GPT-5.6 Luna",
-				context_window = 400000,
-				context_window_measured = true,
-				max_output = 128000,
-				reasoning = true,
-				-- summaries + verbosity supported, token-based output truncation
-				reasoning_summary = true,
-				verbosity = "low",
-				truncation = { mode = "tokens", limit = 10000 },
-				efforts = { "minimal", "low", "medium", "high" },
-				tool_update = "addition_only",
-				cost = { input = 0.2, output = 1.2, cache_read = 0.02, cache_write = 0.25 },
 			},
 		},
 	})

@@ -416,13 +416,13 @@ async fn apply_does_not_read_catalog_or_auth_and_headless_first_request_hydrates
         let mut env = TestEnv::new().await;
         env.set_var("DEEPSEEK_API_KEY", "test-deepseek");
         let server = MockServer::start().await;
-        server.route("/compat", vec![Resp::sse(fixture("openai-compat.sse"))]);
+        server.route("/compat", vec![Resp::sse(responses_text("ok"))]);
 
         let cache_dir = env.home.path().join("state/models-cache");
         std::fs::create_dir_all(&cache_dir).unwrap();
         std::fs::write(
             cache_dir.join("deepseek.json"),
-            r#"{"fetched_at": 9999999999, "models": [{"id": "cached-from-disk", "context_window": 99000}, {"id": "deepseek-chat", "context_window": 42000}]}"#,
+            r#"{"fetched_at": 9999999999, "models": [{"id": "cached-from-disk", "context_window": 99000}, {"id": "deepseek-flash", "context_window": 42000}]}"#,
         )
         .unwrap();
         let auth_path = env.home.path().join("state/auth.json");
@@ -506,15 +506,15 @@ return {
             mare.fs.stat = spy.orig_stat
             mare.fs._fs_spy = nil
 
-            -- Seed model before request/prepare has static 128000 (resolve does no blocking I/O).
-            local before_m = assert(LLM:resolve("deepseek/deepseek-chat"))
+            -- Seed model before request/prepare has static 1000000 (resolve does no blocking I/O).
+            local before_m = assert(LLM:resolve("deepseek/deepseek-flash"))
             local seed_before = before_m.context_window
 
             -- Headless first request (no ui/ready!): prepare_request barrier awaits disk cache for
             -- current provider, so seed model immediately receives cached context_window = 42000.
             local args = { model = before_m }
             LLM:prepare_request(args)
-            local after_m = assert(LLM:resolve("deepseek/deepseek-chat"))
+            local after_m = assert(LLM:resolve("deepseek/deepseek-flash"))
             local msg = LLM:stream({
               model = before_m,
               messages = { { role = "user", content = { { type = "text", text = "hi" } } } },
@@ -533,7 +533,7 @@ return {
             reload_reads.is_empty(),
             "full reload apply (llm + provider-* + statusline render) must not read auth.json or models-cache: {reload_reads:?}"
         );
-        assert_eq!(seed_before, 128000, "resolve must not block on disk I/O");
+        assert_eq!(seed_before, 1_000_000, "resolve must not block on disk I/O");
         assert_eq!(
             seed_after_prepare, 42000,
             "headless request/prepare barrier must hydrate seed model's cached context_window"
@@ -1266,7 +1266,7 @@ async fn dialect_follows_entry_not_name() {
             .host()
             .config(json!({
                 "providers": {
-                    "deepseek": { "base_url": format!("{base}/ds-overlay") },
+                    "deepseek": { "wire": "openai-chat", "base_url": format!("{base}/ds-overlay") },
                     "ds2": {
                         "base_url": format!("{base}/ds2"),
                         "no_key": true,
@@ -1302,7 +1302,7 @@ async fn dialect_follows_entry_not_name() {
             mare_shared::lua::lua_to_json(h.lua(), v).unwrap()
         }
 
-        let _ = stream_high(&h, "deepseek/deepseek-reasoner").await;
+        let _ = stream_high(&h, "deepseek/deepseek-flash").await;
         let _ = stream_high(&h, "ds2/m1").await;
         let _ = stream_high(&h, "ds3/m1").await;
 
@@ -1400,7 +1400,7 @@ async fn preset_overlay_fields_take_effect() {
             for _, m in ipairs(LLM:models()) do
               if m.ref == "ollama/qwen3" then has_q = true end
               if m.ref == "deepseek/custom-ds" then has_c = true end
-              if m.ref == "deepseek/deepseek-chat" then has_old = true end
+              if m.ref == "deepseek/deepseek-flash" then has_old = true end
             end
             return tostring(op and op.default_model or ""), has_q, has_c, has_old
             "#,
@@ -1428,10 +1428,10 @@ async fn preset_overlay_fields_take_effect() {
 async fn wire_api_overlay_moves_the_entry_once() {
     local(async {
         let mut env = TestEnv::new().await;
-        env.set_var("DEEPSEEK_API_KEY", "test-ds");
+        env.set_var("MOONSHOT_API_KEY", "test-kimi");
         let server = MockServer::start().await;
         let base = &server.base;
-        server.route("/ds-resp/responses", vec![Resp::sse(responses_text("ds-via-responses"))]);
+        server.route("/kimi-resp/responses", vec![Resp::sse(responses_text("kimi-via-responses"))]);
 
         write_user_plugin(
             &env,
@@ -1458,9 +1458,9 @@ async fn wire_api_overlay_moves_the_entry_once() {
             .user_plugins()
             .config(json!({
                 "providers": {
-                    "deepseek": {
+                    "kimi": {
                         "wire_api": "responses",
-                        "base_url": format!("{base}/ds-resp")
+                        "base_url": format!("{base}/kimi-resp")
                     },
                     "bedrock": {
                         "base_url": format!("{base}/bedrock-unused")
@@ -1475,7 +1475,7 @@ async fn wire_api_overlay_moves_the_entry_once() {
         let (route, compat_probs, openai_probs): (String, usize, usize) = eval(
             &h,
             r#"
-            local m = assert(LLM:resolve("deepseek/deepseek-chat"))
+            local m = assert(LLM:resolve("kimi/kimi-k3.1-pro"))
             local r = LLM:route_of(m)
             return tostring(r),
                 #mare.plugins.status("provider-openai-compat").problems,
@@ -1483,13 +1483,13 @@ async fn wire_api_overlay_moves_the_entry_once() {
             "#,
         )
         .await;
-        assert_eq!(route, "responses", "deepseek must have moved to responses route");
+        assert_eq!(route, "responses", "kimi must have moved to responses route");
         assert_eq!(compat_probs, 0, "provider-openai-compat must have no duplicate/undeclared problems");
         assert_eq!(openai_probs, 0, "provider-openai must have no duplicate/undeclared problems");
 
-        let msg = ask(&h, "deepseek/deepseek-chat").await;
-        assert_eq!(text_of(&msg), "ds-via-responses");
-        assert_eq!(server.count("/ds-resp/responses"), 1);
+        let msg = ask(&h, "kimi/kimi-k3.1-pro").await;
+        assert_eq!(text_of(&msg), "kimi-via-responses");
+        assert_eq!(server.count("/kimi-resp/responses"), 1);
 
         let bedrock_msg = ask(&h, "bedrock/claude").await;
         assert_eq!(text_of(&bedrock_msg), "from-bedrock");

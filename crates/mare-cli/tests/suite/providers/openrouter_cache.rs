@@ -200,9 +200,9 @@ async fn openrouter_non_anthropic_and_other_endpoints_omit_cache_control() {
             r#"
             local msgs = { { role = "user", content = { { type = "text", text = "hi" } } } }
             local tools = { { name = "read", description = "Read", parameters = { type = "object", properties = {} } } }
-            local m_or_ds = assert(LLM:resolve("openrouter/deepseek/deepseek-chat"))
+            local m_or_ds = assert(LLM:resolve("openrouter/deepseek/deepseek-v4.1-flash"))
             LLM:stream({ model = m_or_ds, system = "S", messages = msgs, tools = tools, session_id = "sess-or-ds" }, function() end)
-            local m_ds = assert(LLM:resolve("deepseek/deepseek-chat"))
+            local m_ds = assert(LLM:resolve("compat/chat-model"))
             LLM:stream({ model = m_ds, system = "S", messages = msgs, tools = tools, session_id = "sess-ds" }, function() end)
             "#,
         )

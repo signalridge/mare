@@ -139,29 +139,36 @@ return function(D)
 		return nil
 	end
 
+	local function matches_any_prefix(key, prefixes)
+		for _, pfx in ipairs(prefixes) do
+			if type(pfx) == "string" and pfx ~= "" and key:sub(1, #pfx) == pfx then
+				return true
+			end
+		end
+		return false
+	end
+
 	--- the API-key half of every provider's login: masked prompt (or `io.key`), stored 0600
 	function llm.login_api_key(_, caller, name, title, lio)
 		lio = llm.login_io(llm, caller, lio)
-		if not lio.key then
-			local p = providers[name]
-			if p and type(p.key_prefixes) == "table" and #p.key_prefixes > 0 then
-				lio.say(("API key for %s (expected prefix: %s)."):format(name, table.concat(p.key_prefixes, ", ")))
-			else
-				lio.say(
-					("API key for %s: check the provider's documented prefix; shared prefixes such as sk- do not identify a provider."):format(
-						name
-					)
-				)
-			end
-		end
-		local key = lio.key or lio.ask(title or (name .. " API key"), { secret = true })
+		local p = providers[name]
+		local prefixes = p and type(p.key_prefixes) == "table" and #p.key_prefixes > 0 and p.key_prefixes or nil
+		local placeholder = prefixes and (table.concat(prefixes, ", ") .. "...") or nil
+		local key = lio.key or lio.ask(title or (name .. " API key"), { secret = true, placeholder = placeholder })
 		key = key and key:match("^%s*(.-)%s*$")
 		if not key or key == "" then
 			lib.fail("llm.login_failed", "no API key given")
 		end
 		local detected = llm.identify_key_provider(llm, caller, key)
 		if detected and detected ~= name then
-			lio.say(("Note: this key's prefix matches %s, not %s."):format(detected, name))
+			lio.say(("Warning: this API key prefix matches %s, not %s (saved for %s)."):format(detected, name, name))
+		elseif prefixes and not matches_any_prefix(key, prefixes) then
+			lio.say(
+				("Warning: %s API keys usually start with %s (saved anyway)."):format(
+					name,
+					table.concat(prefixes, ", ")
+				)
+			)
 		end
 		local ok, err = pcall(function()
 			llm.auth_set(llm, caller, name, { type = "api_key", key = key })

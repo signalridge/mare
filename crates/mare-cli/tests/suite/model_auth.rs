@@ -464,13 +464,22 @@ async fn providers_login_logout_and_usage_through_contracts() {
             assert(status().logged_in == true)
             P:logout("fakeauth")
 
-            -- A pasted key must be masked and identify the provider; prefixes alone can be ambiguous.
-            local hints, secret = {}, false
+            -- A pasted key must be masked; no unsolicited prefix spam is printed when a provider
+            -- has no unique prefix, and a mismatched provider prefix warns clearly without leaking.
+            local hints, secret, got_title = {}, false, nil
             P:login("fakeauth", { method = "api_key", say = function(t) hints[#hints + 1] = t end,
-                ask = function(title, opts) secret = opts.secret == true; return fake_secret end })
-            local hint = table.concat(hints, " ")
-            assert(secret and hint:find("fakeauth", 1, true) and hint:find("prefix", 1, true), hint)
-            assert(not hint:find(fake_secret, 1, true), "key leaked in login hint")
+                ask = function(title, opts) got_title = title; secret = opts.secret == true; return fake_secret end })
+            assert(secret and got_title == "Fake API key", tostring(got_title))
+            assert(#hints == 0, "unexpected login hint on normal login: " .. table.concat(hints, " | "))
+            P:logout("fakeauth")
+
+            local mismatch_hints = {}
+            local wrong_secret = "sk-ant-wrong-provider-9876543210"
+            P:login("fakeauth", { method = "api_key", say = function(t) mismatch_hints[#mismatch_hints + 1] = t end,
+                ask = function(_, opts) assert(opts.secret == true); return wrong_secret end })
+            local mismatch = table.concat(mismatch_hints, " ")
+            assert(mismatch:find("anthropic", 1, true) and mismatch:find("fakeauth", 1, true), mismatch)
+            assert(not mismatch:find(wrong_secret, 1, true), "key leaked in mismatch warning")
             P:logout("fakeauth")
             local isolated = {auth_set=function() error("injected storage error " .. fake_secret, 0) end,
                 invalidate_api_key=function() end}

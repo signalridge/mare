@@ -16,10 +16,10 @@ async fn http_errors_preserve_server_request_id() {
         );
         let h = provider_host(&mut env, &server, json!({})).await;
 
-        let m1 = stream(&h, "deepseek/deepseek-chat").await;
+        let m1 = stream(&h, "compat/chat-model").await;
         assert!(m1["error"].as_str().unwrap().contains("req-abc-123"), "x-request-id must appear in error: {m1}");
 
-        let m2 = stream(&h, "deepseek/deepseek-chat").await;
+        let m2 = stream(&h, "compat/chat-model").await;
         assert!(m2["error"].as_str().unwrap().contains("trace-xyz-789"), "x-trace-id must appear in error: {m2}");
 
         let rid: Option<String> = eval(
@@ -53,7 +53,7 @@ async fn minute_rate_limit_429_retries_without_compaction() {
             &mut env,
             &server,
             json!({
-                "model": "deepseek/deepseek-chat",
+                "model": "compat/chat-model",
                 "providers": { "llm": { "retries": 1, "retry_base_ms": 1, "retry_max_ms": 2 } }
             }),
         )
@@ -152,7 +152,7 @@ async fn budget_adjusted_retry_runs_on_attempt_and_emits_retry_reset() {
             h.lua(),
             h.lua()
                 .load(
-                    r#"local m = LLM:resolve("deepseek/deepseek-reasoner")
+                    r#"local m = LLM:resolve("compat/reasoner-model")
                     ON_ATTEMPT_CALLS = 0
                     return LLM:stream({
                         model = m,
@@ -174,7 +174,7 @@ async fn budget_adjusted_retry_runs_on_attempt_and_emits_retry_reset() {
             h.lua(),
             h.lua()
                 .load(
-                    r#"local m = LLM:resolve("deepseek/deepseek-reasoner")
+                    r#"local m = LLM:resolve("compat/reasoner-model")
                     RETRY_EVENTS = {}
                     ON_ATTEMPT_CALLS = 0
                     C.cordis:on("step/completed", function(ev) if ev.will_retry then table.insert(RETRY_EVENTS, ev) end end)
@@ -514,7 +514,7 @@ async fn provider_errors_classify_through_one_table() {
             },
             // OpenAI Compat (DeepSeek + Cerebras)
             Sample {
-                model: "deepseek/deepseek-chat",
+                model: "compat/chat-model",
                 route: "/compat",
                 resp: Resp::status(
                     429,
@@ -525,14 +525,14 @@ async fn provider_errors_classify_through_one_table() {
                 expect_retried: true,
             },
             Sample {
-                model: "deepseek/deepseek-chat",
+                model: "compat/chat-model",
                 route: "/compat",
                 resp: Resp::status(429, r#"{"error":{"message":"账户余额不足，请充值后重试"}}"#),
                 expect_kind: "quota",
                 expect_retried: false,
             },
             Sample {
-                model: "deepseek/deepseek-chat",
+                model: "compat/chat-model",
                 route: "/compat",
                 resp: Resp::status(400, r#"{"error":{"message":"Prompt too long"}}"#),
                 expect_kind: "context_overflow",

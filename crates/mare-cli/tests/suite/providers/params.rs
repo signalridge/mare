@@ -116,7 +116,7 @@ async fn prepared_output_caps_match_openai_chat_responses_and_google() {
     local(async {
         let mut env = TestEnv::new().await;
         for (model, prefix, key) in [
-            ("deepseek/deepseek-chat", "/compat", "chat"),
+            ("compat/chat-model", "/compat", "chat"),
             ("openai/gpt-6.1-terra", "/openai", "responses"),
             ("google/gemini-2.5-pro", "/google", "google"),
         ] {
@@ -245,7 +245,7 @@ async fn prepared_lower_bound_is_sent_when_the_encoder_omits_the_cap() {
             &mut env,
             &server,
             json!({ "models": {
-            "deepseek/deepseek-reasoner": { "context_window": 60000, "max_output": 8000 }
+            "compat/reasoner-model": { "context_window": 60000, "max_output": 8000 }
         }, "plugins": { "compact": { "auto": false, "headroom_tokens": 0 } } }),
         )
         .await;
@@ -253,10 +253,10 @@ async fn prepared_lower_bound_is_sent_when_the_encoder_omits_the_cap() {
         exec(
             &h,
             r#"
-            mare.config.param_rules = { { match = "deepseek/deepseek-reasoner", define = { effort = {
+            mare.config.param_rules = { { match = "compat/reasoner-model", define = { effort = {
                 only = { "deep" }, options = { { value = "deep", wire = { chat = {
                     ["max_tokens"] = { at_least = 4000 } } } } } } } } }
-            LLM:set_model("deepseek/deepseek-reasoner", { save = false })
+            LLM:set_model("compat/reasoner-model", { save = false })
             C.cordis:on("request/build", function(req, next) req.effort = "deep" return next() end)
         "#,
         )
@@ -268,7 +268,7 @@ async fn prepared_lower_bound_is_sent_when_the_encoder_omits_the_cap() {
         exec(
             &h,
             r#"
-            mare.config.param_rules = { { match = "deepseek/deepseek-reasoner", define = { effort = {
+            mare.config.param_rules = { { match = "compat/reasoner-model", define = { effort = {
                 only = { "deep" }, options = { { value = "deep", wire = { chat = { ["max_tokens"] = 8000 } } } } } } } }
         "#,
         )
@@ -280,7 +280,7 @@ async fn prepared_lower_bound_is_sent_when_the_encoder_omits_the_cap() {
         exec(
             &h,
             r#"
-            mare.config.param_rules = { { match = "deepseek/deepseek-reasoner", define = { effort = {
+            mare.config.param_rules = { { match = "compat/reasoner-model", define = { effort = {
                 only = { "deep" }, options = { { value = "deep", wire = { chat = function(req)
                     req.body.max_tokens = req.body.max_tokens
                 end } } } } } } }
@@ -454,11 +454,27 @@ async fn unsupported_options_clamp_error_or_pass_as_is() {
         exec(&h, r#"mare.config.param_rules = { { match = "opencode-go/glm-*", on_unsupported = "as_is" } }"#).await;
         let body = send(&h, &server, "opencode-go/glm-5.3-flash").await;
         assert_eq!(body["reasoning"]["effort"], "xhigh", "{body}");
-        // ... the Anthropic adaptive route has no "$value" mapping: clamped, and noted
-        exec(&h, r#"mare.config.param_rules = { { route = "anthropic", on_unsupported = "as_is" } } LLM:set_model("anthropic/claude-sonnet-5-5", { save = false }) LLM:restore_selection({ effort = "max" })"#)
+        // Claude 5.5 models support native `max` effort (sent as output_config.effort = "max");
+        // Opus 5.5 always thinks (no `off` option).
+        let opus_efforts: String = eval(
+            &h,
+            r#"return table.concat(LLM:param_list(LLM:resolve("anthropic/claude-opus-5-5"))[1].list, " ")"#,
+        )
+        .await;
+        assert_eq!(opus_efforts, "low medium high xhigh max", "Opus 5.5 omits off and includes max");
+        exec(&h, r#"mare.config.param_rules = {} LLM:set_model("anthropic/claude-sonnet-5-5", { save = false }) LLM:set_effort("max", { save = false })"#)
             .await;
         let body = send(&h, &server, "anthropic/claude-sonnet-5-5").await;
-        assert_eq!(body["output_config"]["effort"], "max", "max clamped to xhigh (sent as max): {body}");
+        assert_eq!(body["output_config"]["effort"], "max", "Claude 5.5 sends max natively: {body}");
+        exec(&h, r#"LLM:set_model("anthropic/claude-opus-5-5", { save = false }) LLM:set_effort("max", { save = false })"#)
+            .await;
+        let body = send(&h, &server, "anthropic/claude-opus-5-5").await;
+        assert_eq!(body["output_config"]["effort"], "max", "Claude Opus 5.5 sends max natively: {body}");
+        // ... the Anthropic adaptive route has no "$value" mapping: clamped, and noted
+        exec(&h, r#"mare.config.param_rules = { { route = "anthropic", on_unsupported = "as_is" } } LLM:set_model("anthropic/claude-opus-5-5", { save = false }) LLM:restore_selection({ effort = "minimal" })"#)
+            .await;
+        let body = send(&h, &server, "anthropic/claude-opus-5-5").await;
+        assert_eq!(body["output_config"]["effort"], "low", "minimal clamped to low (sent as low): {body}");
         let kinds: String = eval(
             &h,
             r#"local out = {} for _, r in ipairs(LLM:params_log()) do out[#out + 1] = r.kind end return table.concat(out, " ")"#,
@@ -596,7 +612,7 @@ async fn parameter_mapping_retained_headers_do_not_gain_provider_credentials() {
         for (model, header, expected) in [
             ("openai/gpt-6.1-terra", "authorization", "Bearer test-openai"),
             ("anthropic/claude-sonnet-5-5", "x-api-key", "test-anthropic"),
-            ("deepseek/deepseek-reasoner", "authorization", "Bearer test-deepseek"),
+            ("compat/reasoner-model", "authorization", "Bearer test-compat"),
             ("google/gemini-2.5-pro", "x-goog-api-key", "test-google"),
         ] {
             send(&h, &server, model).await;
@@ -1240,6 +1256,11 @@ async fn google_thinking_level_maps_minimal_medium_xhigh_and_clamps_to_model_eff
                         "reasoning": true,
                         "reasoning_level": true,
                         "efforts": ["minimal", "low", "medium", "high", "xhigh"]
+                    },
+                    "google/gemini-3-pro-preview": {
+                        "reasoning": true,
+                        "reasoning_level": true,
+                        "efforts": ["low", "high"]
                     }
                 }
             }),

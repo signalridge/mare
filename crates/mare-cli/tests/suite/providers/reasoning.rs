@@ -34,7 +34,7 @@ async fn usage_reports_cache_writes_reasoning_and_never_negative_input() {
         let h = provider_host(&mut env, &server, json!({})).await;
         let usage = |m: &Value, k: &str| m["usage"][k].as_i64();
 
-        let m = ask(&h, "deepseek/deepseek-chat").await;
+        let m = ask(&h, "compat/chat-model").await;
         assert_eq!(
             [
                 usage(&m, "input"),
@@ -46,9 +46,9 @@ async fn usage_reports_cache_writes_reasoning_and_never_negative_input() {
             [Some(70), Some(20), Some(10), Some(30), Some(50)],
             "{m}"
         );
-        let m = ask(&h, "deepseek/deepseek-chat").await;
+        let m = ask(&h, "compat/chat-model").await;
         assert_eq!([usage(&m, "input"), usage(&m, "cache_read")], [Some(60), Some(40)], "Kimi cached_tokens: {m}");
-        let m = ask(&h, "deepseek/deepseek-chat").await;
+        let m = ask(&h, "compat/chat-model").await;
         assert_eq!(usage(&m, "input"), Some(0), "clamped: {m}");
 
         let m = ask(&h, "anthropic/claude-sonnet-5-5").await;
@@ -133,14 +133,14 @@ async fn anthropic_1h_cache_write_usage_and_cost() {
         assert_eq!(m3["usage"]["cache_write_1h"].as_i64().unwrap_or(0), 0, "{m3}");
 
         // `ask` calls `LLM:stream`, which emits `llm/usage` into the `usage` service:
-        // claude-sonnet-5-5: input=3, cache_write(5m)=3.75, 1h=2*3=6.
-        // m1: 600k*3.75 + 400k*6 = 2.25 + 2.40 = 4.65
-        // m2: 500k*6 = 3.00
-        // m3: 1M*3.75 = 3.75
-        // total = 11.40
+        // claude-sonnet-5-5: input=2, cache_write(5m)=2.5, 1h=2*2=4.
+        // m1: 600k*2.5 + 400k*4 = 1.50 + 1.60 = 3.10
+        // m2: 500k*4 = 2.00
+        // m3: 1M*2.5 = 2.50
+        // total = 7.60
         let (total_cost, total_1h): (f64, i64) =
             eval(&h, "local t = USAGE:totals(); return t.cost, t.cache_write_1h or 0").await;
-        assert!((total_cost - 11.40).abs() < 1e-6, "expected 11.40, got {total_cost}");
+        assert!((total_cost - 7.60).abs() < 1e-6, "expected 7.60, got {total_cost}");
         assert_eq!(total_1h, 900_000);
         h.shutdown().await;
     })
@@ -183,7 +183,7 @@ async fn openrouter_reported_cost_overrides_catalog_estimate() {
                     "cost": 0.1, "is_byok": true,
                     "cost_details": { "upstream_inference_cost": null, "upstream_inference_prompt_cost": 0.6, "upstream_inference_completions_cost": 0.3 }
                 }))),
-                // Incomplete accounting -> fall back to catalog estimate (1M input * $3/M = $3.0).
+                // Incomplete accounting -> fall back to catalog estimate (1M input * $2/M = $2.0).
                 Resp::sse(with_usage(json!({
                     "prompt_tokens": 1_000_000, "completion_tokens": 0,
                     "cost": null, "is_byok": false, "cost_details": null
@@ -202,6 +202,7 @@ async fn openrouter_reported_cost_overrides_catalog_estimate() {
             &mut env,
             &server,
             json!({ "providers": {
+                "deepseek": { "wire": "openai-chat" },
                 "openrouter": { "base_url": format!("{}/openrouter", server.base) }
             } }),
         )
@@ -209,30 +210,30 @@ async fn openrouter_reported_cost_overrides_catalog_estimate() {
         expose(&h);
         global(&h, "USAGE", h.service_table("usage").unwrap());
 
-        let m1 = ask(&h, "openrouter/anthropic/claude-sonnet-5-5").await;
+        let m1 = ask(&h, "openrouter/anthropic/claude-sonnet-5.5").await;
         assert_eq!(m1["usage"]["cost"].as_f64(), Some(0.0), "free model: {m1}");
 
-        let m2 = ask(&h, "openrouter/anthropic/claude-sonnet-5-5").await;
+        let m2 = ask(&h, "openrouter/anthropic/claude-sonnet-5.5").await;
         assert!((m2["usage"]["cost"].as_f64().unwrap() - 0.0123).abs() < 1e-9, "{m2}");
 
-        let m3 = ask(&h, "openrouter/anthropic/claude-sonnet-5-5").await;
+        let m3 = ask(&h, "openrouter/anthropic/claude-sonnet-5.5").await;
         assert!((m3["usage"]["cost"].as_f64().unwrap() - 1.0).abs() < 1e-9, "{m3}");
 
-        let m4 = ask(&h, "openrouter/anthropic/claude-sonnet-5-5").await;
+        let m4 = ask(&h, "openrouter/anthropic/claude-sonnet-5.5").await;
         assert!((m4["usage"]["cost"].as_f64().unwrap() - 1.0).abs() < 1e-9, "{m4}");
 
-        let m5 = ask(&h, "openrouter/anthropic/claude-sonnet-5-5").await;
+        let m5 = ask(&h, "openrouter/anthropic/claude-sonnet-5.5").await;
         assert!(m5["usage"]["cost"].is_null(), "incomplete accounting leaves cost unset: {m5}");
 
-        // 0 + 0.0123 + 1.0 + 1.0 + 3.0 (catalog fallback for m5) = 5.0123
+        // 0 + 0.0123 + 1.0 + 1.0 + 2.0 (catalog fallback for m5) = 4.0123
         let or_cost: f64 = eval(&h, "return USAGE:totals().cost").await;
-        assert!((or_cost - 5.0123).abs() < 1e-6, "expected 5.0123, got {or_cost}");
+        assert!((or_cost - 4.0123).abs() < 1e-6, "expected 4.0123, got {or_cost}");
 
-        let m_ds = ask(&h, "deepseek/deepseek-chat").await;
+        let m_ds = ask(&h, "deepseek/deepseek-flash").await;
         assert!(m_ds["usage"]["cost"].is_null(), "non-OpenRouter ignores OpenRouter accounting: {m_ds}");
-        // DeepSeek falls back to catalog pricing (1M * $0.28/M = $0.28).
+        // DeepSeek falls back to catalog pricing (1M * $0.30/M = $0.30).
         let total_cost: f64 = eval(&h, "return USAGE:totals().cost").await;
-        assert!((total_cost - 5.2923).abs() < 1e-6, "expected 5.2923, got {total_cost}");
+        assert!((total_cost - 4.3123).abs() < 1e-6, "expected 4.3123, got {total_cost}");
         h.shutdown().await;
     })
     .await
@@ -399,7 +400,7 @@ async fn agent_end_usage_cost_handles_mixed_reported_and_estimated_requests() {
         expose(&h);
         global(&h, "AGENT", h.service_table("agent").unwrap());
         global(&h, "USAGE", h.service_table("usage").unwrap());
-        exec(&h, r#"LLM:set_model("openrouter/anthropic/claude-sonnet-5-5")"#).await;
+        exec(&h, r#"LLM:set_model("openrouter/anthropic/claude-sonnet-5.5")"#).await;
 
         let (end_cost, usage_cost): (Option<f64>, f64) = eval(
             &h,
@@ -411,11 +412,11 @@ async fn agent_end_usage_cost_handles_mixed_reported_and_estimated_requests() {
             "#,
         )
         .await;
-        // Turn 1 reported $0.10 + Turn 2 catalog fallback (1M input * $3/M = $3.00) = $3.10.
-        assert!((usage_cost - 3.10).abs() < 1e-6, "expected usage service 3.10, got {usage_cost}");
+        // Turn 1 reported $0.10 + Turn 2 catalog fallback (1M input * $2/M = $2.00) = $2.10.
+        assert!((usage_cost - 2.10).abs() < 1e-6, "expected usage service 2.10, got {usage_cost}");
         assert!(
-            end_cost.is_some_and(|c| (c - 3.10).abs() < 1e-6),
-            "turn/completed.usage.cost must equal 3.10 (not partial 0.10), got {end_cost:?}"
+            end_cost.is_some_and(|c| (c - 2.10).abs() < 1e-6),
+            "turn/completed.usage.cost must equal 2.10 (not partial 0.10), got {end_cost:?}"
         );
         h.shutdown().await;
     })
@@ -583,8 +584,9 @@ async fn compat_replays_reasoning_content_of_a_tool_call_turn() {
                 Resp::sse(compat_events(&[compat_text("done"), compat_stop()])),
             ],
         );
-        let h = provider_host(&mut env, &server, json!({})).await;
-        h.lua().load(ROUND_TRIP).into_function().unwrap().call_async::<()>("deepseek/deepseek-reasoner").await.unwrap();
+        let h =
+            provider_host(&mut env, &server, json!({ "providers": { "deepseek": { "wire": "openai-chat" } } })).await;
+        h.lua().load(ROUND_TRIP).into_function().unwrap().call_async::<()>("deepseek/deepseek-flash").await.unwrap();
         let reqs = server.requests();
         assert_eq!(reqs.len(), 2);
         let msgs = reqs[1].json()["messages"].as_array().unwrap().clone();
@@ -623,6 +625,75 @@ async fn opencode_go_replays_the_reasoning_item_of_a_tool_call_turn() {
         assert!(r < fc, "reasoning before its tool call: {types:?}");
         assert_eq!(input[r]["summary"][0]["text"], "Need to read the file.", "verbatim: {}", input[r]);
         assert_eq!(reqs[1].json()["reasoning"]["effort"], "high");
+        h.shutdown().await;
+    })
+    .await
+}
+
+/// DeepSeek Responses returns reasoning items with `summary: []` and `content: [{ type = "reasoning_text", text = "..." }]`.
+/// Final assistant message must preserve the reasoning text (not empty string) for persistence and cross-wire replay.
+#[tokio::test]
+async fn deepseek_responses_preserves_reasoning_text_when_summary_is_empty() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let server = MockServer::start().await;
+        let ds_sse = [
+            responses_event(json!({
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": { "id": "rs_ds1", "type": "reasoning", "summary": [] }
+            })),
+            responses_event(json!({
+                "type": "response.reasoning_text.delta",
+                "item_id": "rs_ds1",
+                "output_index": 0,
+                "content_index": 0,
+                "delta": "Step 1: check files."
+            })),
+            responses_event(json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "id": "rs_ds1",
+                    "type": "reasoning",
+                    "summary": [],
+                    "content": [
+                        { "type": "reasoning_text", "text": "Step 1: check files." },
+                        { "type": "reasoning_text", "text": "Step 2: answer concisely." }
+                    ]
+                }
+            })),
+            responses_event(json!({
+                "type": "response.output_text.delta",
+                "delta": "All good."
+            })),
+            responses_event(json!({
+                "type": "response.output_item.done",
+                "output_index": 1,
+                "item": {
+                    "id": "msg_ds1",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "All good." }]
+                }
+            })),
+            responses_event(json!({
+                "type": "response.completed",
+                "response": { "status": "completed", "usage": { "input_tokens": 10, "output_tokens": 5 } }
+            })),
+        ]
+        .concat();
+        server.route("/compat", vec![Resp::sse(ds_sse)]);
+        let h = provider_host(&mut env, &server, json!({})).await;
+        let msg = ask(&h, "deepseek/deepseek-flash").await;
+        let content = msg["content"].as_array().expect("assistant content array");
+        let reasoning = content.iter().find(|b| b["type"] == "reasoning").expect("reasoning block");
+        assert_eq!(
+            reasoning["text"], "Step 1: check files.\n\nStep 2: answer concisely.",
+            "DeepSeek Responses reasoning_text must populate final reasoning block: {msg}"
+        );
+        let text = content.iter().find(|b| b["type"] == "text").expect("text block");
+        assert_eq!(text["text"], "All good.");
         h.shutdown().await;
     })
     .await
@@ -688,7 +759,7 @@ async fn anthropic_partial_message_delta_1h_only_and_inconsistent_totals() {
             "#,
         )
         .await;
-        assert!((totals_cost - 6.0).abs() < 1e-6, "expected $6.00 for 1M 1h cache write, got {totals_cost}");
+        assert!((totals_cost - 4.0).abs() < 1e-6, "expected $4.00 for 1M 1h cache write, got {totals_cost}");
         assert!(inconsistent_cost.is_none(), "expected nil for cache_write_1h > cache_write, got {inconsistent_cost:?}");
         h.shutdown().await;
     })
@@ -789,13 +860,13 @@ async fn agent_end_fallback_model_missing_usage_and_cost_source() {
             "#,
         )
         .await;
-        assert!(fb_cost.is_some_and(|c| (c - 0.3).abs() < 1e-6), "expected fallback cost 0.3, got {fb_cost:?}");
+        assert!(fb_cost.is_some_and(|c| (c - 0.2).abs() < 1e-6), "expected fallback cost 0.2, got {fb_cost:?}");
         assert_eq!(fb_src.as_deref(), Some("estimated"));
 
         let (unk_cost, unk_src, unk_ev): (Option<f64>, Option<String>, String) = eval(
             &h,
             r#"
-            LLM:set_model("openrouter/anthropic/claude-sonnet-5-5")
+            LLM:set_model("openrouter/anthropic/claude-sonnet-5.5")
             local captured
             C.cordis:on("turn/completed", function(ev) captured = ev end)
             local res = A:wait(AGENT:prompt("hi", {}).turn_id)
@@ -819,7 +890,7 @@ async fn agent_end_fallback_model_missing_usage_and_cost_source() {
             "#,
         )
         .await;
-        assert!(mix_cost.is_some_and(|c| (c - 3.10).abs() < 1e-6), "expected mixed cost 3.10, got {mix_cost:?}");
+        assert!(mix_cost.is_some_and(|c| (c - 2.10).abs() < 1e-6), "expected mixed cost 2.10, got {mix_cost:?}");
         assert_eq!(mix_src.as_deref(), Some("mixed"));
         h.shutdown().await;
     })

@@ -254,6 +254,7 @@ local function new_directory(D)
 		end
 
 		local entry = D.models.normalize_entry(pname, decl, false)
+		entry._builtin_seeds = rec.origin ~= "config" and not (type(overlay) == "table" and overlay.models ~= nil)
 		local disposers = {}
 		if type(param_rules) == "table" then
 			local ok_params, p_err = pcall(function()

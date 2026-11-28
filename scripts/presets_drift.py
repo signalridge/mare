@@ -17,7 +17,14 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 COMPAT_PATH = ROOT / "crates/mare-plugin/preset/plugins/provider-openai-compat.lua"
+STANDALONE_PROVIDERS: tuple[tuple[str, Path, str], ...] = (
+    ("anthropic", ROOT / "crates/mare-plugin/preset/plugins/provider-anthropic.lua", "anthropic"),
+    ("google", ROOT / "crates/mare-plugin/preset/plugins/provider-google.lua", "google"),
+    ("openai", ROOT / "crates/mare-plugin/preset/plugins/lua/provider-openai/requests.lua", "openai"),
+    ("opencode-go", ROOT / "crates/mare-plugin/preset/plugins/lua/provider-opencode-go/provider.lua", "opencode-go"),
+)
 MODELS_DEV_URL = "https://models.dev/api.json"
+USER_AGENT = "mare-presets-drift/1.0"
 
 
 def _strip_lua_comments(src: str) -> str:
@@ -49,6 +56,34 @@ def _extract_balanced(src: str, start_brace: int) -> tuple[str, int]:
     raise ValueError("unterminated Lua table literal")
 
 
+def _parse_models_block(ebody: str) -> list[dict[str, Any]]:
+    models: list[dict[str, Any]] = []
+    mm = re.search(r"\bmodels\s*=\s*\{", ebody)
+    if not mm:
+        return models
+    mbody, _ = _extract_balanced(ebody, mm.end() - 1)
+    j = 0
+    while j < len(mbody):
+        ob = mbody.find("{", j)
+        if ob == -1:
+            break
+        item_body, j = _extract_balanced(mbody, ob)
+        mid = re.search(r'\bmodel_id\s*=\s*"([^"]+)"', item_body)
+        if not mid:
+            continue
+        item: dict[str, Any] = {"model_id": mid.group(1)}
+        cw = re.search(r"\bcontext_window\s*=\s*(\d+)", item_body)
+        mo = re.search(r"\bmax_output\s*=\s*(\d+)", item_body)
+        if cw:
+            item["context_window"] = int(cw.group(1))
+        if re.search(r"\bcontext_window_measured\s*=\s*true\b", item_body):
+            item["context_window_measured"] = True
+        if mo:
+            item["max_output"] = int(mo.group(1))
+        models.append(item)
+    return models
+
+
 def parse_presets(src: str) -> dict[str, dict[str, Any]]:
     """Parse top-level `local PRESETS = { ... }` entries from provider-openai-compat.lua."""
     clean = _strip_lua_comments(src)
@@ -66,7 +101,7 @@ def parse_presets(src: str) -> dict[str, dict[str, Any]]:
         name = em.group(1) or em.group(2)
         ebody, next_i = _extract_balanced(body, em.end() - 1)
         i = next_i
-        info: dict[str, Any] = {"models": []}
+        info: dict[str, Any] = {"models": _parse_models_block(ebody)}
         if re.search(r"\bno_key\s*=\s*true\b", ebody):
             info["no_key"] = True
         mdev_str = re.search(r'\bmodels_dev\s*=\s*"([^"]+)"', ebody)
@@ -77,27 +112,34 @@ def parse_presets(src: str) -> dict[str, dict[str, Any]]:
         dm = re.search(r'\bdefault_model\s*=\s*"([^"]+)"', ebody)
         if dm:
             info["default_model"] = dm.group(1)
-        mm = re.search(r"\bmodels\s*=\s*\{", ebody)
-        if mm:
-            mbody, _ = _extract_balanced(ebody, mm.end() - 1)
-            j = 0
-            while j < len(mbody):
-                ob = mbody.find("{", j)
-                if ob == -1:
-                    break
-                item_body, j = _extract_balanced(mbody, ob)
-                mid = re.search(r'\bmodel_id\s*=\s*"([^"]+)"', item_body)
-                if not mid:
-                    continue
-                item: dict[str, Any] = {"model_id": mid.group(1)}
-                cw = re.search(r"\bcontext_window\s*=\s*(\d+)", item_body)
-                mo = re.search(r"\bmax_output\s*=\s*(\d+)", item_body)
-                if cw:
-                    item["context_window"] = int(cw.group(1))
-                if mo:
-                    item["max_output"] = int(mo.group(1))
-                info["models"].append(item)
         presets[name] = info
+    return presets
+
+
+def parse_registered_provider(src: str, default_models_dev: str) -> dict[str, Any]:
+    """Parse a standalone `llm:register_provider({ ... })` declaration."""
+    clean = _strip_lua_comments(src)
+    m = re.search(r"llm:register_provider\s*\(\s*\{", clean)
+    if not m:
+        raise ValueError("llm:register_provider({...}) call not found")
+    ebody, _ = _extract_balanced(clean, m.end() - 1)
+    info: dict[str, Any] = {"models": _parse_models_block(ebody), "models_dev": default_models_dev}
+    mdev_str = re.search(r'\bmodels_dev\s*=\s*"([^"]+)"', ebody)
+    if mdev_str:
+        info["models_dev"] = mdev_str.group(1)
+    elif re.search(r"\bmodels_dev\s*=\s*false\b", ebody):
+        info["models_dev"] = False
+    dm = re.search(r'\bdefault_model\s*=\s*"([^"]+)"', ebody)
+    if dm:
+        info["default_model"] = dm.group(1)
+    return info
+
+
+def parse_all_builtin_presets() -> dict[str, dict[str, Any]]:
+    """Parse all built-in provider preset seeds (openai-compat + standalone providers)."""
+    presets = parse_presets(COMPAT_PATH.read_text(encoding="utf-8"))
+    for name, path, default_mdev in STANDALONE_PROVIDERS:
+        presets[name] = parse_registered_provider(path.read_text(encoding="utf-8"), default_mdev)
     return presets
 
 
@@ -131,7 +173,12 @@ def check_drift(presets: dict[str, dict[str, Any]], catalog: dict[str, Any]) -> 
             lim = rm.get("limit") if isinstance(rm.get("limit"), dict) else {}
             r_ctx = lim.get("context")
             r_out = lim.get("output")
-            if isinstance(r_ctx, (int, float)) and "context_window" in seed and int(r_ctx) != seed["context_window"]:
+            if (
+                isinstance(r_ctx, (int, float))
+                and "context_window" in seed
+                and not seed.get("context_window_measured")
+                and int(r_ctx) != seed["context_window"]
+            ):
                 issues.append(
                     f"{name}/{mid}: context_window seed={seed['context_window']} vs models.dev={int(r_ctx)}"
                 )
@@ -160,8 +207,9 @@ def _self_test() -> int:
     drifted_catalog = {"alpha-dev": {"models": {"a1": {"limit": {"context": 2000, "output": 200}}}}}
     drifts = check_drift(parsed, drifted_catalog)
     assert len(drifts) == 1 and "context_window" in drifts[0], drifts
-    real_presets = parse_presets(COMPAT_PATH.read_text(encoding="utf-8"))
-    assert "deepseek" in real_presets and "kimi-code" in real_presets and "lmstudio" in real_presets
+    real_presets = parse_all_builtin_presets()
+    for expected in ("deepseek", "kimi", "kimi-code", "openrouter", "lmstudio", "anthropic", "google", "openai", "opencode-go"):
+        assert expected in real_presets, f"missing {expected} in {sorted(real_presets)}"
     print(f"presets_drift self-test OK ({len(real_presets)} presets parsed)")
     return 0
 
@@ -176,11 +224,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.self_test:
         return _self_test()
 
-    presets = parse_presets(COMPAT_PATH.read_text(encoding="utf-8"))
+    presets = parse_all_builtin_presets()
     if args.fixture is not None:
         catalog = json.loads(args.fixture.read_text(encoding="utf-8"))
     else:
-        with urllib.request.urlopen(args.url, timeout=20) as resp:
+        req = urllib.request.Request(
+            args.url,
+            headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
             catalog = json.loads(resp.read().decode("utf-8"))
 
     issues = check_drift(presets, catalog)

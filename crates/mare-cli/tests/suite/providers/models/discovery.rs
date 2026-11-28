@@ -65,7 +65,7 @@ async fn model_catalogue_reads_the_disk_cache_and_refreshes_in_the_background() 
             "/compat/models",
             vec![Resp::status(
                 200,
-                r#"{"object":"list","data":[{"id":"deepseek-chat","context_length":1},{"id":"listed-2","context_length":65536}]}"#,
+                r#"{"object":"list","data":[{"id":"deepseek-flash","context_length":1},{"id":"listed-2","context_length":65536}]}"#,
             )],
         );
         let h = provider_host(&mut env, &server, json!({ "plugins": { "llm": { "catalog_refresh_ms": 0 } } })).await;
@@ -86,14 +86,14 @@ async fn model_catalogue_reads_the_disk_cache_and_refreshes_in_the_background() 
         .await;
         let (ctx_listed, ctx_static, name_static): (i64, i64, String) = eval(
             &h,
-            r#"local l, s = LLM:resolve('deepseek/listed-2'), LLM:resolve('deepseek/deepseek-chat')
+            r#"local l, s = LLM:resolve('deepseek/listed-2'), LLM:resolve('deepseek/deepseek-flash')
                return l.context_window, s.context_window, s.name"#,
         )
         .await;
         assert_eq!(ctx_listed, 65536);
         assert_eq!(
             (ctx_static, name_static.as_str()),
-            (1, "DeepSeek V3.2"),
+            (1, "DeepSeek V4.1 Flash"),
             "server context_window overrides unmeasured static entry"
         );
         let req = server.requests().into_iter().find(|r| r.path.starts_with("/compat/models")).unwrap();
@@ -1285,6 +1285,173 @@ return builtins_use_catalog, has_a, saw_a, has_b, a_gone
             has_b_after_cfg && a_gone_after_cfg,
             "effective catalog target change must invalidate memory cache and fetch new URL"
         );
+        h.shutdown().await;
+    })
+    .await
+}
+
+/// Live `GET /models` is authoritative over static preset seeds (which act as offline fallback):
+/// - HTTP failure keeps static seeds visible.
+/// - Non-empty live `/models` shows only live models (merging static metadata for matching IDs,
+///   pruning omitted static seeds unless pinned by user overrides).
+/// - When live `/models` omits `default_model`, `LLM:current()` picks a live model rather than
+///   synthesizing the omitted static default.
+/// - Logout restores offline static seeds.
+#[tokio::test]
+async fn live_models_endpoint_is_authoritative_over_static_seeds_with_offline_fallback() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        env.set_var("OPENAI_API_KEY", "");
+        env.set_var("ANTHROPIC_API_KEY", "");
+        env.set_var("GEMINI_API_KEY", "");
+        env.set_var("GOOGLE_API_KEY", "");
+        env.set_var("OPENCODE_API_KEY", "");
+        env.set_var("MOONSHOT_API_KEY", "");
+        env.set_var("KIMI_API_KEY", "");
+        env.set_var("OPENROUTER_API_KEY", "");
+        let server = MockServer::start().await;
+        server.route(
+            "/compat/models",
+            vec![
+                Resp::status(500, r#"{"error":"offline"}"#),
+                Resp::status(200, r#"{"object":"list","data":[{"id":"deepseek-flash"},{"id":"deepseek-v5-live"}]}"#),
+                Resp::status(200, r#"{"object":"list","data":[]}"#),
+                Resp::status(200, r#"{"object":"list","data":[{"id":"deepseek-v5-only"}]}"#),
+            ],
+        );
+        server.route("/myproxy/models", vec![Resp::status(200, r#"{"object":"list","data":[{"id":"server-only"}]}"#)]);
+        let h = env
+            .host()
+            .no_session()
+            .config(json!({
+                "model": "",
+                "providers": {
+                    "deepseek": {
+                        "base_url": format!("{}/compat", server.base),
+                    },
+                    "myproxy": {
+                        "base_url": format!("{}/myproxy", server.base),
+                        "api_key": "sk-myproxy-1",
+                        "models": [{
+                            "model_id": "custom-pinned",
+                            "name": "Custom Pinned",
+                            "context_window": 64000,
+                            "max_output": 8192,
+                            "reasoning": true,
+                            "efforts": ["low", "high"],
+                            "cost": { "input": 1, "output": 2 }
+                        }]
+                    }
+                },
+                "plugins": {
+                    "provider-faux": { "enabled": false },
+                    "llm": { "catalog_refresh_ms": 0 }
+                }
+            }))
+            .build()
+            .await;
+        global(&h, "LLM", h.service_table("llm").unwrap());
+
+        let out_json: String = eval(
+            &h,
+            r#"
+            local function ids_of(prov)
+                local ids = {}
+                for _, m in ipairs(LLM:models()) do
+                    if m.provider == prov then ids[#ids + 1] = m.id end
+                end
+                table.sort(ids)
+                return ids
+            end
+
+            -- 1. Offline / HTTP 500: built-in seeds remain as offline fallback.
+            mare.fs.write(mare.paths.auth, mare.json.encode({ version = 1,
+                deepseek = { type = "api_key", key = "sk-ds-test-1" }
+            }), { mode = 384 })
+            LLM:refresh_catalog({ name = "deepseek", force = true })
+            local offline_ids = ids_of("deepseek")
+
+            -- 2. Live GET /models succeeds: live list is authoritative; omitted built-in seeds are
+            -- pruned while matching static entries retain curated metadata.
+            LLM:refresh_catalog({ name = "deepseek", force = true })
+            local live_ids = ids_of("deepseek")
+            local flash = assert(LLM:resolve("deepseek/deepseek-flash"))
+
+            -- 3. Empty 200 GET /models restores built-in seeds as offline fallback.
+            LLM:refresh_catalog({ name = "deepseek", force = true })
+            local empty_ids = ids_of("deepseek")
+
+            -- 4. Live GET /models omits static default_model: LLM:current() picks a live model.
+            mare.config.model = nil
+            LLM:refresh_catalog({ name = "deepseek", force = true })
+            local only_ids = ids_of("deepseek")
+            local cur = LLM:current()
+
+            -- 5. Logout clears live entries and restores built-in seeds as offline fallback.
+            LLM:logout("deepseek")
+            local after_logout_ids = ids_of("deepseek")
+
+            -- 6. User-declared `providers.<name>.models` entries are NEVER pruned by live /models.
+            LLM:refresh_catalog({ name = "myproxy", force = true })
+            local proxy_ids = ids_of("myproxy")
+            local pinned = assert(LLM:resolve("myproxy/custom-pinned"))
+
+            return mare.json.encode({
+                offline_ids = offline_ids,
+                live_ids = live_ids,
+                empty_ids = empty_ids,
+                flash_name = flash.name,
+                flash_ctx = flash.context_window,
+                only_ids = only_ids,
+                current_ref = cur and cur.ref or nil,
+                after_logout_ids = after_logout_ids,
+                proxy_ids = proxy_ids,
+                pinned_ctx = pinned.context_window,
+                pinned_out = pinned.max_output,
+                pinned_efforts = pinned.efforts,
+                pinned_cost = pinned.cost,
+            })
+            "#,
+        )
+        .await;
+        let v: Value = serde_json::from_str(&out_json).unwrap();
+        assert_eq!(
+            v["offline_ids"],
+            json!(["deepseek-flash", "deepseek-v4-pro"]),
+            "offline refresh must keep built-in seeds: {v}"
+        );
+        assert_eq!(
+            v["live_ids"],
+            json!(["deepseek-flash", "deepseek-v5-live"]),
+            "live GET /models must prune omitted built-in seeds: {v}"
+        );
+        assert_eq!(
+            v["empty_ids"],
+            json!(["deepseek-flash", "deepseek-v4-pro"]),
+            "empty 200 GET /models must restore built-in seeds as fallback: {v}"
+        );
+        assert_eq!(v["flash_name"], "DeepSeek V4.1 Flash", "curated static metadata must merge: {v}");
+        assert_eq!(v["flash_ctx"], 1_000_000, "{v}");
+        assert_eq!(v["only_ids"], json!(["deepseek-v5-only"]), "{v}");
+        assert_eq!(
+            v["current_ref"], "deepseek/deepseek-v5-only",
+            "LLM:current() must prefer live model when static default_model was omitted: {v}"
+        );
+        assert_eq!(
+            v["after_logout_ids"],
+            json!(["deepseek-flash", "deepseek-v4-pro"]),
+            "logout must restore built-in seeds as offline fallback: {v}"
+        );
+        assert_eq!(
+            v["proxy_ids"],
+            json!(["custom-pinned", "server-only"]),
+            "user providers.<name>.models must not be pruned by live GET /models: {v}"
+        );
+        assert_eq!(v["pinned_ctx"], 64_000, "{v}");
+        assert_eq!(v["pinned_out"], 8192, "{v}");
+        assert_eq!(v["pinned_efforts"], json!(["low", "high"]), "{v}");
+        assert_eq!(v["pinned_cost"], json!({ "input": 1, "output": 2 }), "{v}");
+
         h.shutdown().await;
     })
     .await

@@ -35,7 +35,7 @@ impl Wire {
         match self {
             Self::Responses => "openai/gpt-6.1-terra",
             Self::Anthropic => "anthropic/claude-sonnet-5-5",
-            Self::Compat => "deepseek/deepseek-chat",
+            Self::Compat => "compat/compat-chat",
             Self::Gemini => "google/gemini-2.5-pro",
         }
     }
@@ -488,7 +488,15 @@ impl ScriptedModel {
         let u = &self.server.base;
         json!({
             "model": self.wire.model(),
-            "providers": { "deepseek": { "base_url": format!("{u}/v1") } },
+            "providers": {
+                "compat": {
+                    "wire": "openai-chat",
+                    "base_url": format!("{u}/v1"),
+                    "api_key": "test-compat",
+                    "list_models": false,
+                    "models": [{ "model_id": "compat-chat", "context_window": 128000, "max_output": 8192 }],
+                }
+            },
             "plugins": {
                 "provider-openai": { "base_url": format!("{u}/v1"), "transport": "http" },
                 "provider-anthropic": { "base_url": u },

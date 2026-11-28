@@ -24,7 +24,7 @@ async fn opencode_zai_http_400_error_body() {
 
         let h = provider_host(&mut env, &server, json!({ "plugins": { "llm": { "retries": 0 } } })).await;
 
-        let zai = stream(&h, "deepseek/deepseek-chat").await;
+        let zai = stream(&h, "compat/chat-model").await;
         assert_eq!(zai["stop_reason"], "error", "{zai}");
         assert!(
             zai["error"].as_str().unwrap_or("").contains("always engages in thinking"),
@@ -132,14 +132,14 @@ async fn opencode_compat_reasoning_and_tool_edges() {
 
         let h = provider_host(&mut env, &server, json!({ "plugins": { "llm": { "retries": 0 } } })).await;
 
-        let zai = stream(&h, "deepseek/deepseek-chat").await;
+        let zai = stream(&h, "compat/chat-model").await;
         assert_eq!(zai["stop_reason"], "tool_use", "{zai}");
         assert!(!find_block(&zai, "reasoning")["text"].as_str().unwrap_or("").is_empty(), "{zai}");
         assert_eq!(find_block(&zai, "tool_call")["name"], "get_weather", "{zai}");
         assert_eq!(zai["usage"]["input"], 174, "{zai}");
         assert_eq!(zai["usage"]["output"], 95, "{zai}");
 
-        let groq = stream(&h, "deepseek/deepseek-chat").await;
+        let groq = stream(&h, "compat/chat-model").await;
         assert_eq!(groq["stop_reason"], "tool_use", "{groq}");
         let tool_calls: Vec<&Value> =
             groq["content"].as_array().unwrap().iter().filter(|b| b["type"] == "tool_call").collect();
@@ -147,7 +147,7 @@ async fn opencode_compat_reasoning_and_tool_edges() {
         assert_eq!(groq["usage"]["input"], 326, "{groq}");
         assert_eq!(groq["usage"]["output"], 54, "{groq}");
 
-        let cerebras = stream(&h, "deepseek/deepseek-chat").await;
+        let cerebras = stream(&h, "compat/chat-model").await;
         assert_eq!(cerebras["stop_reason"], "tool_use", "{cerebras}");
         assert!(!find_block(&cerebras, "reasoning")["text"].as_str().unwrap_or("").is_empty(), "{cerebras}");
         let ctc = find_block(&cerebras, "tool_call");
@@ -169,7 +169,7 @@ async fn opencode_mistral_native_reasoning_content_array() {
 
         let h = provider_host(&mut env, &server, json!({ "plugins": { "llm": { "retries": 0 } } })).await;
 
-        let msg = stream(&h, "deepseek/deepseek-chat").await;
+        let msg = stream(&h, "compat/chat-model").await;
         assert_eq!(msg["stop_reason"], "stop", "{msg}");
         assert!(!find_block(&msg, "reasoning")["text"].as_str().unwrap_or("").is_empty(), "{msg}");
         assert!(find_block(&msg, "text")["text"].as_str().unwrap_or("").contains("91"), "{msg}");
@@ -191,7 +191,7 @@ async fn docker_agent_mistral_single_chunk_tool_call() {
 
         let h = provider_host(&mut env, &server, json!({ "plugins": { "llm": { "retries": 0 } } })).await;
 
-        let msg = stream(&h, "deepseek/deepseek-chat").await;
+        let msg = stream(&h, "compat/chat-model").await;
         assert_eq!(msg["stop_reason"], "tool_use", "{msg}");
         let tc = find_block(&msg, "tool_call");
         assert_eq!(tc["id"], "D9WYdiHxV", "{tc}");
@@ -224,7 +224,7 @@ async fn opencode_gemini_compat_thought_signature_is_replayed() {
         let _: mlua::Value = eval(
             &h,
             r#"
-local m = assert(LLM:resolve("deepseek/deepseek-chat"))
+local m = assert(LLM:resolve("compat/chat-model"))
 local tools = { { name = "get_weather", description = "Get weather", parameters = { type = "object", properties = { city = { type = "string" } } } } }
 local user = { role = "user", content = { { type = "text", text = "What is the weather in Paris and in Tokyo?" } } }
 local m1 = LLM:stream({ model = m, tools = tools, messages = { user } }, function() end)

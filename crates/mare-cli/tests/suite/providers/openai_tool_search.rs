@@ -463,7 +463,7 @@ async fn openai_responses_tool_search_cross_wire_replay_and_server_hosted_items(
             local oai = assert(LLM:resolve("openai/gpt-6.1-terra"))
             local ant = assert(LLM:resolve("anthropic/claude-sonnet-5-5"))
             local gem = assert(LLM:resolve("google/gemini-3-pro-preview"))
-            local ds = assert(LLM:resolve("deepseek/deepseek-chat"))
+            local ds = assert(LLM:resolve("compat/chat-model"))
 
             -- 1. Client-executed tool_search history from OpenAI replayed to Anthropic yields tool_reference.
             local client_history = {
