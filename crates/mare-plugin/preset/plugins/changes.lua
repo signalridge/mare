@@ -280,7 +280,7 @@ return {
 			local turns = mare.snapshot.turns() or {}
 			local parts = { journal_dir(), tostring(#turns) }
 			for _, t in ipairs(turns) do
-				local fp = { tostring(t.turn), tostring(#(t.files or {})) }
+				local fp = { tostring(t.turn), tostring(t.shell == true), tostring(#(t.files or {})) }
 				for _, f in ipairs(t.files or {}) do
 					fp[#fp + 1] = tostring(f.path)
 						.. "="
@@ -335,9 +335,25 @@ return {
 			return false
 		end
 
+		local function suffix_shell_map(raw_turns)
+			local out = {}
+			local seen_shell = false
+			for i = #(raw_turns or {}), 1, -1 do
+				local t = raw_turns[i]
+				local m = turns_meta[t.turn] or {}
+				if t.shell or m.shell then
+					seen_shell = true
+				end
+				out[t.turn] = seen_shell
+			end
+			return out
+		end
+
 		local function rewind_ui(arg)
 			local stamp = session_stamp()
 			local leaf_at_open = current_leaf()
+			local raw_turns = mare.snapshot.turns() or {}
+			local suffix_shell_by_turn = suffix_shell_map(raw_turns)
 			local list = changes.turns(changes, ctx)
 			if #list == 0 then
 				ui.notify("Nothing to rewind: no file changes by tools in this session")
@@ -358,13 +374,15 @@ return {
 				local items = {}
 				for i = #list, 1, -1 do
 					local t = list[i]
+					local shell_note = ""
+					if t.shell then
+						shell_note = " · shell commands ran (may have unrecorded changes)"
+					elseif suffix_shell_by_turn[t.turn] then
+						shell_note = " · later turn ran shell commands (may have unrecorded changes)"
+					end
 					items[#items + 1] = {
 						label = t.label,
-						detail = ("%d file%s%s"):format(
-							#t.files,
-							#t.files == 1 and "" or "s",
-							t.shell and " · shell commands ran (may have unrecorded changes)" or ""
-						),
+						detail = ("%d file%s%s"):format(#t.files, #t.files == 1 and "" or "s", shell_note),
 						turn = t,
 					}
 				end
@@ -377,19 +395,21 @@ return {
 				end
 				pick = items[i].turn
 			end
+			local suffix_shell = pick.shell or suffix_shell_by_turn[pick.turn] == true
 			-- what to rewind: files only, files and the conversation,
 			-- or the conversation from here folded into a summary (files stay)
 			local meta = fresh_turn_meta(pick.turn)
 			local can_talk = svc.session and svc.session.rewind and meta.before ~= nil
 			local mode = "files"
 			if can_talk then
+				local shell_suffix = suffix_shell and " · shell commands ran in rewind range" or ""
 				local c = ui.select({
 					title = ("Rewind to before “%s”"):format(pick.label),
 					items = {
-						{ label = "Restore files", detail = "the conversation stays" },
+						{ label = "Restore files", detail = "the conversation stays" .. shell_suffix },
 						{
 							label = "Restore files and the conversation",
-							detail = "back to before this turn; its prompt goes to the input",
+							detail = "back to before this turn; its prompt goes to the input" .. shell_suffix,
 						},
 						{
 							label = "Summarize from here",
@@ -499,6 +519,32 @@ return {
 					return
 				end
 			end
+			if suffix_shell then
+				local shell_warn = pick.shell
+						and "This turn ran shell commands: unrecorded shell modifications may remain on disk — restore tracked files anyway?"
+					or "A later turn in the rewind range ran shell commands: unrecorded shell modifications may remain on disk — restore tracked files anyway?"
+				local ok = ui.confirm(shell_warn)
+				if not ok then
+					ui.notify("Rewind cancelled: no files were changed", "info")
+					return
+				end
+				if not ensure_fresh() then
+					return
+				end
+				if mode == "both" then
+					meta = fresh_turn_meta(pick.turn)
+					if meta.before == nil then
+						ui.notify("The session changed while /rewind was open — open it again", "warning")
+						return
+					end
+					local resolve_err
+					target_item_id, resolve_err = resolve_before_item(meta)
+					if resolve_err then
+						ui.notify("Not rewound: " .. tostring(resolve_err), "warning")
+						return
+					end
+				end
+			end
 			local r = changes.rewind(changes, ctx, pick.turn, {})
 			if #(r.conflicts or {}) > 0 then
 				local ok = ui.confirm(
@@ -552,6 +598,11 @@ return {
 			end
 			if pick.shell then
 				ui.notify("This turn ran shell commands: changes they made may not have been recorded", "warning")
+			elseif suffix_shell then
+				ui.notify(
+					"A later turn in the rewind range ran shell commands: changes they made may not have been recorded",
+					"warning"
+				)
 			end
 			if mode == "both" then
 				meta = fresh_turn_meta(pick.turn)
