@@ -206,12 +206,25 @@ function M.create(ctx)
 		return to_info(def)
 	end
 
-	function Commands:list()
+	function Commands:list(opts)
+		local only_available = type(opts) == "table" and opts.available == true
+		local allow_local = type(opts) == "table" and opts.allow_local == true
+		local running = only_available and avail.busy(ctx) or nil
 		local out = {}
 		for _, st in pairs(stacks) do
 			local d = st[#st]
 			if not d.alias_of then
-				out[#out + 1] = to_info(d)
+				local include = true
+				if only_available then
+					if not allow_local and d.local_only == true then
+						include = false
+					elseif avail.refusal(ctx, d, running) ~= nil then
+						include = false
+					end
+				end
+				if include then
+					out[#out + 1] = to_info(d)
+				end
 			end
 		end
 		table.sort(out, function(a, b)

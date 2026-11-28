@@ -466,12 +466,35 @@ fn acp_advertises_and_executes_available_slash_commands_on_new_and_load() {
     let new_names: Vec<&str> = new_cmds.iter().filter_map(|c| c["name"].as_str()).collect();
     assert!(new_names.contains(&"ping"), "custom executable command must be advertised: {new_names:?}");
     assert!(new_names.contains(&"compact"), "built-in /compact must be advertised: {new_names:?}");
+    assert!(new_names.contains(&"help"), "built-in /help must be advertised with text fallback: {new_names:?}");
     assert!(!new_names.contains(&"local-secret"), "local_only command must be excluded: {new_names:?}");
     assert!(!new_names.contains(&"tui-only"), "tui-only command must be excluded: {new_names:?}");
     assert!(!new_names.contains(&"running-only"), "running-only command must be excluded: {new_names:?}");
     assert!(!new_names.contains(&"lua"), "local_only /lua must be excluded: {new_names:?}");
+    for tui_cmd in ["hotkeys", "terminal-setup", "show-reasoning", "commands", "skills"] {
+        assert!(!new_names.contains(&tui_cmd), "TUI-only /{tui_cmd} must be excluded from ACP: {new_names:?}");
+    }
     let ping_def = new_cmds.iter().find(|c| c["name"] == "ping").unwrap();
     assert_eq!(ping_def["input"]["hint"], "<msg>");
+
+    // 1b. Advertised `/help` returns real plain-text help listing executable commands in ACP.
+    let id_help =
+        rpc.request("session/prompt", json!({ "sessionId": sid, "prompt": [{ "type": "text", "text": "/help" }] }));
+    let mut help_updates = Vec::new();
+    let p_help = loop {
+        let m = rpc.read();
+        if m["method"] == "session/update" {
+            help_updates.push(m);
+        } else if m["id"] == id_help {
+            break m;
+        }
+    };
+    assert_eq!(p_help["result"]["stopReason"], "end_turn", "/help failed: {p_help}");
+    let help_text: String =
+        help_updates.iter().filter_map(|u| u["params"]["update"]["content"]["text"].as_str()).collect();
+    assert!(help_text.contains("/ping"), "/help must list executable /ping: {help_text:?}");
+    assert!(!help_text.contains("/hotkeys"), "/help in ACP must omit TUI-only /hotkeys: {help_text:?}");
+    assert!(!help_text.contains("/local-secret"), "/help in ACP must omit local_only /local-secret: {help_text:?}");
 
     // 2. Executing an advertised command via `session/prompt` runs `commands.run`, not the LLM.
     let id1 = rpc.request(
@@ -566,6 +589,105 @@ fn acp_advertises_and_executes_available_slash_commands_on_new_and_load() {
     let after_text: String =
         after_updates.iter().filter_map(|u| u["params"]["update"]["content"]["text"].as_str()).collect();
     assert_eq!(after_text, "pong:after-load", "{after_updates:?}");
+
+    rpc.kill_and_wait();
+}
+
+/// Live `commands.list({ available = true })` and unified `ConfigSync` reflect active turn busy
+/// state (excluding `"idle"` and including `"running"` mid-turn) alongside provider config updates.
+#[test]
+fn acp_available_commands_track_live_busy_state_and_provider_updates() {
+    let home = tempfile::tempdir().unwrap();
+    let ws = tempfile::tempdir().unwrap();
+    let cwd = dunce::canonicalize(ws.path()).unwrap();
+    let plugins_dir = home.path().join("config/plugins");
+    std::fs::create_dir_all(&plugins_dir).unwrap();
+    std::fs::write(
+        plugins_dir.join("acp-live-sync.lua"),
+        r#"return {
+  name = "acp-live-sync",
+  inject = { "commands", "llm", "tools" },
+  apply = function(ctx)
+    ctx.commands:register("midturn-only", {
+      description = "Only available while a turn runs",
+      availability = "running",
+      run = function() return "midturn" end,
+    })
+    ctx.tools:register("probe_and_add_provider", {
+      description = "Inspect live available commands mid-turn and register a provider",
+      side_effect = "external",
+      parameters = { type = "object", additionalProperties = false },
+      execute = function()
+        local live = ctx.commands:list({ available = true }).data
+        local names = {}
+        for _, c in ipairs(live) do
+          names[c.name] = true
+        end
+        assert(names["midturn-only"], "midturn-only must be available while busy")
+        assert(not names["compact"], "idle-only /compact must be excluded while busy")
+        ctx.llm:register_provider({
+          provider = "syncprov",
+          no_key = true,
+          models = {
+            { model_id = "live-model", name = "Live Model", reasoning = false },
+          },
+          stream = function()
+            return { role = "assistant", content = { { type = "text", text = "hi" } }, stop_reason = "stop" }
+          end,
+        })
+        return { content = "probed-ok" }
+      end,
+    })
+  end,
+}
+"#,
+    )
+    .unwrap();
+
+    let mut rpc = acp_in_home(
+        home.path(),
+        json!([
+            { "tool_calls": [{ "name": "probe_and_add_provider", "arguments": {} }] },
+            { "text": "all-synced" }
+        ]),
+        &["--permission", "auto", "--approval-policy", "never"],
+        &[],
+    );
+    let _ = rpc.call_raw("initialize", json!({ "protocolVersion": 1, "clientCapabilities": {} }), |_| json!(null));
+    let s = rpc.call_raw("session/new", json!({ "cwd": cwd, "mcpServers": [] }), |_| json!(null));
+    let sid = s["result"]["sessionId"].as_str().unwrap_or_else(|| panic!("{s}")).to_string();
+
+    // Drain initial available_commands_update (idle state).
+    let init_cmds = rpc.read();
+    assert_eq!(init_cmds["params"]["update"]["sessionUpdate"], "available_commands_update");
+
+    let p1 =
+        rpc.request("session/prompt", json!({ "sessionId": sid, "prompt": [{ "type": "text", "text": "run probe" }] }));
+    let mut updates = Vec::new();
+    let r1 = loop {
+        let m = rpc.read();
+        if m["method"] == "session/update" {
+            updates.push(m["params"]["update"].clone());
+        } else if m["id"] == p1 {
+            break m;
+        }
+    };
+    assert_eq!(r1["result"]["stopReason"], "end_turn", "{r1}");
+    assert!(
+        updates.iter().any(|u| u["sessionUpdate"] == "config_option_update"
+            && u["configOptions"].to_string().contains("syncprov/live-model")),
+        "unified ConfigSync must push config_option_update for llm/providers-changed: {updates:?}"
+    );
+    let cmd_updates: Vec<&Value> =
+        updates.iter().filter(|u| u["sessionUpdate"] == "available_commands_update").collect();
+    assert!(
+        cmd_updates.iter().any(|u| {
+            let names: Vec<&str> =
+                u["availableCommands"].as_array().into_iter().flatten().filter_map(|c| c["name"].as_str()).collect();
+            names.contains(&"midturn-only") && !names.contains(&"compact")
+        }),
+        "mid-turn available_commands_update must reflect live busy state: {cmd_updates:?}"
+    );
 
     rpc.kill_and_wait();
 }

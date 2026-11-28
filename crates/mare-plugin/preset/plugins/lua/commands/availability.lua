@@ -48,8 +48,10 @@ function M.refusal(ctx, def, running)
 			if running then
 				return "while a turn is running (Esc stops it)", "idle"
 			end
-		elseif c == "main" and mare.mode == "child" then
-			return "in a child agent", "main"
+		elseif c == "main" then
+			if mare.mode == "child" then
+				return "in a child agent", "main"
+			end
 		elseif c == "session" then
 			local why = store_unavailable(ctx)
 			if why then
@@ -66,6 +68,8 @@ function M.refusal(ctx, def, running)
 			if not (mare.mode == "tui" and mare.ui and mare.ui.connected and mare.ui.connected()) then
 				return "outside the terminal UI", "tui"
 			end
+		elseif c ~= "always" then
+			return ("when condition %q is not satisfied"):format(tostring(c)), tostring(c)
 		end
 	end
 	return nil

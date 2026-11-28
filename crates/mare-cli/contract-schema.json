@@ -1372,10 +1372,18 @@
     }
   },
   "commands.list": {
-    "description": "Registered non-alias slash commands, sorted by name (data only, no callbacks).",
+    "description": "Registered non-alias slash commands, sorted by name (data only, no callbacks). Pass `available = true` to filter to commands executable right now for the active frontend and turn state.",
     "params": {
-      "type": "object",
-      "additionalProperties": false
+      "additionalProperties": false,
+      "properties": {
+        "allow_local": {
+          "type": "boolean"
+        },
+        "available": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
     },
     "result": {
       "additionalProperties": false,

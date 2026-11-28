@@ -19,16 +19,10 @@ use tokio_util::sync::CancellationToken;
 use crate::rpc::call_service;
 
 use super::AcpErr;
-<<<<<<< HEAD
-use super::helpers::{TranslateOpts, config_options, has_truncated_image, hydrate_tool_result_update, to_update_with};
-||||||| parent of 2ba42dd6f (feat(acp): advertise and execute available slash commands)
-use super::helpers::{config_options, has_truncated_image, hydrate_tool_result_update, to_update};
-=======
 use super::helpers::{
-    available_commands, available_commands_update, config_options, has_truncated_image, hydrate_tool_result_update,
-    to_update,
+    TranslateOpts, available_commands, available_commands_update, config_options, has_truncated_image,
+    hydrate_tool_result_update, to_update_with,
 };
->>>>>>> 2ba42dd6f (feat(acp): advertise and execute available slash commands)
 
 /// How long a finished turn may take to hand its queued updates to the client.
 pub(super) const PROMPT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -95,23 +89,14 @@ pub(super) struct ConfigSync {
 }
 
 impl ConfigSync {
-    pub(super) fn install(
-        host: &Arc<Host>,
-        initial_config: J,
-        initial_commands: J,
-        compaction_updates: bool,
-    ) -> Self {
+    pub(super) fn install(host: &Arc<Host>, initial_config: J, initial_commands: J, compaction_updates: bool) -> Self {
         let rx = (|| -> mlua::Result<tokio::sync::watch::Receiver<u64>> {
             let ctx = host.kernel.host_ctx()?;
             let owner = host.kernel.host_owner()?;
             let (tx, rx) = tokio::sync::watch::channel(0u64);
-            for event in [
-                "llm/model-changed",
-                "llm/providers-changed",
-                "reload/completed",
-                "turn/started",
-                "turn/completed",
-            ] {
+            for event in
+                ["llm/model-changed", "llm/providers-changed", "reload/completed", "turn/started", "turn/completed"]
+            {
                 let tx_ev = tx.clone();
                 let cb = host.lua().create_function(move |_, _: mlua::MultiValue| {
                     tx_ev.send_modify(|n| *n = n.wrapping_add(1));

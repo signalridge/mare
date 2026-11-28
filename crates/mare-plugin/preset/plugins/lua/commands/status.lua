@@ -20,13 +20,18 @@ return function(ctx)
 	local s = ctx:get("session") and ctx:get("session"):info() or {}
 	local p = m and ctx:get("llm"):provider(m.provider)
 	local usage, perms = svc(ctx, "usage"), svc(ctx, "permissions")
+	local plain = {}
 	local function row(key, v, style)
+		local text = tostring(v or "—")
+		plain[#plain + 1] = (key ~= "" and (("%-12s %s"):format(key, text)) or ("             " .. text))
 		return ui.Line({
 			ui.Span(("%-12s"):format(key)):hl("MareMuted"),
-			ui.Span(tostring(v or "—")):hl(style or "MareText"),
+			ui.Span(text):hl(style or "MareText"),
 		})
 	end
 	local function heading(t)
+		plain[#plain + 1] = ""
+		plain[#plain + 1] = t
 		return ui.Line({ ui.Span(t):hl("MareTitle") })
 	end
 	local dirs = mare.workspace and table.concat(mare.workspace.dirs(), ", ") or mare.cwd
@@ -151,10 +156,14 @@ return function(ctx)
 		lines[#lines + 1] = ui.Gap()
 		lines[#lines + 1] = heading("Logins")
 		for _, l in ipairs(ctx:get("llm"):status_lines()) do
+			plain[#plain + 1] = tostring(l.text or "")
 			lines[#lines + 1] = ui.Line({
 				ui.Span(l.text):hl(l.warning and "MareWarning" or (l.logged_in and "MareText" or "MareMuted")),
 			})
 		end
 	end
 	ui.overlay("Status", ui.Lines(lines))
+	if not (ui.connected and ui.connected()) then
+		return table.concat(plain, "\n")
+	end
 end

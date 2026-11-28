@@ -62,9 +62,11 @@ return {
 		},
 		methods = {
 			list = {
-				doc = "Registered non-alias slash commands, sorted by name (data only, no callbacks).",
+				doc = "Registered non-alias slash commands, sorted by name (data only, no callbacks). Pass `available = true` to filter to commands executable right now for the active frontend and turn state.",
 				expose = "both",
 				access = "peer",
+				params = object({ available = boolean, allow_local = boolean }),
+				order = { "..." },
 				result = list_of(command_info),
 			},
 			get = {
