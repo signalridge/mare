@@ -93,7 +93,7 @@ return {
 					render = "fun(...): any",
 					enabled = "boolean|fun(model?: mare.Model, edit_mode?: string): boolean",
 					concurrency_safe = "boolean|fun(args: table): boolean",
-					command = "table",
+					command = "table|fun(args: table, ctx: {cwd: string}): table|nil",
 					freeform = "table",
 					param_order = "string[]",
 					sensitive_inputs = "string[]",
