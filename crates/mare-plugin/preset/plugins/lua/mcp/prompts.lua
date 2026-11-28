@@ -97,7 +97,20 @@ return function(D)
 								if type(c) == "table" and c.type == "text" then
 									texts[#texts + 1] = role_prefix .. (c.text or "")
 								elseif type(c) == "table" and c.type == "image" and c.data then
-									images[#images + 1] = { type = "image", data = c.data, mime = c.mimeType }
+									local validated, err = mare.image.validate(tostring(c.data))
+									if validated then
+										images[#images + 1] = {
+											type = "image",
+											data = validated.data,
+											mime = validated.mime,
+										}
+									else
+										texts[#texts + 1] = role_prefix
+											.. ("[image (%s) omitted: %s]"):format(
+												tostring(c.mimeType or "image"),
+												tostring(err or "invalid or unsupported image data")
+											)
+									end
 									if role_prefix ~= "" then
 										texts[#texts + 1] = role_prefix .. "[image]"
 									end

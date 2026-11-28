@@ -870,6 +870,11 @@ function mare.image.is_image(path) end
 ---@param data string
 ---@return {mime: string, data: string}|nil, string|nil err
 function mare.image.to_png(data) end
+--- Validate base64-encoded image bytes by magic bytes and bounded decode, returning the detected MIME type (`image/png`, `image/jpeg`, `image/gif`, or `image/webp`) and normalized base64.
+---@async
+---@param data string
+---@return {mime: string, data: string}|nil, string|nil err
+function mare.image.validate(data) end
 
 --- Desktop notification (OSC 9 / 777 / kitty 99, tmux & screen passthrough, BEL fallback);
 --- returns false when suppressed.

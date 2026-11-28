@@ -152,10 +152,10 @@ fn push_image_block(images: &mut Vec<J>, content: &mut Vec<J>, data: String, mim
     content.push(image);
 }
 
-fn supported_blob_image_mime(mime_type: Option<&str>) -> Option<String> {
-    let raw = mime_type?.trim();
-    let media_type = raw.split(';').next()?.trim().to_ascii_lowercase();
-    matches!(media_type.as_str(), "image/png" | "image/jpeg" | "image/gif" | "image/webp").then_some(media_type)
+fn is_declared_image_mime(mime_type: Option<&str>) -> bool {
+    let Some(raw) = mime_type else { return false };
+    let media_type = raw.trim().split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    media_type.starts_with("image/") && media_type.len() > "image/".len()
 }
 
 /// Extract ordered text and image blocks from an ACP `session/prompt` request.
@@ -173,8 +173,10 @@ pub(super) fn extract_prompt(blocks: &[ContentBlock]) -> Result<ExtractedPrompt,
                     push_text_block(&mut texts, &mut content, text);
                 }
                 EmbeddedResourceResource::BlobResourceContents(blob) => {
-                    if let Some(mime) = supported_blob_image_mime(blob.mime_type.as_deref()) {
-                        push_image_block(&mut images, &mut content, blob.blob.clone(), mime);
+                    if is_declared_image_mime(blob.mime_type.as_deref()) {
+                        let validated = mare_binding::image::validate_base64(&blob.blob)
+                            .map_err(|e| format!("invalid image prompt content: {e}"))?;
+                        push_image_block(&mut images, &mut content, validated.data, validated.mime.to_string());
                     } else {
                         return Err("binary embedded resource prompt content is not supported".into());
                     }
@@ -187,7 +189,9 @@ pub(super) fn extract_prompt(blocks: &[ContentBlock]) -> Result<ExtractedPrompt,
                 push_text_block(&mut texts, &mut content, format!("[resource_link name={name} uri={uri}]"));
             }
             ContentBlock::Image(img) => {
-                push_image_block(&mut images, &mut content, img.data.clone(), img.mime_type.clone());
+                let validated = mare_binding::image::validate_base64(&img.data)
+                    .map_err(|e| format!("invalid image prompt content: {e}"))?;
+                push_image_block(&mut images, &mut content, validated.data, validated.mime.to_string());
             }
             ContentBlock::Audio(_) => return Err("audio prompt content is not supported".into()),
             _ => return Err("unsupported ACP prompt content".into()),
@@ -965,18 +969,19 @@ mod tests {
         use agent_client_protocol::v1::schema::{
             BlobResourceContents, EmbeddedResource, EmbeddedResourceResource, ResourceLink, TextResourceContents,
         };
+        let png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg==";
         let blocks = vec![
             ContentBlock::Resource(EmbeddedResource::new(EmbeddedResourceResource::TextResourceContents(
                 TextResourceContents::new("body", "file:///notes/a.md"),
             ))),
             ContentBlock::Resource(EmbeddedResource::new(EmbeddedResourceResource::BlobResourceContents(
-                BlobResourceContents::new("AQID", "file:///pic.png").mime_type("image/png; charset=binary"),
+                BlobResourceContents::new(png_b64, "file:///pic.png").mime_type("image/png; charset=binary"),
             ))),
             ContentBlock::ResourceLink(ResourceLink::new("ref", "file:///b.md")),
         ];
         let parsed = extract_prompt(&blocks).expect("prompt");
         assert_eq!(parsed.images.len(), 1);
-        assert_eq!(parsed.images[0], json!({ "type": "image", "data": "AQID", "mime": "image/png" }));
+        assert_eq!(parsed.images[0], json!({ "type": "image", "data": png_b64, "mime": "image/png" }));
         assert!(parsed.text.contains("[file:///notes/a.md]\nbody"), "{}", parsed.text);
         assert_eq!(parsed.content.len(), 3);
 
@@ -985,6 +990,12 @@ mod tests {
                 BlobResourceContents::new("AQID", "file:///doc.pdf").mime_type("application/pdf"),
             )))];
         assert!(extract_prompt(&bad_blob).is_err());
+
+        let corrupt_img_blob =
+            vec![ContentBlock::Resource(EmbeddedResource::new(EmbeddedResourceResource::BlobResourceContents(
+                BlobResourceContents::new("AQID", "file:///bad.png").mime_type("image/png"),
+            )))];
+        assert!(extract_prompt(&corrupt_img_blob).is_err());
     }
 
     #[test]

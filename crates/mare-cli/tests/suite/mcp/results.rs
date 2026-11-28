@@ -262,7 +262,10 @@ async fn mcp_prompt_image_preserves_type_and_reaches_provider_request() {
         assert_eq!(seen_block_type, "image|", "MCP prompt image must carry type = 'image'");
         let reqs = server.requests();
         let req_body = &reqs[0].body;
-        assert!(req_body.contains("iVBORw0KGgo="), "provider request must contain the prompt image: {req_body}");
+        assert!(
+            req_body.contains("data:image/png;base64,iVBORw0KGgo"),
+            "provider request must contain the prompt image: {req_body}"
+        );
         assert!(req_body.contains("input_image"), "openai request must serialize image block as input_image: {req_body}");
         h.shutdown().await;
     })
@@ -424,6 +427,103 @@ async fn mcp_image_result_is_replaced_with_text_when_model_lacks_image_support()
             "{no_img_text}"
         );
         assert_eq!((img_type.as_str(), img_mime.as_str()), ("image", "image/png"));
+        h.shutdown().await;
+    })
+    .await
+}
+
+/// Final provider request for MCP image tool results sends the sniffed real format for a
+/// mislabelled image, replaces corrupt data with a text placeholder so history is not poisoned,
+/// and preserves a correctly labelled image.
+#[tokio::test]
+async fn mcp_validates_image_mime_types_in_final_provider_request() {
+    local(async {
+        let env = TestEnv::new().await;
+        let fake = Fake::new(&env, "img-mime-93");
+        let entry = with(fake.entry(json!({ "tools": ["image"] })), json!({ "tier": "direct" }));
+        let cfg = json!({
+            "plugins": {
+                "mcp": { "servers": { "fake": entry } }
+            }
+        });
+        let h = env.host().builtins(&["mcp"]).faux(json!([])).config(cfg).no_session().build().await;
+        expose(&h);
+        wait_until(15, "image tool ready", || {
+            let h = h.clone();
+            async move { eval::<bool>(&h, "return T:get('mcp__fake__image') ~= nil").await }
+        })
+        .await;
+
+        let mut jpg_bytes = Vec::new();
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(1, 1, image::Rgb([12, 34, 56])))
+            .write_to(&mut std::io::Cursor::new(&mut jpg_bytes), image::ImageFormat::Jpeg)
+            .unwrap();
+        let jpg_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &jpg_bytes);
+
+        let captured_raw: String = eval(
+            &h,
+            &format!(
+                r#"
+            local png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg=="
+            local jpg_b64 = {jpg_b64:?}
+            local L = C.cordis:get("llm")
+            local step = 0
+            local captured_req = nil
+            L:register_provider({{
+                provider = "rec_mcp93",
+                no_key = true,
+                models = {{ {{ model_id = "vision", name = "Rec Vision", images = true }} }},
+                stream = function(req)
+                    step = step + 1
+                    if step == 1 then
+                        return {{
+                            role = "assistant",
+                            stop_reason = "tool_use",
+                            content = {{
+                                {{ type = "tool_call", id = "c_mislabelled", name = "mcp__fake__image", arguments = {{ data = jpg_b64, mimeType = "image/png" }} }},
+                                {{ type = "tool_call", id = "c_corrupt", name = "mcp__fake__image", arguments = {{ data = "AQID", mimeType = "image/png" }} }},
+                                {{ type = "tool_call", id = "c_valid", name = "mcp__fake__image", arguments = {{ data = png_b64, mimeType = "image/png" }} }},
+                            }},
+                        }}
+                    end
+                    captured_req = req.messages
+                    return {{ role = "assistant", stop_reason = "stop", content = {{ {{ type = "text", text = "done" }} }} }}
+                end,
+            }})
+            assert(L:set_model("rec_mcp93/vision", {{ save = false }}))
+            local started = A:prompt("inspect three mcp images")
+            local res = A:wait(started.turn_id)
+            assert(res and res.text == "done", mare.json.encode(res))
+            return mare.json.encode(captured_req)
+            "#
+            ),
+        )
+        .await;
+        let captured: Value = serde_json::from_str(&captured_raw).expect("captured JSON");
+
+        let msgs = captured.as_array().expect("captured messages");
+        let tool_results: Vec<&Value> = msgs.iter().filter(|m| m["role"] == "tool_result").collect();
+        assert_eq!(tool_results.len(), 3, "expected 3 tool_result messages in provider request: {captured}");
+
+        let by_id = |id: &str| -> &Value {
+            tool_results.iter().copied().find(|m| m["tool_call_id"] == id).unwrap_or_else(|| panic!("missing {id}"))
+        };
+
+        let mislabelled = by_id("c_mislabelled")["content"].as_array().unwrap();
+        assert_eq!(mislabelled[0]["type"], "image", "{mislabelled:?}");
+        assert_eq!(mislabelled[0]["mime"], "image/jpeg", "JPEG bytes declared as image/png must be sniffed as image/jpeg: {mislabelled:?}");
+
+        let corrupt = by_id("c_corrupt")["content"].as_array().unwrap();
+        assert_eq!(corrupt[0]["type"], "text", "corrupt MCP image must become a text placeholder: {corrupt:?}");
+        assert!(
+            corrupt[0]["text"].as_str().unwrap_or("").contains("[image (image/png) omitted:"),
+            "expected placeholder explaining corrupt image: {corrupt:?}"
+        );
+
+        let valid = by_id("c_valid")["content"].as_array().unwrap();
+        assert_eq!(valid[0]["type"], "image", "{valid:?}");
+        assert_eq!(valid[0]["mime"], "image/png", "{valid:?}");
+
         h.shutdown().await;
     })
     .await

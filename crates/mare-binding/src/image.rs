@@ -49,6 +49,38 @@ pub struct Encoded {
     pub height: u32,
 }
 
+pub struct ValidatedImage {
+    pub data: String,
+    pub mime: &'static str,
+}
+
+/// Validate base64-encoded image bytes against magic bytes and bounded decode, returning the
+/// trimmed base64 alongside the real detected MIME type (`image/png`, `image/jpeg`, `image/gif`,
+/// or `image/webp`).
+pub fn validate_base64(data_b64: &str) -> Result<ValidatedImage, String> {
+    let trimmed = data_b64.trim();
+    if trimmed.is_empty() {
+        return Err("empty image data".into());
+    }
+    if trimmed.len() > MAX_INPUT_BYTES.div_ceil(3) * 4 + 4 {
+        return Err(format!("image payload exceeds {MAX_INPUT_BYTES} byte limit"));
+    }
+    let bytes = STANDARD.decode(trimmed).map_err(|e| format!("invalid base64 image data: {e}"))?;
+    if bytes.len() > MAX_INPUT_BYTES {
+        return Err(format!("image payload exceeds {MAX_INPUT_BYTES} byte limit"));
+    }
+    let format = image::guess_format(&bytes).map_err(|e| format!("unrecognized image format: {e}"))?;
+    let mime = match format {
+        ImageFormat::Png => "image/png",
+        ImageFormat::Jpeg => "image/jpeg",
+        ImageFormat::Gif => "image/gif",
+        ImageFormat::WebP => "image/webp",
+        other => return Err(format!("unsupported image format {other:?}; expected PNG, JPEG, GIF, or WebP")),
+    };
+    decode_limited(&bytes).map_err(|e| format!("corrupt or undecodable image: {e}"))?;
+    Ok(ValidatedImage { data: trimmed.to_string(), mime })
+}
+
 pub fn is_image_path(p: &Path) -> bool {
     p.extension().and_then(|e| e.to_str()).is_some_and(|e| IMAGE_EXTS.contains(&e.to_ascii_lowercase().as_str()))
 }
@@ -169,6 +201,22 @@ pub fn install(lua: &Lua, mare: &Table, cwd: std::path::PathBuf) -> mlua::Result
                     let out = lua.create_table()?;
                     out.set("mime", enc.mime)?;
                     out.set("data", enc.data)?;
+                    Ok(MultiValue::from_vec(vec![Value::Table(out)]))
+                }
+                Ok(Err(e)) => nil_err(&lua, e),
+                Err(e) => nil_err(&lua, e),
+            }
+        })?,
+    )?;
+    // validate(base64_data) -> { mime = "image/png"|"image/jpeg"|"image/gif"|"image/webp", data = base64 } | nil, err  (async)
+    t.set(
+        "validate",
+        lua.create_async_function(|lua, data_b64: String| async move {
+            match tokio::task::spawn_blocking(move || validate_base64(&data_b64)).await {
+                Ok(Ok(img)) => {
+                    let out = lua.create_table()?;
+                    out.set("mime", img.mime)?;
+                    out.set("data", img.data)?;
                     Ok(MultiValue::from_vec(vec![Value::Table(out)]))
                 }
                 Ok(Err(e)) => nil_err(&lua, e),
@@ -304,5 +352,29 @@ mod tests {
         assert!(noisy_bytes.len() <= 1_500_000);
         let noisy_img = image::load_from_memory(&noisy_bytes).unwrap();
         assert_eq!((noisy_img.width(), noisy_img.height()), (2000, 2000));
+    }
+
+    #[test]
+    fn validate_base64_sniffs_real_format_and_rejects_corrupt_or_unsupported() {
+        let png_b64 = encode_rgba_png_b64(2, 2, false);
+        let validated_png = validate_base64(&png_b64).expect("valid PNG");
+        assert_eq!(validated_png.mime, "image/png");
+        assert_eq!(validated_png.data, png_b64);
+
+        let mut jpg = Vec::new();
+        DynamicImage::ImageRgb8(image::RgbImage::from_pixel(1, 1, image::Rgb([10, 20, 30])))
+            .write_to(&mut Cursor::new(&mut jpg), ImageFormat::Jpeg)
+            .unwrap();
+        let jpg_b64 = STANDARD.encode(&jpg);
+        let validated_jpg = validate_base64(&jpg_b64).expect("valid JPEG");
+        assert_eq!(validated_jpg.mime, "image/jpeg");
+        assert_eq!(validated_jpg.data, jpg_b64);
+
+        let bmp_header = b"BM\x3a\x00\x00\x00\x00\x00\x00\x00\x36\x00\x00\x00";
+        assert!(validate_base64(&STANDARD.encode(bmp_header)).is_err(), "BMP must be rejected");
+        assert!(validate_base64("AQID").is_err(), "non-image bytes must be rejected");
+        assert!(validate_base64("iVBORw0KGgo=").is_err(), "truncated PNG header must be rejected");
+        assert!(validate_base64("!!!not-base64!!!").is_err(), "invalid base64 must be rejected");
+        assert!(validate_base64("").is_err(), "empty string must be rejected");
     }
 }
