@@ -964,3 +964,466 @@ async fn command_tool_review_edge_cases_and_fail_closed_fallbacks() {
     })
     .await
 }
+
+#[tokio::test]
+async fn command_tool_resolver_function_and_parse_arguments() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        env.set_var("MARE_SANDBOX_HELPER", sandbox_helper_bin());
+        std::fs::write(env.cwd.join(".env"), "credential-contents\n").unwrap();
+        let opts = json!({
+            "preset": "auto",
+            "rules": [
+                { "argv": ["git", "status"], "decision": "allow" },
+                { "argv": ["git", "push"], "decision": "forbidden" },
+            ],
+        });
+        let h = host(&env, true, opts, json!({ "no_session": true })).await;
+        let result_json: String = eval(
+            &h,
+            r#"
+            local out = {}
+            local T = C.cordis:get("tools")
+            local P = C.cordis:get("permissions")
+
+            local ran = 0
+            local last_exec_args
+            local resolver_ctx_cwd
+            local dynamic_mode = "bash"
+            T:register("multi_shell", {
+                description = "multi-shell runner",
+                side_effect = "external",
+                command_tool = true,
+                command = function(args, ctx)
+                    resolver_ctx_cwd = ctx and ctx.cwd
+                    if type(args) == "table" then
+                        -- Ensure mutating args inside resolver does not leak into execution.
+                        args.injected = "from_resolver"
+                    end
+                    if args.mode == "switchable" then
+                        return { shell = dynamic_mode, arg = "text" }
+                    elseif args.mode == "bash" then
+                        return { shell = "bash", arg = "text" }
+                    elseif args.mode == "pwsh" then
+                        return { shell = "pwsh", arg = "text" }
+                    elseif args.mode == "argv_git" then
+                        return { argv = { "git", args.sub or "status" } }
+                    elseif args.mode == "argv_brace_exe" then
+                        return { argv = { "/opt/{stable}/tool", "--version" } }
+                    elseif args.mode == "argv_defaults" then
+                        return { argv = { "git", "status" }, defaults = { sub = "status" } }
+                    elseif args.mode == "error" then
+                        error("resolver exploded")
+                    elseif args.mode == "bad" then
+                        return { shell = "" }
+                    end
+                    return nil
+                end,
+                parameters = {
+                    type = "object",
+                    properties = {
+                        mode = { type = "string" },
+                        text = { type = "string" },
+                        sub = { type = "string" },
+                        tag = { type = "string" },
+                    },
+                },
+                execute = function(args)
+                    ran = ran + 1
+                    last_exec_args = args
+                    return { content = "ran:" .. tostring(args.mode) .. ":" .. tostring(args.text or args.sub or "") }
+                end,
+            })
+
+            local meta = T:get("multi_shell")
+            out.meta_is_fn = type(meta and meta.command) == "function"
+
+            -- 1. Bash path allowed by git status rule; resolver mutations do not leak to execute.
+            local bash_ok = T:execute({
+                id = "m1",
+                name = "multi_shell",
+                arguments = { mode = "bash", text = "git status", tag = "clean" },
+            })
+            out.bash_allowed = bash_ok.content == "ran:bash:git status" and ran == 1
+            out.no_arg_leak = last_exec_args ~= nil and last_exec_args.injected == nil and last_exec_args.tag == "clean"
+            out.ctx_has_cwd = type(resolver_ctx_cwd) == "string" and resolver_ctx_cwd ~= ""
+
+            -- 2. PowerShell path applies PowerShell dangerous-command rules even under full-access,
+            --    and the approval reason includes the resolved dialect and command text.
+            assert(P:set("full-access"))
+            local pwsh_asks, pwsh_reason = 0, ""
+            local pwsh_danger = T:execute({
+                id = "m2",
+                name = "multi_shell",
+                arguments = { mode = "pwsh", text = "Remove-Item missing -Force" },
+            }, {
+                approve = function(_, _, v)
+                    pwsh_asks = pwsh_asks + 1
+                    pwsh_reason = tostring(v and v.reason or "")
+                    return { decision = "deny", reason = "blocked ps" }
+                end,
+            })
+            out.pwsh_danger = pwsh_asks == 1 and pwsh_danger.is_error == true
+                and pwsh_reason:find("windows_force_delete", 1, true) ~= nil
+                and pwsh_reason:find("powershell: Remove-Item missing -Force", 1, true) ~= nil
+
+            -- 2b. Sensitive/credential path prompts on a command tool under auto include resolved dialect + command.
+            assert(P:set("auto"))
+            local cred_asks, cred_reason = 0, ""
+            local cred_res = T:execute({
+                id = "m2s",
+                name = "multi_shell",
+                arguments = { mode = "pwsh", text = "Get-Content .env" },
+            }, {
+                approve = function(_, _, v)
+                    cred_asks = cred_asks + 1
+                    cred_reason = tostring(v and v.reason or "")
+                    return { decision = "deny", reason = "blocked cred" }
+                end,
+            })
+            out.cred_reason_has_dialect = cred_asks == 1
+                and cred_res.is_error == true
+                and cred_reason:find("credential path", 1, true) ~= nil
+                and cred_reason:find("powershell: Get-Content .env", 1, true) ~= nil
+            assert(P:set("full-access"))
+
+            -- 3. Nil return fails closed as unanalyzable even under full-access (asks, never auto-allows, no amendment).
+            local nil_asks, nil_amend = 0, false
+            local nil_res = T:execute({
+                id = "m3",
+                name = "multi_shell",
+                arguments = { mode = "opaque", text = "git status" },
+            }, {
+                approve = function(_, _, v)
+                    nil_asks = nil_asks + 1
+                    nil_amend = nil_amend or (v and v.amendment ~= nil)
+                    return { decision = "deny", reason = "blocked opaque" }
+                end,
+            })
+            out.nil_unanalyzable = nil_asks == 1 and not nil_amend and nil_res.is_error == true
+
+            -- 4. Dynamic argv template resolution enforces argv rules.
+            local argv_forbid_asks = 0
+            local argv_forbid = T:execute({
+                id = "m4",
+                name = "multi_shell",
+                arguments = { mode = "argv_git", sub = "push" },
+            }, {
+                approve = function() argv_forbid_asks = argv_forbid_asks + 1 return { decision = "allow" } end,
+            })
+            out.argv_forbid = argv_forbid_asks == 0 and argv_forbid.is_error == true and argv_forbid.refused == true
+
+            -- 5. Resolver error / invalid declaration fail closed (never execute).
+            local before_err_ran = ran
+            local err_asks = 0
+            local err_res = T:execute({
+                id = "m5",
+                name = "multi_shell",
+                arguments = { mode = "error", text = "git status" },
+            }, {
+                approve = function() err_asks = err_asks + 1 return { decision = "allow" } end,
+            })
+            local bad_asks = 0
+            local bad_res = T:execute({
+                id = "m6",
+                name = "multi_shell",
+                arguments = { mode = "bad", text = "git status" },
+            }, {
+                approve = function() bad_asks = bad_asks + 1 return { decision = "allow" } end,
+            })
+            out.invalid_fail_closed = err_res.is_error == true and bad_res.is_error == true and ran == before_err_ran and err_asks == 0 and bad_asks == 0
+
+            -- 6. If the dynamic command switches between approval and pre-exec check, snapshot is voided
+            --    and re-evaluated under the new dialect (never executing a bash-approved call under powershell).
+            assert(P:set("auto"))
+            P:add_rules({ { argv = { "Remove-Item", "missing", "-Force" }, decision = "prompt" } })
+            dynamic_mode = "bash"
+            local void_events = 0
+            local off_void = C.cordis:on("tool/snapshot-void", function() void_events = void_events + 1 end)
+            local switch_asks, switch_reasons = 0, {}
+            local before_switch_ran = ran
+            local switch_res = T:execute({
+                id = "m7",
+                name = "multi_shell",
+                arguments = { mode = "switchable", text = "Remove-Item missing -Force" },
+            }, {
+                approve = function(_, _, v)
+                    switch_asks = switch_asks + 1
+                    switch_reasons[#switch_reasons + 1] = tostring(v and v.reason or "")
+                    if switch_asks == 1 then
+                        dynamic_mode = "powershell"
+                        return { decision = "allow" }
+                    end
+                    return { decision = "deny", reason = "re-asked under powershell" }
+                end,
+            })
+            off_void()
+            out.switch_voided = void_events >= 1
+                and switch_asks == 2
+                and ran == before_switch_ran
+                and switch_res.is_error == true
+                and switch_reasons[1]:find("windows_force_delete", 1, true) == nil
+                and switch_reasons[2]:find("windows_force_delete", 1, true) ~= nil
+
+            -- 7. `permission/parse` receives a detached copy of `call.arguments` and can tighten using it.
+            local seen_parse_args = {}
+            local off_parse = C.cordis:on("permission/parse", function(data, ev)
+                seen_parse_args.shell = data.shell
+                seen_parse_args.tool = data.tool
+                seen_parse_args.command = data.command
+                seen_parse_args.mode = data.arguments and data.arguments.mode
+                seen_parse_args.tag = data.arguments and data.arguments.tag
+                if type(data.arguments) == "table" then
+                    data.arguments.tag = "mutated_by_parse"
+                end
+                if data.arguments and data.arguments.tag == "mutated_by_parse" and seen_parse_args.tag == "block_me" then
+                    data.parsed = { deny_reasons = { "blocked by parse args" } }
+                end
+                return ev.next(data)
+            end)
+            local parse_ok = T:execute({
+                id = "m8",
+                name = "multi_shell",
+                arguments = { mode = "bash", text = "git status", tag = "inspect_ok" },
+            })
+            local parse_blocked = T:execute({
+                id = "m9",
+                name = "multi_shell",
+                arguments = { mode = "bash", text = "git status", tag = "block_me" },
+            })
+            off_parse()
+            out.parse_saw_args = seen_parse_args.shell == "bash"
+                and seen_parse_args.tool == "multi_shell"
+                and seen_parse_args.command == "git status"
+                and seen_parse_args.mode == "bash"
+                and last_exec_args ~= nil
+                and last_exec_args.tag == "inspect_ok"
+                and parse_ok.is_error ~= true
+            out.parse_tightened = parse_blocked.is_error == true and parse_blocked.refused == true
+
+            -- 8. Session approval (`allow_session`) does not carry across dialects for the same text,
+            --    and both bash and powershell prompt reasons show their resolved dialect + command.
+            assert(P:set("auto"))
+            P:add_rules({ { argv = { "git", "diff" }, decision = "prompt" } })
+            local session_asks, session_reasons = 0, {}
+            local before_sess_ran = ran
+            local sess_bash_1 = T:execute({
+                id = "m10",
+                name = "multi_shell",
+                arguments = { mode = "bash", text = "git diff" },
+            }, {
+                approve = function(_, _, v)
+                    session_asks = session_asks + 1
+                    session_reasons[#session_reasons + 1] = tostring(v and v.reason or "")
+                    return { decision = "allow_session" }
+                end,
+            })
+            local sess_bash_2 = T:execute({
+                id = "m11",
+                name = "multi_shell",
+                arguments = { mode = "bash", text = "git diff" },
+            }, {
+                approve = function(_, _, v)
+                    session_asks = session_asks + 1
+                    session_reasons[#session_reasons + 1] = tostring(v and v.reason or "")
+                    return { decision = "deny", reason = "unexpected bash re-ask" }
+                end,
+            })
+            local sess_pwsh = T:execute({
+                id = "m12",
+                name = "multi_shell",
+                arguments = { mode = "pwsh", text = "git diff" },
+            }, {
+                approve = function(_, _, v)
+                    session_asks = session_asks + 1
+                    session_reasons[#session_reasons + 1] = tostring(v and v.reason or "")
+                    return { decision = "deny", reason = "pwsh must re-ask" }
+                end,
+            })
+            out.cross_dialect_session_isolated = sess_bash_1.is_error ~= true
+                and sess_bash_2.is_error ~= true
+                and ran == before_sess_ran + 2
+                and session_asks == 2
+                and sess_pwsh.is_error == true
+                and session_reasons[1]:find("bash: git diff", 1, true) ~= nil
+                and session_reasons[2]:find("powershell: git diff", 1, true) ~= nil
+
+            -- 9. Dynamic literal argv preserves `{...}` (e.g. `@{upstream}`) without template re-expansion,
+            --    matches prompt rules on the exact literal, rejects `defaults`, and allows >16 KiB argv.
+            P:add_rules({ { argv = { "git", "@{upstream}" }, decision = "prompt" } })
+            local brace_asks, brace_reason = 0, ""
+            local before_brace_ran = ran
+            local brace_res = T:execute({
+                id = "m13",
+                name = "multi_shell",
+                arguments = { mode = "argv_git", sub = "@{upstream}" },
+            }, {
+                approve = function(_, _, v)
+                    brace_asks = brace_asks + 1
+                    brace_reason = tostring(v and v.reason or "")
+                    return { decision = "allow" }
+                end,
+            })
+            out.argv_literal_braces = brace_asks == 1
+                and brace_res.is_error ~= true
+                and ran == before_brace_ran + 1
+                and last_exec_args ~= nil
+                and last_exec_args.sub == "@{upstream}"
+                and brace_reason:find("git @{upstream}", 1, true) ~= nil
+                and brace_reason:find("bash:", 1, true) == nil
+
+            local before_def_ran = ran
+            local defaults_res = T:execute({
+                id = "m14",
+                name = "multi_shell",
+                arguments = { mode = "argv_defaults" },
+            })
+            out.dynamic_defaults_rejected = defaults_res.is_error == true and ran == before_def_ran
+
+            local long_arg = "-" .. string.rep("x", 20480)
+            local before_long_ran = ran
+            local long_res = T:execute({
+                id = "m15",
+                name = "multi_shell",
+                arguments = { mode = "argv_git", sub = long_arg },
+            })
+            out.argv_over_16k = long_res.is_error ~= true
+                and ran == before_long_ran + 1
+                and last_exec_args ~= nil
+                and #tostring(last_exec_args.sub or "") == 20481
+
+            -- 9b. Dynamic literal argv allows `{` in executable paths (e.g. `/opt/{stable}/tool`)
+            --     since dynamic argv is never template-expanded, while static templates still reject `{`.
+            P:add_rules({ { argv = { "/opt/{stable}/tool", "--version" }, decision = "prompt" } })
+            local brace_exe_asks, brace_exe_reason = 0, ""
+            local before_brace_exe_ran = ran
+            local brace_exe_res = T:execute({
+                id = "m15b",
+                name = "multi_shell",
+                arguments = { mode = "argv_brace_exe" },
+            }, {
+                approve = function(_, _, v)
+                    brace_exe_asks = brace_exe_asks + 1
+                    brace_exe_reason = tostring(v and v.reason or "")
+                    return { decision = "allow" }
+                end,
+            })
+            local static_brace_exe_ok = pcall(function()
+                T:register("static_brace_exe", {
+                    description = "invalid static brace exe",
+                    side_effect = "external",
+                    command_tool = true,
+                    command = { argv = { "/opt/{stable}/tool", "--version" } },
+                    parameters = { type = "object", properties = {} },
+                    execute = function()
+                        return { content = "never" }
+                    end,
+                })
+            end)
+            out.dynamic_brace_exe_allowed = brace_exe_asks == 1
+                and brace_exe_res.is_error ~= true
+                and ran == before_brace_exe_ran + 1
+                and brace_exe_reason:find("/opt/{stable}/tool --version", 1, true) ~= nil
+                and not static_brace_exe_ok
+
+            -- 10. Static `{argv}` command tools keep the bare command label without a `bash:` prefix.
+            T:register("static_git", {
+                description = "static git subcommand",
+                side_effect = "external",
+                command_tool = true,
+                command = { argv = { "git", "{sub}" }, defaults = { sub = "status" } },
+                parameters = { type = "object", properties = { sub = { type = "string" } } },
+                execute = function(args)
+                    return { content = tostring(args.sub) }
+                end,
+            })
+            P:add_rules({ { argv = { "git", "fetch" }, decision = "prompt" } })
+            local static_asks, static_reason = 0, ""
+            local static_res = T:execute({
+                id = "m16",
+                name = "static_git",
+                arguments = { sub = "fetch" },
+            }, {
+                approve = function(_, _, v)
+                    static_asks = static_asks + 1
+                    static_reason = tostring(v and v.reason or "")
+                    return { decision = "deny", reason = "static prompted" }
+                end,
+            })
+            out.static_argv_no_shell_prefix = static_asks == 1
+                and static_res.is_error == true
+                and static_reason:find("git fetch", 1, true) ~= nil
+                and static_reason:find("bash:", 1, true) == nil
+
+            -- 11. Static `{shell="bash", arg="command"}` tools keep baseline labels without `bash: `
+            --     and static sensitive-path prompts do not duplicate the command label.
+            T:register("static_bash", {
+                description = "static bash shell",
+                side_effect = "external",
+                command_tool = true,
+                command = { shell = "bash", arg = "command" },
+                parameters = { type = "object", properties = { command = { type = "string" } } },
+                execute = function(args)
+                    return { content = tostring(args.command) }
+                end,
+            })
+            local sb_asks, sb_reason = 0, ""
+            local sb_res = T:execute({
+                id = "m17",
+                name = "static_bash",
+                arguments = { command = "git fetch" },
+            }, {
+                approve = function(_, _, v)
+                    sb_asks = sb_asks + 1
+                    sb_reason = tostring(v and v.reason or "")
+                    return { decision = "deny", reason = "static bash prompted" }
+                end,
+            })
+            local sb_cred_asks, sb_cred_reason = 0, ""
+            local sb_cred_res = T:execute({
+                id = "m18",
+                name = "static_bash",
+                arguments = { command = "cat .env" },
+            }, {
+                approve = function(_, _, v)
+                    sb_cred_asks = sb_cred_asks + 1
+                    sb_cred_reason = tostring(v and v.reason or "")
+                    return { decision = "deny", reason = "static cred prompted" }
+                end,
+            })
+            out.static_shell_no_prefix = sb_asks == 1
+                and sb_res.is_error == true
+                and sb_reason:find("git fetch", 1, true) == 1
+                and sb_reason:find("bash: ", 1, true) == nil
+                and sb_cred_asks == 1
+                and sb_cred_res.is_error == true
+                and sb_cred_reason:find("credential path reminder:", 1, true) == 1
+
+            return mare.json.encode(out)
+            "#,
+        )
+        .await;
+        let v: serde_json::Value = serde_json::from_str(&result_json).unwrap();
+        assert_eq!(v["meta_is_fn"], json!(true), "{v}");
+        assert_eq!(v["bash_allowed"], json!(true), "{v}");
+        assert_eq!(v["no_arg_leak"], json!(true), "{v}");
+        assert_eq!(v["ctx_has_cwd"], json!(true), "{v}");
+        assert_eq!(v["pwsh_danger"], json!(true), "{v}");
+        assert_eq!(v["cred_reason_has_dialect"], json!(true), "{v}");
+        assert_eq!(v["cross_dialect_session_isolated"], json!(true), "{v}");
+        assert_eq!(v["argv_literal_braces"], json!(true), "{v}");
+        assert_eq!(v["dynamic_defaults_rejected"], json!(true), "{v}");
+        assert_eq!(v["argv_over_16k"], json!(true), "{v}");
+        assert_eq!(v["dynamic_brace_exe_allowed"], json!(true), "{v}");
+        assert_eq!(v["static_argv_no_shell_prefix"], json!(true), "{v}");
+        assert_eq!(v["static_shell_no_prefix"], json!(true), "{v}");
+        assert_eq!(v["nil_unanalyzable"], json!(true), "{v}");
+        assert_eq!(v["argv_forbid"], json!(true), "{v}");
+        assert_eq!(v["invalid_fail_closed"], json!(true), "{v}");
+        assert_eq!(v["switch_voided"], json!(true), "{v}");
+        assert_eq!(v["parse_saw_args"], json!(true), "{v}");
+        assert_eq!(v["parse_tightened"], json!(true), "{v}");
+        h.shutdown().await;
+    })
+    .await
+}

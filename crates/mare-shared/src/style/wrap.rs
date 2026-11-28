@@ -18,6 +18,11 @@ pub fn wrap_line_indent(line: &Line, width: usize, indent: &[Span]) -> Vec<Line>
     wrap_line_inner(line, width, indent, false)
 }
 
+/// Like [`wrap_line_indent`], but also breaks URL tokens that exceed `width`.
+pub fn wrap_line_indent_hard(line: &Line, width: usize, indent: &[Span]) -> Vec<Line> {
+    wrap_line_inner(line, width, indent, true)
+}
+
 fn wrap_line_inner(line: &Line, width: usize, indent: &[Span], break_urls: bool) -> Vec<Line> {
     let width = width.max(1);
     if line.width() <= width {

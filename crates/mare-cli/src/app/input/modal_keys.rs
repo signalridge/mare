@@ -442,6 +442,7 @@ impl App {
             preview_scroll_max,
             preview_hidden,
             filter_cache,
+            approval,
             ..
         }) = &mut self.modal
         else {
@@ -511,7 +512,8 @@ impl App {
                 }
             }
             "toggle" => return Some(false),
-            "toggle_preview" => *preview_hidden = !*preview_hidden,
+            "toggle_preview" if !*approval => *preview_hidden = !*preview_hidden,
+            "toggle_preview" => return Some(false),
             "tab_next" | "tab_prev" => {
                 let n_tabs = tabs.len();
                 if n_tabs < 2 {

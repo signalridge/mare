@@ -144,7 +144,11 @@ pub fn node_from(theme: &Theme, v: Value) -> mlua::Result<Node> {
     let t = match v {
         Value::Nil => return Ok(Node::Empty),
         Value::String(s) => {
-            return Ok(Node::Paragraph { line: Line::new(text_spans(&s.to_str()?, Style::default())), indent: vec![] });
+            return Ok(Node::Paragraph {
+                line: Line::new(text_spans(&s.to_str()?, Style::default())),
+                indent: vec![],
+                hard_wrap: false,
+            });
         }
         Value::Table(t) => t,
         _ => return Ok(Node::Empty),
@@ -164,14 +168,16 @@ pub fn node_from(theme: &Theme, v: Value) -> mlua::Result<Node> {
             let line = line_from(theme, &t)?;
             if t.get::<Option<bool>>("wrap")?.unwrap_or(false) {
                 let indent = spans_from(theme, t.get("indent")?)?;
-                Node::Paragraph { line, indent }
+                let hard_wrap = t.get::<Option<bool>>("hard_wrap")?.unwrap_or(false);
+                Node::Paragraph { line, indent, hard_wrap }
             } else {
                 Node::Line(line)
             }
         }
         "paragraph" => {
             let line = line_from(theme, &t)?;
-            Node::Paragraph { line, indent: spans_from(theme, t.get("indent")?)? }
+            let hard_wrap = t.get::<Option<bool>>("hard_wrap")?.unwrap_or(false);
+            Node::Paragraph { line, indent: spans_from(theme, t.get("indent")?)?, hard_wrap }
         }
         "lines" => {
             let mut out = vec![];

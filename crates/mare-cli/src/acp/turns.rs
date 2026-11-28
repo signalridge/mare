@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -18,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 use crate::rpc::call_service;
 
 use super::AcpErr;
-use super::helpers::{config_options, has_truncated_image, hydrate_tool_result_update, to_update};
+use super::helpers::{TranslateOpts, config_options, has_truncated_image, hydrate_tool_result_update, to_update_with};
 
 /// How long a finished turn may take to hand its queued updates to the client.
 pub(super) const PROMPT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -45,7 +46,7 @@ enum RecordStep {
 trait ConfigWatcher {
     fn is_active(&self) -> bool;
     async fn changed(&mut self) -> bool;
-    async fn flush(&mut self, force: bool) -> Option<J>;
+    async fn flush(&mut self, force: bool) -> Vec<J>;
     async fn translate_event(&mut self, name: &str, payload: &J) -> Option<J>;
 }
 
@@ -62,39 +63,45 @@ impl ConfigWatcher for NoConfigWatcher {
         std::future::pending().await
     }
 
-    async fn flush(&mut self, _force: bool) -> Option<J> {
-        None
+    async fn flush(&mut self, _force: bool) -> Vec<J> {
+        Vec::new()
     }
 
     async fn translate_event(&mut self, name: &str, payload: &J) -> Option<J> {
-        to_update(name, payload)
+        to_update_with(name, payload, TranslateOpts::default())
     }
 }
 
-/// Host-backed watcher for live session `configOptions` updates (`llm/model-changed`) and
-/// hydration of wire-truncated tool-result image payloads (`agent.messages`).
+/// Host-backed watcher for live session `configOptions` updates (`llm/model-changed`,
+/// `llm/providers-changed`), session path/capability context, and hydration of wire-truncated
+/// tool-result image payloads (`agent.messages`).
 pub(super) struct ConfigSync {
     host: std::sync::Weak<Host>,
     rx: Option<tokio::sync::watch::Receiver<u64>>,
     last: J,
+    cwd: PathBuf,
+    compaction_updates: bool,
 }
 
 impl ConfigSync {
-    pub(super) fn install(host: &Arc<Host>, initial: J) -> Self {
+    pub(super) fn install(host: &Arc<Host>, initial: J, compaction_updates: bool) -> Self {
         let rx = (|| -> mlua::Result<tokio::sync::watch::Receiver<u64>> {
             let ctx = host.kernel.host_ctx()?;
             let owner = host.kernel.host_owner()?;
             let (tx, rx) = tokio::sync::watch::channel(0u64);
-            let cb = host.lua().create_function(move |_, _: mlua::MultiValue| {
-                tx.send_modify(|n| *n = n.wrapping_add(1));
-                Ok(())
-            })?;
-            let _ = host.kernel.host_on(&ctx, owner, "llm/model-changed", cb, mare_kernel::HostOn::default())?;
+            for event in ["llm/model-changed", "llm/providers-changed"] {
+                let tx_ev = tx.clone();
+                let cb = host.lua().create_function(move |_, _: mlua::MultiValue| {
+                    tx_ev.send_modify(|n| *n = n.wrapping_add(1));
+                    Ok(())
+                })?;
+                let _ = host.kernel.host_on(&ctx, owner, event, cb, mare_kernel::HostOn::default())?;
+            }
             Ok(rx)
         })()
-        .map_err(|e| tracing::warn!("installing ACP llm/model-changed watcher failed: {e}"))
+        .map_err(|e| tracing::warn!("installing ACP llm config watcher failed: {e}"))
         .ok();
-        Self { host: Arc::downgrade(host), rx, last: initial }
+        Self { host: Arc::downgrade(host), rx, last: initial, cwd: host.cwd().to_path_buf(), compaction_updates }
     }
 }
 
@@ -110,35 +117,40 @@ impl ConfigWatcher for ConfigSync {
         }
     }
 
-    async fn flush(&mut self, force: bool) -> Option<J> {
+    async fn flush(&mut self, force: bool) -> Vec<J> {
         let rx_changed = self.rx.as_ref().and_then(|rx| rx.has_changed().ok()).unwrap_or(false);
         if rx_changed && let Some(rx) = self.rx.as_mut() {
             rx.mark_unchanged();
         }
         if !force && !rx_changed {
-            return None;
+            return Vec::new();
         }
-        let host = self.host.upgrade()?;
+        let Some(host) = self.host.upgrade() else {
+            return Vec::new();
+        };
         let opts = config_options(&host).await;
-        let opts_json = serde_json::to_value(&opts).ok()?;
+        let Ok(opts_json) = serde_json::to_value(&opts) else {
+            return Vec::new();
+        };
         if opts_json == self.last {
-            return None;
+            return Vec::new();
         }
         self.last = opts_json;
-        Some(json!({
+        vec![json!({
             "sessionUpdate": "config_option_update",
             "configOptions": opts,
-        }))
+        })]
     }
 
     async fn translate_event(&mut self, name: &str, payload: &J) -> Option<J> {
+        let opts = TranslateOpts { cwd: Some(&self.cwd), compaction_updates: self.compaction_updates };
         if name == "item/completed"
             && payload.pointer("/item/message/content").is_some_and(has_truncated_image)
             && let Some(host) = self.host.upgrade()
         {
-            return hydrate_tool_result_update(&host, payload).await;
+            return hydrate_tool_result_update(&host, payload, opts.cwd).await;
         }
-        to_update(name, payload)
+        to_update_with(name, payload, opts)
     }
 }
 
@@ -198,10 +210,14 @@ where
     F: FnMut(String, J) -> Fut,
     Fut: Future<Output = SinkOutcome>,
 {
-    let Some(update) = watch.flush(force).await else {
-        return RecordStep::Continue;
-    };
-    send_update(session_id, update, send, stream_err, record_err).await
+    for update in watch.flush(force).await {
+        match send_update(session_id, update, send, stream_err, record_err).await {
+            RecordStep::Continue => {}
+            #[cfg(test)]
+            RecordStep::Disconnected => return RecordStep::Disconnected,
+        }
+    }
+    RecordStep::Continue
 }
 
 async fn forward_record<F, Fut, W: ConfigWatcher>(

@@ -22,6 +22,9 @@ return function(D)
 	---------------------------------------------------------------------------
 	local function label_of(call, repr)
 		if repr and repr.text and repr.text ~= "" then
+			if repr.dynamic and repr.kind == "shell" and repr.shell and repr.shell ~= "" then
+				return tostring(repr.shell) .. ": " .. repr.text
+			end
 			return repr.text
 		end
 		local a = call.arguments or {}
@@ -308,7 +311,8 @@ return function(D)
 		-- the key names the tool implementation too (the pipeline's definition version): a
 		-- same-named replacement, e.g. a peer's unconfined `write`, is asked about afresh
 		local tool_id = call.name .. "@" .. tostring(info.tool_version or "")
-		local key = tool_id .. "|" .. tostring(cwd) .. "|" .. key_cmd .. "|" .. tostring(scope or "")
+		local repr_key = repr and (tostring(repr.kind or "") .. ":" .. tostring(repr.shell or "")) or ""
+		local key = tool_id .. "|" .. repr_key .. "|" .. tostring(cwd) .. "|" .. key_cmd .. "|" .. tostring(scope or "")
 		-- Reuse an explicit grant of unrestricted execution, never an ordinary allow rule or
 		-- a cached call that did not itself request all access.
 		local approved_all = (scope == "all" or scope == "danger-full-access")
@@ -436,7 +440,9 @@ return function(D)
 				}
 			end
 			local categories = { "tool" }
-			local reason = sensitive_reason
+			local reason = (repr and repr.dynamic)
+					and ("%s%s · %s"):format(source_tag(), label_of(call, repr), sensitive_reason)
+				or sensitive_reason
 			if rule and rule.decision == "prompt" then
 				categories[#categories + 1] = "rules"
 				reason = reason

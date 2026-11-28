@@ -133,6 +133,7 @@ return function(D)
 				},
 			})
 		end
+		local live_changes = type(res) == "table" and type(res._mare_changes) == "table" and res._mare_changes or nil
 		ctx.bus:emit("item/completed", {
 			turn_id = A.turn_id,
 			item_id = call.id,
@@ -146,6 +147,7 @@ return function(D)
 				status = item_status,
 				result = tool_result_meta(res),
 				message = rm,
+				changes = live_changes,
 				result_status = status,
 				execution_status = "unknown",
 				result_entry_id = result_entry_id,

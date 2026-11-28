@@ -550,7 +550,7 @@ async fn child_tui_approval_and_status_never_expose_unregistered_rewritten_senti
         t.until("child approval dialog with rewritten path and visible option labels/keys", |screen| {
             screen.contains("UNREGISTERED_REWRITE_SENTINEL_77")
                 && screen.contains("Allow once (y)")
-                && screen.contains("Allow for this session (a)")
+                && screen.contains("Allow this exact call for this session (a)")
                 && screen.contains("Deny, and tell the model why (n)")
                 && screen.contains("Deny and stop this turn (ctrl+c)")
         })

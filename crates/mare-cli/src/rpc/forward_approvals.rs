@@ -2,6 +2,22 @@
 
 use super::*;
 
+/// Collect unified diff text from the shared `info.approval_detail.preview` payload for RPC
+/// clients when the tool's raw arguments do not already carry a patch/diff string.
+fn approval_detail_diff_text(info: &J) -> Option<String> {
+    let blocks = info.pointer("/approval_detail/preview").and_then(J::as_array)?;
+    let mut parts = Vec::new();
+    for block in blocks {
+        if block.get("type").and_then(J::as_str) != Some("diff") {
+            continue;
+        }
+        if let Some(unified) = block.get("unified").and_then(J::as_str).filter(|s| !s.is_empty()) {
+            parts.push(unified.to_string());
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("\n"))
+}
+
 /// `capabilities.approvals` as (re-)`initialize` sets it: the forwarding voters are registered
 /// when it turns on and released when it turns off; an unchanged value keeps what is there.
 /// Turning it off also ends the approvals the host is being asked right now: each ends
@@ -147,7 +163,13 @@ fn subscribe_approvals_on(conn: &Rc<Conn>, session_id: &str, host: &Arc<Host>, c
                         None => None,
                     };
                     let scope = if requested_permissions.is_some() {
-                        match s(verdict, "permission_scope").or_else(|| s(&args, "scope")) {
+                        match info
+                            .pointer("/approval_detail/scope/permission_scope")
+                            .and_then(J::as_str)
+                            .map(str::to_string)
+                            .or_else(|| s(verdict, "permission_scope"))
+                            .or_else(|| s(&args, "scope"))
+                        {
                             Some(scope) => {
                                 match serde_json::from_value::<proto::PermissionGrantScope>(J::String(scope)) {
                                     Ok(scope) => Some(scope),
@@ -161,6 +183,16 @@ fn subscribe_approvals_on(conn: &Rc<Conn>, session_id: &str, host: &Arc<Host>, c
                     } else {
                         None
                     };
+                    let command = info
+                        .pointer("/approval_detail/command")
+                        .and_then(J::as_str)
+                        .filter(|v| !v.is_empty())
+                        .map(str::to_string)
+                        .or_else(|| s(&args, "command"));
+                    let diff = s(&args, "patch")
+                        .or_else(|| s(&args, "input"))
+                        .or_else(|| s(&args, "diff"))
+                        .or_else(|| approval_detail_diff_text(info));
                     proto::ApprovalRequestParams {
                         session_id: sid.clone(),
                         turn_id,
@@ -168,8 +200,8 @@ fn subscribe_approvals_on(conn: &Rc<Conn>, session_id: &str, host: &Arc<Host>, c
                         approval_id,
                         tool_call_id: s(call, "id"),
                         tool: s(call, "name"),
-                        command: s(&args, "command"),
-                        diff: s(&args, "patch").or_else(|| s(&args, "input")).or_else(|| s(&args, "diff")),
+                        command,
+                        diff,
                         requested_permissions,
                         scope,
                         arguments: args,

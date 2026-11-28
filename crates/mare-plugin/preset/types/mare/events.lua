@@ -101,7 +101,7 @@
 -- tool/snapshot-void {call, reason} (an approval was voided: the call changed before it ran),
 -- permission/parse (tighten only: listeners get a copy of the built-in shell_parse result and
 --   may set analyzable = false (+ reason), segments[i].unanalyzable / .note, deny_reasons = {...},
---   notes = {...}; any other change, or a different parse, is ignored; extra {command, tool, shell}),
+--   notes = {...}; any other change, or a different parse, is ignored; extra {command, tool, shell, arguments}),
 -- permission/verdict (policy vote, {call, info, preset, verdict}: participants can only tighten
 --   the permissions plugin's verdict — deny, or ask instead of allow; allow votes change nothing;
 --   errors, timeouts and invalid results count as deny),

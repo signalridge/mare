@@ -28,7 +28,7 @@ pub use width::{
     WidthMethod, ambiwidth_double, grapheme_width, set_ambiwidth_double, set_width_method, set_width_overrides,
     str_width, width_method,
 };
-pub use wrap::{is_url_like, wrap_line, wrap_line_hard, wrap_line_indent};
+pub use wrap::{is_url_like, wrap_line, wrap_line_hard, wrap_line_indent, wrap_line_indent_hard};
 
 /// Layout generation: bumped whenever something that changes rendered output without changing
 /// the content does — a theme / style / Markdown option write, width rules, `ambiwidth`. Render

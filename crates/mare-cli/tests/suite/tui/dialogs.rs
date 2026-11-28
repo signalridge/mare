@@ -241,7 +241,7 @@ async fn approval_dialog_80x24_layout_and_long_cwd_reachability() {
             "Tool: write",
             "Path: a.txt",
             "Allow once (y)",
-            "Allow for this session (a)",
+            "Allow this exact call for this session (a)",
             "Allow and remember (A)",
             "Deny, and tell the model why (n)",
             "Deny and stop this turn (ctrl+c)",
@@ -289,7 +289,7 @@ async fn approval_dialog_80x24_layout_and_long_cwd_reachability() {
         normalize_modal_directory_line(&mut raw_lines, &long_cwd_str);
         for option in [
             "Allow once (y)",
-            "Allow for this session (a)",
+            "Allow this exact call for this session (a)",
             "Allow and remember (A)",
             "Deny, and tell the model why (n)",
             "Deny and stop this turn (ctrl+c)",
