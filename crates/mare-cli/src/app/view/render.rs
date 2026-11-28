@@ -215,28 +215,59 @@ impl App {
         let set = frame::BorderSet::for_theme(&theme.border, &theme.icons);
         let (boxed, pop_cursor, _pop_w) = self.modal_box(w, max_h, &theme, frame);
         let mut pop_top = None;
+        let mut popup_anchor = editor_top;
         if !boxed.is_empty() {
-            if editor_top < boxed.len() {
-                let extra = (boxed.len() - editor_top).min(max_h.saturating_sub(live.len()));
+            // Keep the 1-line working status row cleanly visible below the modal (above the editor)
+            // whenever vertical room permits, instead of slicing it behind the modal borders.
+            let below_working = working_row.filter(|&wr| wr < editor_top).map(|wr| live.len().saturating_sub(wr));
+            if let (Some(wr), Some(below)) = (working_row, below_working)
+                && boxed.len() + below <= max_h
+            {
+                popup_anchor = wr;
+            }
+            if popup_anchor < boxed.len() {
+                let insert_at = popup_anchor;
+                let extra = (boxed.len() - insert_at).min(max_h.saturating_sub(live.len()));
                 for _ in 0..extra {
-                    live.insert(editor_top, Line::empty());
+                    live.insert(insert_at, Line::empty());
+                }
+                popup_anchor += extra;
+                if let Some(wr) = working_row.as_mut()
+                    && *wr >= insert_at
+                {
+                    *wr += extra;
                 }
                 editor_top += extra;
                 cursor = cursor.map(|(r, c)| (r + extra, c));
             }
-            pop_top = Some(editor_top.saturating_sub(boxed.len()).min(live.len().saturating_sub(boxed.len())));
+            pop_top = Some(popup_anchor.saturating_sub(boxed.len()).min(live.len().saturating_sub(boxed.len())));
         }
 
         let layout = NoticeLayout { stream_end, pop_top, working_row, editor_top, max_h };
         self.flush_component_notices();
         let notice_pad = self.overlay_notices(&mut live, Some(layout), w, &theme, set, &mut cursor);
         editor_top += notice_pad;
+        popup_anchor += notice_pad;
 
         if !boxed.is_empty() {
-            overlay_popup(&mut live, &boxed, pop_cursor, w, &mut editor_top, max_h, &mut cursor);
+            overlay_popup(
+                &mut live,
+                &boxed,
+                pop_cursor,
+                &mut popup_anchor,
+                &mut cursor,
+                OverlayBounds { w, max_h, clear_row: true },
+            );
         }
         if let Some((wk_box, _wk_w)) = self.which_key_box(w, &theme, set) {
-            overlay_popup(&mut live, &wk_box, None, w, &mut editor_top, max_h, &mut cursor);
+            overlay_popup(
+                &mut live,
+                &wk_box,
+                None,
+                &mut editor_top,
+                &mut cursor,
+                OverlayBounds { w, max_h, clear_row: false },
+            );
         }
         if live.len() > max_h {
             let cut = live.len() - max_h;
@@ -1045,18 +1076,24 @@ pub(super) struct NoticeLayout {
     max_h: usize,
 }
 
+struct OverlayBounds {
+    w: usize,
+    max_h: usize,
+    clear_row: bool,
+}
+
 fn overlay_popup(
     live: &mut Vec<Line>,
     boxed: &[Line],
     pop_cursor: Option<(usize, usize)>,
-    w: usize,
     editor_top: &mut usize,
-    max_h: usize,
     cursor: &mut Option<(usize, usize)>,
+    bounds: OverlayBounds,
 ) -> Option<usize> {
     if boxed.is_empty() {
         return None;
     }
+    let OverlayBounds { w, max_h, clear_row } = bounds;
     let bw = boxed.iter().map(Line::width).max().unwrap_or(0);
     // Reserve space above the editor when the terminal has room (`<= max_h`), so modals sit
     // above the editor without covering it; on tiny terminals, float without exceeding `max_h`.
@@ -1071,8 +1108,10 @@ fn overlay_popup(
     }
     let top = editor_top.saturating_sub(boxed.len()).min(live.len().saturating_sub(boxed.len()));
     let x = (w.saturating_sub(bw)) / 2;
+    let empty = Line::empty();
     for (i, b) in boxed.iter().take(live.len().saturating_sub(top)).enumerate() {
-        live[top + i] = overlay_line(&live[top + i], x, b);
+        let base = if clear_row { &empty } else { &live[top + i] };
+        live[top + i] = overlay_line(base, x, b);
     }
     if let Some((cr, cc)) = pop_cursor {
         *cursor = Some((top + 1 + cr, x + 2 + cc));

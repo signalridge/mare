@@ -286,8 +286,12 @@ async fn multi_select_keeps_checked_items_by_id_across_updates_and_tabs() {
 async fn an_approval_shows_and_answers_over_the_open_transcript() {
     local(async {
         let write = |p: &str| json!([{ "name": "write", "arguments": { "path": p, "content": "X" } }]);
+        let filler: String = (0..12)
+            .map(|i| format!("UNDERLYING_TRANSCRIPT_ROW_{i:02} {}", "Z".repeat(60)))
+            .collect::<Vec<_>>()
+            .join("\n");
         let script = json!([
-            { "text": "about to write a.txt", "delay_ms": 60, "tool_calls": write("a.txt") },
+            { "text": filler, "delay_ms": 60, "tool_calls": write("a.txt") },
             { "text": "wrote a" },
             { "text": "about to write b.txt", "delay_ms": 60, "tool_calls": write("b.txt") },
             { "text": "stopped" }
@@ -302,6 +306,19 @@ async fn an_approval_shows_and_answers_over_the_open_transcript() {
         t.ctrl('t');
         t.until("the transcript before the approval", |s| in_transcript(s) && !s.contains("Allow once")).await;
         t.until("the approval over the transcript", |s| in_transcript(s) && s.contains("Allow once")).await;
+        let modal_screen = t.screen();
+        let rows: Vec<&str> = modal_screen.lines().collect();
+        let top = rows.iter().position(|r| r.contains("╭─ Allow write?")).expect("modal top border");
+        let bot = rows[top..].iter().rposition(|r| r.contains('╰')).map(|i| top + i).expect("modal bottom border");
+        for row in &rows[top..=bot] {
+            let left_end = row.find(['╭', '│', '╰']).expect("left border");
+            let right_start = row.rfind(['╮', '│', '╯']).expect("right border");
+            let right_after = right_start + row[right_start..].chars().next().unwrap().len_utf8();
+            assert!(
+                row[..left_end].trim().is_empty() && row[right_after..].trim().is_empty(),
+                "full-screen transcript rows behind modal must be blank outside borders:\n{row}\nfull:\n{modal_screen}"
+            );
+        }
         t.key(KeyCode::Char('y'), Modifiers::NONE);
         t.idle().await;
         assert!(cwd.join("a.txt").exists(), "y over the transcript allowed it; screen:\n{}", t.screen());
@@ -861,17 +878,17 @@ async fn permission_approval_dialog_shows_grant_scope_and_expiry() {
         let cfg = json!({ "plugins": { "permissions": { "enabled": true, "preset": "auto" } } });
         let mut t = Term::with(script, cfg, 120, 32).await;
         t.submit("fetch").await;
-        // Body wraps the resolved `reason`, so physical worktree roots remain visible without raw argument echo.
+        // Structured body shows resolved physical worktree roots and grant scope/expiry without raw argument echo.
         let wt_gd_tail = wt_gitdir.file_name().unwrap().to_string_lossy().to_string();
-        let main_git_s = format!("write:{}", main_git.display());
+        let main_git_s = main_git.display().to_string();
         let file_parent_s = format!("write:{}", file_parent.display());
         t.until("scoped permission dialog shows scope, expiry, and resolved physical worktree roots in body", |s| {
             let trimmed: Vec<&str> = s.lines().map(|l| l.trim().trim_matches('│').trim()).collect();
             let flat_paths = trimmed.join("");
             let flat_words = trimmed.join(" ");
-            flat_words.contains("maximum grant scope: session")
-                && flat_words.contains("expires when this session ends")
-                && flat_words.matches("maximum grant scope: session").count() == 1
+            flat_words.contains("this session (a, until session ends or until the permission preset changes)")
+                && flat_words.contains("reused by later commands until this turn ends")
+                && flat_words.matches("until session ends or until the permission preset changes").count() == 1
                 && s.contains("Allow requested access for this turn (y)")
                 && s.contains("Allow requested access for this session (a)")
                 && !s.contains("Grant scope:")

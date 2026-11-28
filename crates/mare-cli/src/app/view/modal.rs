@@ -561,17 +561,27 @@ impl App {
                     pop_w
                 };
                 let mut head = vec![];
+                let body_w = list_w.saturating_sub(4).max(8);
                 if !body.is_empty() {
                     for b in body {
-                        head.extend(wrap_line(&Line::raw(b.clone()), list_w.saturating_sub(4).max(8)));
+                        head.extend(mare_shared::style::wrap_line_hard(&Line::raw(b.clone()), body_w));
                     }
                     head.push(Line::empty());
                 }
                 let search_rows = usize::from(*searching || !filter.is_empty());
-                let head_budget = max_h.saturating_sub(3 + search_rows);
+                let min_list_rows = visible.len().clamp(1, 6);
+                let head_budget = max_h.saturating_sub(2 + search_rows + min_list_rows).max(1);
                 body_scroll_max = head.len().saturating_sub(head_budget);
                 let body_sc = (*body_scroll).min(body_scroll_max);
-                let head: Vec<Line> = head.into_iter().skip(body_sc).take(head_budget).collect();
+                let head_total = head.len();
+                let mut head: Vec<Line> = head.into_iter().skip(body_sc).take(head_budget).collect();
+                let remaining = head_total.saturating_sub(body_sc + head_budget);
+                if remaining > 0 && head_budget >= 2 {
+                    if head.len() == head_budget {
+                        head.pop();
+                    }
+                    head.push(Line::styled(format!("… {} more detail lines", remaining + 1), theme.fg("MareDim")));
+                }
                 let chrome = 2 + search_rows + head.len();
                 let (cap_h, pv_inner_max) = if preview.is_some() && !wide {
                     if max_h >= chrome + 4 {

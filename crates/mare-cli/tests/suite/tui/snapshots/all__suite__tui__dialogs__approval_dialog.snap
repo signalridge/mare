@@ -3,8 +3,15 @@ source: crates/mare-cli/tests/suite/tui/dialogs.rs
 expression: t.snap().await
 ---
 ❯ write a
- ╭─ Allow write: a.txt?  write a.txt · write · cwd <tmp> ─╮
-▂│ Allow once (y)                                                             │
+ ╭─ Allow write? ─────────────────────────────────────────────────────────────╮
+ │ Requester: Main session                                                    │
+ │ Tool: write (call call_1_1)                                                │
+ │ Path: a.txt                                                                │
+ │ Directory: <tmp> │
+ │ Scope: once (y, this call) · this session (a, until session ends or until  │
+ │ the permission preset changes) · remember rule (A)                         │
+ │                                                                            │
+ │ Allow once (y)                                                             │
  │ Allow for this session (a)                                                 │
  │ Allow and remember (A): allow all write calls this session                 │
  │ Deny, and tell the model why (n)                                           │
@@ -14,6 +21,7 @@ expression: t.snap().await
  │ +1 −0                                                                      │
  │ 1 + A                                                                      │
  ╰────────────────────────────────────────────────────────────────────────────╯
+▂▃▅▃ Responding… (Ns · Esc to interrupt)
 ╭──────────────────────────────────────────────────────────────────────────────╮
 │ ❯ Queue a message… (Ctrl+S steer now · Esc interrupt)                        │
 ╰──────────────────────────────────────────────────────────────────────────────╯

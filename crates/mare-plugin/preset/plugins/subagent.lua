@@ -1024,7 +1024,14 @@ return {
 			},
 			side_effect = "read",
 			summary = function(a)
-				return ("SubagentWait(%s)"):format(tostring(a.id or "?"))
+				local target = a.id
+				if target and mare.subagent and mare.subagent.get then
+					local ok, info = pcall(mare.subagent.get, target)
+					if ok and type(info) == "table" then
+						target = info.label or info.name or target
+					end
+				end
+				return ("SubagentWait(%s)"):format(mare.text.trunc_width(tostring(target or "?"), 40))
 			end,
 			execute = function(a, t)
 				local ok, res = pcall(mare.subagent.wait, a.id, { timeout_ms = a.timeout_ms, cancel = t.cancel })

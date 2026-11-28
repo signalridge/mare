@@ -42,7 +42,10 @@ struct Responses(Mutex<OneTimeRegistry<String, Binding, Response>>);
 #[derive(Clone)]
 pub struct Snapshot {
     pub tool: String,
+    pub call_id: Option<String>,
+    pub cwd: Option<String>,
     pub arguments: J,
+    pub requested_permissions: Option<J>,
     pub unconfined: bool,
     pub protected_arguments: bool,
     pub origin: Option<J>,
@@ -122,7 +125,16 @@ impl Snapshot {
             .and_then(J::as_str)
             .map(str::to_owned)
             .unwrap_or_else(|| "tool".to_string());
+        let call_id = call
+            .and_then(|c| c.get("id"))
+            .and_then(J::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        let cwd = call.and_then(|c| c.get("cwd")).and_then(J::as_str).filter(|s| !s.is_empty()).map(str::to_owned);
         let arguments = call.and_then(|c| c.get("arguments")).cloned().unwrap_or(J::Null);
+        let requested_permissions =
+            verdict.and_then(|v| v.get("requested_permissions")).filter(|v| v.is_object()).cloned();
         let protected_arguments = call.and_then(|c| c.get("protected_arguments")).and_then(J::as_bool).unwrap_or(false);
         let origin = call.and_then(|c| c.get("origin")).filter(|v| !v.is_null()).cloned();
         let unconfined = info.and_then(|i| i.get("unconfined")).and_then(J::as_bool).unwrap_or(false);
@@ -139,7 +151,19 @@ impl Snapshot {
                     .or_else(|| a.is_object().then(|| describe_rule(a)))
             }
         });
-        Ok(Self { tool, arguments, unconfined, protected_arguments, origin, scoped, reason, amendment_description })
+        Ok(Self {
+            tool,
+            call_id,
+            cwd,
+            arguments,
+            requested_permissions,
+            unconfined,
+            protected_arguments,
+            origin,
+            scoped,
+            reason,
+            amendment_description,
+        })
     }
 }
 
@@ -418,7 +442,10 @@ mod tests {
         let binding = Binding::from_json(&json).unwrap();
         let original = Snapshot {
             tool: "secret_tool".into(),
+            call_id: Some("call-1".into()),
+            cwd: None,
             arguments: serde_json::json!({"token": "ref-1"}),
+            requested_permissions: None,
             unconfined: true,
             protected_arguments: true,
             origin: None,

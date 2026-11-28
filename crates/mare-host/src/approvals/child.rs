@@ -710,6 +710,10 @@ impl Host {
             vote["decision"] = "deny".into();
             vote["unavailable"] = true.into();
         }
+        if vote["decision"] == "abort" {
+            vote["decision"] = "deny".into();
+            vote["abort"] = true.into();
+        }
         let source = ApprovalSource::from_wire(vote["source"].as_str()).as_str();
         if let Some(object) = vote.as_object_mut() {
             object.remove("source");

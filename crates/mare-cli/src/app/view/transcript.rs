@@ -700,9 +700,10 @@ impl App {
         let x = w.saturating_sub(bw) / 2;
         let shown = boxed.len().min(last);
         let top = last - shown;
+        let empty = Line::empty();
         // too tall for the screen: its bottom (the options, the input) stays visible
         for (i, b) in boxed.iter().skip(boxed.len() - shown).enumerate() {
-            screen[top + i] = overlay_line(&screen[top + i], x, b);
+            screen[top + i] = overlay_line(&empty, x, b);
         }
         let skipped = boxed.len() - shown;
         cursor.and_then(|(r, c)| (r + 1).checked_sub(skipped).map(|r| (top + r, x + 2 + c)))
