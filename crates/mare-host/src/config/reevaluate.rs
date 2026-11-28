@@ -113,7 +113,10 @@ impl Host {
     /// core option names). Plugins are not touched.
     pub(crate) async fn reevaluate(self: &Arc<Self>) -> Result<(serde_json::Value, serde_json::Value, Vec<String>)> {
         if !self.reload.load_init {
-            anyhow::bail!("config reload is unavailable (started without user config)");
+            return Err(anyhow::Error::new(mare_shared::errors::Coded {
+                code: "unavailable",
+                message: "config reload is unavailable (started without user config)".into(),
+            }));
         }
         let lua = self.lua().clone();
         let mare: Table = lua.globals().get("mare")?;

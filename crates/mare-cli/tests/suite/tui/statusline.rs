@@ -1323,7 +1323,7 @@ async fn ui_service_keymap_rules_and_bindings_reject_invalid_inputs() {
 
             -- 1b. Config reload without init.lua fails cleanly; cyclic runtime option is rejected.
             local ok_rl, err_rl = pcall(mare.reload_config)
-            assert(not ok_rl and tostring(err_rl):find("config reload is unavailable", 1, true), tostring(err_rl))
+            assert(not ok_rl and type(err_rl) == "table" and err_rl.code == "unavailable" and tostring(err_rl):find("config reload is unavailable", 1, true), tostring(err_rl))
             local cyc = {}
             cyc.self = cyc
             assert(not pcall(function() mare.o.ui = cyc end))

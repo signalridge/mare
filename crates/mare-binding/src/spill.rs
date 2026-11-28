@@ -96,11 +96,6 @@ pub(super) fn coded_result(lua: &Lua, code: &str, message: &str) -> mlua::Result
     let err = mare_shared::lua_error::error_value(lua, code, message, mlua::Value::Nil)?;
     Ok((false, mlua::Value::Table(err)))
 }
-pub(super) fn wrap_coded(lua: &Lua, inner: mlua::Function) -> mlua::Result<mlua::Function> {
-    lua.load("local f = ... return function(...) local ok, v = f(...) if not ok then error(v, 0) end return v end")
-        .set_name("@spill/wrap")
-        .call(inner)
-}
 fn encode_segment(raw: &str) -> String {
     if raw.is_empty() {
         return "~".to_owned();
@@ -509,7 +504,7 @@ fn store_api(lua: &Lua, store: std::sync::Arc<local::Store>) -> mlua::Result<Tab
                 save_value(&lua, &store, owner, bytes, save_opts).await
             }
         })?;
-    api.set("save", wrap_coded(lua, save_raw)?)?;
+    api.set("save", mare_shared::lua_error::wrap_coded(lua, "@spill/wrap", save_raw)?)?;
     let read_store = store.clone();
     let read_raw = lua.create_async_function(move |lua, args: mlua::MultiValue| {
         let store = read_store.clone();
@@ -571,7 +566,7 @@ fn store_api(lua: &Lua, store: std::sync::Arc<local::Store>) -> mlua::Result<Tab
             Ok((true, mlua::Value::Table(out)))
         }
     })?;
-    api.set("read", wrap_coded(lua, read_raw)?)?;
+    api.set("read", mare_shared::lua_error::wrap_coded(lua, "@spill/wrap", read_raw)?)?;
     let delete_store = store.clone();
     let delete_raw = lua.create_async_function(move |lua, args: mlua::MultiValue| {
         let store = delete_store.clone();
@@ -613,7 +608,7 @@ fn store_api(lua: &Lua, store: std::sync::Arc<local::Store>) -> mlua::Result<Tab
             Ok((true, mlua::Value::Nil))
         }
     })?;
-    api.set("delete", wrap_coded(lua, delete_raw)?)?;
+    api.set("delete", mare_shared::lua_error::wrap_coded(lua, "@spill/wrap", delete_raw)?)?;
     bytes::install(lua, &api, store.clone())?;
     api.set(
         "dispose",

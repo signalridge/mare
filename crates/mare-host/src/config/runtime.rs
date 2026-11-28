@@ -111,7 +111,7 @@ impl Host {
                 }
             }
         })?;
-        mare.set("reload", wrap_coded_async(&lua, reload_fn)?)?;
+        mare.set("reload", mare_shared::lua_error::wrap_coded(&lua, "@config/reload_wrap", reload_fn)?)?;
         let reload_config_fn = lua.create_async_function(move |lua, ()| {
             let weak = weak.clone();
             async move {
@@ -122,15 +122,9 @@ impl Host {
                 }
             }
         })?;
-        mare.set("reload_config", wrap_coded_async(&lua, reload_config_fn)?)?;
+        mare.set("reload_config", mare_shared::lua_error::wrap_coded(&lua, "@config/reload_wrap", reload_config_fn)?)?;
         Ok(())
     }
-}
-
-fn wrap_coded_async(lua: &mlua::Lua, inner: Function) -> mlua::Result<Function> {
-    lua.load("local f = ... return function(...) local ok, v = f(...) if not ok then error(v, 0) end return v end")
-        .set_name("@config/reload_wrap")
-        .call(inner)
 }
 
 fn strip_lua_traceback(text: &str) -> String {
@@ -172,8 +166,7 @@ fn reload_error_outcome(lua: &mlua::Lua, err: anyhow::Error) -> mlua::Result<(bo
         return Ok((false, Value::Table(tbl)));
     }
     let clean = strip_lua_traceback(&text);
-    let code = if clean.starts_with("config reload is unavailable") { "unavailable" } else { "internal" };
-    let tbl = mare_shared::lua_error::error_value(lua, code, &clean, Value::Nil)?;
+    let tbl = mare_shared::lua_error::error_value(lua, "internal", &clean, Value::Nil)?;
     Ok((false, Value::Table(tbl)))
 }
 
