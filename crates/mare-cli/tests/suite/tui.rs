@@ -26,7 +26,7 @@ mod editor_api;
 mod images;
 mod input;
 mod interaction_hints;
-mod invariants;
+pub(in crate::suite) mod invariants;
 mod keys;
 mod layout;
 mod matrix;
@@ -50,7 +50,7 @@ tokio::task_local! {
 }
 
 /// Keep Lua's LocalSet alive through asynchronous fixture teardown, even after an assertion.
-async fn local(future: impl Future<Output = ()>) {
+pub(in crate::suite) async fn local(future: impl Future<Output = ()>) {
     tokio::task::LocalSet::new()
         .run_until(CLEANUPS.scope(RefCell::new(Vec::new()), async {
             let result = AssertUnwindSafe(future).catch_unwind().await;
@@ -81,9 +81,9 @@ async fn local(future: impl Future<Output = ()>) {
         .await;
 }
 
-struct VtResources {
-    vt: Vt,
-    _env: TestEnv,
+pub(in crate::suite) struct VtResources {
+    pub(in crate::suite) vt: Vt,
+    pub(in crate::suite) _env: TestEnv,
 }
 
 impl Deref for VtResources {
@@ -99,7 +99,7 @@ impl DerefMut for VtResources {
     }
 }
 
-struct OwnedVt(Option<VtResources>);
+pub(in crate::suite) struct OwnedVt(Option<VtResources>);
 
 impl OwnedVt {
     async fn new(env: TestEnv, opts: mare_host::HostOptions, w: u16, h: u16) -> Self {
@@ -133,12 +133,12 @@ impl Drop for OwnedVt {
 }
 
 /// The app plus a virtual terminal with scrollback.
-struct Term {
-    owned: OwnedVt,
-    parser: vt100::Parser,
+pub(in crate::suite) struct Term {
+    pub(in crate::suite) owned: OwnedVt,
+    pub(in crate::suite) parser: vt100::Parser,
     /// turns ended before the last submit
     ended: usize,
-    saw_welcome_banner: bool,
+    pub(in crate::suite) saw_welcome_banner: bool,
     skip_drop_invariants: bool,
 }
 
@@ -167,7 +167,7 @@ impl DerefMut for Term {
 }
 
 impl Term {
-    async fn new(script: Value, w: u16, h: u16) -> Self {
+    pub(in crate::suite) async fn new(script: Value, w: u16, h: u16) -> Self {
         Self::with(script, json!({}), w, h).await
     }
 
@@ -178,11 +178,11 @@ impl Term {
         Self::in_env(env, script, json!({}), json!({}), w, h).await
     }
 
-    async fn with(script: Value, config: Value, w: u16, h: u16) -> Self {
+    pub(in crate::suite) async fn with(script: Value, config: Value, w: u16, h: u16) -> Self {
         Self::build(script, config, json!({}), w, h, |_| {}).await
     }
 
-    async fn with_all_builtins(
+    pub(in crate::suite) async fn with_all_builtins(
         script: Value,
         config: Value,
         args: Value,
@@ -196,10 +196,41 @@ impl Term {
     }
 
     /// `prepare` runs on the workspace before the host starts (e.g. project resources).
-    async fn build(script: Value, config: Value, args: Value, w: u16, h: u16, prepare: impl FnOnce(&TestEnv)) -> Self {
+    pub(in crate::suite) async fn build(
+        script: Value,
+        config: Value,
+        args: Value,
+        w: u16,
+        h: u16,
+        prepare: impl FnOnce(&TestEnv),
+    ) -> Self {
         let env = TestEnv::new().await;
         prepare(&env);
         Self::in_env(env, script, config, args, w, h).await
+    }
+
+    /// Build a TUI `Term` without `provider-faux` or onboarding configured (no active model).
+    #[cfg(unix)]
+    pub(in crate::suite) async fn without_model(config: Value, w: u16, h: u16) -> Self {
+        let env = TestEnv::new().await;
+        let mut b = env
+            .host()
+            .builtins(&["user-config"])
+            .config(json!({
+                "model": "",
+                "logo": false,
+                "plugins": {
+                    "permissions": { "enabled": true },
+                    "provider-faux": { "enabled": false }
+                }
+            }))
+            .config(config);
+        b.opts.mode = Mode::Tui;
+        b.opts.load_init = false;
+        let owned = OwnedVt::new(env, b.opts, w, h).await;
+        let mut t = Self::from_vt(owned, vt100::Parser::new(nz(h), nz(w), 2000));
+        t.step().await;
+        t
     }
 
     async fn in_env(env: TestEnv, script: Value, config: Value, args: Value, w: u16, h: u16) -> Self {
@@ -256,12 +287,12 @@ impl Term {
         Self { owned, parser, ended: 0, saw_welcome_banner: false, skip_drop_invariants: false }
     }
 
-    fn set_skip_drop_invariants(&mut self, skip: bool) {
+    pub(in crate::suite) fn set_skip_drop_invariants(&mut self, skip: bool) {
         self.skip_drop_invariants = skip;
     }
 
     /// One frame: run what's queued, draw, feed the bytes to the virtual terminal.
-    async fn step(&mut self) {
+    pub(in crate::suite) async fn step(&mut self) {
         self.vt.frame().await;
         let out = self.vt.output();
         self.parser.process(&out);
@@ -270,13 +301,13 @@ impl Term {
         }
     }
 
-    fn check_invariants(&mut self) -> Result<(), String> {
+    pub(in crate::suite) fn check_invariants(&mut self) -> Result<(), String> {
         let obs = invariants::observe_term(self, self.saw_welcome_banner);
         invariants::check_global_invariants(&obs)
     }
 
     /// Draw frames until `f(screen)` holds (polling with a deadline; no fixed sleeps).
-    async fn until(&mut self, what: &str, f: impl Fn(&str) -> bool) {
+    pub(in crate::suite) async fn until(&mut self, what: &str, f: impl Fn(&str) -> bool) {
         let end = Instant::now() + WAIT;
         loop {
             self.step().await;
@@ -288,12 +319,12 @@ impl Term {
         }
     }
 
-    fn screen(&self) -> String {
+    pub(in crate::suite) fn screen(&self) -> String {
         self.parser.screen().contents()
     }
 
     /// Everything the terminal holds: scrollback (oldest first) and the visible screen.
-    fn history(&mut self) -> String {
+    pub(in crate::suite) fn history(&mut self) -> String {
         let rows = self.parser.screen().size().0.get() as usize;
         self.parser.screen_mut().set_scrollback(usize::MAX);
         let max = self.parser.screen().scrollback();
@@ -317,7 +348,7 @@ impl Term {
         out
     }
 
-    fn key(&mut self, code: KeyCode, m: Modifiers) {
+    pub(in crate::suite) fn key(&mut self, code: KeyCode, m: Modifiers) {
         self.vt.key(KeyEvent::new(code, m));
     }
 
@@ -325,7 +356,7 @@ impl Term {
     /// Waits for startup to finish first: Enter while startup is still in progress sends
     /// nothing by design (app/startup/gate.rs), and a slow `app/ready` handler under parallel
     /// load would otherwise swallow the submission and stall the test until its deadline.
-    async fn submit(&mut self, text: &str) {
+    pub(in crate::suite) async fn submit(&mut self, text: &str) {
         self.until_vt("startup to finish", |t| !t.vt.starting()).await;
         self.ended = self.vt.turns_ended();
         self.vt.type_str(text);
@@ -340,7 +371,7 @@ impl Term {
     }
 
     /// Wait until the turn started by the last [`Self::submit`] has ended, then draw.
-    async fn idle(&mut self) {
+    pub(in crate::suite) async fn idle(&mut self) {
         let end = Instant::now() + WAIT;
         loop {
             self.step().await;
@@ -356,7 +387,7 @@ impl Term {
 
 impl Term {
     /// Draw frames until `f(self)` holds (for conditions that aren't screen text).
-    async fn until_vt(&mut self, what: &str, f: impl Fn(&mut Self) -> bool) {
+    pub(in crate::suite) async fn until_vt(&mut self, what: &str, f: impl Fn(&mut Self) -> bool) {
         let end = Instant::now() + WAIT;
         loop {
             self.step().await;
@@ -368,7 +399,7 @@ impl Term {
         }
     }
 
-    fn ctrl(&mut self, c: char) {
+    pub(in crate::suite) fn ctrl(&mut self, c: char) {
         self.key(KeyCode::Char(c), Modifiers::CONTROL);
     }
 }
