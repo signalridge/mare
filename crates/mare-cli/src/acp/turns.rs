@@ -46,7 +46,7 @@ enum RecordStep {
 trait ConfigWatcher {
     fn is_active(&self) -> bool;
     async fn changed(&mut self) -> bool;
-    async fn flush(&mut self, force: bool) -> Option<J>;
+    async fn flush(&mut self, force: bool) -> Vec<J>;
     async fn translate_event(&mut self, name: &str, payload: &J) -> Option<J>;
 }
 
@@ -63,8 +63,8 @@ impl ConfigWatcher for NoConfigWatcher {
         std::future::pending().await
     }
 
-    async fn flush(&mut self, _force: bool) -> Option<J> {
-        None
+    async fn flush(&mut self, _force: bool) -> Vec<J> {
+        Vec::new()
     }
 
     async fn translate_event(&mut self, name: &str, payload: &J) -> Option<J> {
@@ -117,25 +117,29 @@ impl ConfigWatcher for ConfigSync {
         }
     }
 
-    async fn flush(&mut self, force: bool) -> Option<J> {
+    async fn flush(&mut self, force: bool) -> Vec<J> {
         let rx_changed = self.rx.as_ref().and_then(|rx| rx.has_changed().ok()).unwrap_or(false);
         if rx_changed && let Some(rx) = self.rx.as_mut() {
             rx.mark_unchanged();
         }
         if !force && !rx_changed {
-            return None;
+            return Vec::new();
         }
-        let host = self.host.upgrade()?;
+        let Some(host) = self.host.upgrade() else {
+            return Vec::new();
+        };
         let opts = config_options(&host).await;
-        let opts_json = serde_json::to_value(&opts).ok()?;
+        let Ok(opts_json) = serde_json::to_value(&opts) else {
+            return Vec::new();
+        };
         if opts_json == self.last {
-            return None;
+            return Vec::new();
         }
         self.last = opts_json;
-        Some(json!({
+        vec![json!({
             "sessionUpdate": "config_option_update",
             "configOptions": opts,
-        }))
+        })]
     }
 
     async fn translate_event(&mut self, name: &str, payload: &J) -> Option<J> {
@@ -206,10 +210,14 @@ where
     F: FnMut(String, J) -> Fut,
     Fut: Future<Output = SinkOutcome>,
 {
-    let Some(update) = watch.flush(force).await else {
-        return RecordStep::Continue;
-    };
-    send_update(session_id, update, send, stream_err, record_err).await
+    for update in watch.flush(force).await {
+        match send_update(session_id, update, send, stream_err, record_err).await {
+            RecordStep::Continue => {}
+            #[cfg(test)]
+            RecordStep::Disconnected => return RecordStep::Disconnected,
+        }
+    }
+    RecordStep::Continue
 }
 
 async fn forward_record<F, Fut, W: ConfigWatcher>(

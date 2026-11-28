@@ -16,9 +16,11 @@ fn acp_file_tools_emit_locations_and_diffs_live_and_on_replay_with_stable_messag
     let work = tempfile::tempdir().unwrap();
     let cwd = dunce::canonicalize(work.path()).unwrap();
     let existing = cwd.join("existing.txt");
-    std::fs::write(&existing, "line1\nline2\nline3\n").unwrap();
+    let full_original: String = (1..=100).map(|i| format!("line{i:03}\n")).collect();
+    let full_edited = full_original.replace("line050\n", "line050-edited\n");
+    std::fs::write(&existing, &full_original).unwrap();
 
-    // Turn 1: reasoning + read (with offset=2) + write (new file) + edit (existing file) -> text reply.
+    // Turn 1: reasoning + read (with offset=2) + write (new file) + edit (middle line of 100-line file) -> text reply.
     let script = json!([
         {
             "reasoning": "inspect and update files",
@@ -29,7 +31,7 @@ fn acp_file_tools_emit_locations_and_diffs_live_and_on_replay_with_stable_messag
         },
         {
             "tool_calls": [
-                { "name": "edit", "arguments": { "path": "existing.txt", "old_string": "line2", "new_string": "line2-edited" } }
+                { "name": "edit", "arguments": { "path": "existing.txt", "old_string": "line050", "new_string": "line050-edited" } }
             ]
         },
         { "text": "all file edits applied" }
@@ -48,7 +50,7 @@ fn acp_file_tools_emit_locations_and_diffs_live_and_on_replay_with_stable_messag
         assert_valid_session_update(&sid, u);
     }
 
-    let check_file_tool_updates = |label: &str, updates: &[Value]| {
+    let check_file_tool_updates = |label: &str, updates: &[Value], expect_full_edit_diff: bool| {
         // 1. `read` tool_call carries absolute location + 1-based line from offset=2.
         let read_call = updates
             .iter()
@@ -94,10 +96,11 @@ fn acp_file_tools_emit_locations_and_diffs_live_and_on_replay_with_stable_messag
         assert!(write_diff.get("oldText").is_none(), "{label}: new file write diff must omit oldText: {write_diff}");
         assert_eq!(write_diff["newText"], "fresh line 1\nfresh line 2\n", "{label}: {write_diff}");
 
-        // 3. `edit` tool_call carries location; tool_call_update carries location + diff with oldText & newText.
+        // 3. `edit` tool_call carries location; live completion carries full 100-line oldText/newText
+        //    (preserving trailing newline), while compact v2 replay emits the unified diff as text.
         let edit_call = updates
             .iter()
-            .find(|u| u["sessionUpdate"] == "tool_call" && u["rawInput"]["old_string"] == "line2")
+            .find(|u| u["sessionUpdate"] == "tool_call" && u["rawInput"]["old_string"] == "line050")
             .unwrap_or_else(|| panic!("{label}: missing edit tool_call: {updates:?}"));
         let edit_id = edit_call["toolCallId"].as_str().unwrap();
         assert_eq!(edit_call["kind"], "edit", "{label}: {edit_call}");
@@ -116,20 +119,41 @@ fn acp_file_tools_emit_locations_and_diffs_live_and_on_replay_with_stable_messag
             json!([{ "path": existing.to_string_lossy() }]),
             "{label}: edit tool_call_update must include location: {edit_done}"
         );
-        let edit_diff = edit_done["content"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|b| b["type"] == "diff")
-            .unwrap_or_else(|| panic!("{label}: edit tool_call_update must include diff block: {edit_done}"));
-        assert_eq!(edit_diff["path"], existing.to_string_lossy().as_ref(), "{label}: {edit_diff}");
-        let old_text = edit_diff["oldText"].as_str().unwrap_or("");
-        let new_text = edit_diff["newText"].as_str().unwrap_or("");
-        assert!(old_text.contains("line2") && !old_text.contains("line2-edited"), "{label}: {edit_diff}");
-        assert!(new_text.contains("line2-edited"), "{label}: {edit_diff}");
+        let edit_blocks = edit_done["content"].as_array().unwrap();
+        if expect_full_edit_diff {
+            let edit_diff = edit_blocks
+                .iter()
+                .find(|b| b["type"] == "diff")
+                .unwrap_or_else(|| panic!("{label}: edit tool_call_update must include diff block: {edit_done}"));
+            assert_eq!(edit_diff["path"], existing.to_string_lossy().as_ref(), "{label}: {edit_diff}");
+            assert_eq!(
+                edit_diff["oldText"].as_str().unwrap_or(""),
+                full_original,
+                "{label}: live edit diff oldText must match full 100-line file with trailing newline"
+            );
+            assert_eq!(
+                edit_diff["newText"].as_str().unwrap_or(""),
+                full_edited,
+                "{label}: live edit diff newText must match full 100-line file with trailing newline"
+            );
+        } else {
+            assert!(
+                edit_blocks.iter().all(|b| b["type"] != "diff"),
+                "{label}: compact v2 replay must not emit a partial-hunk diff block: {edit_done}"
+            );
+            assert!(
+                edit_blocks.iter().any(|b| {
+                    b["type"] == "content"
+                        && b["content"]["text"]
+                            .as_str()
+                            .is_some_and(|t| t.contains("@@ ") && t.contains("+line050-edited"))
+                }),
+                "{label}: compact v2 replay must present unified diff as text content: {edit_done}"
+            );
+        }
     };
 
-    check_file_tool_updates("live", &live_updates);
+    check_file_tool_updates("live", &live_updates, true);
 
     // Capture live messageIds for reasoning & final assistant text.
     let live_thought_ids: Vec<String> = live_updates
@@ -183,7 +207,7 @@ fn acp_file_tools_emit_locations_and_diffs_live_and_on_replay_with_stable_messag
         assert_valid_session_update(&sid, u);
     }
 
-    check_file_tool_updates("replay", &replay_updates);
+    check_file_tool_updates("replay", &replay_updates, false);
 
     let replay_user = replay_updates
         .iter()
@@ -220,16 +244,18 @@ fn acp_apply_patch_emits_locations_and_diffs_live_and_on_replay() {
     let cwd = dunce::canonicalize(work.path()).unwrap();
     let target = cwd.join("patchme.txt");
     let added = cwd.join("added.txt");
-    std::fs::write(&target, "alpha\nbeta\ngamma\n").unwrap();
+    let full_original: String = (1..=30).map(|i| format!("row{i:02}\n")).collect();
+    let full_patched = full_original.replace("row15\n", "ROW15\n");
+    std::fs::write(&target, &full_original).unwrap();
 
     let patch = concat!(
         "*** Begin Patch\n",
         "*** Update File: patchme.txt\n",
         "@@\n",
-        " alpha\n",
-        "-beta\n",
-        "+BETA\n",
-        " gamma\n",
+        " row14\n",
+        "-row15\n",
+        "+ROW15\n",
+        " row16\n",
         "*** Add File: added.txt\n",
         "+hello patch\n",
         "*** End Patch\n",
@@ -255,7 +281,7 @@ fn acp_apply_patch_emits_locations_and_diffs_live_and_on_replay() {
     let (r1, live_updates) = read_until(&mut rpc, p1, Some(&sid));
     assert_eq!(r1["result"]["stopReason"], "end_turn", "{r1}");
 
-    let check_patch = |label: &str, updates: &[Value]| {
+    let check_patch = |label: &str, updates: &[Value], expect_full_diffs: bool| {
         let patch_call = updates
             .iter()
             .find(|u| u["sessionUpdate"] == "tool_call" && u["rawInput"].get("input").is_some())
@@ -283,18 +309,28 @@ fn acp_apply_patch_emits_locations_and_diffs_live_and_on_replay() {
             ]),
             "{label}: apply_patch tool_call_update must include locations: {patch_done}"
         );
-        let diffs: Vec<&Value> =
-            patch_done["content"].as_array().unwrap().iter().filter(|b| b["type"] == "diff").collect();
-        assert_eq!(diffs.len(), 2, "{label}: expected 2 diff blocks for update+add: {patch_done}");
-        assert_eq!(diffs[0]["path"], target.to_string_lossy().as_ref(), "{label}: {diffs:?}");
-        assert!(diffs[0]["oldText"].as_str().unwrap_or("").contains("beta"), "{label}: {diffs:?}");
-        assert!(diffs[0]["newText"].as_str().unwrap_or("").contains("BETA"), "{label}: {diffs:?}");
-        assert_eq!(diffs[1]["path"], added.to_string_lossy().as_ref(), "{label}: {diffs:?}");
-        assert!(diffs[1].get("oldText").is_none(), "{label}: added file diff must omit oldText: {diffs:?}");
-        assert!(diffs[1]["newText"].as_str().unwrap_or("").contains("hello patch"), "{label}: {diffs:?}");
+        let blocks = patch_done["content"].as_array().unwrap();
+        if expect_full_diffs {
+            let diffs: Vec<&Value> = blocks.iter().filter(|b| b["type"] == "diff").collect();
+            assert_eq!(diffs.len(), 2, "{label}: expected 2 full diff blocks for update+add: {patch_done}");
+            assert_eq!(diffs[0]["path"], target.to_string_lossy().as_ref(), "{label}: {diffs:?}");
+            assert_eq!(diffs[0]["oldText"].as_str().unwrap_or(""), full_original, "{label}: {diffs:?}");
+            assert_eq!(diffs[0]["newText"].as_str().unwrap_or(""), full_patched, "{label}: {diffs:?}");
+            assert_eq!(diffs[1]["path"], added.to_string_lossy().as_ref(), "{label}: {diffs:?}");
+            assert!(diffs[1].get("oldText").is_none(), "{label}: added file diff must omit oldText: {diffs:?}");
+            assert_eq!(diffs[1]["newText"].as_str().unwrap_or(""), "hello patch\n", "{label}: {diffs:?}");
+        } else {
+            assert!(
+                blocks.iter().all(|b| b["type"] != "diff"),
+                "{label}: compact v2 replay must not emit partial-hunk diff blocks: {patch_done}"
+            );
+            let texts: String =
+                blocks.iter().filter_map(|b| b["content"]["text"].as_str()).collect::<Vec<_>>().join("\n");
+            assert!(texts.contains("+ROW15") && texts.contains("+hello patch"), "{label}: {patch_done}");
+        }
     };
 
-    check_patch("live", &live_updates);
+    check_patch("live", &live_updates, true);
 
     let closed = rpc.call_raw("session/close", json!({ "sessionId": sid }), |_| json!(null));
     assert!(closed.get("result").is_some(), "{closed}");
@@ -308,7 +344,7 @@ fn acp_apply_patch_emits_locations_and_diffs_live_and_on_replay() {
     for u in &replay_updates {
         assert_valid_session_update(&sid, u);
     }
-    check_patch("replay", &replay_updates);
+    check_patch("replay", &replay_updates, false);
 
     rpc2.kill_and_wait();
 }

@@ -240,16 +240,68 @@ pub(super) fn acp_tool_kind_str(info: &J) -> &'static str {
     }
 }
 
-fn patch_tool_kind(input: &str) -> Option<&'static str> {
+fn access_tool_kind(info: &J) -> Option<&'static str> {
+    if info.get("access_state").and_then(J::as_str) == Some("undeclared") {
+        return None;
+    }
+    let entries = info.get("access").and_then(J::as_array)?;
     let mut has_delete = false;
+    let mut has_write = false;
+    let mut has_create = false;
+    let mut delete_paths = HashSet::new();
+    let mut write_paths = HashSet::new();
+    for entry in entries {
+        if entry.get("kind").and_then(J::as_str) != Some("file") {
+            continue;
+        }
+        let path = entry.get("logical").or_else(|| entry.get("path")).and_then(J::as_str).unwrap_or("");
+        match entry.get("op").and_then(J::as_str) {
+            Some("delete") => {
+                has_delete = true;
+                if !path.is_empty() {
+                    delete_paths.insert(path);
+                }
+            }
+            Some("create") => {
+                has_create = true;
+                if !path.is_empty() {
+                    write_paths.insert(path);
+                }
+            }
+            Some("write") => {
+                has_write = true;
+                if !path.is_empty() {
+                    write_paths.insert(path);
+                }
+            }
+            _ => {}
+        }
+    }
+    if has_delete && has_create && write_paths.iter().any(|p| !delete_paths.contains(p)) {
+        Some("move")
+    } else if has_delete && !has_write && !has_create {
+        Some("delete")
+    } else if has_write || has_create || has_delete {
+        Some("edit")
+    } else {
+        None
+    }
+}
+
+fn details_tool_kind(details: &J) -> Option<&'static str> {
+    let changes = details.get("changes").and_then(J::as_array)?;
+    if changes.is_empty() {
+        return None;
+    }
     let mut has_move = false;
+    let mut has_delete = false;
     let mut has_edit = false;
-    for line in input.lines() {
-        if line.starts_with("*** Move to: ") {
+    for ch in changes {
+        if ch.get("move_to").and_then(J::as_str).is_some_and(|s| !s.is_empty()) {
             has_move = true;
-        } else if line.starts_with("*** Delete File: ") {
+        } else if ch.get("kind").and_then(J::as_str) == Some("delete") {
             has_delete = true;
-        } else if line.starts_with("*** Add File: ") || line.starts_with("*** Update File: ") {
+        } else {
             has_edit = true;
         }
     }
@@ -257,16 +309,14 @@ fn patch_tool_kind(input: &str) -> Option<&'static str> {
         Some("move")
     } else if has_delete && !has_edit {
         Some("delete")
-    } else if has_edit || has_delete {
-        Some("edit")
     } else {
-        None
+        Some("edit")
     }
 }
 
-fn acp_tool_kind_for(info: Option<&J>, arguments: &J) -> &'static str {
+fn acp_tool_kind_for(info: Option<&J>, arguments: &J, replay_details: Option<&J>) -> &'static str {
     let Some(info) = info else {
-        return "other";
+        return replay_details.and_then(details_tool_kind).unwrap_or("other");
     };
     if let Some(kind) = info.get("kind").and_then(J::as_str).and_then(explicit_tool_kind_str) {
         return kind;
@@ -277,12 +327,7 @@ fn acp_tool_kind_for(info: Option<&J>, arguments: &J) -> &'static str {
     let obj = arguments.as_object();
     match info.get("side_effect").and_then(J::as_str) {
         Some("write") => {
-            if let Some(input) = obj.and_then(|o| o.get("input")).and_then(J::as_str)
-                && let Some(kind) = patch_tool_kind(input)
-            {
-                return kind;
-            }
-            "edit"
+            access_tool_kind(info).or_else(|| replay_details.and_then(details_tool_kind)).unwrap_or("edit")
         }
         Some("read") => {
             if obj.is_some_and(|o| o.contains_key("pattern") || o.contains_key("query")) {
@@ -335,23 +380,6 @@ fn resolve_tool_path(raw: &str, cwd: Option<&Path>) -> Option<PathBuf> {
     Some(normalize_lexical_path(&abs))
 }
 
-fn parse_patch_paths(input: &str) -> Vec<&str> {
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-    for line in input.lines() {
-        for prefix in ["*** Add File: ", "*** Update File: ", "*** Delete File: ", "*** Move to: "] {
-            if let Some(rest) = line.strip_prefix(prefix) {
-                let trimmed = rest.trim();
-                if !trimmed.is_empty() && seen.insert(trimmed) {
-                    out.push(trimmed);
-                }
-                break;
-            }
-        }
-    }
-    out
-}
-
 fn location_json(path: &Path, line: Option<u32>) -> J {
     let mut obj = Map::new();
     obj.insert("path".into(), J::String(path.to_string_lossy().into_owned()));
@@ -361,59 +389,74 @@ fn location_json(path: &Path, line: Option<u32>) -> J {
     J::Object(obj)
 }
 
-fn tool_call_locations_start(arguments: &J, cwd: Option<&Path>) -> Vec<J> {
-    let Some(obj) = arguments.as_object() else {
-        return Vec::new();
-    };
-    if let Some(raw_path) = obj.get("path").and_then(J::as_str) {
-        if let Some(abs) = resolve_tool_path(raw_path, cwd) {
-            let line = obj
-                .get("offset")
-                .or_else(|| obj.get("line"))
-                .and_then(J::as_u64)
-                .filter(|&n| n >= 1)
-                .and_then(|n| u32::try_from(n).ok());
-            return vec![location_json(&abs, line)];
-        }
-        return Vec::new();
-    }
-    if let Some(input) = obj.get("input").and_then(J::as_str) {
-        let mut out = Vec::new();
-        let mut seen = HashSet::new();
-        for raw in parse_patch_paths(input) {
-            if let Some(abs) = resolve_tool_path(raw, cwd)
-                && seen.insert(abs.clone())
-            {
-                out.push(location_json(&abs, None));
-            }
-        }
-        return out;
-    }
-    Vec::new()
+fn arg_line_hint(arguments: &J) -> Option<u32> {
+    let obj = arguments.as_object()?;
+    obj.get("offset")
+        .or_else(|| obj.get("line"))
+        .and_then(J::as_u64)
+        .filter(|&n| n >= 1)
+        .and_then(|n| u32::try_from(n).ok())
 }
 
-fn parse_unified_diff(diff: &str) -> (String, String) {
-    let mut in_hunk = false;
-    let mut old_lines = Vec::new();
-    let mut new_lines = Vec::new();
-    for line in diff.lines() {
-        if line.starts_with("@@ ") {
-            in_hunk = true;
-            continue;
+fn locations_from_paths(paths: Vec<PathBuf>, line: Option<u32>) -> Vec<J> {
+    let single_line = (paths.len() == 1).then_some(line).flatten();
+    paths.iter().map(|p| location_json(p, single_line)).collect()
+}
+
+fn tool_call_locations_start(
+    info: Option<&J>,
+    arguments: &J,
+    replay_details: Option<&J>,
+    cwd: Option<&Path>,
+) -> Vec<J> {
+    let line = arg_line_hint(arguments);
+    if let Some(info) = info
+        && info.get("access_state").and_then(J::as_str) != Some("undeclared")
+        && let Some(entries) = info.get("access").and_then(J::as_array)
+    {
+        let mut paths = Vec::new();
+        let mut seen = HashSet::new();
+        for entry in entries {
+            if entry.get("kind").and_then(J::as_str) != Some("file") {
+                continue;
+            }
+            let raw = entry.get("logical").or_else(|| entry.get("path")).and_then(J::as_str);
+            if let Some(abs) = raw.and_then(|p| resolve_tool_path(p, cwd))
+                && seen.insert(abs.clone())
+            {
+                paths.push(abs);
+            }
         }
-        if !in_hunk || line.starts_with("\\ ") {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix(' ') {
-            old_lines.push(rest);
-            new_lines.push(rest);
-        } else if let Some(rest) = line.strip_prefix('-') {
-            old_lines.push(rest);
-        } else if let Some(rest) = line.strip_prefix('+') {
-            new_lines.push(rest);
+        if !paths.is_empty() {
+            return locations_from_paths(paths, line);
         }
     }
-    (old_lines.join("\n"), new_lines.join("\n"))
+    if let Some(details) = replay_details.and_then(J::as_object) {
+        let mut paths = Vec::new();
+        let mut seen = HashSet::new();
+        if let Some(changes) = details.get("changes").and_then(J::as_array) {
+            for ch in changes {
+                for key in ["path", "move_to"] {
+                    if let Some(abs) = ch.get(key).and_then(J::as_str).and_then(|p| resolve_tool_path(p, cwd))
+                        && seen.insert(abs.clone())
+                    {
+                        paths.push(abs);
+                    }
+                }
+            }
+        } else if let Some(abs) = details.get("path").and_then(J::as_str).and_then(|p| resolve_tool_path(p, cwd)) {
+            paths.push(abs);
+        }
+        if !paths.is_empty() {
+            return locations_from_paths(paths, line);
+        }
+    }
+    if let Some(raw_path) = arguments.as_object().and_then(|o| o.get("path")).and_then(J::as_str)
+        && let Some(abs) = resolve_tool_path(raw_path, cwd)
+    {
+        return vec![location_json(&abs, line)];
+    }
+    Vec::new()
 }
 
 fn diff_block(path: &Path, old_text: Option<&str>, new_text: &str) -> J {
@@ -427,16 +470,19 @@ fn diff_block(path: &Path, old_text: Option<&str>, new_text: &str) -> J {
     J::Object(obj)
 }
 
+fn text_diff_block(unified: &str) -> J {
+    json!({ "type": "content", "content": { "type": "text", "text": unified } })
+}
+
 fn tool_result_diffs_and_locations(
+    live_changes: Option<&J>,
     details: Option<&J>,
     arguments: Option<&J>,
     failed: bool,
     cwd: Option<&Path>,
 ) -> (Vec<J>, Vec<J>) {
-    let Some(obj) = details.and_then(J::as_object) else {
-        return (Vec::new(), Vec::new());
-    };
-    let mut diffs = Vec::new();
+    let details_obj = details.and_then(J::as_object);
+    let mut blocks = Vec::new();
     let mut locations = Vec::new();
     let mut seen_locs = HashSet::new();
     let mut push_loc = |abs: &Path| {
@@ -445,11 +491,16 @@ fn tool_result_diffs_and_locations(
         }
     };
 
-    if let Some(changes) = obj.get("changes").and_then(J::as_array) {
-        let outcomes = obj.get("outcomes").and_then(J::as_array);
+    let live_arr = live_changes.and_then(J::as_array);
+    let details_arr = details_obj.and_then(|o| o.get("changes")).and_then(J::as_array);
+    if let Some(changes) = live_arr.or(details_arr) {
+        let outcomes = details_obj.and_then(|o| o.get("outcomes")).and_then(J::as_array);
         for (idx, ch) in changes.iter().enumerate() {
-            let outcome_status = outcomes.and_then(|o| o.get(idx)).and_then(|o| o.get("status")).and_then(J::as_str);
-            let completed = match outcome_status {
+            let status = ch
+                .get("status")
+                .and_then(J::as_str)
+                .or_else(|| outcomes.and_then(|o| o.get(idx)).and_then(|o| o.get("status")).and_then(J::as_str));
+            let completed = match status {
                 Some(s) => s == "completed",
                 None => !failed,
             };
@@ -471,53 +522,82 @@ fn tool_result_diffs_and_locations(
             let Some(target) = dst_abs.as_deref().or(src_abs.as_deref()) else {
                 continue;
             };
-            if let Some(unified) = ch.get("diff").and_then(J::as_str) {
-                let (old, new) = parse_unified_diff(unified);
-                if kind == "add" {
-                    diffs.push(diff_block(target, None, &new));
-                } else if !unified.is_empty() {
-                    diffs.push(diff_block(target, Some(&old), &new));
+            let truncated = ch.get("truncated").and_then(J::as_bool) == Some(true);
+            let is_add = kind == "add" || ch.get("is_new").and_then(J::as_bool) == Some(true);
+            if !truncated && let Some(new) = ch.get("new").and_then(J::as_str) {
+                if is_add {
+                    blocks.push(diff_block(target, None, new));
+                    continue;
                 }
-            } else if let Some(new) = ch.get("new").and_then(J::as_str) {
-                if kind == "add" {
-                    diffs.push(diff_block(target, None, new));
-                } else {
-                    diffs.push(diff_block(target, Some(ch.get("old").and_then(J::as_str).unwrap_or("")), new));
+                if let Some(old) = ch.get("old").and_then(J::as_str) {
+                    blocks.push(diff_block(target, Some(old), new));
+                    continue;
                 }
             }
+            let fallback_unified = ch
+                .get("diff")
+                .and_then(J::as_str)
+                .filter(|d| !d.is_empty())
+                .or_else(|| {
+                    live_arr.and_then(|_| {
+                        details_arr
+                            .and_then(|arr| arr.get(idx))
+                            .and_then(|d| d.get("diff"))
+                            .and_then(J::as_str)
+                            .filter(|d| !d.is_empty())
+                    })
+                })
+                .or_else(|| {
+                    live_arr.and_then(|_| {
+                        details_obj.and_then(|o| o.get("diff")).and_then(J::as_str).filter(|d| !d.is_empty())
+                    })
+                });
+            if let Some(unified) = fallback_unified {
+                blocks.push(text_diff_block(unified));
+            }
         }
-        return (diffs, locations);
+        return (blocks, locations);
     }
 
+    let Some(obj) = details_obj else {
+        return (Vec::new(), Vec::new());
+    };
     if let Some(raw_path) = obj.get("path").and_then(J::as_str)
         && let Some(abs) = resolve_tool_path(raw_path, cwd)
     {
         push_loc(&abs);
         if !failed {
-            if let Some(unified) = obj.get("diff").and_then(J::as_str).filter(|d| !d.is_empty()) {
-                let (old, new) = parse_unified_diff(unified);
-                diffs.push(diff_block(&abs, Some(&old), &new));
-            } else if let Some(new) = obj.get("new").and_then(J::as_str) {
+            let truncated = obj.get("truncated").and_then(J::as_bool) == Some(true);
+            if !truncated && let Some(new) = obj.get("new").and_then(J::as_str) {
                 let old = obj.get("old").and_then(J::as_str);
-                diffs.push(diff_block(&abs, old, new));
+                blocks.push(diff_block(&abs, old, new));
             } else if obj.get("version").and_then(J::as_u64) == Some(2)
                 && obj.get("replaced").and_then(J::as_bool) != Some(true)
                 && let Some(content) = arguments.and_then(|a| a.get("content")).and_then(J::as_str)
             {
-                diffs.push(diff_block(&abs, None, content));
+                blocks.push(diff_block(&abs, None, content));
+            } else if let Some(unified) = obj.get("diff").and_then(J::as_str).filter(|d| !d.is_empty()) {
+                blocks.push(text_diff_block(unified));
             }
         }
     }
-    (diffs, locations)
+    (blocks, locations)
 }
 
-fn tool_call_update_start(id: &J, name: &str, arguments: &J, info: Option<&J>, cwd: Option<&Path>) -> J {
+fn tool_call_update_start(
+    id: &J,
+    name: &str,
+    arguments: &J,
+    info: Option<&J>,
+    replay_details: Option<&J>,
+    cwd: Option<&Path>,
+) -> J {
     let arg = arguments
         .as_object()
         .and_then(|o| o.get("path").or_else(|| o.get("command")).or_else(|| o.get("url")))
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let kind = acp_tool_kind_for(info, arguments);
+    let kind = acp_tool_kind_for(info, arguments, replay_details);
     let mut obj = Map::new();
     obj.insert("sessionUpdate".into(), J::String("tool_call".into()));
     obj.insert("toolCallId".into(), id.clone());
@@ -525,7 +605,7 @@ fn tool_call_update_start(id: &J, name: &str, arguments: &J, info: Option<&J>, c
     obj.insert("kind".into(), J::String(kind.into()));
     obj.insert("status".into(), J::String("in_progress".into()));
     obj.insert("rawInput".into(), arguments.clone());
-    let locations = tool_call_locations_start(arguments, cwd);
+    let locations = tool_call_locations_start(info, arguments, replay_details, cwd);
     if !locations.is_empty() {
         obj.insert("locations".into(), J::Array(locations));
     }
@@ -562,12 +642,13 @@ fn tool_call_update_end(
     id: &J,
     failed: bool,
     content: &J,
+    live_changes: Option<&J>,
     details: Option<&J>,
     arguments: Option<&J>,
     cwd: Option<&Path>,
 ) -> J {
     let mut blocks = tool_result_content(content);
-    let (diffs, locations) = tool_result_diffs_and_locations(details, arguments, failed, cwd);
+    let (diffs, locations) = tool_result_diffs_and_locations(live_changes, details, arguments, failed, cwd);
     blocks.extend(diffs);
     let mut obj = Map::new();
     obj.insert("sessionUpdate".into(), J::String("tool_call_update".into()));
@@ -602,6 +683,7 @@ struct CompletedToolCall<'a> {
     call_id: &'a J,
     failed: bool,
     content: &'a J,
+    changes: Option<&'a J>,
     details: Option<&'a J>,
     arguments: Option<&'a J>,
 }
@@ -620,9 +702,10 @@ fn parse_completed_tool_call(p: &J) -> Option<CompletedToolCall<'_>> {
     let status_failed = item["status"].as_str().is_some_and(|s| s != "completed");
     let failed = is_error || status_failed;
     let content = item.pointer("/message/content").unwrap_or(&J::Null);
+    let changes = item.get("changes");
     let details = item.pointer("/message/details");
     let arguments = item.get("arguments");
-    Some(CompletedToolCall { call_id, failed, content, details, arguments })
+    Some(CompletedToolCall { call_id, failed, content, changes, details, arguments })
 }
 
 async fn fetch_full_tool_result_content(host: &Host, call_id: &str) -> Option<J> {
@@ -643,9 +726,9 @@ pub(super) async fn hydrate_tool_result_update(host: &Host, p: &J, cwd: Option<&
         && let Some(id_str) = c.call_id.as_str()
         && let Some(full) = fetch_full_tool_result_content(host, id_str).await
     {
-        return Some(tool_call_update_end(c.call_id, c.failed, &full, c.details, c.arguments, cwd));
+        return Some(tool_call_update_end(c.call_id, c.failed, &full, c.changes, c.details, c.arguments, cwd));
     }
-    Some(tool_call_update_end(c.call_id, c.failed, c.content, c.details, c.arguments, cwd))
+    Some(tool_call_update_end(c.call_id, c.failed, c.content, c.changes, c.details, c.arguments, cwd))
 }
 
 fn content_chunk_update(kind: &str, content: J, message_id: Option<&str>) -> J {
@@ -699,11 +782,11 @@ pub(super) fn to_update_with(name: &str, p: &J, opts: TranslateOpts<'_>) -> Opti
             let call_id = item.get("tool_call_id").or_else(|| p.get("item_id"))?;
             let tool_name = item["name"].as_str().unwrap_or("tool");
             let info = item.get("info").or_else(|| p.get("info"));
-            Some(tool_call_update_start(call_id, tool_name, &item["arguments"], info, opts.cwd))
+            Some(tool_call_update_start(call_id, tool_name, &item["arguments"], info, None, opts.cwd))
         }
         "item/completed" => {
             let c = parse_completed_tool_call(p)?;
-            Some(tool_call_update_end(c.call_id, c.failed, c.content, c.details, c.arguments, opts.cwd))
+            Some(tool_call_update_end(c.call_id, c.failed, c.content, c.changes, c.details, c.arguments, opts.cwd))
         }
         "compact/started" => {
             if !opts.compaction_updates {
@@ -814,6 +897,16 @@ pub(super) fn messages_to_updates_with_context(
     let mut tool_call_order = Vec::new();
     let mut tool_call_args: HashMap<String, &J> = HashMap::new();
     let mut closed_tool_calls = HashSet::new();
+    let mut replay_details_by_id: HashMap<&str, &J> = HashMap::new();
+    for entry in messages {
+        let msg = &entry.message;
+        if msg.get("role").and_then(J::as_str) == Some("tool_result")
+            && let Some(id) = msg.get("tool_call_id").and_then(J::as_str).filter(|s| !s.is_empty())
+            && let Some(details) = msg.get("details")
+        {
+            replay_details_by_id.insert(id, details);
+        }
+    }
     for (idx, entry) in messages.iter().enumerate() {
         let msg = &entry.message;
         let msg_id = entry.entry_id.as_deref();
@@ -887,14 +980,23 @@ pub(super) fn messages_to_updates_with_context(
                                     let name = block.get("name").and_then(J::as_str).unwrap_or("tool");
                                     let args = block.get("arguments").unwrap_or(&J::Null);
                                     let info = block.get("info").or_else(|| tool_info.get(name));
+                                    let replay_details = replay_details_by_id.get(id).copied();
                                     if block.get("hosted").and_then(J::as_bool) == Some(true) {
-                                        out.push(tool_call_update_start(id_val, name, args, info, opts.cwd));
+                                        out.push(tool_call_update_start(
+                                            id_val,
+                                            name,
+                                            args,
+                                            info,
+                                            replay_details,
+                                            opts.cwd,
+                                        ));
                                         let result = block.get("result").unwrap_or(&J::Null);
                                         let failed = result.get("status").and_then(J::as_str) == Some("failed");
                                         out.push(tool_call_update_end(
                                             id_val,
                                             failed,
                                             result,
+                                            None,
                                             None,
                                             Some(args),
                                             opts.cwd,
@@ -904,7 +1006,14 @@ pub(super) fn messages_to_updates_with_context(
                                             tool_call_order.push(id.to_string());
                                         }
                                         tool_call_args.insert(id.to_string(), args);
-                                        out.push(tool_call_update_start(id_val, name, args, info, opts.cwd));
+                                        out.push(tool_call_update_start(
+                                            id_val,
+                                            name,
+                                            args,
+                                            info,
+                                            replay_details,
+                                            opts.cwd,
+                                        ));
                                     }
                                 }
                             }
@@ -923,7 +1032,7 @@ pub(super) fn messages_to_updates_with_context(
                     let failed = msg.get("is_error").and_then(J::as_bool).unwrap_or(false);
                     let details = msg.get("details");
                     let args = tool_call_args.get(id).copied();
-                    out.push(tool_call_update_end(id_val, failed, &msg["content"], details, args, opts.cwd));
+                    out.push(tool_call_update_end(id_val, failed, &msg["content"], None, details, args, opts.cwd));
                 }
             }
             _ => {}
@@ -931,7 +1040,7 @@ pub(super) fn messages_to_updates_with_context(
     }
     for id in tool_call_order {
         if !closed_tool_calls.contains(&id) {
-            out.push(tool_call_update_end(&J::String(id), true, &J::Null, None, None, opts.cwd));
+            out.push(tool_call_update_end(&J::String(id), true, &J::Null, None, None, None, opts.cwd));
         }
     }
     out
@@ -1530,33 +1639,51 @@ mod tests {
     }
 
     #[test]
-    fn tool_call_kinds_and_locations_cover_metadata_and_patch_operations() {
-        let cwd = PathBuf::from("/workspace/proj");
+    fn tool_call_kinds_and_locations_derive_from_structured_access_and_details() {
+        let cwd = if cfg!(windows) { PathBuf::from(r"C:\workspace\proj") } else { PathBuf::from("/workspace/proj") };
+        let old_path = cwd.join("old.txt").to_string_lossy().into_owned();
+        let a_path = cwd.join("a.txt").to_string_lossy().into_owned();
+        let b_path = cwd.join("b.txt").to_string_lossy().into_owned();
+        let src_path = cwd.join("src").to_string_lossy().into_owned();
         let opts = TranslateOpts { cwd: Some(&cwd), compaction_updates: false };
 
-        let del_patch = "*** Begin Patch\n*** Delete File: old.txt\n*** End Patch\n";
-        let move_patch = "*** Begin Patch\n*** Update File: a.txt\n*** Move to: b.txt\n@@\n-x\n+y\n*** End Patch\n";
         let cases = [
             (
-                "delete patch",
-                json!({ "side_effect": "write" }),
-                json!({ "input": del_patch }),
+                "delete via structured access",
+                json!({
+                    "side_effect": "write",
+                    "access_state": "declared",
+                    "access": [
+                        { "kind": "file", "op": "read", "logical": old_path },
+                        { "kind": "file", "op": "delete", "logical": old_path }
+                    ]
+                }),
+                json!({}),
                 "delete",
-                Some(json!([{ "path": "/workspace/proj/old.txt" }])),
+                Some(json!([{ "path": old_path }])),
             ),
             (
-                "move patch",
-                json!({ "side_effect": "write" }),
-                json!({ "input": move_patch }),
+                "move via structured access",
+                json!({
+                    "side_effect": "write",
+                    "access_state": "declared",
+                    "access": [
+                        { "kind": "file", "op": "read", "logical": a_path },
+                        { "kind": "file", "op": "delete", "logical": a_path },
+                        { "kind": "file", "op": "write", "logical": b_path },
+                        { "kind": "file", "op": "create", "logical": b_path }
+                    ]
+                }),
+                json!({}),
                 "move",
-                Some(json!([{ "path": "/workspace/proj/a.txt" }, { "path": "/workspace/proj/b.txt" }])),
+                Some(json!([{ "path": a_path }, { "path": b_path }])),
             ),
             (
                 "read search",
                 json!({ "side_effect": "read" }),
                 json!({ "pattern": "foo", "path": "src" }),
                 "search",
-                Some(json!([{ "path": "/workspace/proj/src" }])),
+                Some(json!([{ "path": src_path }])),
             ),
             (
                 "web fetch",
@@ -1596,6 +1723,95 @@ mod tests {
                 serde_json::from_value(json!({ "sessionId": "s1", "update": u }));
             assert!(parsed.is_ok(), "{label}: invalid SessionNotification {u}: {parsed:?}");
         }
+    }
+
+    #[test]
+    fn full_changes_emit_exact_diff_while_unified_hunks_emit_text_content() {
+        let cwd = if cfg!(windows) { PathBuf::from(r"C:\workspace\proj") } else { PathBuf::from("/workspace/proj") };
+        let big_path = cwd.join("big.txt").to_string_lossy().into_owned();
+        let opts = TranslateOpts { cwd: Some(&cwd), compaction_updates: false };
+        let full_old: String = (1..=100).map(|i| format!("line {i:03}\n")).collect();
+        let full_new = full_old.replace("line 050\n", "line 050 edited\n");
+
+        // 1. Live completion carrying full before/after content emits an exact ACP diff block
+        //    preserving every line and trailing newline.
+        let live = to_update_with(
+            "item/completed",
+            &json!({
+                "turn_id": "t1",
+                "item_id": "c1",
+                "status": "completed",
+                "item": {
+                    "type": "tool_call",
+                    "tool_call_id": "c1",
+                    "name": "edit",
+                    "status": "completed",
+                    "changes": [{
+                        "path": big_path,
+                        "kind": "update",
+                        "old": full_old,
+                        "new": full_new
+                    }],
+                    "message": {
+                        "role": "tool_result",
+                        "tool_call_id": "c1",
+                        "content": [{ "type": "text", "text": "Edited big.txt (+1 -1)" }],
+                        "details": {
+                            "version": 2,
+                            "path": big_path,
+                            "diff": "--- a/big.txt\n+++ b/big.txt\n@@ -49,3 +49,3 @@\n line 049\n-line 050\n+line 050 edited\n line 051\n",
+                            "lines": 100
+                        },
+                        "is_error": false
+                    }
+                }
+            }),
+            opts,
+        )
+        .unwrap();
+        let live_diff = live["content"].as_array().unwrap().iter().find(|b| b["type"] == "diff").expect("diff block");
+        assert_eq!(live_diff["path"], big_path);
+        assert_eq!(live_diff["oldText"], full_old);
+        assert_eq!(live_diff["newText"], full_new);
+
+        // 2. Replay of a compact v2 record (only a unified hunk, no full file contents) emits the
+        //    unified diff as text content and NEVER fabricates a partial-hunk ACP diff block.
+        let unified =
+            "--- a/big.txt\n+++ b/big.txt\n@@ -49,3 +49,3 @@\n line 049\n-line 050\n+line 050 edited\n line 051\n";
+        let replay = messages_to_updates_with_context(
+            &[
+                ReplayMessage {
+                    message: json!({
+                        "role": "assistant",
+                        "content": [{ "type": "tool_call", "id": "c1", "name": "edit", "arguments": { "path": "big.txt" } }]
+                    }),
+                    entry_id: None,
+                },
+                ReplayMessage {
+                    message: json!({
+                        "role": "tool_result",
+                        "tool_call_id": "c1",
+                        "content": [{ "type": "text", "text": "Edited big.txt (+1 -1)" }],
+                        "details": { "version": 2, "path": big_path, "diff": unified, "lines": 100 },
+                        "is_error": false
+                    }),
+                    entry_id: None,
+                },
+            ],
+            &HashMap::from([("edit".to_string(), json!({ "side_effect": "write" }))]),
+            opts,
+        );
+        let done = replay.iter().find(|u| u["sessionUpdate"] == "tool_call_update").unwrap();
+        assert_eq!(done["locations"], json!([{ "path": big_path }]));
+        let blocks = done["content"].as_array().unwrap();
+        assert!(
+            blocks.iter().all(|b| b["type"] != "diff"),
+            "unified-hunk-only replay must not emit a partial diff block: {done}"
+        );
+        assert!(
+            blocks.iter().any(|b| b["type"] == "content" && b["content"]["text"] == unified),
+            "unified-hunk-only replay must preserve unified diff as text content: {done}"
+        );
     }
 
     #[test]
