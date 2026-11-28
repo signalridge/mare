@@ -131,6 +131,10 @@ impl LiveDecoder {
                         self.in_paste = true;
                         self.parser.parse(&seq, true);
                         self.drain_parser(None, out);
+                    } else if b == b'~'
+                        && let Some(key) = crate::term_input::decode_xterm_modify_other_keys(&seq)
+                    {
+                        out.push(Event::Key(key));
                     } else {
                         let base_key = (b == b'u').then(|| extract_csi_u_base_layout_key(&seq)).flatten();
                         let seq_more = if base_key.is_some() { false } else { i < bytes.len() || more };
@@ -302,5 +306,41 @@ mod tests {
         assert_eq!(dec.flush_expired_esc(expired, &mut out), Some(t0));
         assert!(out.is_empty(), "incomplete OSC trailing ESC must not emit key: {out:?}");
         assert!(dec.esc_deadline().is_none());
+    }
+
+    #[test]
+    fn repro_242_xterm_modified_keys_in_live_decoder() {
+        let mut dec = LiveDecoder::default();
+        let mut out = Vec::new();
+        // xterm modifyOtherKeys: Shift+Tab (`CSI 27 ; 2 ; 9 ~`) and Ctrl+Enter (`CSI 27 ; 5 ; 13 ~`)
+        dec.feed(b"\x1b[27;2;9~\x1b[27;5;13~", false, &mut out);
+        assert_eq!(out.len(), 2, "expected 2 key events for xterm Shift+Tab and Ctrl+Enter, got {out:?}");
+        assert!(
+            matches!(out[0], Event::Key(k) if (k.code == KeyCode::BackTab || (k.code == KeyCode::Tab && k.modifiers.contains(Modifiers::SHIFT)))),
+            "expected Shift+Tab, got {:?}",
+            out[0]
+        );
+        assert!(
+            matches!(out[1], Event::Key(k) if k.code == KeyCode::Enter && k.modifiers.contains(Modifiers::CONTROL)),
+            "expected Ctrl+Enter, got {:?}",
+            out[1]
+        );
+
+        // Split across raw reads (right after ESC and mid-parameter).
+        out.clear();
+        let t0 = std::time::Instant::now();
+        dec.feed_at(b"a\x1b", false, t0, &mut out);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(out[0], Event::Key(k) if k.code == KeyCode::Char('a')));
+        dec.feed_at(b"[27;2;", true, t0 + std::time::Duration::from_millis(1), &mut out);
+        assert_eq!(out.len(), 1);
+        dec.feed_at(b"13~b", false, t0 + std::time::Duration::from_millis(2), &mut out);
+        assert_eq!(out.len(), 3, "expected a + Shift+Enter + b, got {out:?}");
+        assert!(
+            matches!(out[1], Event::Key(k) if k.code == KeyCode::Enter && k.modifiers == Modifiers::SHIFT),
+            "expected split Shift+Enter, got {:?}",
+            out[1]
+        );
+        assert!(matches!(out[2], Event::Key(k) if k.code == KeyCode::Char('b')));
     }
 }

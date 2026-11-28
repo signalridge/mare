@@ -273,6 +273,56 @@ pub fn decode_events(bytes: &[u8]) -> Vec<crate::tty::Event> {
     out
 }
 
+fn csi_modifiers(m: u32) -> Modifiers {
+    let m = m.saturating_sub(1);
+    let mut k = Modifiers::NONE;
+    if m & 1 != 0 {
+        k |= Modifiers::SHIFT;
+    }
+    if m & 2 != 0 {
+        k |= Modifiers::ALT;
+    }
+    if m & 4 != 0 {
+        k |= Modifiers::CONTROL;
+    }
+    if m & 8 != 0 {
+        k |= Modifiers::SUPER;
+    }
+    k
+}
+
+fn csi_u_code(cp: u32) -> Option<KeyCode> {
+    Some(match cp {
+        27 => KeyCode::Escape,
+        13 => KeyCode::Enter,
+        9 => KeyCode::Tab,
+        127 | 8 => KeyCode::Backspace,
+        c if c >= 0x20 && c != 0x7f && !(0xE000..=0xF8FF).contains(&c) => KeyCode::Char(char::from_u32(c)?),
+        _ => return None,
+    })
+}
+
+/// Decode an xterm `modifyOtherKeys` sequence (`CSI 27 ; <mods> ; <codepoint> ~`), used by
+/// terminals like WezTerm and tmux extended-keys for Shift+Tab, Ctrl+Enter, Shift+Enter, etc.
+pub(crate) fn decode_xterm_modify_other_keys(seq: &[u8]) -> Option<KeyEvent> {
+    if seq.len() < 7 || !seq.starts_with(b"\x1b[") || !seq.ends_with(b"~") {
+        return None;
+    }
+    let body = std::str::from_utf8(&seq[2..seq.len() - 1]).ok()?;
+    if body.bytes().any(|b| !b.is_ascii_digit() && b != b';' && b != b':') {
+        return None;
+    }
+    let mut parts = body.split(';');
+    let first = parts.next()?.split(':').next()?.parse::<u32>().ok()?;
+    if first != 27 {
+        return None;
+    }
+    let mod_val = parts.next()?.split(':').next()?.parse::<u32>().ok()?;
+    let cp = parts.next()?.split(':').next()?.parse::<u32>().ok()?;
+    let code = csi_u_code(cp)?;
+    Some(KeyEvent::new(code, csi_modifiers(mod_val)))
+}
+
 /// Raw terminal input bytes → key events, for keys typed while the startup background query
 /// owned stdin: text, Enter/Tab/Backspace, Ctrl+letter, Alt+key (ESC prefix), and the common
 /// CSI / SS3 sequences (arrows, Home/End, Insert/Delete, PgUp/PgDn, with modifiers).
@@ -292,33 +342,7 @@ pub fn decode_keys(bytes: &[u8]) -> Vec<KeyEvent> {
         })
     };
     // xterm / kitty modifier parameter: 1 + (shift 1 | alt 2 | ctrl 4 | super 8)
-    let mods = |m: u32| {
-        let m = m.saturating_sub(1);
-        let mut k = Modifiers::NONE;
-        if m & 1 != 0 {
-            k |= Modifiers::SHIFT;
-        }
-        if m & 2 != 0 {
-            k |= Modifiers::ALT;
-        }
-        if m & 4 != 0 {
-            k |= Modifiers::CONTROL;
-        }
-        if m & 8 != 0 {
-            k |= Modifiers::SUPER;
-        }
-        k
-    };
-    let csi_u_code = |cp: u32| -> Option<KeyCode> {
-        Some(match cp {
-            27 => KeyCode::Escape,
-            13 => KeyCode::Enter,
-            9 => KeyCode::Tab,
-            127 | 8 => KeyCode::Backspace,
-            c if c >= 0x20 && c != 0x7f && !(0xE000..=0xF8FF).contains(&c) => KeyCode::Char(char::from_u32(c)?),
-            _ => return None,
-        })
-    };
+    let mods = csi_modifiers;
     while i < cs.len() {
         let c = cs[i];
         if c != '\x1b' {
