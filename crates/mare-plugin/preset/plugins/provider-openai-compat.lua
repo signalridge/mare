@@ -355,13 +355,23 @@ return {
 				if is_openrouter and type(req.session_id) == "string" and req.session_id ~= "" then
 					headers["x-session-id"] = req.session_id
 				end
+				local tool_names = nil
+				if #tools > 0 then
+					tool_names = {}
+					for _, t in ipairs(tools) do
+						local fn_def = type(t) == "table" and t["function"] or nil
+						if type(fn_def) == "table" and type(fn_def.name) == "string" and fn_def.name ~= "" then
+							tool_names[fn_def.name] = true
+						end
+					end
+				end
 				return {
 					method = "POST",
 					url = wire_url,
 					headers = headers,
 					body = body,
 					model = model.id,
-				}, { markup_healing = healing_pattern }
+				}, { markup_healing = healing_pattern, tool_names = tool_names }
 			end,
 			decoder = function(sink, context)
 				local wire = ensure_wire()
@@ -376,6 +386,7 @@ return {
 				end, {
 					is_openrouter = lib.is_openrouter(ep.dialect, wire_req.url),
 					markup_healing = healing_pattern,
+					tool_names = st.tool_names,
 				})
 				return { event = P.feed, body = P.feed_body, finish = P.finish_message }
 			end,

@@ -1173,3 +1173,172 @@ async fn wire_estimate_hints_register_with_wire_and_dispose_on_unload() {
     })
     .await
 }
+
+#[tokio::test]
+async fn repro_issue_193_openai_chat_split_function_name_across_streaming_deltas() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        env.set_var("DEEPSEEK_API_KEY", "test-key");
+        let server = MockServer::start().await;
+        let c0 = json!({
+            "id": "chatcmpl-split",
+            "object": "chat.completion.chunk",
+            "created": 1700000000,
+            "model": "deepseek-chat",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "call_split_1",
+                            "type": "function",
+                            "function": { "name": "get_", "arguments": "" }
+                        },
+                        {
+                            "index": 1,
+                            "id": "call_repeat_2",
+                            "type": "function",
+                            "function": { "name": "read_file", "arguments": "{\"path\":" }
+                        },
+                        {
+                            "index": 2,
+                            "id": "call_prefix_3",
+                            "type": "function",
+                            "function": { "name": "a", "arguments": "{\"val\":" }
+                        }
+                    ]
+                },
+                "finish_reason": Value::Null
+            }]
+        });
+        let c1 = json!({
+            "id": "chatcmpl-split",
+            "object": "chat.completion.chunk",
+            "created": 1700000000,
+            "model": "deepseek-chat",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "function": { "name": "weather", "arguments": "{\"city\":\"Tokyo\"}" }
+                        },
+                        {
+                            "index": 1,
+                            "function": { "name": "read_file", "arguments": "\"a.txt\"}" }
+                        },
+                        {
+                            "index": 2,
+                            "function": { "name": "append", "arguments": "42}" }
+                        }
+                    ]
+                },
+                "finish_reason": Value::Null
+            }]
+        });
+        let c2 = json!({
+            "id": "chatcmpl-split",
+            "object": "chat.completion.chunk",
+            "created": 1700000000,
+            "model": "deepseek-chat",
+            "choices": [{ "index": 0, "delta": {}, "finish_reason": "tool_calls" }],
+            "usage": { "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15 }
+        });
+        server.route(
+            "/chat/completions",
+            vec![Resp::sse(format!("data: {c0}\n\ndata: {c1}\n\ndata: {c2}\n\ndata: [DONE]\n\n"))],
+        );
+
+        let h = wire_host(
+            &mut env,
+            &server,
+            json!({
+                "model": "deepseek/deepseek-chat",
+                "providers": { "deepseek": { "base_url": server.base } }
+            }),
+        )
+        .await;
+        let out: String = eval(
+            &h,
+            r#"
+            local starts, start_counts, deltas, delta_before_start = {}, {}, {}, {}
+            local msg = LLM:stream({
+                model = LLM:resolve("deepseek/deepseek-chat"),
+                system = "sys",
+                messages = { { role = "user", content = { { type = "text", text = "weather?" } } } },
+                tools = {
+                    { name = "get_weather", description = "w", parameters = { type = "object" } },
+                    { name = "read_file", description = "r", parameters = { type = "object" } },
+                    { name = "a", description = "short", parameters = { type = "object" } },
+                    { name = "aappend", description = "a", parameters = { type = "object" } },
+                },
+            }, function(ev)
+                if ev.type == "tool_call_start" then
+                    starts[ev.tool_call_id] = ev.name
+                    start_counts[ev.tool_call_id] = (start_counts[ev.tool_call_id] or 0) + 1
+                elseif ev.type == "tool_call_delta" then
+                    if not starts[ev.tool_call_id] then
+                        delta_before_start[ev.tool_call_id] = true
+                    end
+                    deltas[ev.tool_call_id] = (deltas[ev.tool_call_id] or "") .. tostring(ev.delta or "")
+                end
+            end)
+            local calls = {}
+            for _, b in ipairs(msg.content or {}) do
+                if b.type == "tool_call" then
+                    calls[b.id] = b
+                end
+            end
+            return mare.json.encode({
+                c1 = calls["call_split_1"],
+                c2 = calls["call_repeat_2"],
+                c3 = calls["call_prefix_3"],
+                starts = starts,
+                start_counts = start_counts,
+                deltas = deltas,
+                delta_before_start = delta_before_start,
+            })
+            "#,
+        )
+        .await;
+        h.shutdown().await;
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["c1"]["arguments"]["city"], "Tokyo", "arguments should be retained: {parsed}");
+        assert_eq!(parsed["c1"]["name"], "get_weather", "split function.name deltas should assemble: {parsed}");
+        assert_eq!(parsed["c2"]["name"], "read_file", "repeated full name must not concatenate: {parsed}");
+        assert_eq!(parsed["c2"]["arguments"]["path"], "a.txt", "repeated-name call arguments retained: {parsed}");
+        assert_eq!(
+            parsed["c3"]["name"], "aappend",
+            "split `a` + `append` must assemble to `aappend`, not be treated as cumulative snapshot: {parsed}"
+        );
+        assert_eq!(parsed["c3"]["arguments"]["val"], 42, "aappend arguments should be retained: {parsed}");
+        assert_eq!(
+            parsed["starts"]["call_split_1"], "get_weather",
+            "tool_call_start must emit complete assembled name, not truncated first fragment: {parsed}"
+        );
+        assert_eq!(parsed["starts"]["call_repeat_2"], "read_file", "tool_call_start must emit `read_file`: {parsed}");
+        assert_eq!(
+            parsed["starts"]["call_prefix_3"], "aappend",
+            "tool_call_start must emit `aappend`, not `a` even when `a` is also declared: {parsed}"
+        );
+        for id in ["call_split_1", "call_repeat_2", "call_prefix_3"] {
+            assert_eq!(parsed["start_counts"][id], 1, "{id} must emit tool_call_start exactly once: {parsed}");
+            assert!(
+                parsed["delta_before_start"][id].is_null(),
+                "{id} must not emit tool_call_delta before tool_call_start: {parsed}"
+            );
+        }
+        assert_eq!(
+            parsed["deltas"]["call_prefix_3"], "{\"val\":42}",
+            "buffered argument deltas must replay after deferred tool_call_start: {parsed}"
+        );
+        assert_eq!(
+            parsed["deltas"]["call_split_1"], "{\"city\":\"Tokyo\"}",
+            "tool_call_delta must carry full arguments: {parsed}"
+        );
+    })
+    .await
+}
