@@ -965,3 +965,66 @@ async fn repro_233_rewind_warns_when_later_turn_in_suffix_ran_shell() {
     })
     .await
 }
+
+#[tokio::test]
+async fn repro_232_rewind_restores_prompt_text_for_queued_turn() {
+    local(async {
+        let env = TestEnv::new().await;
+        std::fs::write(env.cwd.join("a.txt"), "ATTACHED_FILE_BODY_MUST_NOT_ENTER_EDITOR\n").unwrap();
+        let script = json!([
+            { "tool_calls": [{ "name": "write", "arguments": { "path": "queued.txt", "content": "from queued turn\n" } }] },
+            { "text": "queued turn done" }
+        ]);
+        let h = env.host().builtins(&["changes", "commands", "file-ref"]).faux(script).build_exposed().await;
+        global(&h, "CH", h.service_table("changes").unwrap());
+        global(&h, "CMD", h.service_table("commands").unwrap());
+
+        let (turn_id, label, editor_text): (String, String, Option<String>) = eval(
+            &h,
+            r#"
+            local q1 = A:prompt("check @a.txt", { queue_only = true })
+            assert(q1 and q1.status == "queued", "expected queued status, got " .. mare.json.encode(q1))
+            local q2 = A:prompt("second queued line", { queue_only = true })
+            assert(q2 and q2.status == "queued", "expected queued status, got " .. mare.json.encode(q2))
+            local started = A:continue()
+            assert(started and started.turn_id, "expected turn_id from continue")
+            A:wait(started.turn_id)
+
+            local turns = CH:turns()
+            assert(#turns == 1, "expected 1 snapshot turn, got " .. #turns)
+            local lbl = turns[1].label
+
+            local step = 0
+            mare.g.restored_editor = nil
+            mare.ui.connected = function() return true end
+            mare.ui.notify = function() end
+            mare.ui.set_editor = function(t) mare.g.restored_editor = t end
+            mare.ui.select = function()
+                step = step + 1
+                if step == 1 then return 1 end -- pick the queued turn
+                return 2 -- "Restore files and the conversation" (both)
+            end
+            CMD:run("/rewind")
+            return started.turn_id, lbl, mare.g.restored_editor
+            "#,
+        )
+        .await;
+
+        assert!(!env.cwd.join("queued.txt").exists(), "rewind should still remove queued.txt");
+        let restored = editor_text.as_deref().unwrap_or("");
+        assert!(
+            !restored.contains("ATTACHED_FILE_BODY_MUST_NOT_ENTER_EDITOR"),
+            "restored draft must use original queued prompt text, not file-ref transformed message body: {restored:?}"
+        );
+        assert_eq!(
+            restored, "check @a.txt\nsecond queued line",
+            "expected queued turn ({turn_id}) to restore original queued prompts in submission order; label={label:?}"
+        );
+        assert!(
+            label.contains("check @a.txt"),
+            "expected rewind turn label to reflect original queued prompt; label={label:?}"
+        );
+        h.shutdown().await;
+    })
+    .await
+}

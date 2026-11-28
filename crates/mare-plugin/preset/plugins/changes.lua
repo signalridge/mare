@@ -75,7 +75,7 @@ return {
 						if not prev then
 							turns_meta[r.turn] = { text = r.text, before = r.before, shell = r.shell == true, n = 0 }
 						else
-							if r.text ~= nil and prev.text == nil then
+							if r.text ~= nil then
 								prev.text = r.text
 							end
 							if r.before ~= nil and prev.before == nil then
@@ -116,7 +116,8 @@ return {
 			-- the conversation point before this turn's prompt (agent/start comes before the
 			-- prompt is written): false = the start of the session
 			local before = svc.session and svc.session:leaf() or false
-			turns_meta[id] = { text = ev and ev.text or nil, n = #order, before = before }
+			local from_queue = ev ~= nil and ev.text == nil and ev.trigger == "queued"
+			turns_meta[id] = { text = ev and ev.text or nil, n = #order, before = before, from_queue = from_queue }
 			if svc.session and svc.session.add_record then
 				local text = ev and ev.text
 				pcall(svc.session.add_record, svc.session, "changes/turn", {
@@ -126,6 +127,78 @@ return {
 				})
 			end
 			mare.snapshot.begin_turn(id)
+		end)
+
+		local queued_texts = {}
+		local function record_queue_items(items, action)
+			if type(items) ~= "table" then
+				return
+			end
+			local live = {}
+			for _, it in ipairs(items) do
+				if type(it) == "table" and type(it.input_id) == "string" and it.input_id ~= "" then
+					live[it.input_id] = true
+					if type(it.text) == "string" and it.text ~= "" then
+						queued_texts[it.input_id] = it.text
+					end
+				end
+			end
+			if action ~= "consumed" then
+				for id in pairs(queued_texts) do
+					if not live[id] then
+						queued_texts[id] = nil
+					end
+				end
+			end
+		end
+		if svc.agent and svc.agent.list_queue then
+			local ok_q, q = pcall(svc.agent.list_queue, svc.agent)
+			if ok_q and type(q) == "table" then
+				record_queue_items(q.data, "init")
+			end
+		end
+		ctx:on("queue/changed", function(ev)
+			if type(ev) == "table" then
+				record_queue_items(ev.items, ev.action)
+			end
+		end)
+		ctx:on("session/changed", function()
+			queued_texts = {}
+			if svc.agent and svc.agent.list_queue then
+				local ok_q, q = pcall(svc.agent.list_queue, svc.agent)
+				if ok_q and type(q) == "table" then
+					record_queue_items(q.data, "init")
+				end
+			end
+		end)
+
+		ctx:on("item/completed", function(ev)
+			local item = type(ev) == "table" and ev.item or nil
+			local msg = item and item.type == "user_message" and item.message or nil
+			if not msg or msg.role ~= "user" or msg.notification then
+				return
+			end
+			local id = (ev.turn_id and tostring(ev.turn_id)) or (msg.turn_id and tostring(msg.turn_id)) or current
+			local meta = id and turns_meta[id] or nil
+			if not meta or not meta.from_queue then
+				return
+			end
+			local input_id = type(msg.input_id) == "string" and msg.input_id ~= "" and msg.input_id or nil
+			local text = input_id and queued_texts[input_id] or nil
+			if input_id then
+				queued_texts[input_id] = nil
+			end
+			if not text or text == "" then
+				return
+			end
+			meta.text = meta.text and (meta.text .. "\n" .. text) or text
+			if svc.session and svc.session.add_record then
+				pcall(svc.session.add_record, svc.session, "changes/turn", {
+					turn = id,
+					before = meta.before,
+					text = mare.text.cut(meta.text, 2000),
+				})
+			end
 		end)
 
 		local rel = require("mare_lib").rel
@@ -312,15 +385,31 @@ return {
 		local function fresh_turn_meta(turn_id)
 			local mem = turns_meta[turn_id]
 			if svc.session and svc.session.list_records then
+				local merged
 				for _, r in ipairs(require("mare_lib").all_records(svc.session, "changes/turn") or {}) do
 					if type(r) == "table" and r.turn == turn_id then
-						return {
-							text = r.text,
-							before = r.before,
-							shell = (mem and mem.shell) or r.shell or false,
-							n = mem and mem.n or 0,
-						}
+						if not merged then
+							merged = {
+								text = r.text,
+								before = r.before,
+								shell = (mem and mem.shell) or r.shell == true,
+								n = mem and mem.n or 0,
+							}
+						else
+							if r.text ~= nil then
+								merged.text = r.text
+							end
+							if r.before ~= nil and merged.before == nil then
+								merged.before = r.before
+							end
+							if r.shell == true then
+								merged.shell = true
+							end
+						end
 					end
+				end
+				if merged then
+					return merged
 				end
 			end
 			return mem or {}
