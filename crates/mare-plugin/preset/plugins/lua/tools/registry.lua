@@ -556,18 +556,70 @@ return function(D)
 		return out
 	end
 
+	--- Whether `name` was explicitly listed by a request allowlist (`names`) or `--tools` (`tools_enabled`).
+	local function is_explicitly_allowed(name, names)
+		if type(names) == "table" and table.find(names, name) then
+			return true
+		end
+		local only = mare.config.tools_enabled
+		return type(only) == "table" and table.find(only, name) ~= nil
+	end
+
+	--- Decide how a `deferred` tool should appear in a request based on:
+	---   1. model capability (`native_tool_update`),
+	---   2. explicit admission (`explicit`), and
+	---   3. loader availability in the final request (`has_search`, `has_call`).
+	--- Returns `"defer"` (include with `defer_loading = true`), `"eager"` (include directly),
+	--- or `"omit"` (leave out of direct declarations).
+	local function deferred_declaration_mode(model, explicit, has_search, has_call)
+		if native_tool_update(model) then
+			if explicit and not has_search then
+				return "eager"
+			end
+			return "defer"
+		end
+		if explicit and not (has_search and has_call) then
+			return "eager"
+		end
+		return "omit"
+	end
+
+	local function tool_available_in_request(name, model, mode, names, opts, admit_ctx)
+		local d = registry[name]
+		if not d then
+			return false
+		end
+		if excluded(name) or (tool_allowed and not tool_allowed(name)) then
+			return false
+		end
+		if names and not table.find(names, name) then
+			return false
+		end
+		if d.enabled and not d.enabled(model, mode) then
+			return false
+		end
+		return is_admitted(d, model, mode, opts, admit_ctx)
+	end
+
 	--- definitions(model, names?, opts?) -> request tool list
 	function tools.definitions(_, _, model, names, opts)
 		local mode = edit_mode(model)
 		local admit_ctx = admission_context(model, mode, opts)
+		local has_search = tool_available_in_request("tool_search", model, mode, names, opts, admit_ctx)
+		local has_call = tool_available_in_request("call_tool", model, mode, names, opts, admit_ctx)
 		local out = {}
 		for _, n in ipairs(order) do
 			local d = registry[n]
 			local ok = not excluded(n) and (not tool_allowed or tool_allowed(n))
+			local explicit = is_explicitly_allowed(n, names)
+			local defer_mode = nil
 			if d.exposure == "nested" and not names then
 				ok = false
-			elseif not names and d.exposure == "deferred" and not native_tool_update(model) then
-				ok = false
+			elseif d.exposure == "deferred" then
+				defer_mode = deferred_declaration_mode(model, explicit, has_search, has_call)
+				if defer_mode == "omit" then
+					ok = false
+				end
 			end
 			if names and not table.find(names, n) then
 				ok = false
@@ -591,7 +643,7 @@ return function(D)
 					end
 					schema = compile_schema(n, params, d.param_order, d._external_schema)
 				end
-				local defer_loading = d.exposure == "deferred" and native_tool_update(model)
+				local defer_loading = defer_mode == "defer"
 				local declaration = {
 					name = n,
 					description = desc,
@@ -604,6 +656,7 @@ return function(D)
 					version = d._version,
 					model = model,
 					edit_mode = mode,
+					explicit_allow = explicit,
 					step_id = opts and opts.step_id or nil,
 					session_id = admit_ctx.session and admit_ctx.session.session_id or nil,
 					session_generation = admit_ctx.session and admit_ctx.session.session_epoch or nil,
@@ -619,6 +672,16 @@ return function(D)
 	function tools.bind_declarations(_, _, list, opts)
 		local llm_svc = D.svc.llm
 		local default_model = (opts and opts.model) or (llm_svc and llm_svc:current()) or nil
+		local has_search, has_call = false, false
+		for _, declaration in ipairs(list or {}) do
+			if type(declaration) == "table" and declaration.type ~= "hosted" then
+				if declaration.name == "tool_search" then
+					has_search = true
+				elseif declaration.name == "call_tool" then
+					has_call = true
+				end
+			end
+		end
 		local bound, wire = {}, {}
 		for _, declaration in ipairs(list or {}) do
 			if type(declaration) == "table" and declaration.type == "hosted" then
@@ -667,7 +730,9 @@ return function(D)
 				session_generation = admit_ctx.session and admit_ctx.session.session_epoch or record.session_generation,
 			}
 			bound[declaration.name] = token
-			local defer_loading = record.definition.exposure == "deferred" and native_tool_update(bound_model)
+			local defer_loading = record.definition.exposure == "deferred"
+				and deferred_declaration_mode(bound_model, record.explicit_allow == true, has_search, has_call)
+					== "defer"
 			wire[#wire + 1] = {
 				name = declaration.name,
 				description = declaration.description,
