@@ -97,6 +97,8 @@ return function(D)
 		end
 		if 1 > cfg.max_turns then
 			S.run_error = "max turns exceeded"
+			S.termination_reason = "turn_limit"
+			S.error_kind = "max_turns"
 			return nil
 		end
 		local lease, lease_error
@@ -335,10 +337,7 @@ return function(D)
 			S.termination_reason = "error"
 		end
 		-- `error_kind` lets frontends map the outcome (headless exit code 4 for the turn limit)
-		local error_kind = S.error_kind
-			or (S.run_error == "max turns exceeded" and "max_turns")
-			or (S.termination_reason == "interrupted" and "aborted")
-			or nil
+		local error_kind = S.error_kind or (S.termination_reason == "interrupted" and "aborted") or nil
 		return {
 			text = S.last_text,
 			structured = S.structured,

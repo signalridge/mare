@@ -546,13 +546,10 @@ fn build_session_config(mut base: J, mcp_servers: Map<String, J>) -> J {
 }
 
 fn session_trust(opts: &HostOptions, cwd: &std::path::Path) -> bool {
-    if opts.no_user_plugins {
-        return false;
-    }
     let same_ws = same_directory(&opts.cwd, cwd);
     let cli_trust = (opts.args.get("trust_source").and_then(|v| v.as_str()) == Some("cli"))
         .then(|| opts.args.get("trust").and_then(|v| v.as_str()) == Some("trusted"));
-    mare_host::resolve_workspace_trust(cwd, same_ws, opts.project_trusted, cli_trust)
+    mare_host::resolve_workspace_trust(cwd, same_ws, opts.project_trusted, cli_trust, opts.no_user_plugins)
 }
 
 fn session_args(opts: &HostOptions, cwd: &std::path::Path, trusted: bool, resume: Option<&str>) -> J {

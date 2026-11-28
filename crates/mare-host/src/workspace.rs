@@ -34,6 +34,7 @@ impl WorkspaceId {
 }
 
 /// Resolve project trust for a workspace session (shared by RPC and ACP):
+/// - `--clean` (`no_user_plugins == true`) forces untrusted everywhere;
 /// - CLI `--no-trust` (`anchor_cli_trust == Some(false)`) forces untrusted everywhere;
 /// - CLI `--trust` (`anchor_cli_trust == Some(true)`) applies only to the launch workspace
 ///   (`same_ws == true`) and never extends to sibling workspaces;
@@ -45,8 +46,9 @@ pub fn resolve_workspace_trust(
     same_ws: bool,
     anchor_startup_trusted: bool,
     anchor_cli_trust: Option<bool>,
+    no_user_plugins: bool,
 ) -> bool {
-    if anchor_cli_trust == Some(false) {
+    if no_user_plugins || anchor_cli_trust == Some(false) {
         return false;
     }
     if same_ws && let Some(cli_trust) = anchor_cli_trust {
@@ -444,15 +446,18 @@ mod tests {
     fn resolve_workspace_trust_honors_cli_flags_and_workspace_scope() {
         let dir = TempDir::new();
         let sibling = TempDir::new();
+        // `--clean` (`no_user_plugins = true`) forces untrusted everywhere, even with `--trust` or startup trust.
+        assert!(!resolve_workspace_trust(dir.path(), true, true, Some(true), true));
+        assert!(!resolve_workspace_trust(sibling.path(), false, true, None, true));
         // `--no-trust` forces untrusted everywhere, even on the launch workspace.
-        assert!(!resolve_workspace_trust(dir.path(), true, true, Some(false)));
-        assert!(!resolve_workspace_trust(sibling.path(), false, true, Some(false)));
+        assert!(!resolve_workspace_trust(dir.path(), true, true, Some(false), false));
+        assert!(!resolve_workspace_trust(sibling.path(), false, true, Some(false), false));
         // `--trust` applies only to the launch workspace, never to siblings.
-        assert!(resolve_workspace_trust(dir.path(), true, false, Some(true)));
-        assert!(!resolve_workspace_trust(sibling.path(), false, true, Some(true)));
+        assert!(resolve_workspace_trust(dir.path(), true, false, Some(true), false));
+        assert!(!resolve_workspace_trust(sibling.path(), false, true, Some(true), false));
         // Without CLI flags or saved decision, launch workspace falls back to startup trust; siblings default false.
-        assert!(resolve_workspace_trust(dir.path(), true, true, None));
-        assert!(!resolve_workspace_trust(dir.path(), true, false, None));
-        assert!(!resolve_workspace_trust(sibling.path(), false, true, None));
+        assert!(resolve_workspace_trust(dir.path(), true, true, None, false));
+        assert!(!resolve_workspace_trust(dir.path(), true, false, None, false));
+        assert!(!resolve_workspace_trust(sibling.path(), false, true, None, false));
     }
 }

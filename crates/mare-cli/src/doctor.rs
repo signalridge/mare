@@ -530,12 +530,36 @@ fn session_index(r: &mut Report, root: &Path) {
 /// Directory and permission checks; with `fix`, create missing directories and set 0700 / 0600.
 fn fs_checks(fix: bool) -> Vec<(&'static str, String, bool)> {
     use mare_shared::paths;
+    let dirs = [paths::config_dir(), paths::state_dir(), paths::data_dir(), paths::sessions_dir(), paths::log_dir()];
+    let mut priv_paths = Vec::new();
+    priv_paths.push((paths::auth_file(), 0o600));
+    if let Some(host_dir) = paths::host_token_file().parent() {
+        priv_paths.push((host_dir.to_path_buf(), 0o700));
+    }
+    priv_paths.push((paths::host_token_file(), 0o600));
+    priv_paths.push((paths::sessions_dir(), 0o700));
+    priv_paths.push((paths::state_dir(), 0o700));
+    visit_session_jsonl(&paths::sessions_dir(), &mut |p| priv_paths.push((p, 0o600)));
+    fs_checks_with(fix, &dirs, &priv_paths, &mut set_mode)
+}
+
+fn fs_checks_with(
+    fix: bool,
+    dirs: &[std::path::PathBuf],
+    priv_paths: &[(std::path::PathBuf, u32)],
+    apply_mode: &mut impl FnMut(&std::path::Path, u32) -> std::io::Result<()>,
+) -> Vec<(&'static str, String, bool)> {
     let mut out = vec![];
     let mut missing = vec![];
-    for d in [paths::config_dir(), paths::state_dir(), paths::data_dir(), paths::sessions_dir(), paths::log_dir()] {
+    let mut loose = vec![];
+    for d in dirs {
         if !d.exists() {
-            if fix && std::fs::create_dir_all(&d).is_ok() {
-                set_mode(&d, 0o700);
+            if fix && std::fs::create_dir_all(d).is_ok() {
+                if let Err(e) = apply_mode(d, 0o700)
+                    && !priv_paths.iter().any(|(pp, _)| pp == d)
+                {
+                    loose.push(format!("{} ({e})", d.display()));
+                }
             } else {
                 missing.push(d.display().to_string());
             }
@@ -551,34 +575,28 @@ fn fs_checks(fix: bool) -> Vec<(&'static str, String, bool)> {
         missing.is_empty(),
     ));
     {
-        let mut loose = vec![];
-        let mut check = |p: std::path::PathBuf, want: u32| {
-            let Ok(_m) = std::fs::metadata(&p) else { return };
-            // Unix: no group/other bits; Windows: a DACL that admits only this user, SYSTEM and
-            // Administrators (`mare_shared::private`)
-            #[cfg(unix)]
-            let open = {
-                use std::os::unix::fs::PermissionsExt;
-                _m.permissions().mode() & 0o077 != 0
-            };
-            #[cfg(windows)]
-            let open = mare_shared::private::check(&p).is_err();
-            if open {
-                if fix {
-                    set_mode(&p, want);
-                } else {
+        let mut check = |p: &std::path::Path, want: u32| {
+            let Ok(meta) = std::fs::metadata(p) else { return };
+            if !is_open(p, &meta) {
+                return;
+            }
+            if fix {
+                if let Err(e) = apply_mode(p, want) {
+                    loose.push(format!("{} ({e})", p.display()));
+                    return;
+                }
+                if let Ok(after) = std::fs::metadata(p)
+                    && is_open(p, &after)
+                {
                     loose.push(p.display().to_string());
                 }
+            } else {
+                loose.push(p.display().to_string());
             }
         };
-        check(paths::auth_file(), 0o600);
-        if let Some(host_dir) = paths::host_token_file().parent() {
-            check(host_dir.to_path_buf(), 0o700);
+        for (p, want) in priv_paths {
+            check(p, *want);
         }
-        check(paths::host_token_file(), 0o600);
-        check(paths::sessions_dir(), 0o700);
-        check(paths::state_dir(), 0o700);
-        visit_session_jsonl(&paths::sessions_dir(), &mut |p| check(p, 0o600));
         out.push((
             "permissions",
             if loose.is_empty() {
@@ -594,17 +612,33 @@ fn fs_checks(fix: bool) -> Vec<(&'static str, String, bool)> {
     out
 }
 
-/// Unix: chmod `mode`; Windows (no mode bits): the private DACL of `mare_shared::private`.
-fn set_mode(p: &std::path::Path, mode: u32) {
+/// Unix: any group/other mode bits; Windows: a DACL that admits more than this user, SYSTEM, and
+/// Administrators (`mare_shared::private`).
+fn is_open(p: &std::path::Path, meta: &std::fs::Metadata) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode));
+        let _ = p;
+        meta.permissions().mode() & 0o077 != 0
+    }
+    #[cfg(windows)]
+    {
+        let _ = meta;
+        mare_shared::private::check(p).is_err()
+    }
+}
+
+/// Unix: chmod `mode`; Windows (no mode bits): the private DACL of `mare_shared::private`.
+fn set_mode(p: &std::path::Path, mode: u32) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode))
     }
     #[cfg(windows)]
     {
         let _ = mode;
-        let _ = mare_shared::private::restrict(p);
+        mare_shared::private::restrict(p)
     }
 }
 
@@ -667,5 +701,45 @@ mod tests {
         assert_eq!(bad_rows[1]["ok"], false);
         let keys_detail = bad_rows[1]["detail"].as_str().unwrap();
         assert!(keys_detail.contains("extended-keys is off") && keys_detail.contains("Shift+Enter"), "{keys_detail}");
+    }
+
+    #[test]
+    fn fs_checks_fix_reports_error_and_unmodified_permissions_as_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let sess = dir.path().join("s1.jsonl");
+        std::fs::write(&sess, "{}\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&sess, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        #[cfg(windows)]
+        mare_shared::private::testing::open_to_everyone(&sess);
+
+        // 1) OS refuses permission tightening -> permissions check fails, names file, exit code 1.
+        let checks = fs_checks_with(true, &[], &[(sess.clone(), 0o600)], &mut |_, _| {
+            Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "read-only fs"))
+        });
+        let perm = checks.iter().find(|c| c.0 == "permissions").unwrap();
+        assert!(!perm.2, "{perm:?}");
+        assert!(perm.1.contains("s1.jsonl") && perm.1.contains("read-only fs"), "{perm:?}");
+        let mut r = Report { failures: 0, color: false, json: Some(Vec::new()) };
+        for (name, detail, ok) in checks {
+            r.line(ok, name, &detail);
+        }
+        assert_eq!(finish_report(r).unwrap(), 1);
+
+        // 2) set_mode returns Ok without tightening permissions -> post-check still fails.
+        let checks_noop = fs_checks_with(true, &[], &[(sess.clone(), 0o600)], &mut |_, _| Ok(()));
+        let perm_noop = checks_noop.iter().find(|c| c.0 == "permissions").unwrap();
+        assert!(!perm_noop.2, "{perm_noop:?}");
+        assert!(perm_noop.1.contains("s1.jsonl"), "{perm_noop:?}");
+
+        // 3) Real set_mode succeeds -> permissions check passes and file mode/DACL is private.
+        let checks_ok = fs_checks_with(true, &[], &[(sess.clone(), 0o600)], &mut set_mode);
+        let perm_ok = checks_ok.iter().find(|c| c.0 == "permissions").unwrap();
+        assert!(perm_ok.2, "{perm_ok:?}");
+        assert_eq!(perm_ok.1, "credentials and sessions are private");
+        assert!(!is_open(&sess, &std::fs::metadata(&sess).unwrap()));
     }
 }

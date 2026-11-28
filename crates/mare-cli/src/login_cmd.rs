@@ -8,7 +8,6 @@ use std::io::{IsTerminal, Read, Write};
 
 use anyhow::Result;
 use mare_host::{Host, HostOptions};
-use mare_shared::ui::Mode;
 
 pub enum Request {
     Login { provider: Option<String>, with_api_key: bool, device_auth: bool, oauth: bool },
@@ -17,7 +16,7 @@ pub enum Request {
     ModelsRefresh,
 }
 
-pub async fn run(cwd: &std::path::Path, req: Request) -> Result<i32> {
+pub async fn run(opts: HostOptions, req: Request) -> Result<i32> {
     let mut key = None;
     let mut with_api_key_tty = false;
     if let Request::Login { with_api_key: true, .. } = &req {
@@ -32,15 +31,6 @@ pub async fn run(cwd: &std::path::Path, req: Request) -> Result<i32> {
             key = Some(s.trim().to_string());
         }
     }
-    let opts = HostOptions {
-        cwd: cwd.to_path_buf(),
-        mode: Mode::Print,
-        config: serde_json::json!({}),
-        load_init: true,
-        project_trusted: mare_config::trust::decision(cwd).unwrap_or(false),
-        args: serde_json::json!({ "no_session": true }),
-        no_user_plugins: false,
-    };
     let host = match Host::new(opts).await {
         Ok(h) => h,
         Err(e) => {

@@ -302,8 +302,14 @@ impl RpcRuntime {
         let anchor_startup_trusted = host.startup_project_trusted();
         let anchor_cli_trust = host.startup_cli_trust();
         let anchor_load_init = host.load_init();
-        let initial_trusted =
-            mare_host::resolve_workspace_trust(&anchor_cwd, true, anchor_startup_trusted, anchor_cli_trust);
+        let no_user_plugins = host.no_user_plugins();
+        let initial_trusted = mare_host::resolve_workspace_trust(
+            &anchor_cwd,
+            true,
+            anchor_startup_trusted,
+            anchor_cli_trust,
+            no_user_plugins,
+        );
         sync_trust_args(&mut args, &anchor_cwd, initial_trusted, anchor_cli_trust, anchor_load_init);
         let base_opts = HostOptions {
             cwd: host.cwd.clone(),
@@ -616,8 +622,13 @@ impl RpcRuntime {
         let target_norm = mare_shared::paths::normalize_workspace_path(&opts.cwd).ok();
         let anchor_norm = mare_shared::paths::normalize_workspace_path(&self.anchor_cwd).ok();
         let same_ws = target_norm.is_some() && target_norm == anchor_norm;
-        opts.project_trusted =
-            mare_host::resolve_workspace_trust(&opts.cwd, same_ws, self.anchor_startup_trusted, self.anchor_cli_trust);
+        opts.project_trusted = mare_host::resolve_workspace_trust(
+            &opts.cwd,
+            same_ws,
+            self.anchor_startup_trusted,
+            self.anchor_cli_trust,
+            opts.no_user_plugins,
+        );
         sync_trust_args(&mut opts.args, &opts.cwd, opts.project_trusted, self.anchor_cli_trust, opts.load_init);
         Ok(opts)
     }
