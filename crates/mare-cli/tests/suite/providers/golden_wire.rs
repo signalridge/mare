@@ -18,7 +18,7 @@ for _, c in ipairs(cases) do
     max_tokens = c.max_tokens, no_fallback = true }
   if c.mode == "session" then
     LLM:set_model(c.ref, { save = false })
-    LLM:set_effort(c.effort, { save = false })
+    LLM:restore_selection({ effort = c.effort })
   elseif c.mode == "request" then
     req.effort = c.effort
   end

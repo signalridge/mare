@@ -263,10 +263,10 @@ async fn model_preview_effort_and_profile_show_the_parameters() {
         exec(&h, r#"L:set_model("faux/echo2") assert(not pcall(CM.run, CM, "/effort high")) CM:run("/effort")"#).await;
         let n = notices(&h).await;
         assert_eq!(n.matches("faux/echo2 has no effort parameter; its parameters: thinking").count(), 2, "{n}");
-        // a session effort the model doesn't offer: clamped per request, and /profile says so
+        // a session effort the model doesn't offer (e.g. restored): clamped per request, and /profile says so
         exec(
             &h,
-            r#"L:set_model("faux/echo") L:set_effort("xhigh", { save = false })
+            r#"L:set_model("faux/echo") L:restore_selection({ effort = "xhigh" })
                L:complete({ messages = { { role = "user", content = { { type = "text", text = "hi" } } } } })
                CM:run("/profile")"#,
         )

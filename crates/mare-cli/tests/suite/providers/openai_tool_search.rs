@@ -48,7 +48,12 @@ async fn openai_catalog_marks_gpt54_plus_models_defer_loading_and_codex_models_s
             &server,
             json!({
                 "models": {
-                    "openai/gpt-5.6-luna": { "tool_update": false }
+                    "openai/gpt-5.6-luna": { "tool_update": false },
+                    "openai/gpt-5.4": {},
+                    "openai/gpt-5.5": {},
+                    "openai/gpt-5.3": {},
+                    "openai/gpt-4.1": {},
+                    "openai/o3": {}
                 }
             }),
         )
@@ -573,6 +578,7 @@ async fn non_native_model_keeps_function_tool_search_without_defer_loading() {
             .user_plugins()
             .config(json!({
                 "model": "openai/gpt-5.3",
+                "models": { "openai/gpt-5.3": {} },
                 "plugins": {
                     "provider-openai": { "base_url": format!("{base}/openai") },
                     "llm": { "retry_base_ms": 1 },
