@@ -2474,3 +2474,194 @@ async fn subagent_wait_true_interrupted_persists_start_and_delivers_completion_n
     })
     .await;
 }
+
+#[tokio::test]
+async fn repro_236_explicitly_allowed_deferred_tool_callable_without_tool_search() {
+    local(async {
+        let env = TestEnv::new().await;
+        let plugins_dir = env.config_dir().join("plugins");
+        std::fs::create_dir_all(&plugins_dir).unwrap();
+        let req_capture = env.home.path().join("child-req.json");
+        std::fs::write(
+            plugins_dir.join("native-tu-provider.lua"),
+            format!(
+                r#"return {{
+    name = "native-tu-provider",
+    inject = {{ "llm", "tools" }},
+    apply = function(ctx)
+        ctx.llm:register_provider({{
+            provider = "nat",
+            no_key = true,
+            models = {{
+                {{ model_id = "tu", name = "TU", reasoning = false, tool_update = "addition_only" }},
+            }},
+            stream = function(req)
+                local wire = require("provider-anthropic.wire")
+                local converted = wire.convert_tools(req.tools)
+                mare.fs.write({:?}, mare.json.encode({{
+                    converted = mare.json.array(converted),
+                    raw = mare.json.array(req.tools or {{}}),
+                    model_tu = req.model and req.model.tool_update,
+                }}))
+                return {{ role = "assistant", content = {{ {{ type = "text", text = "done" }} }}, stop_reason = "stop" }}
+            end,
+        }})
+        ctx.tools:register("mcp__srv__ping", {{
+            description = "deferred mcp ping tool",
+            exposure = "deferred",
+            side_effect = "read",
+            parameters = {{ type = "object", properties = {{}}, additionalProperties = false }},
+            execute = function() return {{ content = "pong" }} end,
+        }})
+    end,
+}}"#,
+                req_capture.to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let mut b = env
+            .host()
+            .builtins(&["subagent", "provider-anthropic"])
+            .config(json!({ "model": "nat/tu" }))
+            .no_session();
+        b.opts.project_trusted = true;
+        b.opts.load_init = true;
+        b.opts.no_user_plugins = false;
+        let h = b.build().await;
+        expose(&h);
+
+        let _res: String = eval(
+            &h,
+            r#"
+            assert(C.cordis:get("llm"):set_model("nat/tu"))
+            local svc = C.cordis:get("subagent")
+            local run = svc:start({
+                prompt = "ping",
+                model = "nat/tu",
+                tools = { "mcp__srv__ping" },
+            })
+            local done = svc:wait(run.subagent_id, { timeout_ms = 15000 })
+            assert(done and done.status == "completed", mare.json.encode(done))
+            return tostring(done.result or "")
+            "#,
+        )
+        .await;
+
+        let raw = std::fs::read_to_string(&req_capture).expect("captured child wire tools");
+        let captured: Value = serde_json::from_str(&raw).unwrap();
+        let tools = captured["converted"].as_array().unwrap_or_else(|| panic!("captured={captured}"));
+        let ping = tools
+            .iter()
+            .find(|t| t["name"] == "mcp__srv__ping")
+            .unwrap_or_else(|| panic!("expected mcp__srv__ping in child request tools: {captured}"));
+        let has_tool_search = tools.iter().any(|t| t["name"] == "tool_search");
+        assert!(!has_tool_search, "fixture must omit tool_search: {captured}");
+        assert_ne!(
+            ping.get("defer_loading").and_then(Value::as_bool),
+            Some(true),
+            "explicitly allowed deferred tool was still sent with defer_loading=true without tool_search: {captured}"
+        );
+
+        // With `tool_search` present on the same native tool-update model, `defer_loading=true` is preserved.
+        let _res2: String = eval(
+            &h,
+            r#"
+            local svc = C.cordis:get("subagent")
+            local run = svc:start({
+                prompt = "ping with search",
+                model = "nat/tu",
+                tools = { "tool_search", "mcp__srv__ping" },
+            })
+            local done = svc:wait(run.subagent_id, { timeout_ms = 15000 })
+            assert(done and done.status == "completed", mare.json.encode(done))
+            return tostring(done.result or "")
+            "#,
+        )
+        .await;
+        let raw2 = std::fs::read_to_string(&req_capture).expect("captured child wire tools with tool_search");
+        let captured2: Value = serde_json::from_str(&raw2).unwrap();
+        let tools2 = captured2["converted"].as_array().unwrap_or_else(|| panic!("captured2={captured2}"));
+        assert!(tools2.iter().any(|t| t["name"] == "tool_search"), "expected tool_search: {captured2}");
+        let ping2 = tools2
+            .iter()
+            .find(|t| t["name"] == "mcp__srv__ping")
+            .unwrap_or_else(|| panic!("expected mcp__srv__ping in child request tools: {captured2}"));
+        assert_eq!(
+            ping2.get("defer_loading").and_then(Value::as_bool),
+            Some(true),
+            "deferred tool must stay defer_loading=true when tool_search is present: {captured2}"
+        );
+
+        // Verify non-native and implicit-allowlist cases directly on `tools:definitions` + `tools:bind_declarations`:
+        // 1. Non-native model with `tools_enabled = { "tool_search", "mcp__srv__ping" }` (no `call_tool`):
+        //    `tool_search` alone cannot execute deferred tools on a non-native model, so the explicitly allowed
+        //    deferred tool must be declared eagerly.
+        // 2. Non-native model with `tools_enabled = { "tool_search", "call_tool", "mcp__srv__ping" }`:
+        //    both loader tools are available, so the deferred tool stays omitted (deferred).
+        // 3. No explicit allowlist (`tools_enabled = nil`), disabling both `tool_search` and `call_tool`:
+        //    must NOT promote deferred tools to eager on either non-native or native models.
+        let (
+            non_native_search_only_eager,
+            non_native_both_deferred,
+            non_native_disabled_wrappers_not_eager,
+            native_disabled_search_not_eager,
+        ): (bool, bool, bool, bool) = eval(
+            &h,
+            r#"
+            local non_native = { id = "plain", provider = "nat" }
+            local native = { id = "tu", provider = "nat", tool_update = "addition_only" }
+            local function find_decl(list, name)
+                for _, d in ipairs(list) do
+                    if d.name == name then return d end
+                end
+                return nil
+            end
+
+            local orig_enabled = mare.config.tools_enabled
+            mare.config.tools_enabled = { "tool_search", "mcp__srv__ping" }
+            local d1 = T:definitions(non_native)
+            local _, w1 = T:bind_declarations(d1, { model = non_native })
+            local case1 = find_decl(d1, "mcp__srv__ping") ~= nil
+                and find_decl(w1, "mcp__srv__ping") ~= nil
+                and find_decl(w1, "mcp__srv__ping").defer_loading == nil
+
+            mare.config.tools_enabled = { "tool_search", "call_tool", "mcp__srv__ping" }
+            local d2 = T:definitions(non_native)
+            local case2 = find_decl(d2, "mcp__srv__ping") == nil
+
+            mare.config.tools_enabled = orig_enabled
+            T:disable("tool_search")
+            T:disable("call_tool")
+            local d3 = T:definitions(non_native)
+            local case3 = find_decl(d3, "mcp__srv__ping") == nil
+            local d4 = T:definitions(native)
+            local _, w4 = T:bind_declarations(d4, { model = native })
+            local p4 = find_decl(w4, "mcp__srv__ping")
+            local case4 = p4 ~= nil and p4.defer_loading == true
+            T:enable("tool_search")
+            T:enable("call_tool")
+            return case1, case2, case3, case4
+            "#,
+        )
+        .await;
+        assert!(
+            non_native_search_only_eager,
+            "non-native model with tools_enabled={{tool_search, target}} and no call_tool must expose target eagerly"
+        );
+        assert!(
+            non_native_both_deferred,
+            "non-native model with both tool_search and call_tool must keep deferred target deferred"
+        );
+        assert!(
+            non_native_disabled_wrappers_not_eager,
+            "disabling tool_search+call_tool without an explicit allowlist must not promote deferred tools to eager on non-native models"
+        );
+        assert!(
+            native_disabled_search_not_eager,
+            "disabling tool_search without an explicit allowlist must not promote deferred tools to eager on native models"
+        );
+        h.shutdown().await;
+    })
+    .await;
+}
