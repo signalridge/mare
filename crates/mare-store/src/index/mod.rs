@@ -61,6 +61,25 @@ thread_local! {
     static BEFORE_NONE_DELETE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static AFTER_BUILD_SCAN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static AFTER_UNSUPPORTED_UPDATE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static BEFORE_UPDATE_TX: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn before_update_tx(hook: Option<Box<dyn FnMut()>>) {
+    BEFORE_UPDATE_TX.with(|slot| *slot.borrow_mut() = hook);
+}
+
+#[cfg(test)]
+fn update_tx_ready() {
+    let hook = BEFORE_UPDATE_TX.with(|slot| slot.borrow_mut().take());
+    if let Some(mut hook) = hook {
+        hook();
+        BEFORE_UPDATE_TX.with(|slot| {
+            if slot.borrow().is_none() {
+                *slot.borrow_mut() = Some(hook);
+            }
+        });
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -527,13 +546,43 @@ impl Index {
                 row.git_branch = git_branch(&root);
                 (row.cwd, row.project_root) = (c.to_string(), Some(root));
             }
-            let id_changed = old.as_ref().is_some_and(|old| old.session_id != row.session_id);
+            let mut old = old;
+            let mut gained = gained;
+            let mut id_changed = old.as_ref().is_some_and(|old| old.session_id != row.session_id);
 
+            #[cfg(test)]
+            update_tx_ready();
             let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let current_old = by_path(&tx, &key)?;
             if current_old != old {
-                drop(tx);
-                continue;
+                let Some(cur) = current_old.filter(|cur| {
+                    cur.session_id == row.session_id
+                        && same_source_generation(cur, &row)
+                        && (cur.indexed_len < row.indexed_len
+                            || (cur.indexed_len == row.indexed_len && cur.indexed_mtime == row.indexed_mtime))
+                }) else {
+                    drop(tx);
+                    continue;
+                };
+                // Another connection committed an earlier or identical watermark of this same file
+                // generation while we scanned: rebase onto its row instead of retrying.
+                row.seq = cur.seq;
+                if cwd.filter(|c| !c.is_empty()).is_none() {
+                    row.git_branch = cur.git_branch.clone();
+                    if !cur.cwd.is_empty() {
+                        (row.cwd, row.project_root) = (cur.cwd.clone(), cur.project_root.clone());
+                    }
+                }
+                if checkpoint_anchor_matches(&cur, &row) {
+                    row.verified_len = cur.verified_len;
+                    row.verified_mtime = cur.verified_mtime;
+                } else {
+                    row.verified_len = None;
+                    row.verified_mtime = None;
+                }
+                gained = row.message_count - cur.message_count;
+                id_changed = false;
+                old = Some(cur);
             }
             // The same id under another path is a copied file; keep the first row only while that
             // path's current header still names the ID. A stale row must not make a changed ID vanish.
