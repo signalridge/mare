@@ -13,8 +13,17 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 jobs:
+  gate:
+    name: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: ${{ github.event_name == 'pull_request' && 'ci-approval' || '' }}
+    steps:
+      - run: echo "approved"
+
   changes:
     name: changes
+    needs: [gate]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -211,7 +220,7 @@ jobs:
 
   yamllint:
     name: yamllint
-    needs: [changes]
+    needs: [gate, changes]
     if: needs.changes.outputs.yaml == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -227,7 +236,7 @@ jobs:
 
   actionlint:
     name: actionlint
-    needs: [changes]
+    needs: [gate, changes]
     if: needs.changes.outputs.workflows == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -238,7 +247,7 @@ jobs:
 
   lint:
     name: lint
-    needs: [changes]
+    needs: [gate, changes]
     if: >-
       needs.changes.outputs.rust == 'true' ||
       needs.changes.outputs.scripts == 'true' ||
@@ -279,7 +288,7 @@ jobs:
 
   deny:
     name: cargo-deny
-    needs: [changes]
+    needs: [gate, changes]
     if: needs.changes.outputs.deny == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -293,7 +302,7 @@ jobs:
 
   lua:
     name: stylua · public-api-lint
-    needs: [changes]
+    needs: [gate, changes]
     if: needs.changes.outputs.lua == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -363,7 +372,7 @@ jobs:
 
   build-linux-tests:
     name: build tests (ubuntu-latest)
-    needs: [changes]
+    needs: [gate, changes]
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.lua == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -424,7 +433,7 @@ jobs:
 
   test-linux:
     name: test (ubuntu-latest, shard ${{ matrix.shard }}/4)
-    needs: [changes, build-linux-tests]
+    needs: [gate, changes, build-linux-tests]
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.lua == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -490,7 +499,7 @@ jobs:
 
   test-platform:
     name: test (${{ matrix.os }})
-    needs: [changes]
+    needs: [gate, changes]
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.lua == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 35
