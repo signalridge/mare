@@ -205,9 +205,6 @@ return function(D)
 			return false
 		end
 		if D.policy_revision() ~= rev_before then
-			if shared.error then
-				return false
-			end
 			local co = coroutine.running()
 			local prev_quiet = D.quiet[co]
 			D.quiet[co] = true

@@ -114,12 +114,14 @@ fn update_rebases_when_concurrent_reconcile_commits_same_generation() {
     append(&path, &[user("1", "first", 1)]);
 
     // Simulate reconcile committing L0 before writer's first tx (and L1 if it ever retried).
-    let mut calls = 0usize;
+    let calls1 = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let calls1_hook = calls1.clone();
     let peer_path = path.clone();
     let peer_l0 = row_l0.clone();
     before_update_tx(Some(Box::new(move || {
-        calls += 1;
-        if calls == 1 {
+        let n = calls1_hook.get() + 1;
+        calls1_hook.set(n);
+        if n == 1 {
             write_row(&peer.conn, &peer_l0).unwrap();
         } else {
             peer.update(&peer_path, None).unwrap();
@@ -128,6 +130,7 @@ fn update_rebases_when_concurrent_reconcile_commits_same_generation() {
     let landed = writer.update(&path, None);
     before_update_tx(None);
     let landed = landed.unwrap().unwrap();
+    assert_eq!(calls1.get(), 1, "prefix concurrent commit must rebase in the first transaction without retrying");
     assert_eq!(landed.message_count, 1);
     assert!(landed.seq > row_l0.seq, "rebasing a prefix commit that gained a message must advance seq");
 
@@ -137,13 +140,21 @@ fn update_rebases_when_concurrent_reconcile_commits_same_generation() {
     let peer2_path = path.clone();
     let committed_seq = std::rc::Rc::new(std::cell::Cell::new(0i64));
     let committed_seq_hook = committed_seq.clone();
+    let calls2 = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let calls2_hook = calls2.clone();
     before_update_tx(Some(Box::new(move || {
+        calls2_hook.set(calls2_hook.get() + 1);
         let r = peer2.update(&peer2_path, None).unwrap().unwrap();
         committed_seq_hook.set(r.seq);
     })));
     let same = writer.update(&path, None);
     before_update_tx(None);
     let same = same.unwrap().unwrap();
+    assert_eq!(
+        calls2.get(),
+        1,
+        "identical-watermark concurrent commit must rebase in the first transaction without retrying"
+    );
     assert_eq!(same.message_count, 2);
     assert_eq!(same.seq, committed_seq.get());
 }
