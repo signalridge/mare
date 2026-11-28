@@ -1354,3 +1354,156 @@ async fn local_summary_tracks_cumulative_files_and_live_todo_list() {
     })
     .await
 }
+
+#[tokio::test]
+async fn repro_issue_196_compaction_accepts_ack_only_summary() {
+    local(async {
+        let env = TestEnv::new().await;
+        let cfg = json!({ "plugins": { "compact": { "keep_recent_tokens": 1, "recent_user_tokens": 0 } } });
+        let h = env
+            .host()
+            .builtins(&["compact", "usage"])
+            .faux(json!([
+                { "text": "ACK" },
+                { "text": "OK, understood." },
+                { "text": "## Goal\n## Progress\n" },
+                { "text": "ACK\nOK" },
+                { "text": "## Goal\nOK" },
+                { "text": "## Goal\n- OK\n## Progress\n- Done" }
+            ]))
+            .config(cfg)
+            .no_session()
+            .build()
+            .await;
+        expose(&h);
+        global(&h, "K", h.service_table("compact").unwrap());
+
+        for label in [
+            "ACK",
+            "OK, understood.",
+            "headings-only",
+            "multiline-ack",
+            "heading-plus-ack",
+            "heading-plus-bullet-ack",
+        ] {
+            let (ok, err_or_status, count, first_text): (bool, String, i64, String) = eval(
+                &h,
+                r#"
+                local msgs = {
+                    { role = "user", content = { { type = "text", text = "Implement parser fix " .. string.rep("detail ", 300) } } },
+                    { role = "assistant", content = { { type = "text", text = "Analyzed src/parser.rs " .. string.rep("finding ", 300) } } },
+                    { role = "user", content = { { type = "text", text = "Now add unit tests" } } },
+                }
+                A:set_messages(msgs)
+                local ok, r = pcall(K.run, K)
+                local list = A:list_messages().data
+                local first = list[1]
+                local t = first and first.content and first.content[1] and first.content[1].text or ""
+                return ok and type(r) == "table" and r.status == "compacted", tostring(type(r) == "table" and r.status or r), #list, t
+                "#,
+            )
+            .await;
+            assert!(
+                !ok,
+                "degenerate summary ({label}) must not replace substantive history: {err_or_status} / {first_text}"
+            );
+            assert_eq!(count, 3, "active history must remain intact after rejected summary ({label})");
+            assert!(
+                first_text.starts_with("Implement parser fix "),
+                "original history must stay unchanged after rejected summary ({label}): {first_text}"
+            );
+        }
+        h.shutdown().await;
+    })
+    .await
+}
+
+#[tokio::test]
+async fn degenerate_summary_routes_through_summary_model_and_waterfall_fallbacks() {
+    local(async {
+        let env = TestEnv::new().await;
+        let cfg = json!({
+            "plugins": {
+                "llm": { "retries": 0 },
+                "compact": {
+                    "auto": false,
+                    "keep_recent_tokens": 1,
+                    "recent_user_tokens": 0,
+                    "summary_model": "faux/echo2",
+                    "stages": ["local"]
+                }
+            }
+        });
+        let h = env.host().builtins(&["compact", "usage"]).faux(json!([])).config(cfg).no_session().build().await;
+        expose(&h);
+        global(&h, "L", h.service_table("llm").unwrap());
+        global(&h, "K", h.service_table("compact").unwrap());
+
+        // 1. summary_model returns ACK -> falls back to current model which returns a real summary.
+        exec(&h, &long_history(3)).await;
+        let (ok1, models1, text1): (bool, Vec<String>, String) = eval(
+            &h,
+            r###"
+            local m = A:list_messages().data
+            m[#m + 1] = { role = "user", content = { { type = "text", text = "TAIL" } } }
+            A:set_messages(m)
+            MODELS = {}
+            L:provider("faux").stream = function(req, sink)
+                local ref = req.model and req.model.ref or "nil"
+                MODELS[#MODELS + 1] = ref
+                local reply = ref == "faux/echo2" and "ACK" or "## Goal\nFallback summary from current model"
+                sink({ type = "text_delta", id = "t1", delta = reply })
+                return { role = "assistant", stop_reason = "stop", content = { { type = "text", text = reply } } }
+            end
+            local r = K:run()
+            return r.status == "compacted", MODELS, mare.json.encode(A:list_messages().data)
+            "###,
+        )
+        .await;
+        assert!(ok1, "degenerate summary_model reply must fall back to current model");
+        assert_eq!(models1, vec!["faux/echo2", "faux/echo"]);
+        assert!(text1.contains("Fallback summary from current model"), "{text1}");
+
+        // 2. Both summary_model and current model return ACK -> compact/summary-error waterfall runs;
+        //    degenerate waterfall summary is rejected, substantive waterfall summary succeeds.
+        exec(&h, &long_history(3)).await;
+        let (ok2, err2, kind_seen): (bool, String, String) = eval(
+            &h,
+            r###"
+            local m = A:list_messages().data
+            m[#m + 1] = { role = "user", content = { { type = "text", text = "TAIL2" } } }
+            A:set_messages(m)
+            L:provider("faux").stream = function(req, sink)
+                sink({ type = "text_delta", id = "t1", delta = "ACK" })
+                return { role = "assistant", stop_reason = "stop", content = { { type = "text", text = "ACK" } } }
+            end
+            WATERFALL_KIND = ""
+            WF_REPLY = "## Goal\nOK"
+            C.cordis:on("compact/summary-error", function(data, ev)
+                WATERFALL_KIND = tostring(data.kind or "")
+                data.summary = WF_REPLY
+                return ev.next(data)
+            end)
+            local ok, err = pcall(K.run, K)
+            return ok and type(err) == "table" and err.status == "compacted", tostring(err), WATERFALL_KIND
+            "###,
+        )
+        .await;
+        assert!(!ok2, "degenerate waterfall summary must also be rejected: {err2}");
+        assert_eq!(kind_seen, "invalid_summary");
+
+        let (ok3, text3): (bool, String) = eval(
+            &h,
+            r###"
+            WF_REPLY = "## Goal\nSubstantive waterfall recovery summary"
+            local r = K:run()
+            return r.status == "compacted", mare.json.encode(A:list_messages().data)
+            "###,
+        )
+        .await;
+        assert!(ok3, "substantive waterfall summary must succeed");
+        assert!(text3.contains("Substantive waterfall recovery summary"), "{text3}");
+        h.shutdown().await;
+    })
+    .await
+}
