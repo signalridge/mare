@@ -51,6 +51,164 @@ fn position(items: &[Value], what: &str, pred: impl Fn(&Value) -> bool) -> Resul
     items.iter().position(pred).ok_or_else(|| format!("no {what} in {}", Value::Array(items.to_vec())))
 }
 
+#[tokio::test]
+async fn repro_269_google_signature_only_part_without_text_survives_replay() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let server = MockServer::start().await;
+        let turn1 = format!(
+            "data: {}\n\ndata: {}\n\n",
+            json!({
+                "candidates": [{
+                    "content": {
+                        "role": "model",
+                        "parts": [
+                            {"thoughtSignature": "U0lHX05PX1RFWFQ="},
+                            {"functionCall": {"name": "read", "args": {"path": "src/main.rs"}}}
+                        ]
+                    }
+                }]
+            }),
+            json!({
+                "candidates": [{
+                    "content": {"role": "model", "parts": []},
+                    "finishReason": "STOP"
+                }]
+            }),
+        );
+        let done = format!(
+            "data: {}\n\n",
+            json!({"candidates": [{"content": {"role": "model", "parts": [{"text": "done"}]}, "finishReason": "STOP"}]})
+        );
+        server.route("/google", vec![Resp::sse(turn1), Resp::sse(done)]);
+        let h = provider_host(&mut env, &server, json!({})).await;
+        h.lua().load(ROUND_TRIP).into_function().unwrap().call_async::<()>("google/gemini-2.5-pro").await.unwrap();
+        h.shutdown().await;
+        let reqs = server.requests();
+        assert_eq!(reqs.len(), 2);
+        let req = reqs[1].json();
+        let model_parts = req["contents"].as_array().unwrap().iter().find(|c| c["role"] == "model").unwrap()["parts"]
+            .as_array()
+            .unwrap();
+        let sig_pos = position(model_parts, "signature-only part", |p| {
+            p.get("text").is_none() && p["thoughtSignature"] == "U0lHX05PX1RFWFQ="
+        })
+        .unwrap();
+        let call_pos = position(model_parts, "functionCall", |p| p.get("functionCall").is_some()).unwrap();
+        assert!(
+            sig_pos < call_pos,
+            "signature-only part must replay before its functionCall in original part order: {}",
+            Value::Array(model_parts.clone())
+        );
+    })
+    .await
+}
+
+/// Review regression (#385): a Google response containing ONLY a signature-only part and
+/// `finishReason: "STOP"` has no visible output and must trigger the shared empty-response
+/// handling rather than succeeding with an empty answer.
+#[tokio::test]
+async fn google_signature_only_stop_without_visible_output_is_treated_as_empty_response() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let server = MockServer::start().await;
+        let sig_only_stop = format!(
+            "data: {}\n\n",
+            json!({
+                "candidates": [{
+                    "content": {
+                        "role": "model",
+                        "parts": [
+                            {"thoughtSignature": "U0lHX09OTFlfU1RPUA=="}
+                        ]
+                    },
+                    "finishReason": "STOP"
+                }]
+            })
+        );
+        server.route("/google", vec![Resp::sse(sig_only_stop)]);
+        let h = provider_host(&mut env, &server, json!({ "plugins": { "llm": { "retries": 0 } } })).await;
+        let msg = ask(&h, "google/gemini-2.5-pro").await;
+        h.shutdown().await;
+        assert_eq!(msg["stop_reason"], "error", "signature-only STOP must not succeed as empty reply: {msg}");
+        assert!(
+            msg["error"].as_str().is_some_and(|e| e.contains("empty response")),
+            "expected shared empty response error, got: {msg}"
+        );
+    })
+    .await
+}
+
+#[tokio::test]
+async fn repro_269_google_empty_text_signed_part_does_not_merge_into_prior_text() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let server = MockServer::start().await;
+        let turn1 = format!(
+            "data: {}\n\ndata: {}\n\ndata: {}\n\n",
+            json!({
+                "candidates": [{
+                    "content": {
+                        "role": "model",
+                        "parts": [{"text": "Hello"}]
+                    }
+                }]
+            }),
+            json!({
+                "candidates": [{
+                    "content": {
+                        "role": "model",
+                        "parts": [{"text": "", "thoughtSignature": "U0lHX0VNUFRZX1RFWFQ="}]
+                    }
+                }]
+            }),
+            json!({
+                "candidates": [{
+                    "content": {
+                        "role": "model",
+                        "parts": [{"functionCall": {"name": "read", "args": {"path": "src/main.rs"}}}]
+                    },
+                    "finishReason": "STOP"
+                }]
+            }),
+        );
+        let done = format!(
+            "data: {}\n\n",
+            json!({"candidates": [{"content": {"role": "model", "parts": [{"text": "done"}]}, "finishReason": "STOP"}]})
+        );
+        server.route("/google", vec![Resp::sse(turn1), Resp::sse(done)]);
+        let h = provider_host(&mut env, &server, json!({})).await;
+        h.lua().load(ROUND_TRIP).into_function().unwrap().call_async::<()>("google/gemini-2.5-pro").await.unwrap();
+        h.shutdown().await;
+        let req = server.requests()[1].json();
+        let model_parts = req["contents"].as_array().unwrap().iter().find(|c| c["role"] == "model").unwrap()["parts"]
+            .as_array()
+            .unwrap();
+        let merged =
+            model_parts.iter().any(|p| p["text"] == "Hello" && p["thoughtSignature"] == "U0lHX0VNUFRZX1RFWFQ=");
+        assert!(
+            !merged,
+            "empty signed part was merged onto preceding unsigned text part: {}",
+            Value::Array(model_parts.clone())
+        );
+        let hello_pos = position(model_parts, "unsigned Hello part", |p| {
+            p["text"] == "Hello" && p.get("thoughtSignature").is_none()
+        })
+        .unwrap();
+        let empty_sig_pos = position(model_parts, "separate empty signed part", |p| {
+            p["text"] == "" && p["thoughtSignature"] == "U0lHX0VNUFRZX1RFWFQ="
+        })
+        .unwrap();
+        let call_pos = position(model_parts, "functionCall", |p| p.get("functionCall").is_some()).unwrap();
+        assert!(
+            hello_pos < empty_sig_pos && empty_sig_pos < call_pos,
+            "empty signed part must stay between unsigned Hello and functionCall: {}",
+            Value::Array(model_parts.clone())
+        );
+    })
+    .await
+}
+
 /// The second request of a tool round per wire, checked exactly: the sealed parts with their
 /// text, the call with its name and arguments (once), and the one tool result that answers it
 /// after the call. Each check names what is missing or misplaced. All wires run before the

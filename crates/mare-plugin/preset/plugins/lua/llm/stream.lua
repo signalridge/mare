@@ -202,8 +202,9 @@ return function(D)
 				describe = resolved and resolved.describe,
 				stream = resolved and resolved.stream,
 			}
+			local wire_name = (resolved and resolved.config and resolved.config.wire) or p.wire or wire_route
 			copy.messages =
-				transform_messages(req.messages or {}, model, req.tools, p.tool_id_policy, route, p.route, wire_route)
+				transform_messages(req.messages or {}, model, req.tools, p.tool_id_policy, route, p.route, wire_name)
 			-- every request of a session carries its id, auxiliary ones (summaries, titles)
 			-- included: providers key per-session headers on it (e.g. `x-opencode-session`)
 			if copy.session_id == nil then

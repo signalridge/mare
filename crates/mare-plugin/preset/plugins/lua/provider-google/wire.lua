@@ -180,7 +180,15 @@ function M.convert_messages(messages, model_id, own_provider)
 				local sig = (raw_sig and is_valid_thought_signature(raw_sig)) and raw_sig or nil
 				if b.type == "reasoning" then
 					if sig ~= nil then
-						parts[#parts + 1] = { text = b.text or "", thought = true, thoughtSignature = sig }
+						local meta = b.native and b.native[WIRE]
+						if type(meta) == "table" and meta.signature_only == true then
+							parts[#parts + 1] = {
+								thought = (meta.thought == true) or nil,
+								thoughtSignature = sig,
+							}
+						else
+							parts[#parts + 1] = { text = b.text or "", thought = true, thoughtSignature = sig }
+						end
 					end
 				elseif b.type == "text" then
 					local has_text = type(b.text) == "string" and b.text:match("%S") ~= nil
@@ -440,6 +448,7 @@ function M.new_parser(sink, on_error)
 			and b.type == kind
 			and not (sig and prev_sig)
 			and not (prev_sig and not open_has_text)
+			and not (sig and text == "")
 		if not continues then
 			b = stream.stream_record({ type = kind, text = "" }, { "text" })
 			P.content[#P.content + 1] = b
@@ -564,6 +573,22 @@ function M.new_parser(sink, on_error)
 					if part.text ~= "" then
 						sink({ type = kind == "reasoning" and "reasoning_delta" or "text_delta", delta = part.text })
 					end
+				elseif type(part.thoughtSignature) == "string" and part.thoughtSignature ~= "" then
+					-- Replay-only signed part without `text`: store as an invisible `reasoning`
+					-- block with `signature_only = true` metadata so shared stream visibility
+					-- still treats signature-only STOP responses as empty output.
+					P.content[#P.content + 1] = {
+						type = "reasoning",
+						text = "",
+						native = {
+							[WIRE] = {
+								thought_signature = part.thoughtSignature,
+								thought = part.thought == true or nil,
+								signature_only = true,
+							},
+						},
+					}
+					open_has_text = false
 				end
 			end
 			if type(c.finishReason) == "string" and c.finishReason ~= "" then
