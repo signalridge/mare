@@ -409,6 +409,12 @@ def check_dockerfile_release(root: pathlib.Path) -> list[str]:
 
     if from_count == 0:
         errors.append("Dockerfile.release must declare a base image pinned by @sha256 digest")
+
+    text = df.read_text(encoding="utf-8")
+    if not re.search(r"\btini\b", text):
+        errors.append("Dockerfile.release must install tini so mare does not run as PID 1")
+    if 'ENTRYPOINT ["/usr/bin/tini", "--", "/usr/bin/mare"]' not in text:
+        errors.append('Dockerfile.release must set ENTRYPOINT ["/usr/bin/tini", "--", "/usr/bin/mare"]')
     return errors
 
 
@@ -773,10 +779,11 @@ class ReleasePolicySelfTests(unittest.TestCase):
 
     def test_dockerfile_release_requires_digest_not_specific_version(self):
         digest = "a" * 64
+        tini_tail = 'RUN apt-get install -y tini\nENTRYPOINT ["/usr/bin/tini", "--", "/usr/bin/mare"]\n'
         for body in (
-            f"FROM ubuntu:24.04@sha256:{digest}\n",
-            f"FROM ubuntu:26.04@sha256:{digest}\n",
-            f"FROM --platform=$BUILDPLATFORM ubuntu:26.04@sha256:{digest} AS runtime\n",
+            f"FROM ubuntu:24.04@sha256:{digest}\n{tini_tail}",
+            f"FROM ubuntu:26.04@sha256:{digest}\n{tini_tail}",
+            f"FROM --platform=$BUILDPLATFORM ubuntu:26.04@sha256:{digest} AS runtime\n{tini_tail}",
         ):
             with self.subTest(valid=body.strip()), tempfile.TemporaryDirectory() as tmp:
                 root = pathlib.Path(tmp)
@@ -784,12 +791,13 @@ class ReleasePolicySelfTests(unittest.TestCase):
                 self.assertEqual(check_dockerfile_release(root), [])
 
         for body in (
-            "FROM ubuntu:24.04\n",
-            "FROM ubuntu:26.04\n",
-            "FROM ubuntu:latest\n",
-            "FROM ubuntu:26.04@sha256:deadbeef\n",
-            f"FROM ubuntu:26.04@sha256:{'A' * 64}\n",
-            "RUN echo no-from\n",
+            f"FROM ubuntu:24.04\n{tini_tail}",
+            f"FROM ubuntu:26.04\n{tini_tail}",
+            f"FROM ubuntu:latest\n{tini_tail}",
+            f"FROM ubuntu:26.04@sha256:deadbeef\n{tini_tail}",
+            f"FROM ubuntu:26.04@sha256:{'A' * 64}\n{tini_tail}",
+            f"RUN echo no-from\n{tini_tail}",
+            f'FROM ubuntu:24.04@sha256:{digest}\nENTRYPOINT ["/usr/bin/mare"]\n',
         ):
             with self.subTest(invalid=body.strip()), tempfile.TemporaryDirectory() as tmp:
                 root = pathlib.Path(tmp)

@@ -12,7 +12,7 @@ RUN cargo build --release --locked -p mare-cli
 FROM debian:bookworm-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates git bubblewrap \
+    && apt-get install -y --no-install-recommends ca-certificates git bubblewrap tini \
     && rm -rf /var/lib/apt/lists/* \
     && git config --system --add safe.directory '*' \
     && groupadd -g 65532 nonroot \
@@ -23,7 +23,7 @@ COPY LICENSE /usr/share/licenses/mare/LICENSE
 COPY README.md /usr/share/doc/mare/README.md
 
 USER nonroot:nonroot
-ENTRYPOINT ["/usr/bin/mare"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/bin/mare"]
 
 LABEL org.opencontainers.image.title="mare"
 LABEL org.opencontainers.image.description="Hyperextensible AI coding agent harness (Rust core, Lua 5.5 plugins)"
