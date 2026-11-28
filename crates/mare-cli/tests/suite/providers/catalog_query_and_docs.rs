@@ -1169,7 +1169,7 @@ async fn all_builtin_provider_presets_expose_current_models_and_metadata() {
         assert_eq!(v["k31_images"], true, "{v}");
         assert_eq!(v["k3_ctx"], 1_048_576, "{v}");
         assert_eq!(v["kc_default"], "kimi-for-coding", "{v}");
-        assert_eq!(v["kc_mdev"], "kimi-code-plan-global", "{v}");
+        assert_eq!(v["kc_mdev"], "kimi-code-plan-cn", "{v}");
         assert_eq!(v["kc31_ctx"], 1_048_576, "{v}");
         assert_eq!(v["or_default"], "anthropic/claude-sonnet-5.5", "{v}");
         assert_eq!(v["or_sonnet_ctx"], 1_000_000, "{v}");

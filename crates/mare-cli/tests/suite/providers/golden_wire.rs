@@ -327,7 +327,7 @@ async fn wire_bodies_for_kimi_code_and_lmstudio_presets() {
             "#,
         )
         .await;
-        assert_eq!(kc_mdev, "kimi-code-plan-global");
+        assert_eq!(kc_mdev, "kimi-code-plan-cn");
         assert_eq!(kc_def, "kimi-for-coding");
         assert!(lm_no_key, "lmstudio must be keyless");
 
@@ -1163,10 +1163,11 @@ mare.provider("tuned-ant", {{
     .await
 }
 
-/// Issue #90: China-region presets (`kimi-cn`, `kimi-code-cn`, `minimax-cn`, `zhipu-cn`) and
-/// their global counterparts (`kimi`, `kimi-code`, `minimax`, `zai`) register as independent
-/// built-in providers with distinct endpoints and `models_dev` IDs, hydrating offline from the
-/// bundled `models_dev.json.gz` snapshot without any region toggle mechanism.
+/// Issue #90: China-region and global presets (`kimi`, `kimi-cn`, `kimi-code`, `kimi-code-global`,
+/// `minimax`, `minimax-cn`, `zai`, `zhipu-cn`) register as independent built-in providers with
+/// distinct endpoints and `models_dev` IDs, preserving `kimi-code`'s existing `.com` endpoint and
+/// hydrating offline from the merged bundled `models_dev.json.gz` snapshot (retaining both
+/// regional providers and `reasoning_options` effort metadata).
 #[tokio::test]
 async fn china_region_presets_register_independently_with_bundled_models_dev_hydration() {
     local(async {
@@ -1187,7 +1188,7 @@ async fn china_region_presets_register_independently_with_bundled_models_dev_hyd
               { "kimi", "kimi-k3.1-pro" },
               { "kimi-cn", "kimi-k3.1-pro" },
               { "kimi-code", "kimi-for-coding" },
-              { "kimi-code-cn", "kimi-for-coding" },
+              { "kimi-code-global", "kimi-for-coding" },
               { "minimax", "MiniMax-M3.1-Flash" },
               { "minimax-cn", "MiniMax-M3.1-Flash" },
               { "zai", "glm-5.3" },
@@ -1207,6 +1208,17 @@ async fn china_region_presets_register_independently_with_bundled_models_dev_hyd
                 reasoning = m.reasoning == true,
               }
             end
+            local raw = assert(mare.plugins.read_resource("models_dev.json.gz"))
+            local snap = mare.json.decode(raw)
+            local ro_count = 0
+            for _, pm in pairs(snap.providers or {}) do
+              for _, entry in pairs(pm or {}) do
+                if type(entry) == "table" and type(entry.reasoning_options) == "table" and #entry.reasoning_options > 0 then
+                  ro_count = ro_count + 1
+                end
+              end
+            end
+            out._reasoning_options_count = ro_count
             return mare.json.encode(out)
             "#,
         )
@@ -1218,17 +1230,17 @@ async fn china_region_presets_register_independently_with_bundled_models_dev_hyd
             ("kimi-cn", "moonshotai-cn", "https://api.moonshot.cn/v1", true, "kimi-k3.1-pro", 1_048_576, 131_072),
             (
                 "kimi-code",
-                "kimi-code-plan-global",
-                "https://api.kimi.ai/coding/v1",
+                "kimi-code-plan-cn",
+                "https://api.kimi.com/coding/v1",
                 true,
                 "kimi-for-coding",
                 1_048_576,
                 32_768,
             ),
             (
-                "kimi-code-cn",
-                "kimi-code-plan-cn",
-                "https://api.kimi.com/coding/v1",
+                "kimi-code-global",
+                "kimi-code-plan-global",
+                "https://api.kimi.ai/coding/v1",
                 true,
                 "kimi-for-coding",
                 1_048_576,
@@ -1249,6 +1261,10 @@ async fn china_region_presets_register_independently_with_bundled_models_dev_hyd
             assert_eq!(row["max_out"], max_out, "{pid}: {row}");
             assert_eq!(row["reasoning"], true, "{pid}: {row}");
         }
+        assert!(
+            v["_reasoning_options_count"].as_u64().unwrap_or(0) > 100,
+            "merged bundled models_dev snapshot must retain offline reasoning_options metadata: {v}"
+        );
 
         h.shutdown().await;
     })

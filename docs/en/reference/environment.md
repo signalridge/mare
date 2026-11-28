@@ -49,7 +49,7 @@ A provider reads its key from, in order: the `api_key` option in `init.lua`, the
 | `OPENCODE_API_KEY` | opencode Go |
 | `DEEPSEEK_API_KEY` | DeepSeek |
 | `MOONSHOT_API_KEY` | Moonshot (`kimi`, `kimi-cn`) |
-| `KIMI_API_KEY` | Kimi Code (`kimi-code`, `kimi-code-cn`) |
+| `KIMI_API_KEY` | Kimi Code (`kimi-code`, `kimi-code-global`) |
 | `MINIMAX_API_KEY` | MiniMax (`minimax`, `minimax-cn`) |
 | `ZAI_API_KEY` | Z.ai (`zai`) |
 | `ZHIPU_API_KEY` | Zhipu GLM (`zhipu-cn`) |

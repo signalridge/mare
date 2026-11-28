@@ -16,7 +16,7 @@
 | `kimi` | `provider-openai-compat` | Moonshot API 密钥 | `MOONSHOT_API_KEY` |
 | `kimi-cn` | `provider-openai-compat` | Moonshot 中国区 API 密钥 | `MOONSHOT_API_KEY` |
 | `kimi-code` | `provider-openai-compat` | Kimi Code API 密钥 | `KIMI_API_KEY` |
-| `kimi-code-cn` | `provider-openai-compat` | Kimi Code 中国区 API 密钥 | `KIMI_API_KEY` |
+| `kimi-code-global` | `provider-openai-compat` | Kimi Code 国际区 API 密钥 | `KIMI_API_KEY` |
 | `minimax` | `provider-openai-compat` | MiniMax API 密钥 | `MINIMAX_API_KEY` |
 | `minimax-cn` | `provider-openai-compat` | MiniMax 中国区 API 密钥 | `MINIMAX_API_KEY` |
 | `zai` | `provider-openai-compat` | Z.ai API 密钥 | `ZAI_API_KEY` |

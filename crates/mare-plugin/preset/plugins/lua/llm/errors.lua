@@ -580,18 +580,23 @@ local function matches_effort_refusal(text, param)
 		return false
 	end
 	local low = text:lower()
+	local text_is_effort = low:match("reasoning[._ ]?effort") ~= nil
+		or low:match("reasoning%s+effort") ~= nil
+		or low:match("thinking[._ ]?effort") ~= nil
+		or low:match("effort%s+level") ~= nil
+	if not param_is_effort and not text_is_effort then
+		return false
+	end
 	local unsupported_val = low:match("unsupported value:?%s*['\"`]?([a-z_]+)['\"`]?%s+is not supported")
 	if unsupported_val and (param_is_effort or EFFORT_LEVEL_WORDS[unsupported_val]) then
 		return true
 	end
-	if param_is_effort or low:match("reasoning[._ ]?effort") then
-		if low:find("invalid", 1, true) or low:find("supported values are", 1, true) then
+	if low:find("invalid", 1, true) or low:find("supported values are", 1, true) then
+		return true
+	end
+	for _, pat in ipairs(EFFORT_DENIED_PATTERNS) do
+		if low:find(pat, 1, true) then
 			return true
-		end
-		for _, pat in ipairs(EFFORT_DENIED_PATTERNS) do
-			if low:find(pat, 1, true) then
-				return true
-			end
 		end
 	end
 	return false

@@ -16,7 +16,7 @@ A model is named `provider/id`, for example `openai/gpt-6-luna`. The providers a
 | `kimi` | `provider-openai-compat` | Moonshot API key | `MOONSHOT_API_KEY` |
 | `kimi-cn` | `provider-openai-compat` | Moonshot China API key | `MOONSHOT_API_KEY` |
 | `kimi-code` | `provider-openai-compat` | Kimi Code API key | `KIMI_API_KEY` |
-| `kimi-code-cn` | `provider-openai-compat` | Kimi Code China API key | `KIMI_API_KEY` |
+| `kimi-code-global` | `provider-openai-compat` | Kimi Code Global API key | `KIMI_API_KEY` |
 | `minimax` | `provider-openai-compat` | MiniMax API key | `MINIMAX_API_KEY` |
 | `minimax-cn` | `provider-openai-compat` | MiniMax China API key | `MINIMAX_API_KEY` |
 | `zai` | `provider-openai-compat` | Z.ai API key | `ZAI_API_KEY` |

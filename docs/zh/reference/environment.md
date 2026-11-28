@@ -49,7 +49,7 @@ provider 按以下顺序读取密钥：`init.lua` 中的 `api_key` 选项、`mar
 | `OPENCODE_API_KEY` | opencode Go |
 | `DEEPSEEK_API_KEY` | DeepSeek |
 | `MOONSHOT_API_KEY` | Moonshot（`kimi`、`kimi-cn`） |
-| `KIMI_API_KEY` | Kimi Code（`kimi-code`、`kimi-code-cn`） |
+| `KIMI_API_KEY` | Kimi Code（`kimi-code`、`kimi-code-global`） |
 | `MINIMAX_API_KEY` | MiniMax（`minimax`、`minimax-cn`） |
 | `ZAI_API_KEY` | Z.ai（`zai`） |
 | `ZHIPU_API_KEY` | 智谱 GLM（`zhipu-cn`） |

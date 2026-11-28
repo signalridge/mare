@@ -1241,6 +1241,16 @@ mod tests {
         ] {
             assert!(providers.contains_key(pid), "bundled models.dev snapshot missing `{pid}`");
         }
+        let reasoning_options_count: usize = providers
+            .values()
+            .filter_map(|p| p.as_object())
+            .flat_map(|pm| pm.values())
+            .filter(|m| m.get("reasoning_options").and_then(|v| v.as_array()).is_some_and(|a| !a.is_empty()))
+            .count();
+        assert!(
+            reasoning_options_count > 100,
+            "bundled models.dev snapshot must preserve reasoning_options metadata (got {reasoning_options_count})"
+        );
         assert_eq!(
             super::loader::builtin_text("agent").unwrap().as_ref(),
             std::fs::read_to_string(preset_root.join("plugins/agent.lua")).unwrap()

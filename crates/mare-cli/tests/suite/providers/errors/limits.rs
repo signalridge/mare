@@ -550,6 +550,26 @@ async fn effort_400_refusal_surfaces_supported_values_without_mutating_model() {
                     })
                     .to_string(),
                 ),
+                // 6) Missing param with effort-like word ('high') targeting verbosity -> NOT effort refusal
+                Resp::status(
+                    400,
+                    json!({
+                        "error": {
+                            "message": "Unsupported value: 'high' is not supported for verbosity. Supported values are: 'low', 'medium'."
+                        }
+                    })
+                    .to_string(),
+                ),
+                // 7) Missing param but error text explicitly names reasoning_effort -> IS effort refusal
+                Resp::status(
+                    400,
+                    json!({
+                        "error": {
+                            "message": "Invalid reasoning_effort: unsupported value 'high' is not supported. Supported values are: 'low', 'medium'."
+                        }
+                    })
+                    .to_string(),
+                ),
             ],
         );
 
@@ -592,7 +612,21 @@ async fn effort_400_refusal_surfaces_supported_values_without_mutating_model() {
         let e5 = m5["error"].as_str().unwrap_or("");
         assert!(!e5.contains("/effort"), "non-effort value refusal must not get /effort hint: {e5}");
 
-        assert_eq!(server.count("/compat"), 5, "400 effort refusals must not retry");
+        let m6 = stream(&h, "compat/reasoner-model").await;
+        assert_eq!(m6["error_kind"], "invalid", "{m6}");
+        let e6 = m6["error"].as_str().unwrap_or("");
+        assert!(
+            !e6.contains("/effort"),
+            "missing-param verbosity refusal with 'high' must not get /effort hint: {e6}"
+        );
+
+        let m7 = stream(&h, "compat/reasoner-model").await;
+        assert_eq!(m7["error_kind"], "invalid", "{m7}");
+        let e7 = m7["error"].as_str().unwrap_or("");
+        assert!(e7.contains("Supported values are: 'low', 'medium'"), "must keep supported values: {e7}");
+        assert!(e7.contains("/effort"), "missing-param error naming reasoning_effort must get /effort hint: {e7}");
+
+        assert_eq!(server.count("/compat"), 7, "400 effort refusals must not retry");
         h.shutdown().await;
     })
     .await

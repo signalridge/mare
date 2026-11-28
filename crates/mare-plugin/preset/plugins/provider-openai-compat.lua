@@ -88,8 +88,9 @@ local PRESETS = {
 		label = "Kimi Code",
 		wire = "openai-chat",
 		dialect = "kimi",
-		models_dev = "kimi-code-plan-global",
-		base_url = "https://api.kimi.ai/coding/v1",
+		models_dev = "kimi-code-plan-cn",
+		reasoning_toggle_off = true,
+		base_url = "https://api.kimi.com/coding/v1",
 		api_key_env = "KIMI_API_KEY",
 		default_model = "kimi-for-coding",
 		models = {
@@ -115,13 +116,13 @@ local PRESETS = {
 			},
 		},
 	},
-	["kimi-code-cn"] = {
-		label = "Kimi Code (China)",
+	["kimi-code-global"] = {
+		label = "Kimi Code (Global)",
 		wire = "openai-chat",
 		dialect = "kimi",
-		models_dev = "kimi-code-plan-cn",
+		models_dev = "kimi-code-plan-global",
 		reasoning_toggle_off = true,
-		base_url = "https://api.kimi.com/coding/v1",
+		base_url = "https://api.kimi.ai/coding/v1",
 		api_key_env = "KIMI_API_KEY",
 		default_model = "kimi-for-coding",
 		models = {

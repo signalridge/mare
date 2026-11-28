@@ -439,7 +439,7 @@ def _self_test() -> int:
         "kimi",
         "kimi-cn",
         "kimi-code",
-        "kimi-code-cn",
+        "kimi-code-global",
         "minimax",
         "minimax-cn",
         "zai",
