@@ -1438,3 +1438,171 @@ async fn theme_and_osc8_changes_recolor_and_relink_existing_node_blocks() {
     })
     .await
 }
+
+/// Issue #43: retries appear on the transient working line with `attempt/max` and a non-zero
+/// wait delay (never `0s`), never push per-attempt error toasts, cancel cleanly on `Esc`, and
+/// only surface the raw error in the transcript when the final attempt fails.
+#[tokio::test]
+async fn retry_status_line_shows_attempt_and_nonzero_delay_cancels_on_esc_and_only_errors_on_final_failure() {
+    let drop_err = json!({
+        "error": "stream ended before response.completed",
+        "retryable": true,
+        "kind": "stream_closed",
+    });
+
+    // 1. Stream drops early -> transient working indicator with attempt/max + sub-second delay -> succeeds once.
+    local(async {
+        let mut t = Term::with(
+            json!([drop_err.clone(), { "text": "RECOVERED-ONCE" }]),
+            json!({ "plugins": { "llm": { "retries": 3, "retry_base_ms": 800 } } }),
+            110,
+            24,
+        )
+        .await;
+        t.vt.dismiss_notices();
+        t.submit("go").await;
+        t.until("transient retry status line", |s| s.contains("Retrying (1/3) in 0.")).await;
+        let retry_screen = t.screen();
+        assert!(!retry_screen.contains("in 0s"), "sub-second backoff must never print as 0s:\n{retry_screen}");
+        assert!(
+            !retry_screen.contains("stream ended before response.completed"),
+            "per-attempt retry must not show raw error toast:\n{retry_screen}"
+        );
+        t.idle().await;
+        let hist = t.history();
+        assert_eq!(hist.matches("RECOVERED-ONCE").count(), 1, "final answer must appear once:\n{hist}");
+        assert!(
+            !hist.contains("stream ended before response.completed"),
+            "successful retry must leave no error in transcript:\n{hist}"
+        );
+        assert!(!t.screen().contains("Retrying"), "retry indicator clears after recovery:\n{}", t.screen());
+    })
+    .await;
+
+    // 2. Esc cancels an in-flight retry sleep without running the next attempt or showing an error.
+    local(async {
+        let mut t_esc = Term::with(
+            json!([drop_err.clone(), { "text": "SHOULD-NOT-RUN" }]),
+            json!({ "plugins": { "llm": { "retries": 2, "retry_base_ms": 5000 } } }),
+            110,
+            24,
+        )
+        .await;
+        t_esc.vt.dismiss_notices();
+        t_esc.submit("cancel me").await;
+        t_esc.until("retry wait before Esc", |s| s.contains("Retrying (1/2) in ")).await;
+        assert!(!t_esc.screen().contains("in 0s"), "retry wait must not show 0s:\n{}", t_esc.screen());
+        t_esc.key(KeyCode::Escape, Modifiers::NONE);
+        t_esc.until_vt("retry aborted by Esc", |t| !t.vt.busy()).await;
+        let esc_hist = t_esc.history();
+        assert!(!esc_hist.contains("SHOULD-NOT-RUN"), "Esc must cancel before next attempt:\n{esc_hist}");
+        assert!(
+            !esc_hist.contains("stream ended before response.completed"),
+            "Esc cancel must not show provider error:\n{esc_hist}"
+        );
+    })
+    .await;
+
+    // 3. Exhausting all retries surfaces the raw error once in the transcript.
+    local(async {
+        let mut t_fail = Term::with(
+            json!([drop_err.clone(), drop_err]),
+            json!({ "plugins": { "llm": { "retries": 1, "retry_base_ms": 50 } } }),
+            110,
+            24,
+        )
+        .await;
+        t_fail.vt.dismiss_notices();
+        t_fail.submit("fail me").await;
+        t_fail.idle().await;
+        let fail_hist = t_fail.history();
+        assert_eq!(
+            fail_hist.matches("stream ended before response.completed").count(),
+            1,
+            "final failure must show raw error exactly once:\n{fail_hist}"
+        );
+    })
+    .await;
+}
+
+/// Every toast (`mare.ui.notify`) stays strictly inside its box borders and terminal width,
+/// including long messages, URLs, wide CJK text, ANSI control bytes, and over-wide live rows.
+#[tokio::test]
+async fn notify_toast_never_wraps_or_overflows_past_its_border() {
+    let assert_toast_box = |t: &Term, label: &str| {
+        let screen = t.parser.screen();
+        let (rows, cols) = (screen.size().0.get(), screen.size().1.get());
+        let mut top_row = None;
+        let mut left_col = 0u16;
+        let mut right_col = 0u16;
+        for r in 0..rows {
+            let mut found_tl = None;
+            let mut found_tr = None;
+            for c in 0..cols {
+                let ch = screen.cell(r, c).map(|cell| cell.contents()).unwrap_or("");
+                if ch == "╭" {
+                    found_tl = Some(c);
+                } else if ch == "╮" {
+                    found_tr = Some(c);
+                }
+            }
+            if let (Some(tl), Some(tr)) = (found_tl, found_tr)
+                && tl > 0
+            {
+                top_row = Some(r);
+                left_col = tl;
+                right_col = tr;
+                break;
+            }
+        }
+        let top = top_row.unwrap_or_else(|| panic!("{label}: missing toast top border:\n{}", t.screen()));
+        let mut closed = false;
+        for r in (top + 1)..rows {
+            let lch = screen.cell(r, left_col).map(|c| c.contents()).unwrap_or("");
+            let rch = screen.cell(r, right_col).map(|c| c.contents()).unwrap_or("");
+            if lch == "╰" {
+                assert_eq!(rch, "╯", "{label}: bottom border misaligned at row {r}:\n{}", t.screen());
+                closed = true;
+                break;
+            }
+            assert_eq!(lch, "│", "{label}: missing left border at row {r}:\n{}", t.screen());
+            assert_eq!(rch, "│", "{label}: missing right border at row {r}:\n{}", t.screen());
+            for c in (right_col + 1)..cols {
+                let tail = screen.cell(r, c).map(|cell| cell.contents()).unwrap_or("");
+                assert!(
+                    tail.trim().is_empty(),
+                    "{label}: text {tail:?} spilled past right border at ({r},{c}):\n{}",
+                    t.screen()
+                );
+            }
+        }
+        assert!(closed, "{label}: toast box never closed:\n{}", t.screen());
+    };
+
+    for width in [110u16, 40u16] {
+        local(async {
+            let mut t = Term::new(json!([]), width, 24).await;
+            t.vt.dismiss_notices();
+            // Add an over-wide live block so overlay_notices also composites over a row > w.
+            exec(
+                &t.vt.host,
+                r#"mare.ui.push("text", { node = mare.ui.Paragraph("https://example.com/" .. string.rep("x", 160)) })"#,
+            )
+            .await;
+            for (tag, lua_msg) in [
+                ("retry-like", r#""Retrying (1) in 0.5s: stream ended before response.completed""#),
+                (
+                    "long-url",
+                    r#""Failed fetching https://api.example.com/v1/responses/very-long-unbreakable-endpoint-path""#,
+                ),
+                ("cjk-ansi", r#""\x1b[31m警告\x1b[0m 中文宽字符长提示测试确保每一行都在边框内部""#),
+            ] {
+                t.vt.dismiss_notices();
+                exec(&t.vt.host, &format!("mare.ui.notify({lua_msg}, 'warning')")).await;
+                t.until(&format!("{tag} toast at w={width}"), |s| s.contains("Warning")).await;
+                assert_toast_box(&t, &format!("{tag}@w={width}"));
+            }
+        })
+        .await;
+    }
+}

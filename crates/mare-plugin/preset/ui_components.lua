@@ -901,8 +901,9 @@ end
 --- render(p) -> Node, p = { text, level, icon, title, style, width, is_first, max_rows }
 ui.NoticeCard = {}
 function ui.NoticeCard:render(p)
-	local text = tostring(p.text or ""):gsub("\r\n", "\n"):gsub("\r", "\n"):gsub("\t", "    ")
-	local wrapped = ui.render_text(ui.Paragraph(text), math.max(4, (p.width or 40) - 4))
+	local text = mare.text.sanitize(tostring(p.text or "")):gsub("\t", "    ")
+	local border_w = (ui.icon_set and ui.icon_set() == "ascii") and 1 or mare.text.width("│")
+	local wrapped = ui.render_text(ui.Paragraph(text), math.max(1, (p.width or 40) - (border_w * 2 + 2)))
 	local lines = {}
 	for line in (wrapped .. "\n"):gmatch("(.-)\n") do
 		lines[#lines + 1] = line

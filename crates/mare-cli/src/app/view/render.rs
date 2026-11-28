@@ -769,13 +769,17 @@ impl App {
                     max_rows = max_rows.min(cap - 2);
                 }
             }
-            let (x, card) = if let Some(lines) =
-                self.notice_card_lines(text, level, icon, name, style, is_first, card_w, max_rows, theme, STATIC_FRAME)
-            {
-                (w.saturating_sub(card_w), lines)
-            } else {
-                build_notice_card(text, w, theme, (style, name, icon), (card_w, max_rows))
-            };
+            let mut card = self
+                .notice_card_lines(text, level, icon, name, style, is_first, card_w, max_rows, theme, STATIC_FRAME)
+                .unwrap_or_else(|| build_notice_card(text, theme, (style, name, icon), (card_w, max_rows)));
+            let max_w = card_w.min(w);
+            for line in &mut card {
+                if line.width() > max_w {
+                    *line = truncate_line(line, max_w);
+                }
+            }
+            let actual_w = card.iter().map(Line::width).max().unwrap_or(0).min(w);
+            let x = w.saturating_sub(actual_w);
             let covers = x < w / 2;
             let next_len = cards.len() + card.len();
             if budget.is_some_and(|b| next_len > b)
@@ -809,7 +813,11 @@ impl App {
             None => 1,
         };
         for (i, (x, c)) in cards.iter().take(live.len().saturating_sub(start_row)).enumerate() {
-            live[start_row + i] = overlay_line(&live[start_row + i], *x, c);
+            let row = start_row + i;
+            if live[row].width() > w {
+                live[row] = slice_cells(&live[row], 0, w);
+            }
+            live[row] = overlay_line(&live[row], *x, c);
         }
         self.notices
             .set_visible_count(if self.modal.is_some() { 0 } else { visible_cards }, mare_tui::render::clock_now());
@@ -1106,14 +1114,16 @@ fn box_fit_metrics(text: &str, is_first: bool, w: usize, cw: usize) -> (usize, u
 
 fn build_notice_card(
     text: &str,
-    w: usize,
     theme: &Theme,
     (style, name, icon): (&str, &str, &str),
     (card_w, max_rows): (usize, usize),
-) -> (usize, Vec<Line>) {
-    let inner = card_w.saturating_sub(4).max(1);
+) -> Vec<Line> {
+    let set = frame::BorderSet::for_theme(&theme.border, &theme.icons);
+    let vw = str_width(set.v);
+    let inner = card_w.saturating_sub(vw * 2 + 2).max(1);
+    let clean = sanitize(text);
     let mut body = vec![];
-    for part in text.split('\n') {
+    for part in clean.split('\n') {
         body.extend(wrap_line(&Line::raw(expand_tabs(part)), inner));
     }
     if body.len() > max_rows {
@@ -1127,8 +1137,7 @@ fn build_notice_card(
         style,
         vec![mare_tui::fallback::Fallback::lines(body)],
     );
-    let x = w.saturating_sub(card_w);
-    (x, mare_tui::fallback::render(&fb, card_w, theme))
+    mare_tui::fallback::render(&fb, card_w, theme)
 }
 
 #[cfg(test)]
@@ -1138,9 +1147,43 @@ mod tests {
     #[test]
     fn fallback_notice_reports_the_number_of_clipped_lines() {
         let text = (1..=8).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
-        let (_, lines) = build_notice_card(&text, 80, &Theme::default(), ("MareNotifyInfo", "Info", "i"), (40, 3));
+        let lines = build_notice_card(&text, &Theme::default(), ("MareNotifyInfo", "Info", "i"), (40, 3));
         let rendered = lines.iter().map(Line::plain).collect::<Vec<_>>().join("\n");
         assert!(rendered.contains("line 1") && rendered.contains("line 2"), "{rendered}");
         assert!(rendered.contains("↓ 6 more lines"), "{rendered}");
+    }
+
+    #[test]
+    fn fallback_notice_keeps_every_row_within_box_borders() {
+        let theme = Theme::default();
+        let samples = [
+            "Retrying (1) in 0.5s: stream ended before response.completed",
+            "https://api.example.com/v1/responses/very-long-unbreakable-path-segment-that-exceeds-card-width",
+            "\x1b[31mred\x1b[0m\t中文宽字符测试超长提示信息不断行边界检查",
+            "short",
+        ];
+        for w in [16usize, 44, 110] {
+            let cw = (w / 2).clamp(24, 44).min(w);
+            for text in samples {
+                let (card_w, max_rows) = box_fit_metrics(text, false, w, cw);
+                let lines = build_notice_card(text, &theme, ("MareNotifyWarn", "Warning", "⚠"), (card_w, max_rows));
+                assert!(lines.len() >= 3, "box needs top/body/bottom for {text:?} at w={w}");
+                for (idx, line) in lines.iter().enumerate() {
+                    let plain = line.plain();
+                    assert_eq!(
+                        line.width(),
+                        card_w,
+                        "row {idx} width {} != card_w {card_w} (w={w}) for {text:?}:\n{plain}",
+                        line.width()
+                    );
+                    if idx > 0 && idx + 1 < lines.len() {
+                        assert!(
+                            plain.starts_with('│') && plain.ends_with('│'),
+                            "body row {idx} lost borders for {text:?}:\n{plain}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }

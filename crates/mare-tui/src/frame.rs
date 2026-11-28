@@ -128,7 +128,7 @@ pub fn boxed(content: &[Line], width: usize, o: &BoxOpts) -> Vec<Line> {
     let tail_chrome = h_w + tr_w;
     let mut top = Line::new(vec![Span::styled(format!("{}{}", b.tl, b.h), bs)]);
     let mut used = tl_w + h_w;
-    if !o.title.is_empty() {
+    if !o.title.is_empty() && width > used + 2 + tail_chrome {
         let max_title = width.saturating_sub(used + 2 + tail_chrome);
         let t = truncate_line(&Line::new(o.title.clone()), max_title);
         top.push(Span::raw(" "));

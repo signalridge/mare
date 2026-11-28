@@ -520,6 +520,7 @@
 ---@field delay_ms integer
 ---@field error? {code: string, data?: any, message: string}
 ---@field kind? string
+---@field max_attempts? integer
 ---@field reset? boolean
 
 --- Token usage reported from a completed model request.
@@ -921,6 +922,7 @@
 ---@field error_kind? string|nil
 ---@field will_retry? boolean|nil
 ---@field attempt? integer|nil
+---@field max_attempts? integer|nil
 ---@field delay_ms? number|nil
 ---@field reset? boolean|nil
 ---@field truncated? boolean|nil

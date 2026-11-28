@@ -466,7 +466,7 @@ return function(D)
 		local attempt, overloaded = math.max(0, math.floor(tonumber(req.attempt) or 0)), 0
 		local auth_refreshed = false
 		local reply_capped = false
-		local function before_retry(next_attempt_num, delay_ms, err_res, kind, reset)
+		local function before_retry(next_attempt_num, delay_ms, err_res, kind, reset, max_attempts)
 			-- the caller records the new attempt (request marker) before it is sent
 			if req.on_attempt then
 				local okr, perr = pcall(req.on_attempt, next_attempt_num)
@@ -493,6 +493,7 @@ return function(D)
 			end
 			ctx.bus:emit("llm/retry", {
 				attempt = next_attempt_num,
+				max_attempts = max_attempts,
 				delay_ms = delay_ms,
 				error = ev_err,
 				kind = kind,
@@ -507,6 +508,7 @@ return function(D)
 					error_kind = kind,
 					will_retry = true,
 					attempt = next_attempt_num,
+					max_attempts = max_attempts,
 					delay_ms = delay_ms,
 					reset = reset,
 				})
@@ -694,7 +696,7 @@ return function(D)
 					req.max_tokens = res.reply_left
 					req._reply_cap = res.reply_left
 					attempt = attempt + 1
-					local persist_err = before_retry(attempt, 0, res, "context_overflow", emitted)
+					local persist_err = before_retry(attempt, 0, res, "context_overflow", emitted, retries)
 					if persist_err then
 						return persist_err
 					end
@@ -780,7 +782,10 @@ return function(D)
 				if kind == "transport" or kind == "stream_closed" then
 					req.fresh_connection = true
 				end
-				local persist_err = before_retry(attempt, delay, res, kind, emitted)
+				local max_attempts = kind == "overloaded"
+						and math.min(retries, attempt - overloaded + (cfg.overloaded_retries or 3))
+					or retries
+				local persist_err = before_retry(attempt, delay, res, kind, emitted, max_attempts)
 				if persist_err then
 					return persist_err
 				end

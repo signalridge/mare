@@ -2876,6 +2876,14 @@
               "format": "uint64",
               "minimum": 0
             },
+            "max_attempts": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0
+            },
             "delay_ms": {
               "type": [
                 "number",
@@ -6699,6 +6707,14 @@
               "format": "uint64",
               "minimum": 0
             },
+            "max_attempts": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0
+            },
             "delay_ms": {
               "type": [
                 "number",
@@ -8480,6 +8496,14 @@
               ]
             },
             "attempt": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0
+            },
+            "max_attempts": {
               "type": [
                 "integer",
                 "null"

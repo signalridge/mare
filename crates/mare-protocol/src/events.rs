@@ -124,6 +124,8 @@ pub struct StepCompleted {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_attempts: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delay_ms: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reset: Option<bool>,
