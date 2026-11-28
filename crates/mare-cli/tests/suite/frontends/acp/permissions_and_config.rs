@@ -1337,3 +1337,122 @@ fn acp_preserves_trust_source_for_trust_default_and_trust_resolve_plugins() {
         "ACP trust/resolve plugin must load project skills into the request: {system2}"
     );
 }
+
+#[test]
+fn acp_forwards_config_option_update_on_in_session_model_and_effort_change() {
+    let home = tempfile::tempdir().unwrap();
+    let reqs_dir = home.path().join("reqs");
+    std::fs::create_dir_all(&reqs_dir).unwrap();
+    let plugins_dir = home.path().join("config/plugins");
+    std::fs::create_dir_all(&plugins_dir).unwrap();
+    std::fs::write(
+        plugins_dir.join("switch-model.lua"),
+        format!(
+            r#"local n = 0
+return {{
+    name = "switch-model",
+    inject = {{ "llm", "tools" }},
+    apply = function(ctx)
+        ctx.llm:register_provider({{
+            provider = "sw",
+            no_key = true,
+            models = {{
+                {{ model_id = "alpha", name = "Alpha", reasoning = false }},
+                {{ model_id = "beta", name = "Beta", reasoning = true, efforts = {{ "minimal", "medium", "max" }}, default_effort = "medium" }},
+            }},
+            stream = function(req)
+                n = n + 1
+                mare.fs.write({:?} .. "/req-" .. tostring(n) .. ".json", mare.json.encode({{
+                    model = req.model and req.model.ref,
+                    effort = req.effort,
+                }}))
+                if n == 1 then
+                    return {{
+                        role = "assistant",
+                        content = {{ {{ type = "tool_call", id = "tc1", name = "switch_to_beta", arguments = {{}} }} }},
+                        stop_reason = "tool_use",
+                    }}
+                elseif n == 3 then
+                    return {{
+                        role = "assistant",
+                        content = {{ {{ type = "tool_call", id = "tc2", name = "bump_effort", arguments = {{}} }} }},
+                        stop_reason = "tool_use",
+                    }}
+                end
+                return {{ role = "assistant", content = {{ {{ type = "text", text = "ok-" .. tostring(n) }} }}, stop_reason = "stop" }}
+            end,
+        }})
+        ctx.tools:register("switch_to_beta", {{
+            description = "switch model to sw/beta",
+            side_effect = "external",
+            parameters = {{ type = "object", additionalProperties = false }},
+            execute = function()
+                ctx.llm:set_model("sw/beta", {{ target = "session" }})
+                return {{ content = "switched" }}
+            end,
+        }})
+        ctx.tools:register("bump_effort", {{
+            description = "set effort to max",
+            side_effect = "external",
+            parameters = {{ type = "object", additionalProperties = false }},
+            execute = function()
+                ctx.llm:set_effort("max", {{ target = "session" }})
+                return {{ content = "effort-updated" }}
+            end,
+        }})
+    end,
+}}"#,
+            reqs_dir.to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    let mut cmd = mare_cmd();
+    cmd.args(["--model", "sw/alpha", "--permission", "auto", "--approval-policy", "never", "acp"])
+        .env("MARE_HOME", home.path())
+        .stderr(Stdio::piped());
+    let mut rpc = RpcClient::spawn_cmd(&mut cmd);
+    let _ = rpc.call_raw("initialize", json!({ "protocolVersion": 1, "clientCapabilities": {} }), |_| json!(null));
+    let cwd = dunce::canonicalize(home.path()).unwrap();
+    let s = rpc.call_raw("session/new", json!({ "cwd": cwd, "mcpServers": [] }), |_| json!(null));
+    let sid = s["result"]["sessionId"].as_str().unwrap().to_string();
+
+    // Turn 1: plugin tool switches sw/alpha -> sw/beta.
+    let p1 =
+        rpc.request("session/prompt", json!({ "sessionId": sid, "prompt": [{ "type": "text", "text": "switch" }] }));
+    let (r1, u1) = read_until(&mut rpc, p1, Some(&sid));
+    assert_eq!(r1["result"]["stopReason"], "end_turn", "{r1}");
+
+    let cfg_update = u1
+        .iter()
+        .rev()
+        .find(|u| u["sessionUpdate"] == "config_option_update")
+        .unwrap_or_else(|| panic!("expected config_option_update after model switch: {u1:?}"));
+    let opts1 = cfg_update["configOptions"].as_array().unwrap();
+    let model_opt = opts1.iter().find(|o| o["id"] == "model").unwrap();
+    assert_eq!(model_opt["currentValue"], "sw/beta", "{cfg_update}");
+    let effort_opt = opts1.iter().find(|o| o["id"] == "reasoning_effort").unwrap();
+    assert_eq!(effort_opt["currentValue"], "medium", "{cfg_update}");
+    let effort_vals: Vec<&str> =
+        effort_opt["options"].as_array().unwrap().iter().filter_map(|o| o["value"].as_str()).collect();
+    assert!(effort_vals.contains(&"max"), "expected max effort option: {cfg_update}");
+
+    // Turn 2: next request must go to sw/beta, and effort change emits config_option_update too.
+    let p2 = rpc.request("session/prompt", json!({ "sessionId": sid, "prompt": [{ "type": "text", "text": "bump" }] }));
+    let (r2, u2) = read_until(&mut rpc, p2, Some(&sid));
+    assert_eq!(r2["result"]["stopReason"], "end_turn", "{r2}");
+
+    let req3: Value = serde_json::from_str(&std::fs::read_to_string(reqs_dir.join("req-3.json")).unwrap()).unwrap();
+    assert_eq!(req3["model"], "sw/beta", "next request after model switch must target sw/beta: {req3}");
+
+    let cfg_update2 = u2
+        .iter()
+        .rev()
+        .find(|u| u["sessionUpdate"] == "config_option_update")
+        .unwrap_or_else(|| panic!("expected config_option_update after effort change: {u2:?}"));
+    let effort_opt2 =
+        cfg_update2["configOptions"].as_array().unwrap().iter().find(|o| o["id"] == "reasoning_effort").unwrap();
+    assert_eq!(effort_opt2["currentValue"], "max", "{cfg_update2}");
+
+    rpc.kill_and_wait();
+}

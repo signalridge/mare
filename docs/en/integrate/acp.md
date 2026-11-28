@@ -70,7 +70,7 @@ The `mcpServers` supplied with `session/new`, `session/load`, or `session/resume
 
 ### Prompts
 
-Prompts accept text blocks, embedded text resources, resource links and images in their original order. Resource links are represented as text, and adjacent text is joined with a blank line. Audio and embedded binary resources are refused.
+Prompts accept text blocks, embedded text resources (preserving non-empty URIs), resource links and images in their original order. Embedded blob resources with `image/png`, `image/jpeg`, `image/gif`, or `image/webp` MIME types are treated as images; audio and other embedded binary resources are refused. Resource links are represented as text, and adjacent text is joined with a blank line.
 
 Image blocks are refused with an invalid-params error when the session's current model does not declare image input. `initialize` advertises image support for the connection because the model is selected per session and can change; image support is checked for each prompt containing images, since mare cannot decide this flag from a model at initialization before a session host exists.
 
@@ -95,8 +95,9 @@ While a turn runs, mare sends `session/update` notifications:
 | `agent_message_chunk` | Assistant text deltas. |
 | `agent_thought_chunk` | Reasoning deltas. |
 | `tool_call` | A tool call starting. `status` is `in_progress`, `title` is the tool name plus its `path` or `command` argument, `rawInput` is the arguments. |
-| `tool_call_update` | A tool call finishing. `status` is `completed` or `failed`, and the content is the tool's text output. |
+| `tool_call_update` | A tool call finishing. `status` is `completed` or `failed`, and the content carries the tool's text and image output. |
 | `usage_update` | Emitted when `usage/changed` reports `last_context` and a positive `context_window`, carrying `used` and `size`. |
+| `config_option_update` | Emitted when the session's model or reasoning effort changes in-session, carrying updated `configOptions`. |
 
 The `kind` of a tool call is derived from kernel tool metadata (`execute` when `command_tool` is set, `read` / `edit` from `side_effect`, and `other` otherwise or when metadata is unavailable during history replay).
 
@@ -104,7 +105,7 @@ The `kind` of a tool call is derived from kernel tool metadata (`execute` when `
 
 - **No session modes.** The server does not advertise ACP session modes and does not implement `session/set_mode`.
 - **Additional directories validation.** `session/new` accepts `additionalDirectories` (existing physical directories outside `cwd`, revalidated on resume). `session/load` and `session/resume` accept recorded `additionalDirectories` that pass revalidation and refuse unrecorded or invalid directories with `Invalid params`.
-- **No audio prompts.** Audio blocks and embedded binary resources are refused.
+- **No audio or arbitrary binary prompts.** Audio blocks and non-image embedded binary resources are refused (`image/png`, `image/jpeg`, `image/gif`, and `image/webp` blobs are accepted as images).
 - **No client file or terminal methods.** mare reads and writes files and runs commands itself. It does not call the editor's `fs/*` or `terminal/*` methods.
 - **No authentication required.** `initialize` returns no auth methods, and `authenticate` returns an empty success response.
 
