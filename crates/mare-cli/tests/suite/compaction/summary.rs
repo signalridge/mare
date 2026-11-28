@@ -1020,7 +1020,7 @@ async fn compaction_handles_413_payload_too_large_strips_images_and_bounds_live_
             L:register_provider({
                 provider = "imgsum",
                 is_configured = function() return true end,
-                models = { { model_id = "m", context_window = 128000, max_output = 4096, images = true } },
+                models = { { model_id = "m", context_window = 128000, max_output = 4096, input = { "text", "image" } } },
                 stream = function(req, sink)
                     CALLS = CALLS + 1
                     local enc = mare.json.encode(req.messages)

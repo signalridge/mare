@@ -35,6 +35,15 @@ local function check_kind(v, kind)
 			end
 		end
 		return true
+	elseif type(kind) == "string" and kind:sub(1, 5) == "enum:" then
+		local allowed = {}
+		for choice in kind:sub(6):gmatch("[^|]+") do
+			if v == choice then
+				return true
+			end
+			allowed[#allowed + 1] = choice
+		end
+		return false, "one of " .. table.concat(allowed, ", ")
 	end
 	return true
 end
@@ -94,17 +103,15 @@ local MODEL_FIELDS = {
 	context_window_measured = "boolean",
 	max_output = "positive_number",
 	reasoning = "boolean",
-	images = "boolean",
 	hidden = "boolean",
 	tool_update = "tool_update",
 	cache_retention = "string",
-	reasoning_default = "boolean",
 	max_output_default = "boolean",
 	efforts = "string_array",
 	default_effort = "string",
 	cost = "table",
 	truncation = "table",
-	input = "table",
+	input = "string_array",
 	params = "table",
 	effort_map = "table",
 	unavailable = "string_or_boolean",
@@ -150,7 +157,6 @@ local DATA_PROVIDER_FIELDS = {
 	default_context = "positive_number",
 	default_max_output = "positive_number",
 	default_reasoning = "boolean",
-	reasoning = "boolean",
 	tool_update = "tool_update",
 	no_key = "boolean",
 	models = "table",
@@ -200,7 +206,10 @@ local function check_fields(tbl, schema, scope)
 		if val ~= nil then
 			local ok, expected = check_kind(val, kind)
 			if not ok then
-				return false, field, ("expected %s for field `%s`, got %s"):format(expected, field, type(val)), scope
+				local got = (type(kind) == "string" and kind:sub(1, 5) == "enum:" and type(val) == "string")
+						and ("%q"):format(val)
+					or type(val)
+				return false, field, ("expected %s for field `%s`, got %s"):format(expected, field, got), scope
 			end
 		end
 	end
@@ -277,7 +286,17 @@ local function validate_models(models, pname, extra_model_fields)
 		if m.vision ~= nil then
 			return false,
 				("models[%d].vision"):format(i),
-				("provider %q: model field `vision` was replaced by `images`"):format(pname)
+				("provider %q: model field `vision` was replaced by `input`"):format(pname)
+		end
+		if m.images ~= nil then
+			return false,
+				("models[%d].images"):format(i),
+				("provider %q: model field `images` is a derived read-only output; use `input` instead"):format(pname)
+		end
+		if m.input_modalities ~= nil then
+			return false,
+				("models[%d].input_modalities"):format(i),
+				("provider %q: model field `input_modalities` was replaced by `input`"):format(pname)
 		end
 		if type(m.cost) == "table" then
 			for _, ck in ipairs({ "input", "output", "cache_read", "cache_write" }) do
@@ -690,21 +709,14 @@ function M.provider_from_config(id, pc, opts, wire_spec)
 		models_copy = {}
 	end
 
-	local default_reasoning
-	if pc.default_reasoning ~= nil then
-		default_reasoning = pc.default_reasoning
-	elseif pc.reasoning ~= nil then
-		default_reasoning = pc.reasoning ~= false
-	else
-		default_reasoning = opts.default_reasoning
-	end
-
 	local function pick(a, b)
 		if a ~= nil then
 			return a
 		end
 		return b
 	end
+
+	local default_reasoning = pick(pc.default_reasoning, opts.default_reasoning)
 
 	local decl = {
 		provider = id,

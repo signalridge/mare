@@ -17,25 +17,7 @@
 ---@field name string Hosted tool name (e.g. `"web_search"`)
 ---@field options? table Wire-specific hosted tool options
 
----@class mare.Model
----@field id string
----@field ref string "provider/id"
----@field provider string
----@field name? string
----@field context_window? integer measured input limit
----@field max_output? integer
----@field reasoning? boolean
----@field efforts? string[]
----@field cost? {input?: number, output?: number, cache_read?: number, cache_write?: number} USD per million tokens
----@field edit_tool? "apply_patch"|"replace"
----@field truncation? {mode: "tokens"|"bytes", limit: integer} tool-output budget
----@field images? boolean false: the model takes no images — they become "Attachment: <path>" text
---- a provider with several routes: the catalogue's route for this model (llm/routes layer 3)
----@field route? "responses"|"anthropic"|"chat"|"google"|string
----@field tool_update? "addition_only"
----@field cache_retention? "none"|"short"|"long"
---- models.dev's wire protocol for a listed model (llm/routes layer 4, when the provider uses it)
----@field protocol? "responses"|"messages"|"chat-completions"|"generate-content"
+-- `mare.Model` is generated from `types/mare/services/contracts/schema.lua` into `model.gen.lua`.
 
 --- Content block shapes on `mare.Message.content`:
 --- - `{ type = "text", text = string, citations?: mare.Citation[], native?: mare.NativeMap }`
@@ -160,10 +142,11 @@
 ---@field body? fun(text: string, headers: table)
 ---@field finish fun(): mare.Message
 
+--- What a wire tells other plugins about itself (`llm:register_wire`).
 ---@class mare.WireDescribe
----@field route? string
----@field path? string
----@field auth? string[]
+---@field route? string the params route its requests use (resolved by `llm:apply_params`)
+---@field path? string appended to a gateway route's address ("/responses", "/v1/messages")
+---@field auth? string[] the key styles it sends, the default first ("bearer", "x-api-key")
 ---@field hosted_tools? string[]
 ---@field provider_fields? table<string, string>
 ---@field model_fields? table<string, string>

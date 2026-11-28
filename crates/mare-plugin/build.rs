@@ -485,6 +485,26 @@ fn emit_static_contracts(parsed: &std::collections::BTreeMap<String, mare_kernel
             );
         }
         contracts_code.push_str("        ],\n");
+        contracts_code.push_str("        types: &[\n");
+        for (tk, ty) in &c.types {
+            let schema_id = pool.intern(&ty.schema);
+            let req = match &ty.required {
+                Some(r) => format!("Some({})", fmt_str_slice(r)),
+                None => "None".to_string(),
+            };
+            let _ = writeln!(contracts_code, "            ({tk:?}, StaticNamedTypeSpec {{");
+            let _ = writeln!(contracts_code, "                class: {:?},", ty.class);
+            let _ = writeln!(contracts_code, "                doc: {},", fmt_opt_str(&ty.doc));
+            let _ = writeln!(contracts_code, "                schema: {schema_id},");
+            let _ = writeln!(contracts_code, "                required: {req},");
+            contracts_code.push_str("                lua_fields: &[\n");
+            for (fk, fty) in &ty.lua_fields {
+                let _ = writeln!(contracts_code, "                    ({fk:?}, {fty:?}),");
+            }
+            contracts_code.push_str("                ],\n");
+            contracts_code.push_str("            }),\n");
+        }
+        contracts_code.push_str("        ],\n");
         contracts_code.push_str("    }),\n");
     }
     contracts_code.push_str("];\n");

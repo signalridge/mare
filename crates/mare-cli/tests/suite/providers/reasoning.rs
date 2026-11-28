@@ -537,7 +537,7 @@ async fn opencode_go_deepseek_sends_high_and_max_as_they_are() {
             r#"local m = assert(LLM:resolve("opencode-go/deepseek-v4.1-flash"))
                LLM:set_model(m.ref, { save = false })
                for _, e in ipairs({ "high", "max", "xhigh", "off" }) do
-                 LLM:set_effort(e, { save = false })
+                 LLM:restore_selection({ effort = e })
                  LLM:stream({ model = m, system = "S",
                    messages = { { role = "user", content = { { type = "text", text = "hi" } } } } }, function() end)
                end"#,

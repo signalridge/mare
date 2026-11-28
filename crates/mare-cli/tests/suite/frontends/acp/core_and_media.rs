@@ -305,7 +305,7 @@ return {
         ctx.llm:register_provider({
             provider = "text-only",
             no_key = true,
-            models = { { model_id = "plain", name = "Plain", images = false } },
+            models = { { model_id = "plain", name = "Plain", input = { "text" } } },
             stream = function()
                 return { role = "assistant", content = { { type = "text", text = "ok" } }, stop_reason = "stop" }
             end,
@@ -540,8 +540,8 @@ return {{
             provider = "rec",
             no_key = true,
             models = {{
-                {{ model_id = "img", name = "Rec Img", images = true }},
-                {{ model_id = "plain", name = "Rec Plain", images = false }},
+                {{ model_id = "img", name = "Rec Img", input = {{ "text", "image" }} }},
+                {{ model_id = "plain", name = "Rec Plain", input = {{ "text" }} }},
             }},
             stream = function(req)
                 n = n + 1

@@ -1260,7 +1260,7 @@ fn rpc_anchor_cli_trust_does_not_suppress_untrusted_label_in_other_directory() {
         ctx.llm:register_provider({{
             provider = "rec",
             no_key = true,
-            models = {{ {{ model_id = "m", name = "Rec", images = true }} }},
+            models = {{ {{ model_id = "m", name = "Rec", input = {{ "text", "image" }} }} }},
             stream = function(req)
                 mare.fs.write({:?}, mare.json.encode({{ system = req.system }}))
                 return {{ role = "assistant", content = {{ {{ type = "text", text = "ok" }} }}, stop_reason = "stop" }}

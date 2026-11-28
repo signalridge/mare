@@ -22,6 +22,7 @@ mod golden_wire;
 mod interrupted_call;
 mod kimi_loop;
 mod markup_healing;
+mod model_resolve;
 mod models;
 mod native_metadata;
 mod native_metadata_edges;

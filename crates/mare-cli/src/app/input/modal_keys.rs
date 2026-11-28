@@ -676,6 +676,7 @@ fn send_select_reply(
             tab,
             key,
             filter: filter.to_string(),
+            item_id: items.get(index).and_then(|it| it.item_id.clone()),
         });
         let _ = r.send(pick.ok_or(Dismissed::Cancelled));
     }

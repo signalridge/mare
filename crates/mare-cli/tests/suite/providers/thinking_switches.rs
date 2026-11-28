@@ -135,7 +135,7 @@ assert(msg and not msg.error, tostring(msg and msg.error))
         let session_probe = r#"
 local model_ref, effort = ...
 LLM:set_model(model_ref, { save = false })
-LLM:set_effort(effort, { save = false })
+LLM:restore_selection({ effort = effort })
 local m = assert(LLM:resolve(model_ref))
 local msg = LLM:stream({
     model = m,

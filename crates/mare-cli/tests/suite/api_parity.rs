@@ -937,6 +937,19 @@ fn generated_luals_are_current() {
             path.display()
         );
     }
+    for (type_name, type_text) in mare_kernel::contracts::luals_named_types(&contracts()) {
+        let type_path = dir.join(format!("{type_name}.gen.lua"));
+        expected.insert(type_path.clone());
+        if std::env::var_os("UPDATE_GENERATED").is_some() {
+            std::fs::write(&type_path, &type_text).unwrap();
+        }
+        let type_current = std::fs::read_to_string(&type_path).unwrap_or_default();
+        assert!(
+            type_current == type_text,
+            "{} is stale: UPDATE_GENERATED=1 cargo test -p mare-cli generated_luals_are_current",
+            type_path.display()
+        );
+    }
     for entry in std::fs::read_dir(&dir).unwrap() {
         let path = entry.unwrap().path();
         if path.to_string_lossy().ends_with(".gen.lua") {
@@ -955,6 +968,46 @@ fn generated_luals_are_current() {
         "{} is stale: UPDATE_GENERATED=1 cargo test -p mare-cli generated_luals_are_current",
         events_path.display()
     );
+}
+
+/// Issue #89: `mare.WireDescribe` is declared once, `mare.Model` is generated from the contract
+/// with all contract fields (`default_effort`, `available`, `ready`, `parameters`, ...), and
+/// `register_provider` model items accept `input` without an `images` input alias.
+#[test]
+fn provider_contract_has_single_wire_describe_generated_model_and_single_modality_input() {
+    let types_dir = preset().join("types/mare");
+    let mut wire_describe_files = vec![];
+    let mut stack = vec![types_dir];
+    while let Some(d) = stack.pop() {
+        for entry in std::fs::read_dir(&d).unwrap() {
+            let p = entry.unwrap().path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|e| e == "lua") {
+                let text = std::fs::read_to_string(&p).unwrap();
+                if text.contains("---@class mare.WireDescribe") {
+                    wire_describe_files.push(p);
+                }
+            }
+        }
+    }
+    assert_eq!(
+        wire_describe_files.len(),
+        1,
+        "mare.WireDescribe must be declared in exactly one file: {wire_describe_files:?}"
+    );
+
+    let model_gen = std::fs::read_to_string(preset().join("types/mare/services/model.gen.lua")).unwrap();
+    for field in ["default_effort?", "available?", "ready?", "parameters?", "images?"] {
+        assert!(model_gen.contains(&format!("---@field {field}")), "model.gen.lua missing `{field}`:\n{model_gen}");
+    }
+
+    let c = contracts();
+    let reg_props = c["llm"].methods["register_provider"].params["properties"]["models"]["items"]["properties"]
+        .as_object()
+        .unwrap();
+    assert!(reg_props.contains_key("input"), "register_provider model items must declare `input`");
+    assert!(!reg_props.contains_key("images"), "register_provider model items must not accept `images` input");
 }
 
 /// Counter-test: changing only a parameter's or the result's type (not a method name) changes

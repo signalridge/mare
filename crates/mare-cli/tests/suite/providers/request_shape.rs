@@ -399,7 +399,7 @@ async fn anthropic_error_tool_result_without_images_and_non_vision_unchanged() {
         let h = provider_host(
             &mut env,
             &server,
-            json!({ "models": { "anthropic/claude-haiku-5-5": { "images": false } } }),
+            json!({ "models": { "anthropic/claude-haiku-5-5": { "input": ["text"] } } }),
         )
         .await;
         let script = r#"
@@ -521,6 +521,7 @@ async fn opencode_go_anthropic_error_tool_result_image_preserves_unsigned_thinki
             &mut env,
             &server,
             json!({
+                "models": { "opencode-go/claude-haiku-5-5": {} },
                 "plugins": {
                     "provider-opencode-go": {
                         "base_url": format!("{}/opencode-go", server.base),

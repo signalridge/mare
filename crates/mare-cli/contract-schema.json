@@ -2758,9 +2758,6 @@
               "hidden": {
                 "type": "boolean"
               },
-              "images": {
-                "type": "boolean"
-              },
               "input": {
                 "items": {
                   "type": "string"
@@ -2789,9 +2786,6 @@
                 "type": "string"
               },
               "reasoning": {
-                "type": "boolean"
-              },
-              "reasoning_default": {
                 "type": "boolean"
               },
               "route": {

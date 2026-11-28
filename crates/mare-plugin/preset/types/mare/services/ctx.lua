@@ -201,12 +201,6 @@ function Ctx:get(name) end
 ---@field credits? string
 ---@field reached? string
 
---- What a wire tells other plugins about itself (`llm:register_wire`).
----@class mare.WireDescribe
----@field route? string the params route its requests use (resolved by `llm:apply_params`)
----@field path? string appended to a gateway route's address ("/responses", "/v1/messages")
----@field auth? string[] the key styles it sends, the default first ("bearer", "x-api-key")
-
 ---@alias mare.ConfigApiEntry (fun(config: table, ...: any): any)|table<string, mare.ConfigApiEntry>
 
 ---@class mare.PluginDef

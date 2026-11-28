@@ -1281,19 +1281,15 @@ function M.openrouter_cost(u)
 	return nil
 end
 
---- Derive a model's image capability (`true`, `false`, or `nil` when unknown):
---- explicit boolean `m.images` wins (user override priority); otherwise a non-empty
---- `m.input` / `m.input_modalities` list yields `true` iff `"image"` is present and
---- `false` otherwise. Empty or absent `input` keeps `nil` (unknown).
+--- Derive a model's image capability (`true`, `false`, or `nil` when unknown) from
+--- `m.input` (a non-empty list yields `true` iff `"image"` is present and `false`
+--- otherwise). Detached read-only descriptors without `input` fall back to boolean
+--- `m.images`. Empty or absent `input` keeps `nil` (unknown).
 function M.model_images(m)
 	if type(m) ~= "table" then
 		return nil
 	end
-	if type(m.images) == "boolean" then
-		return m.images
-	end
-	local mods = type(m.input) == "table" and m.input
-		or (type(m.input_modalities) == "table" and m.input_modalities or nil)
+	local mods = type(m.input) == "table" and m.input or nil
 	if type(mods) == "table" and #mods > 0 then
 		for _, v in ipairs(mods) do
 			if v == "image" then
@@ -1301,6 +1297,9 @@ function M.model_images(m)
 			end
 		end
 		return false
+	end
+	if type(m.images) == "boolean" then
+		return m.images
 	end
 	return nil
 end

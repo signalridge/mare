@@ -230,6 +230,7 @@ function mare.tools.disable(names) end
 ---@field max_output? integer
 ---@field reasoning? boolean
 ---@field efforts? string[]
+---@field input? string[] accepted input modalities (e.g. `{ "text", "image" }`)
 ---@field cost? {input?: number, output?: number, cache_read?: number, cache_write?: number} USD per 1M tokens
 ---@field edit_tool? "apply_patch"|"replace"
 ---@field alias? string another name: `/model <alias>`; with plain `params` values it pins them
@@ -310,7 +311,6 @@ function mare.params(rule) end
 ---@field default_context? integer default context window for unknown models on this provider
 ---@field default_max_output? integer default max output tokens for unknown models on this provider
 ---@field default_reasoning? boolean whether unknown models default to reasoning-capable
----@field reasoning? boolean shorthand for `default_reasoning`
 ---@field tool_update? "addition_only" default mid-conversation tool update capability for models on this provider
 ---@field models? table[] seed model list (replaces preset seeds on an overlay)
 ---@field list_models? boolean set `false` to disable live `GET /models` fetching

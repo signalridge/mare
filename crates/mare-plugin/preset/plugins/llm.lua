@@ -34,6 +34,11 @@ return {
 		---
 		model = function(C, def)
 			assert(type(def) == "table" and def.provider and def.id, "mare.model needs provider and id")
+			assert(
+				def.images == nil,
+				'mare.model: `images` is a derived read-only output; set `input` (e.g. `input = { "text" }`) instead'
+			)
+			assert(def.input_modalities == nil, "mare.model: use `input` instead of `input_modalities`")
 			C.models = C.models or {}
 			local ref = def.provider .. "/" .. def.id
 			C.models[ref] = C.models[ref] or {}
@@ -476,6 +481,12 @@ return {
 					end,
 					current = function()
 						return llm.current(llm, ctx)
+					end,
+					selected_model = function()
+						return state.model
+					end,
+					unresolved_model = function()
+						return D.models.unresolved_model()
 					end,
 					resolve = function(ref)
 						return llm.resolve(llm, ctx, ref)

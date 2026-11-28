@@ -1,0 +1,36 @@
+---@meta _
+-- GENERATED from types/mare/services/contracts/llm.lua (service `llm`, type `model`): do not edit.
+-- Regenerate: UPDATE_GENERATED=1 cargo test -p mare-cli generated_luals_are_current
+
+---@class mare.Model
+---@field id string
+---@field ref string
+---@field provider string
+---@field available? boolean
+---@field cache_retention? "none"|"short"|"long"
+---@field context_window? integer
+---@field cost? {cache_read?: number, cache_write?: number, input?: number, output?: number}
+---@field default_effort? string
+---@field edit_tool? "apply_patch"|"replace"
+---@field effort_map? table<string, any>
+---@field efforts? string[]
+---@field hidden? boolean
+---@field images? boolean
+---@field input? string[]
+---@field listed? boolean
+---@field max_output? integer
+---@field max_output_default? boolean
+---@field model_id? string
+---@field name? string
+---@field parameters? ({cycleable?: boolean, default?: any, name?: string, options: ({cost?: number|table, name?: string, tooltip?: string, value: any})[], parameter_id: string, statusline?: any, tooltip?: string, type?: string, values: any[], visible?: any})[]
+---@field protocol? "responses"|"messages"|"chat-completions"|"generate-content"
+---@field ready? boolean
+---@field ready_reason? string
+---@field reasoning? boolean
+---@field route? string
+---@field route_error? string
+---@field tool_update? "addition_only"
+---@field truncation? {mode: "tokens"|"bytes", limit: integer}
+---@field unavailable? string|boolean
+---@field unavailable_reason? string
+---@field wire_route? string

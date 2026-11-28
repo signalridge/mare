@@ -126,6 +126,8 @@ pub struct ServiceContract {
     pub events: BTreeMap<String, crate::dispatch::contracts::EventSpec>,
     /// Named provider capabilities backed by declared methods (`capabilities = { name = { method, doc } }`).
     pub capabilities: BTreeMap<String, crate::dispatch::contracts::CapabilitySpec>,
+    /// Named LuaLS types generated from contract schemas (`types = { stem = { class, schema, required?, lua_fields? } }`).
+    pub types: BTreeMap<String, crate::dispatch::contracts::NamedTypeSpec>,
 }
 
 /// Declarative static frontend assets on a plugin definition (`web = { dir = ... }`).

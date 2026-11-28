@@ -11,6 +11,25 @@ return {
 	["llm"] = {
 		essential = true,
 		doc = "Models, providers, credentials and model requests.",
+		types = {
+			model = {
+				class = "mare.Model",
+				schema = model,
+				required = { "id", "ref", "provider" },
+				lua_fields = {
+					id = "string",
+					input = "string[]",
+					truncation = '{mode: "tokens"|"bytes", limit: integer}',
+					cache_retention = '"none"|"short"|"long"',
+					protocol = '"responses"|"messages"|"chat-completions"|"generate-content"',
+					hidden = "boolean",
+					listed = "boolean",
+					max_output_default = "boolean",
+					effort_map = "table<string, any>",
+					unavailable = "string|boolean",
+				},
+			},
+		},
 		errors = {
 			unknown_model = { doc = "no model with that ref or alias" },
 			model_unavailable = {
@@ -174,7 +193,6 @@ return {
 							context_window_measured = boolean,
 							max_output = { type = "number", minimum = 1 },
 							reasoning = boolean,
-							images = boolean,
 							hidden = boolean,
 							tool_update = {
 								oneOf = {
@@ -182,7 +200,6 @@ return {
 									{ type = "boolean", enum = { false } },
 								},
 							},
-							reasoning_default = boolean,
 							max_output_default = boolean,
 							cache_retention = { type = "string", enum = { "none", "short", "long" } },
 							efforts = { type = "array", items = string },
@@ -304,7 +321,6 @@ return {
 					default_context = "integer",
 					default_max_output = "integer",
 					default_reasoning = "boolean",
-					reasoning = "boolean",
 					tool_update = '"addition_only"|false',
 					no_key = "boolean",
 					wire = "string",
@@ -549,7 +565,7 @@ return {
 				result = { type = { "string", "null" } },
 			},
 			effort_options = {
-				doc = "Return every effort value defined for `model` (built-in levels plus rule additions), or nil.",
+				doc = "Return the effort values offered for `model` on its active route (same source as `param_list`), or nil.",
 				lua_unchecked = true,
 				params = object({}),
 				lua = { model = "mare.Model?" },

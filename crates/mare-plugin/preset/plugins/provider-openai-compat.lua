@@ -57,7 +57,6 @@ local PRESETS = {
 				context_window = 256000,
 				max_output = 32768,
 				reasoning = true,
-				efforts = { "high" },
 				cost = { input = 0.6, output = 2.5, cache_read = 0.15 },
 			},
 			{
@@ -66,7 +65,8 @@ local PRESETS = {
 				context_window = 262144,
 				max_output = 131072,
 				reasoning = true,
-				efforts = EFFORTS,
+				-- Moonshot Kimi K3 docs: always-on thinking, top-level reasoning_effort = low | high | max.
+				efforts = { "low", "high", "max" },
 				tool_update = "addition_only",
 				cost = { input = 3, output = 15, cache_read = 0.3 },
 			},
@@ -87,7 +87,6 @@ local PRESETS = {
 				context_window = 262144,
 				max_output = 32768,
 				reasoning = true,
-				efforts = { "high" },
 			},
 		},
 	},
@@ -152,8 +151,8 @@ end
 table.sort(PRESET_PROVIDERS)
 
 local PROVIDER_FIELDS = {
-	effort_param = "string",
-	reasoning_format = "string",
+	effort_param = "enum:openrouter|reasoning_effort",
+	reasoning_format = "enum:openrouter|reasoning_effort|deepseek|kimi|zai|together|qwen|qwen-chat-template|chat-template",
 	reasoning_budget_field = "string",
 	reasoning_budgets = "table",
 	supports_reasoning_effort = "boolean",
