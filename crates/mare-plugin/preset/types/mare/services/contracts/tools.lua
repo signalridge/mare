@@ -109,6 +109,7 @@ return {
 					permission_request = "boolean",
 					terminate = "boolean",
 					search = "table",
+					sort_key = "string",
 					is_current = "fun(): boolean",
 					access = "fun(args: table, ctx?: table): table[]",
 				},

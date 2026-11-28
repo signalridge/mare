@@ -77,6 +77,77 @@ async fn mcp_tool_names_are_hashed_and_colliding_servers_rejected() {
     .await
 }
 
+#[tokio::test]
+async fn repro_264_mcp_tool_declarations_stable_across_connection_order() {
+    local(async {
+        async fn collect_order(alpha_first: bool) -> (Vec<String>, Vec<String>) {
+            let env = TestEnv::new().await;
+            let alpha = Fake::new(&env, "alpha");
+            let beta = Fake::new(&env, "beta");
+            let gate = env.home.path().join("second.gate");
+            let alpha_opts = if alpha_first {
+                json!({ "tools": ["echo"] })
+            } else {
+                json!({ "tools": ["echo"], "list_gate": gate })
+            };
+            let beta_opts = if alpha_first {
+                json!({ "tools": ["echo"], "list_gate": gate })
+            } else {
+                json!({ "tools": ["echo"] })
+            };
+            let cfg = servers(json!({
+                "alpha": with(alpha.entry(alpha_opts), json!({ "tier": "direct" })),
+                "beta": with(beta.entry(beta_opts), json!({ "tier": "direct" })),
+            }));
+            let h = env.host().builtins(&["mcp"]).config(cfg).no_session().build().await;
+            expose(&h);
+            let first = if alpha_first { "mcp__alpha__echo" } else { "mcp__beta__echo" };
+            let second = if alpha_first { "mcp__beta__echo" } else { "mcp__alpha__echo" };
+            wait_until(15, "first MCP server ready", || {
+                let h = h.clone();
+                let first = first.to_string();
+                async move { eval::<bool>(&h, &format!("return T:get('{first}') ~= nil")).await }
+            })
+            .await;
+            std::fs::write(&gate, "go").unwrap();
+            wait_until(15, "second MCP server ready", || {
+                let h = h.clone();
+                let second = second.to_string();
+                async move { eval::<bool>(&h, &format!("return T:get('{second}') ~= nil")).await }
+            })
+            .await;
+            let defs: Vec<String> = eval(
+                &h,
+                r#"local out = {}
+                   for _, d in ipairs(T:definitions()) do
+                     if d.name:match("^mcp__") then out[#out + 1] = d.name end
+                   end
+                   return out"#,
+            )
+            .await;
+            let snippets: Vec<String> = eval(
+                &h,
+                r#"local out = {}
+                   for _, s in ipairs(T:snippets()) do
+                     if type(s) == "table" and type(s.name) == "string" and s.name:match("^mcp__") then
+                       out[#out + 1] = s.name
+                     end
+                   end
+                   return out"#,
+            )
+            .await;
+            h.shutdown().await;
+            (defs, snippets)
+        }
+
+        let (defs_ab, snips_ab) = collect_order(true).await;
+        let (defs_ba, snips_ba) = collect_order(false).await;
+        assert_eq!(defs_ab, defs_ba, "MCP tool declaration order must not depend on server connection order");
+        assert_eq!(snips_ab, snips_ba, "MCP tool snippet order must not depend on server connection order");
+    })
+    .await
+}
+
 /// The `mcp` service's status(): one row per server with state, tier, transport, tool count
 /// and the last error, without connecting anything itself (deferred servers stay idle).
 #[tokio::test]
