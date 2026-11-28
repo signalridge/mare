@@ -875,6 +875,44 @@ return {
 				return {}
 			end,
 		})
+		-- Treat exact empty-string optional overrides at the model-callable `subagent` tool entry
+		-- as omitted so empty `type`/`model`/`effort`/`system` inherit defaults instead of
+		-- bypassing them; invalid non-empty values stay rejected by schema/type validation.
+		local OPTIONAL_OVERRIDE_FIELDS = { "type", "model", "effort", "system" }
+		local function strip_empty_overrides(args)
+			if type(args) ~= "table" then
+				return nil
+			end
+			local changed = false
+			for _, key in ipairs(OPTIONAL_OVERRIDE_FIELDS) do
+				if args[key] == "" then
+					changed = true
+					break
+				end
+			end
+			if not changed then
+				return nil
+			end
+			local out = {}
+			for k, v in pairs(args) do
+				out[k] = v
+			end
+			for _, key in ipairs(OPTIONAL_OVERRIDE_FIELDS) do
+				if out[key] == "" then
+					out[key] = nil
+				end
+			end
+			return out
+		end
+		ctx:inject({ "policy" }, function(c)
+			c.policy:rewriter("tool/rewrite", function(call)
+				if call.name ~= "subagent" then
+					return nil
+				end
+				return strip_empty_overrides(call.arguments)
+			end, { prepend = true })
+		end)
+
 		ctx.tools:register("subagent", {
 			snippet = "Delegate a task to an independent subagent",
 			description = "Start an independently managed subagent with its own context and return its id. "
@@ -937,6 +975,7 @@ return {
 				if not (mare.subagent and mare.subagent.start) then
 					return { content = "subagent runtime is unavailable", is_error = true }
 				end
+				a = strip_empty_overrides(a) or a
 				local opts = {
 					prompt = a.prompt,
 					type = a.type,
