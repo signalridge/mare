@@ -550,3 +550,121 @@ async fn file_backed_json_readers_strip_single_utf8_bom_while_json_decode_stays_
     })
     .await
 }
+
+#[tokio::test]
+async fn repro_235_subagent_discovers_uncached_deferred_mcp_tool() {
+    local(async {
+        let env = TestEnv::new().await;
+        let fake = Fake::new(&env, "cold-deferred-subagent");
+        let entry = with(fake.entry(json!({ "tools": ["echo"] })), json!({ "tier": "deferred" }));
+        // Child calls tool_search for "echo" (connecting the cold deferred server), then calls mcp__cold__echo via call_tool.
+        let script = json!([
+            { "tool_calls": [{ "name": "tool_search", "arguments": { "query": "echo" } }] },
+            { "tool_calls": [{ "name": "call_tool", "arguments": { "name": "mcp__cold__echo", "arguments": { "text": "from-cold-mcp" } } }] },
+            { "text": "child-done" }
+        ]);
+        let mut b = env
+            .host()
+            .builtins(&["subagent", "mcp"])
+            .faux(script)
+            .config(json!({
+                "plugins": {
+                    "permissions": { "enabled": true, "preset": "full-access" },
+                    "approvals": { "policy": "never" },
+                    "mcp": { "servers": { "cold": entry } }
+                }
+            }))
+            .no_session();
+        b.opts.project_trusted = true;
+        let h = b.build().await;
+        expose(&h);
+
+        // Parent has NOT searched `cold` yet, so `mcp__cold__echo` is uncached and absent from T:list().
+        assert!(!eval::<bool>(&h, "return T:get('mcp__cold__echo') ~= nil").await);
+        assert!(eval::<bool>(&h, "return T:get('tool_search') ~= nil").await);
+
+        let (search_out, call_out): (String, String) = eval(
+            &h,
+            r#"
+            local svc = C.cordis:get("subagent")
+            local run = svc:start({ prompt = "discover and call cold mcp tool" })
+            local done = svc:wait(run.subagent_id, { timeout_ms = 15000 })
+            assert(done and done.status == "completed", mare.json.encode(done))
+            return tostring(done.result or ""), tostring(done.error or "")
+            "#,
+        )
+        .await;
+        assert_eq!(
+            fake.count("tools/call"),
+            1,
+            "child with tool_search could not discover/call uncached deferred MCP tool mcp__cold__echo; fake_log={:?}, result={search_out:?}, err={call_out:?}",
+            fake.lines()
+        );
+        h.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn subagent_deferred_mcp_discovery_still_respects_explicit_allowlist_and_disallowed_tools() {
+    local(async {
+        let env = TestEnv::new().await;
+        let fake = Fake::new(&env, "cold-deferred-subagent-denied");
+        let entry = with(fake.entry(json!({ "tools": ["echo"] })), json!({ "tier": "deferred" }));
+        let script = json!([
+            { "tool_calls": [{ "name": "tool_search", "arguments": { "query": "echo" } }] },
+            { "tool_calls": [{ "name": "call_tool", "arguments": { "name": "mcp__cold__echo", "arguments": { "text": "blocked" } } }] },
+            { "text": "child-1-done" },
+            { "tool_calls": [{ "name": "tool_search", "arguments": { "query": "echo" } }] },
+            { "tool_calls": [{ "name": "call_tool", "arguments": { "name": "mcp__cold__echo", "arguments": { "text": "blocked-2" } } }] },
+            { "text": "child-2-done" }
+        ]);
+        let mut b = env
+            .host()
+            .builtins(&["subagent", "mcp"])
+            .faux(script)
+            .config(json!({
+                "plugins": {
+                    "permissions": { "enabled": true, "preset": "full-access" },
+                    "approvals": { "policy": "never" },
+                    "mcp": { "servers": { "cold": entry } }
+                }
+            }))
+            .no_session();
+        b.opts.project_trusted = true;
+        let h = b.build().await;
+        expose(&h);
+
+        // 1. Explicit closed `tools` allowlist on start() must NOT inherit deferred discovery prefixes.
+        // 2. Subagent type with `disallowed_tools = { "mcp__cold__echo" }` must block that tool even
+        //    when deferred discovery prefixes are inherited.
+        exec(
+            &h,
+            r#"
+            local svc = C.cordis:get("subagent")
+            local r1 = svc:start({ prompt = "try with closed allowlist", tools = { "tool_search", "call_tool" } })
+            local d1 = svc:wait(r1.subagent_id, { timeout_ms = 15000 })
+            assert(d1 and d1.status == "completed", mare.json.encode(d1))
+
+            svc:register_type({
+                name = "no_cold_echo",
+                description = "forbids cold echo",
+                disallowed_tools = { "mcp__cold__echo" },
+            })
+            local r2 = svc:start({ type = "no_cold_echo", prompt = "try with disallowed tool" })
+            local d2 = svc:wait(r2.subagent_id, { timeout_ms = 15000 })
+            assert(d2 and d2.status == "completed", mare.json.encode(d2))
+            "#,
+        )
+        .await;
+
+        assert_eq!(
+            fake.count("tools/call"),
+            0,
+            "excluded or allowlist-restricted subagent must not call mcp__cold__echo; fake_log={:?}",
+            fake.lines()
+        );
+        h.shutdown().await;
+    })
+    .await;
+}

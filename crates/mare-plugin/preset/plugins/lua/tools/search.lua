@@ -191,7 +191,7 @@ return function(D)
 		assert(type(def) == "table" and type(def.prepare) == "function", "search source requires prepare")
 		sequence = sequence + 1
 		local id = sequence
-		sources[id] = def.prepare
+		sources[id] = { prepare = def.prepare, prefixes = def.prefixes }
 		local function remove()
 			if sources[id] then
 				sources[id] = nil
@@ -201,6 +201,28 @@ return function(D)
 		remove = require("mare_lib").owned(caller, remove, "tool search source")
 		tools:invalidate(ctx)
 		return remove
+	end
+
+	function tools.discovery_prefixes(_, _)
+		local seen, out = {}, mare.json.array()
+		for i = 1, sequence do
+			local src = sources[i]
+			local raw = src and src.prefixes
+			if type(raw) == "function" then
+				local ok, list = pcall(raw)
+				raw = ok and list or nil
+			end
+			if type(raw) == "table" then
+				for _, p in ipairs(raw) do
+					if type(p) == "string" and p ~= "" and not seen[p] then
+						seen[p] = true
+						out[#out + 1] = p
+					end
+				end
+			end
+		end
+		table.sort(out)
+		return out
 	end
 
 	local function catalog()
@@ -252,7 +274,8 @@ return function(D)
 		end,
 		execute = function(a, tctx)
 			for i = 1, sequence do
-				local prepare = sources[i]
+				local src = sources[i]
+				local prepare = src and src.prepare
 				if prepare then
 					local ok, err = pcall(prepare)
 					if not ok then

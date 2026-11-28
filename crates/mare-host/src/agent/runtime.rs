@@ -354,6 +354,12 @@ async fn run_child_host(mut args: ChildHostArgs) -> Result<serde_json::Value, su
     if let Some(tools) = args.spec.get(crate::frontend::TOOLS).filter(|v| !v.is_null()) {
         child_args.insert("tool_ceiling".into(), tools.clone());
     }
+    if let Some(prefixes) = args.spec.get("tool_discovery_prefixes").filter(|v| !v.is_null()) {
+        child_args.insert("tool_discovery_prefixes".into(), prefixes.clone());
+    }
+    if let Some(denied) = args.spec.get("tool_ceiling_denied").filter(|v| !v.is_null()) {
+        child_args.insert("tool_ceiling_denied".into(), denied.clone());
+    }
     child_args.insert("no_session".into(), serde_json::Value::Bool(args.transcript.is_none()));
     if let Some(trust) = args.trust.trust_arg {
         child_args.insert("trust".into(), serde_json::Value::String(trust));

@@ -392,8 +392,17 @@ return {
 				registration = true,
 				lua_unchecked = true,
 				params = object({}),
-				lua = { definition = "{prepare: async fun()}" },
+				lua = { definition = "{prepare: async fun(), prefixes?: string[]|fun(): string[]}" },
 				order = { "definition" },
+			},
+			discovery_prefixes = {
+				doc = "Tool-name prefixes advertised by registered lazy search sources.",
+				optional = true,
+				poisoned = "allow",
+				lua_unchecked = true,
+				params = object({}),
+				order = {},
+				result = { type = "array", items = string },
 			},
 			output_channel = {
 				doc = "Open an optional streaming output channel owned by the tools service, or `nil, err`.",
