@@ -47,6 +47,8 @@ pub struct ChildEnd {
     pub error: Option<mare_protocol::events::EventError>,
     pub error_kind: Option<String>,
     pub usage: Option<serde_json::Value>,
+    pub truncated: bool,
+    pub stop_reason: Option<String>,
 }
 
 /// A child's `tool/approval` request, forwarded to the parent host. A child has no UI of its own;

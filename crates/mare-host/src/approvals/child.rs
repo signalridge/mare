@@ -183,6 +183,8 @@ impl Host {
                             error,
                             error_kind,
                             usage,
+                            truncated,
+                            stop_reason,
                         } = *end;
                         let (session, session_epoch) = parent_session.unzip();
                         let status = if status.is_empty() {
@@ -206,6 +208,12 @@ impl Host {
                         if let Some(obj) = completed.as_object_mut() {
                             obj.insert(mare_shared::STATUS_KEY.into(), serde_json::json!(status));
                             obj.insert(mare_shared::USAGE_KEY.into(), serde_json::json!(usage));
+                            if truncated {
+                                obj.insert("output_truncated".into(), serde_json::json!(true));
+                            }
+                            if let Some(reason) = stop_reason {
+                                obj.insert("stop_reason".into(), serde_json::json!(reason));
+                            }
                         }
                         h.kernel.emit_json("subagent/completed", completed).await
                     }

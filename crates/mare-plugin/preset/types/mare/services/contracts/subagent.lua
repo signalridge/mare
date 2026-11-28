@@ -43,6 +43,8 @@ local subagent_wait_result = object({
 	usage = { type = "object" },
 	error = structured_error,
 	error_kind = string,
+	truncated = boolean,
+	stop_reason = string,
 }, { "subagent_id", "status", "timed_out" })
 return {
 	["subagent"] = {

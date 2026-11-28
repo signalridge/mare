@@ -953,6 +953,8 @@
 ---@field error? {code: string, message: string, data?: any}|nil
 ---@field error_kind? string|nil
 ---@field usage? any
+---@field output_truncated? boolean|nil
+---@field stop_reason? string|nil
 ---@field truncated? boolean|nil
 
 --- Latest coalesced progress snapshot for a subagent.
@@ -1090,6 +1092,8 @@
 ---@field error? {code: string, message: string, data?: any}|nil
 ---@field error_kind? string|nil
 ---@field not_sent? boolean|nil
+---@field output_truncated? boolean|nil
+---@field stop_reason? string|nil
 ---@field truncated? boolean|nil
 
 --- Agent turn started.

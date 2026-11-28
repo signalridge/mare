@@ -65,6 +65,8 @@ function mare.subagent.tool_allowed(name) end
 ---@field messages? table[]
 ---@field usage? table
 ---@field error? string
+---@field truncated? boolean
+---@field stop_reason? string
 
 --- List subagents spawned by the current parent session.
 ---@return mare.SubagentInfo[]

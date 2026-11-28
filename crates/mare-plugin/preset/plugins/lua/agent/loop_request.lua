@@ -693,6 +693,8 @@ return function(D)
 			persist({ kind = "request-end", payload = { request_id = rid } })
 		end
 		local truncated = msg.stop_reason == "length"
+		S.stop_reason = msg.stop_reason
+		S.truncated = truncated
 		if truncated then
 			-- Warn visibly instead of silently stopping.
 			local note = "Response truncated (max output tokens reached)."

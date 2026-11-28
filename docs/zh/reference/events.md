@@ -54,6 +54,8 @@ Agent turn completed after run-end durability confirmation.
 | `error` | `EventError \| null` |  |  |
 | `error_kind` | `string \| null` |  |  |
 | `not_sent` | `boolean \| null` |  |  |
+| `output_truncated` | `boolean \| null` |  |  |
+| `stop_reason` | `string \| null` |  |  |
 | `truncated` | `boolean \| null` |  |  |
 
 **示例**
@@ -371,6 +373,8 @@ Subagent run completed.
 | `error` | `EventError \| null` |  |  |
 | `error_kind` | `string \| null` |  |  |
 | `usage` | `any` |  |  |
+| `output_truncated` | `boolean \| null` |  |  |
+| `stop_reason` | `string \| null` |  |  |
 | `truncated` | `boolean \| null` |  | True when the outbound event tap truncated strings or projected images to stay within `EVENT_MAX_BYTES`. |
 
 **示例**

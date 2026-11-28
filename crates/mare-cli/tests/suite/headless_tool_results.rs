@@ -871,3 +871,71 @@ async fn plugin_tool_image_blocks_normalize_and_output_truncated_renames_on_wire
     })
     .await;
 }
+
+#[test]
+fn repro_issue_194_length_truncation_missing_from_headless_settled_record() {
+    let home = tempfile::tempdir().unwrap();
+    let script = home.path().join("faux-len.json");
+    std::fs::write(&script, json!([{ "text": "partial answer cut off", "stop": "length" }]).to_string()).unwrap();
+
+    let out = mare_cmd()
+        .args(["--json", "--no-session", "--model", "faux/echo", "tell me everything"])
+        .env("MARE_HOME", home.path())
+        .env("MARE_FAUX_SCRIPT", &script)
+        .current_dir(home.path())
+        .stdin(Stdio::null())
+        .run_output();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    let events: Vec<Value> = String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("invalid JSON ({e}): {l}")))
+        .collect();
+    let settled = events.iter().find(|e| e["type"] == "settled").expect("missing settled event");
+    let data = &settled["data"];
+    assert_eq!(data["text"], "partial answer cut off", "{settled}");
+    assert_eq!(data["exit_code"], 0, "{settled}");
+    assert_eq!(data["reason"], "completed", "{settled}");
+    assert_eq!(data["truncated"], true, "{settled}");
+    assert_eq!(data["stop_reason"], "length", "{settled}");
+    let has_truncation_signal = data.get("truncated").and_then(Value::as_bool) == Some(true)
+        || data.get("stop_reason").and_then(Value::as_str) == Some("length")
+        || data.get("termination_reason").and_then(Value::as_str) == Some("length");
+    assert!(
+        has_truncation_signal,
+        "headless settled record lacks structured truncation signal on stop_reason=length: {settled}"
+    );
+    let turn_completed = events.iter().find(|e| e["type"] == "turn/completed").expect("missing turn/completed event");
+    assert_eq!(turn_completed["data"]["output_truncated"], true, "{turn_completed}");
+    assert!(
+        turn_completed["data"].get("truncated").is_none(),
+        "turn/completed must not collide with wire-reserved truncated: {turn_completed}"
+    );
+    assert_eq!(turn_completed["data"]["stop_reason"], "length", "{turn_completed}");
+    mare_protocol::events::validate_protocol("turn/completed", &turn_completed["data"]).unwrap();
+
+    // Non-truncated turn omits `truncated` and preserves `stop_reason`.
+    let clean_script = home.path().join("faux-stop.json");
+    std::fs::write(&clean_script, json!([{ "text": "complete answer", "stop": "stop" }]).to_string()).unwrap();
+    let clean_out = mare_cmd()
+        .args(["--json", "--no-session", "--model", "faux/echo", "say hi"])
+        .env("MARE_HOME", home.path())
+        .env("MARE_FAUX_SCRIPT", &clean_script)
+        .current_dir(home.path())
+        .stdin(Stdio::null())
+        .run_output();
+    assert!(clean_out.status.success(), "{}", String::from_utf8_lossy(&clean_out.stderr));
+    let clean_events: Vec<Value> = String::from_utf8(clean_out.stdout)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("invalid JSON ({e}): {l}")))
+        .collect();
+    let clean_settled = clean_events.iter().find(|e| e["type"] == "settled").expect("missing settled event");
+    assert_eq!(clean_settled["data"]["text"], "complete answer", "{clean_settled}");
+    assert!(
+        clean_settled["data"].get("truncated").is_none(),
+        "non-truncated settled must omit truncated: {clean_settled}"
+    );
+    assert_eq!(clean_settled["data"]["stop_reason"], "stop", "{clean_settled}");
+}

@@ -91,6 +91,14 @@ local turn_result = object({
 	messages = { type = "array", items = { type = "object" }, description = "Session messages visible at turn end." },
 	structured = { description = "Validated structured output when `output_schema` was supplied." },
 	not_sent = { type = "boolean", description = "True when the prompt failed before reaching the provider." },
+	truncated = {
+		type = "boolean",
+		description = "True when the final model response stopped at the output token limit.",
+	},
+	stop_reason = {
+		type = "string",
+		description = "Final model stop reason when reported (e.g. `stop`, `length`, `filtered`).",
+	},
 	started_at_ms = { type = "integer", description = "Unix epoch milliseconds when the turn started." },
 	completed_at_ms = { type = "integer", description = "Unix epoch milliseconds when the turn finished." },
 }, { "turn_id", "status", "started_at_ms" })

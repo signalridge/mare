@@ -482,6 +482,8 @@ local function publish_end(s, res, turn_id)
 			error = ev_err,
 			error_kind = res.error_kind,
 			not_sent = res.not_sent,
+			output_truncated = res.truncated,
+			stop_reason = res.stop_reason,
 		})
 	end
 	if not s.A.busy and s.A.turn_id == turn_id then
@@ -508,6 +510,8 @@ local function publish_end(s, res, turn_id)
 		messages = project_messages(res.messages, { lossy = true }),
 		structured = res.structured and mare.projection.project(res.structured, { lossy = true }) or nil,
 		not_sent = res.not_sent,
+		truncated = res.truncated,
+		stop_reason = res.stop_reason,
 		started_at_ms = (live and live.started_at_ms) or require("mare_lib").to_epoch_ms(mare.task.now()),
 		completed_at_ms = require("mare_lib").to_epoch_ms(mare.task.now()),
 	}

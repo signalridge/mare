@@ -698,9 +698,11 @@ return {
 			end
 			local status = err and "failed"
 				or ((res and res.status) or ((res and res.error) and "failed" or "completed"))
-			local header = ("[subagent %s finished: %s%s]"):format(
+			local truncated = not err and type(res) == "table" and res.truncated == true
+			local header = ("[subagent %s finished: %s%s%s]"):format(
 				id,
 				status,
+				truncated and " (output truncated: max output tokens reached)" or "",
 				label and (" — " .. mare.text.sanitize(label)) or ""
 			)
 			local body = ""
@@ -1032,6 +1034,8 @@ return {
 							name = info and info.name or nil,
 							status = res.status,
 							usage = res.usage,
+							truncated = res.truncated,
+							stop_reason = res.stop_reason,
 						},
 					}
 				end

@@ -2724,6 +2724,18 @@
                 "null"
               ]
             },
+            "output_truncated": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "stop_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "truncated": {
               "type": [
                 "boolean",
@@ -3805,6 +3817,18 @@
               ]
             },
             "usage": true,
+            "output_truncated": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "stop_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "truncated": {
               "description": "True when the outbound event tap truncated strings or projected images to stay within `EVENT_MAX_BYTES`.",
               "type": [
@@ -6361,6 +6385,17 @@
                       "type": "null"
                     }
                   ]
+                },
+                "truncated": {
+                  "description": "true when the final model response hit the output token limit (`stop_reason == \"length\"`)",
+                  "type": "boolean"
+                },
+                "stop_reason": {
+                  "description": "final model stop reason when reported (e.g. `stop`, `length`, `filtered`)",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 }
               },
               "$defs": {
@@ -6552,6 +6587,18 @@
             "not_sent": {
               "type": [
                 "boolean",
+                "null"
+              ]
+            },
+            "output_truncated": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "stop_reason": {
+              "type": [
+                "string",
                 "null"
               ]
             },
@@ -7636,6 +7683,18 @@
               ]
             },
             "usage": true,
+            "output_truncated": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "stop_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "truncated": {
               "description": "True when the outbound event tap truncated strings or projected images to stay within `EVENT_MAX_BYTES`.",
               "type": [
@@ -8348,6 +8407,18 @@
             "not_sent": {
               "type": [
                 "boolean",
+                "null"
+              ]
+            },
+            "output_truncated": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "stop_reason": {
+              "type": [
+                "string",
                 "null"
               ]
             },
@@ -9432,6 +9503,18 @@
               ]
             },
             "usage": true,
+            "output_truncated": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "stop_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "truncated": {
               "description": "True when the outbound event tap truncated strings or projected images to stay within `EVENT_MAX_BYTES`.",
               "type": [
@@ -9937,6 +10020,17 @@
             {
               "type": "null"
             }
+          ]
+        },
+        "truncated": {
+          "description": "true when the final model response hit the output token limit (`stop_reason == \"length\"`)",
+          "type": "boolean"
+        },
+        "stop_reason": {
+          "description": "final model stop reason when reported (e.g. `stop`, `length`, `filtered`)",
+          "type": [
+            "string",
+            "null"
           ]
         }
       },

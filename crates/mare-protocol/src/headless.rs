@@ -104,6 +104,12 @@ pub struct Settled {
     /// structured agent outcome (`completed` | `usage_limit` | `interrupted` | `turn_limit` | `error`)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub termination_reason: Option<crate::AgentTerminationReason>,
+    /// true when the final model response hit the output token limit (`stop_reason == "length"`)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+    /// final model stop reason when reported (e.g. `stop`, `length`, `filtered`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
 }
 
 #[cfg(test)]
