@@ -173,10 +173,19 @@ pub(super) fn extract_prompt(blocks: &[ContentBlock]) -> Result<ExtractedPrompt,
                     push_text_block(&mut texts, &mut content, text);
                 }
                 EmbeddedResourceResource::BlobResourceContents(blob) => {
-                    if let Some(mime) = supported_blob_image_mime(blob.mime_type.as_deref()) {
-                        push_image_block(&mut images, &mut content, blob.blob.clone(), mime);
-                    } else {
-                        return Err("binary embedded resource prompt content is not supported".into());
+                    match blob.mime_type.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                        Some(declared) => {
+                            if let Some(mime) = supported_blob_image_mime(Some(declared)) {
+                                push_image_block(&mut images, &mut content, blob.blob.clone(), mime);
+                            } else {
+                                return Err("binary embedded resource prompt content is not supported".into());
+                            }
+                        }
+                        None => {
+                            let validated = mare_binding::image::validate_base64(&blob.blob)
+                                .map_err(|_| "binary embedded resource prompt content is not supported".to_string())?;
+                            push_image_block(&mut images, &mut content, validated.data, validated.mime.to_string());
+                        }
                     }
                 }
                 _ => return Err("unsupported embedded resource prompt content".into()),
@@ -1076,5 +1085,49 @@ mod tests {
         assert_eq!(page2.sessions[1].session_id.0.as_ref(), "s-zero");
         assert_eq!(page2.sessions[1].updated_at, None);
         assert!(parse_list_cursor(Some("-1:abc")).is_err());
+    }
+
+    #[test]
+    fn repro_317_extract_prompt_accepts_embedded_png_without_mime_type() {
+        use agent_client_protocol::v1::schema::{BlobResourceContents, EmbeddedResource, EmbeddedResourceResource};
+        const PNG_1X1_B64: &str =
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+        let blocks = vec![ContentBlock::Resource(EmbeddedResource::new(
+            EmbeddedResourceResource::BlobResourceContents(BlobResourceContents::new(PNG_1X1_B64, "file:///pic.png")),
+        ))];
+        let parsed = extract_prompt(&blocks)
+            .expect("embedded PNG blob without explicit mimeType should be accepted via byte sniffing");
+        assert_eq!(parsed.images.len(), 1);
+        assert_eq!(parsed.images[0]["mime"], "image/png");
+    }
+
+    #[test]
+    fn extract_prompt_rejects_non_image_or_corrupt_blob_without_mime_type() {
+        use agent_client_protocol::v1::schema::{BlobResourceContents, EmbeddedResource, EmbeddedResourceResource};
+        use base64::Engine as _;
+        const PNG_1X1_B64: &str =
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+        let mut corrupt_pixels = base64::engine::general_purpose::STANDARD.decode(PNG_1X1_B64).unwrap();
+        // Preserve PNG signature and valid 1x1 IHDR (first 33 bytes), corrupt the IDAT pixel payload.
+        assert!(corrupt_pixels.len() > 45);
+        for b in &mut corrupt_pixels[37..45] {
+            *b ^= 0xff;
+        }
+        let corrupt_pixels_b64 = base64::engine::general_purpose::STANDARD.encode(&corrupt_pixels);
+
+        for payload in ["SGVsbG8gd29ybGQ=", "iVBORw0KGgo=", "not-valid-base64!!!", corrupt_pixels_b64.as_str()] {
+            let blocks = vec![ContentBlock::Resource(EmbeddedResource::new(
+                EmbeddedResourceResource::BlobResourceContents(BlobResourceContents::new(payload, "file:///blob.bin")),
+            ))];
+            assert!(extract_prompt(&blocks).is_err(), "payload {payload:?} without mimeType must be rejected");
+        }
+
+        // Explicit non-image MIME must still be rejected even when bytes are a valid PNG.
+        let mut non_image_blob = BlobResourceContents::new(PNG_1X1_B64, "file:///blob.bin");
+        non_image_blob.mime_type = Some("application/octet-stream".into());
+        let blocks = vec![ContentBlock::Resource(EmbeddedResource::new(
+            EmbeddedResourceResource::BlobResourceContents(non_image_blob),
+        ))];
+        assert!(extract_prompt(&blocks).is_err(), "explicit non-image mimeType must be rejected");
     }
 }
