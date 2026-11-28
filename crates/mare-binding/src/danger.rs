@@ -20,6 +20,19 @@ const MAX_SCRIPT: usize = 64 * 1024;
 /// Placeholder for an argument whose value is only known at run time (`$VAR`, `${…}`, `$(…)`,
 /// backquotes, `<(…)`). NUL can't occur in a real argv, so it never collides with a literal.
 const DYN: &str = "\0dyn";
+/// Prefix for a dynamic argument whose static text is preserved for nested script analysis
+/// (`sh -c "rm -rf $DIR"` -> `"\0dyn_script:rm -rf $MARE_DYN"`), while still treated as opaque
+/// dynamic input by `rm_forced` and dropped by `literal_commands`.
+const DYN_SCRIPT_PREFIX: &str = "\0dyn_script:";
+const OPAQUE_EXPANSION: &str = "$MARE_DYN";
+
+fn is_dyn(w: &str) -> bool {
+    w == DYN || w.starts_with(DYN_SCRIPT_PREFIX)
+}
+
+fn script_operand(w: &str) -> &str {
+    w.strip_prefix(DYN_SCRIPT_PREFIX).unwrap_or(w)
+}
 
 /// The built-in rule that matched.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,7 +59,7 @@ impl Match {
 pub fn literal_commands(script: &str) -> Vec<Vec<String>> {
     let mut cmds = parse_literal(script).unwrap_or_default();
     for c in &mut cmds {
-        c.retain(|w| w != DYN);
+        c.retain(|w| !is_dyn(w));
     }
     cmds
 }
@@ -102,7 +115,11 @@ fn literal_command(cmd: Node, src: &str) -> Option<Vec<String>> {
         } else if found && let Some(w) = literal_word(child, src) {
             words.push(w);
         } else if found && dynamic(child) {
-            words.push(DYN.to_string());
+            if let Some(template) = script_template(child, src) {
+                words.push(format!("{DYN_SCRIPT_PREFIX}{template}"));
+            } else {
+                words.push(DYN.to_string());
+            }
         }
     }
     found.then_some(words)
@@ -259,11 +276,73 @@ fn literal_word(node: Node, src: &str) -> Option<String> {
     }
 }
 
+/// Whether a tree-sitter bash node represents a dynamic shell expansion or substitution whose
+/// runtime value is unknown statically. Shared by `dynamic()` and `script_template()` so direct
+/// arguments and nested script operands classify expansions identically.
+fn is_expansion_node(kind: &str) -> bool {
+    matches!(
+        kind,
+        "simple_expansion" | "expansion" | "command_substitution" | "process_substitution" | "arithmetic_expansion"
+    )
+}
+
+/// Preserve static text inside a dynamic `string` or `concatenation` for nested script analysis,
+/// replacing expansions/substitutions with an opaque `$MARE_DYN` placeholder. Returns `None` when
+/// no static text is present (e.g. a bare `"$VAR"`).
+fn script_template(node: Node, src: &str) -> Option<String> {
+    fn visit(node: Node, src: &str, out: &mut String, has_static: &mut bool) -> bool {
+        if let Some(lit) = literal_word(node, src) {
+            if !lit.is_empty() {
+                *has_static = true;
+                out.push_str(&lit);
+            }
+            return true;
+        }
+        if is_expansion_node(node.kind()) {
+            out.push_str(OPAQUE_EXPANSION);
+            return true;
+        }
+        match node.kind() {
+            "string" => {
+                let mut c = node.walk();
+                for child in node.named_children(&mut c) {
+                    if child.kind() == "string_content" {
+                        let Ok(raw) = child.utf8_text(src.as_bytes()) else { return false };
+                        let unescaped = unescape_double_quoted(raw);
+                        if !unescaped.is_empty() {
+                            *has_static = true;
+                            out.push_str(&unescaped);
+                        }
+                    } else if !visit(child, src, out, has_static) {
+                        return false;
+                    }
+                }
+                true
+            }
+            "concatenation" => {
+                let mut c = node.walk();
+                for part in node.named_children(&mut c) {
+                    if !visit(part, src, out, has_static) {
+                        return false;
+                    }
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+    let mut out = String::new();
+    let mut has_static = false;
+    (visit(node, src, &mut out, &mut has_static) && has_static).then_some(out)
+}
+
 /// An argument whose value comes from an expansion or substitution (redirects and other
 /// non-argument children are not arguments).
 fn dynamic(node: Node) -> bool {
+    if is_expansion_node(node.kind()) {
+        return true;
+    }
     match node.kind() {
-        "simple_expansion" | "expansion" | "command_substitution" | "process_substitution" => true,
         "string" | "concatenation" => {
             let mut c = node.walk();
             node.named_children(&mut c).any(dynamic)
@@ -350,7 +429,8 @@ fn exec_match_inner(argv: &[String], depth: usize, windows: bool, fail_on_depth:
         "eval" => {
             let body = if rest.first().is_some_and(|a| a == "--") { &rest[1..] } else { rest };
             if !body.is_empty() {
-                return script_match_inner(&body.join(" "), depth, windows, fail_on_depth);
+                let joined = body.iter().map(|a| script_operand(a)).collect::<Vec<_>>().join(" ");
+                return script_match_inner(&joined, depth, windows, fail_on_depth);
             }
         }
         // wrappers that run their operand: skip their own options (and option values), then
@@ -385,7 +465,7 @@ fn exec_match_inner(argv: &[String], depth: usize, windows: bool, fail_on_depth:
         "trap" => {
             let i = usize::from(rest.first().is_some_and(|a| a == "--"));
             let action = rest.get(i).filter(|a| !a.starts_with('-'))?;
-            return script_match_inner(action, depth, windows, fail_on_depth);
+            return script_match_inner(script_operand(action), depth, windows, fail_on_depth);
         }
         // bash -c / -lc / -o errexit -c / -c -- / -c -l '<script>' (and sh, zsh, …)
         "bash" | "sh" | "zsh" | "dash" | "ksh" | "ash" => {
@@ -411,7 +491,7 @@ fn exec_match_inner(argv: &[String], depth: usize, windows: bool, fail_on_depth:
                 break;
             }
             if saw_c && let Some(s) = script {
-                return script_match_inner(s, depth, windows, fail_on_depth);
+                return script_match_inner(script_operand(s), depth, windows, fail_on_depth);
             }
         }
         // pwsh / powershell run cross-platform (Linux/macOS/Windows) and support `-Force` deletes
@@ -425,8 +505,8 @@ fn exec_match_inner(argv: &[String], depth: usize, windows: bool, fail_on_depth:
             let script = rest
                 .iter()
                 .position(|a| ps_flag_prefix(a, "-c", "-command"))
-                .map(|p| rest[p + 1..].join(" "))
-                .unwrap_or_else(|| rest.join(" "));
+                .map(|p| rest[p + 1..].iter().map(|a| script_operand(a)).collect::<Vec<_>>().join(" "))
+                .unwrap_or_else(|| rest.iter().map(|a| script_operand(a)).collect::<Vec<_>>().join(" "));
             return ps_dangerous(&script, depth + 1, windows);
         }
         _ => {}
@@ -554,9 +634,11 @@ fn env_split_string_payload(rest: &[String]) -> Option<String> {
             return None;
         }
         if a == "-S" || a == "--split-string" {
-            return it.next().cloned();
+            return it.next().map(|s| script_operand(s).to_string());
         }
-        if let Some(inline) = a.strip_prefix("--split-string=").or_else(|| a.strip_prefix("-S")) {
+        if let Some(inline) =
+            script_operand(a).strip_prefix("--split-string=").or_else(|| script_operand(a).strip_prefix("-S"))
+        {
             return (!inline.is_empty()).then(|| inline.to_string());
         }
     }
@@ -732,7 +814,7 @@ fn shell_execute_url(seg: &[String]) -> bool {
 
 /// `-f` / `--force` before `--`, or any operand that is an unexpanded variable / substitution.
 fn rm_forced(args: &[String]) -> bool {
-    args.iter().any(|a| a == DYN)
+    args.iter().any(|a| is_dyn(a))
         || args
             .iter()
             .take_while(|a| a.as_str() != "--")
@@ -750,7 +832,7 @@ fn cmd_force_delete(rest: &[String]) -> bool {
             _ => return false,
         }
     }
-    let body: Vec<String> = it.cloned().collect();
+    let body: Vec<String> = it.map(|a| script_operand(a).to_string()).collect();
     let tokens: Vec<String> = match body.as_slice() {
         [only] => shlex::split(only).unwrap_or_else(|| vec![only.clone()]),
         _ => body,
@@ -1026,6 +1108,57 @@ mod tests {
             dangerous("pwsh -EncodedCommand:invalid_odd!", false, false),
             Some(Match::WindowsForceDelete),
             "undecodable -EncodedCommand must fail closed"
+        );
+    }
+
+    #[test]
+    fn repro_223_nested_shell_script_with_expansion_preserves_danger_signal() {
+        let literal_rm = bash(r#"sh -c "rm -rf /tmp/x""#);
+        let dynamic_rm = bash(r#"sh -c "rm -rf $DIR""#);
+        assert_eq!(literal_rm, Some(Match::ForcedRm));
+        assert_eq!(
+            dynamic_rm, literal_rm,
+            "nested sh -c script with expansion must keep the same ForcedRm danger signal as a literal target"
+        );
+
+        let literal_find = bash(r#"bash -c "find /tmp/x -delete""#);
+        let dynamic_find = bash(r#"bash -c "find $DIR -delete""#);
+        assert_eq!(literal_find, Some(Match::ForcedRm));
+        assert_eq!(
+            dynamic_find, literal_find,
+            "nested bash -c find -delete with expansion must keep ForcedRm danger signal"
+        );
+
+        assert_eq!(bash(r#"sudo sh -c "rm $DIR""#), Some(Match::ForcedRm));
+        assert_eq!(bash(r#"bash -c "rm -rf \"/tmp/$DIR\"""#), Some(Match::ForcedRm));
+        assert_eq!(bash(r#"pwsh -Command "Remove-Item $DIR -Force""#), Some(Match::WindowsForceDelete));
+        assert_eq!(bash(r#"sh -c "echo $DIR""#), None, "safe nested command with expansion must not false-positive");
+    }
+
+    #[test]
+    fn arithmetic_expansion_classified_consistently_in_direct_and_nested_scripts() {
+        // Direct commands: arithmetic_expansion is recognized as dynamic (omitted from literal_commands
+        // and treated as an expanded operand by rm_forced even without -f).
+        assert_eq!(bash("rm $((1+1))"), Some(Match::ForcedRm));
+        assert_eq!(bash("rm -rf $((1+1))"), Some(Match::ForcedRm));
+        assert_eq!(bash(r#"rm "/tmp/$((1+1))""#), Some(Match::ForcedRm));
+        assert_eq!(literal_commands("rm -rf $((1+1))"), vec![vec!["rm".to_string(), "-rf".to_string()]]);
+
+        // Nested scripts: arithmetic_expansion inside a quoted or concatenated script operand is
+        // replaced with an opaque placeholder instead of discarding the entire operand.
+        for s in [
+            r#"sh -c "rm -rf $((1+1))""#,
+            r#"sh -c "rm -rf /tmp/$((1+1))""#,
+            r#"bash -c "find /tmp/$((i+1)) -delete""#,
+            r#"eval "rm -rf $((1+1))""#,
+            r#"sh -c 'rm -rf '/tmp/$((1+1))"#,
+        ] {
+            assert_eq!(bash(s), Some(Match::ForcedRm), "expected ForcedRm for {s}");
+        }
+        assert_eq!(
+            bash(r#"sh -c "echo $((1+1))""#),
+            None,
+            "safe nested command with arithmetic expansion must not false-positive"
         );
     }
 }
