@@ -44,6 +44,7 @@ impl App {
                     if self.expand_all != value {
                         self.expand_all = value;
                         self.transcript.invalidate_cache();
+                        self.reflow.invalidated(app_now());
                     }
                 }
                 // spinners hold still (static marker), no animation frames

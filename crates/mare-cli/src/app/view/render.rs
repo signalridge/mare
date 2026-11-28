@@ -6,7 +6,7 @@ use crate::app::*;
 use mare_shared::layout::{RegionLines, StackRegion, clip_regions};
 
 impl App {
-    fn editor_action_key(&self, action: &str) -> Option<String> {
+    pub(super) fn editor_action_key(&self, action: &str) -> Option<String> {
         let chain = self.current_editor_chain();
         let chain: Vec<&str> = chain.iter().map(String::as_str).collect();
         self.keymap.hint(action, &chain).first().map(|key| mare_shared::bindings::key_label(key))

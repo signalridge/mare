@@ -139,7 +139,7 @@ You can keep typing while the agent works.
 | `q`, `Ctrl+T` | Close. |
 | `Esc`, `Ctrl+C` | Clear the search, then close. |
 
-Output already written to the scrollback cannot be redrawn, so `Ctrl+O` on an old tool call opens it in the transcript view, scrolled to that call. `Ctrl+O` while a call is still live switches all later output between compact and expanded.
+`Ctrl+O` toggles compact and expanded tool output and thinking in place across both committed scrollback and live blocks.
 
 ## Images
 

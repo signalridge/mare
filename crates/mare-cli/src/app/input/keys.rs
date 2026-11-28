@@ -35,22 +35,16 @@ impl App {
             // runs it on an empty input (its default binding's `when`)
             "keymap-help" => self.open_keymap_help(),
             "toggle-expand" => {
-                // the latest tool call / reasoning is already in the scrollback, which an inline
-                // UI can't redraw: show it in the Ctrl+T transcript instead (expanded, scrolled
-                // to it reads full output in its Ctrl+T overlay).
-                let latest = self.blocks.iter().rposition(|b| b.kind == "tool" || b.kind == "reasoning");
-                if let Some(i) = latest
-                    && i < self.committed.min(self.blocks.len())
-                {
-                    self.transcript_at(i);
-                    return true;
-                }
-                // Ctrl+O: one switch for the whole conversation — live blocks re-render now,
-                // later blocks commit in the chosen form (Ctrl+T still opens the full transcript)
+                // Ctrl+O: toggle compact/expanded tool output and thinking across both committed
+                // scrollback (via debounced reflow) and live blocks.
                 self.expand_all = !self.expand_all;
                 self.transcript.invalidate_cache();
+                self.reflow.invalidated(app_now());
                 let mode = if self.expand_all { "expanded" } else { "compact" };
-                self.push_notice((format!("Tool output: {mode}"), "info".into(), app_now()));
+                self.push_notice_with_id(
+                    (format!("Tool output: {mode}"), "info".into(), app_now()),
+                    Some("toggle-expand".into()),
+                );
             }
             // Ctrl+D: nothing with a menu open (row 7); with a draft the editor
             // deletes the character after the cursor (rows 2, 11); while working it never exits
