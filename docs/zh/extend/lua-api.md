@@ -968,6 +968,20 @@
 | `mare.image.is_image(path)` |  |
 | `mare.image.to_png(data)` | Decode base64-encoded image bytes within safety limits, downscale if oversized, and re-encode as PNG (or JPEG when large). |
 
+## mare.install
+
+定义于 `types/mare.lua`.
+
+| | |
+|---|---|
+| `mare.install.channel()` |  |
+| `mare.install.info(method)` |  |
+| `mare.install.update_command()` |  |
+| `mare.install.is_managed()` |  |
+| `mare.install.update_check_disabled()` |  |
+| `mare.install.policy(config_update_check, plugin_enabled)` | Effective update-check policy resolved from `mare.o.update_check`, plugin `enabled`, and env opt-outs. |
+| `mare.install.stage_update(api_url)` |  |
+
 ## mare.json
 
 定义于 `types/mare/text.lua`.
@@ -1203,6 +1217,16 @@
 | `mare.schema.compile_output(schema)` | Compile a tool output JSON Schema (or clone an existing `OutputSchema`). |
 | `mare.schema.compile_value(schema)` | Canonical outputs may be any JSON type; does not relax argument-schema validation. |
 | `mare.schema.redact(schema, value)` | Schema-directed removal, independent from key/pattern-based mare.text.redact. Structural JSON Schema subset: properties, additionalProperties schema, items, allOf/anyOf/oneOf. Annotate a secret node with ["x-mare-secret"]=true. Every union branch is visited conservatively; duplicate paths merge set=true. Object slots include missing ones; record/array slots include only existing entries. JSON null is set=true; Lua nil is unset. Array removals leave JSON null preserving zero-based string indexes in sidecar paths. Does not mutate input. Schema depth 64/nodes 10000; unsupported constructs (including $ref/conditionals) and malformed annotations error rather than silently exposing values. |
+
+## mare.semver
+
+定义于 `types/mare.lua`.
+
+| | |
+|---|---|
+| `mare.semver.compare(a, b)` | Pure SemVer 2.0.0 precedence comparison (`-1`, `0`, `1`), ignoring build metadata; returns `nil` when either version string is malformed. |
+| `mare.semver.is_newer(candidate, current)` | Pure SemVer 2.0.0 precedence check: whether `candidate` has strictly greater precedence than `current` (e.g. `1.0.1-rc.1` &gt; `1.0.0`). |
+| `mare.semver.is_newer_release(candidate, current)` | Release-channel update policy: whether `candidate` should be offered as an update over `current` under SemVer 2.0.0 precedence (prerelease → stable notifies; stable never upgrades to a prerelease). |
 
 ## mare.snapshot
 

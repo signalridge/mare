@@ -78,6 +78,7 @@ mod trust;
 mod tui;
 mod tui_followups;
 mod tui_pty;
+mod update;
 mod web;
 mod web_rpc;
 mod win_process;

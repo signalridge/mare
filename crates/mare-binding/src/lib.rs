@@ -65,6 +65,7 @@ mod ui_node;
 mod ui_questions;
 mod ui_select;
 pub mod ui_wire;
+pub mod update;
 pub mod winsandbox;
 pub mod workspace;
 pub mod ws;

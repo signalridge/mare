@@ -38,6 +38,14 @@ end
 
 local closest, luatype, validate_working
 
+local function validate_update_check(v, path, warn_fn)
+	if v == false or v == true or v == "notify" or v == "auto" then
+		return true
+	end
+	warn_fn(path .. ' must be false, "notify", or "auto"')
+	return false
+end
+
 local WORKING_GLYPHS = {
 	braille = true,
 	ember = true,
@@ -291,9 +299,10 @@ mare.options = mare.options
 		},
 		prompt = { type = "string", default = "❯", desc = "input prompt symbol" },
 		update_check = {
-			type = "boolean",
-			default = true,
-			desc = "check GitHub releases for a newer mare (at most daily, interactive sessions; nothing else is sent)",
+			type = { "boolean", "string" },
+			default = "notify",
+			luals_type = 'false|"notify"|"auto"',
+			desc = 'check GitHub releases for a newer mare: "notify" | "auto" (stage standalone updates) | false (at most daily, interactive sessions; nothing else is sent)',
 		},
 		news = {
 			type = "boolean",
@@ -916,6 +925,7 @@ local validators = validate_factory(mare, {
 	deepcopy = deepcopy,
 	validate_ui_config = validate_ui_config,
 	validate_working = validate_working,
+	validate_update_check = validate_update_check,
 	clear_sources = clear_sources,
 	closest = closest,
 	set_preset_state = set_preset_state,
