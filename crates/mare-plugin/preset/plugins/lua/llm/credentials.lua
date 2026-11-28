@@ -9,6 +9,30 @@ return function(D)
 
 	-- One owner per auth.json key in this VM; other processes coordinate through the file lock.
 	local refreshes = {}
+	local function shutdown_error()
+		return {
+			message = "OAuth refresh rejected: host is shutting down",
+			kind = "cancelled",
+			retryable = false,
+		}
+	end
+	function D.drain_refreshes()
+		local inflight = {}
+		for key, flight in pairs(refreshes) do
+			if flight.dispatched then
+				inflight[#inflight + 1] = flight
+			else
+				if refreshes[key] == flight then
+					refreshes[key] = nil
+				end
+				flight.admission:cancel()
+			end
+		end
+		for _, flight in ipairs(inflight) do
+			flight.done:wait()
+		end
+	end
+
 	function llm.refresh_credential(_, caller, _provider, key, refresh_fn, opts)
 		opts = opts or {}
 		local initial = llm.auth_get(llm, caller, key)
@@ -29,6 +53,9 @@ return function(D)
 		end
 		if not opts.force and valid(initial) then
 			return initial
+		end
+		if D.is_shutting_down() then
+			return nil, shutdown_error()
 		end
 		if opts.cancel and opts.cancel:is_cancelled() then
 			return nil, "OAuth preparation cancelled before dispatch"
@@ -84,6 +111,9 @@ return function(D)
 						end
 						if valid(current) and (not flight.force or refreshed) then
 							return current
+						end
+						if D.is_shutting_down() then
+							error(shutdown_error(), 0)
 						end
 						if not has_waiter() then
 							error("OAuth preparation cancelled before dispatch", 0)
