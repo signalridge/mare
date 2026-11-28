@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -18,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 use crate::rpc::call_service;
 
 use super::AcpErr;
-use super::helpers::{config_options, has_truncated_image, hydrate_tool_result_update, to_update};
+use super::helpers::{TranslateOpts, config_options, has_truncated_image, hydrate_tool_result_update, to_update_with};
 
 /// How long a finished turn may take to hand its queued updates to the client.
 pub(super) const PROMPT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -67,34 +68,40 @@ impl ConfigWatcher for NoConfigWatcher {
     }
 
     async fn translate_event(&mut self, name: &str, payload: &J) -> Option<J> {
-        to_update(name, payload)
+        to_update_with(name, payload, TranslateOpts::default())
     }
 }
 
-/// Host-backed watcher for live session `configOptions` updates (`llm/model-changed`) and
-/// hydration of wire-truncated tool-result image payloads (`agent.messages`).
+/// Host-backed watcher for live session `configOptions` updates (`llm/model-changed`,
+/// `llm/providers-changed`), session path/capability context, and hydration of wire-truncated
+/// tool-result image payloads (`agent.messages`).
 pub(super) struct ConfigSync {
     host: std::sync::Weak<Host>,
     rx: Option<tokio::sync::watch::Receiver<u64>>,
     last: J,
+    cwd: PathBuf,
+    compaction_updates: bool,
 }
 
 impl ConfigSync {
-    pub(super) fn install(host: &Arc<Host>, initial: J) -> Self {
+    pub(super) fn install(host: &Arc<Host>, initial: J, compaction_updates: bool) -> Self {
         let rx = (|| -> mlua::Result<tokio::sync::watch::Receiver<u64>> {
             let ctx = host.kernel.host_ctx()?;
             let owner = host.kernel.host_owner()?;
             let (tx, rx) = tokio::sync::watch::channel(0u64);
-            let cb = host.lua().create_function(move |_, _: mlua::MultiValue| {
-                tx.send_modify(|n| *n = n.wrapping_add(1));
-                Ok(())
-            })?;
-            let _ = host.kernel.host_on(&ctx, owner, "llm/model-changed", cb, mare_kernel::HostOn::default())?;
+            for event in ["llm/model-changed", "llm/providers-changed"] {
+                let tx_ev = tx.clone();
+                let cb = host.lua().create_function(move |_, _: mlua::MultiValue| {
+                    tx_ev.send_modify(|n| *n = n.wrapping_add(1));
+                    Ok(())
+                })?;
+                let _ = host.kernel.host_on(&ctx, owner, event, cb, mare_kernel::HostOn::default())?;
+            }
             Ok(rx)
         })()
-        .map_err(|e| tracing::warn!("installing ACP llm/model-changed watcher failed: {e}"))
+        .map_err(|e| tracing::warn!("installing ACP llm config watcher failed: {e}"))
         .ok();
-        Self { host: Arc::downgrade(host), rx, last: initial }
+        Self { host: Arc::downgrade(host), rx, last: initial, cwd: host.cwd().to_path_buf(), compaction_updates }
     }
 }
 
@@ -132,13 +139,14 @@ impl ConfigWatcher for ConfigSync {
     }
 
     async fn translate_event(&mut self, name: &str, payload: &J) -> Option<J> {
+        let opts = TranslateOpts { cwd: Some(&self.cwd), compaction_updates: self.compaction_updates };
         if name == "item/completed"
             && payload.pointer("/item/message/content").is_some_and(has_truncated_image)
             && let Some(host) = self.host.upgrade()
         {
-            return hydrate_tool_result_update(&host, payload).await;
+            return hydrate_tool_result_update(&host, payload, opts.cwd).await;
         }
-        to_update(name, payload)
+        to_update_with(name, payload, opts)
     }
 }
 
