@@ -18,6 +18,7 @@ impl Stream for GuardedStream {
 pub(super) struct SseStream {
     blocks: sse::Blocks<ByteStream>,
     last_id: String,
+    seen_event: bool,
 }
 
 /// Error prefixes the `llm` classifier keys on: `transport:` = any failure
@@ -70,7 +71,11 @@ fn sse_pipeline(
             *l = std::time::Instant::now();
         }
     });
-    SseStream { blocks: sse::Blocks::new(utf8_guarded(body, bad), caps, on_comment), last_id: String::new() }
+    SseStream {
+        blocks: sse::Blocks::new(utf8_guarded(body, bad), caps, on_comment),
+        last_id: String::new(),
+        seen_event: false,
+    }
 }
 
 /// Wrap a body stream so every chunk (heartbeat comments included) stamps `last`.
@@ -82,14 +87,29 @@ fn stamped(s: ByteStream, last: std::sync::Arc<std::sync::Mutex<std::time::Insta
     }))
 }
 
-/// `next()` on a stream under the cancel/close token, overall request deadline, and idle watchdog:
-/// wakes on cancel/`close()`, when the deadline passes, or when the idle period since the last
-/// *byte* (not the last parsed event) has passed.
-async fn next_watched<S: Stream + Unpin>(this: &Response, s: &mut S) -> mlua::Result<Option<S::Item>> {
+#[derive(Clone, Copy)]
+enum WatchTimeout {
+    Idle(Duration),
+    FirstEvent(Duration),
+    Overall,
+}
+
+fn format_timeout(d: Duration) -> String {
+    if d.as_secs() > 0 { format!("{}s", d.as_secs()) } else { format!("{}ms", d.as_millis()) }
+}
+
+/// `next()` on a stream under the cancel/close token, overall request deadline, idle watchdog, and
+/// optional first-event deadline: wakes on cancel/`close()`, when any deadline passes, or when the
+/// idle period since the last *byte* (not the last parsed event) has passed.
+async fn next_watched<S: Stream + Unpin>(
+    this: &Response,
+    s: &mut S,
+    first_event: Option<(tokio::time::Instant, Duration)>,
+) -> mlua::Result<Option<S::Item>> {
     if this.close_token.is_cancelled() {
         return Err(rt_err("aborted"));
     }
-    if this.idle.is_none() && this.deadline.is_none() {
+    if this.idle.is_none() && this.deadline.is_none() && first_event.is_none() {
         return tokio::select! {
             biased;
             _ = this.close_token.cancelled() => Err(rt_err("aborted")),
@@ -102,20 +122,32 @@ async fn next_watched<S: Stream + Unpin>(this: &Response, s: &mut S) -> mlua::Re
             return Err(rt_err("aborted"));
         }
         let now = tokio::time::Instant::now();
-        let idle_deadline = this.idle.map(|idle| {
-            this.last_activity.lock().map(|last| tokio::time::Instant::from_std(*last)).unwrap_or(now) + idle
-        });
-        let (next_deadline, idle_timeout) = match (idle_deadline, this.deadline) {
-            (Some(idle), Some(deadline)) if deadline < idle => (deadline, None),
-            (Some(idle), _) => (idle, this.idle),
-            (None, Some(deadline)) => (deadline, None),
-            (None, None) => unreachable!("checked above"),
+        let mut earliest: Option<(tokio::time::Instant, WatchTimeout)> = None;
+        let mut consider = |at: tokio::time::Instant, kind: WatchTimeout| {
+            if earliest.is_none_or(|(cur, _)| at < cur) {
+                earliest = Some((at, kind));
+            }
         };
+        if let Some(idle) = this.idle {
+            let idle_at =
+                this.last_activity.lock().map(|last| tokio::time::Instant::from_std(*last)).unwrap_or(now) + idle;
+            consider(idle_at, WatchTimeout::Idle(idle));
+        }
+        if let Some((at, dur)) = first_event {
+            consider(at, WatchTimeout::FirstEvent(dur));
+        }
+        if let Some(deadline) = this.deadline {
+            consider(deadline, WatchTimeout::Overall);
+        }
+        let (next_deadline, kind) = earliest.expect("at least one deadline checked above");
         if next_deadline <= now {
-            return if let Some(idle) = idle_timeout {
-                Err(rt_err(format!("{TRANSPORT}stream idle for {}s", idle.as_secs())))
-            } else {
-                Err(rt_err(format!("{TRANSPORT}request timed out")))
+            return match kind {
+                WatchTimeout::Idle(idle) => Err(rt_err(format!("{TRANSPORT}stream idle for {}s", idle.as_secs()))),
+                WatchTimeout::FirstEvent(dur) => Err(rt_err(format!(
+                    "{TRANSPORT}stream timed out waiting for first event ({})",
+                    format_timeout(dur)
+                ))),
+                WatchTimeout::Overall => Err(rt_err(format!("{TRANSPORT}request timed out"))),
             };
         }
         let wait = tokio::time::sleep_until(next_deadline);
@@ -133,7 +165,7 @@ async fn read_all(this: &Response) -> mlua::Result<Vec<u8>> {
     let mut g = this.body.lock().await;
     let mut out = Vec::new();
     if let Some(mut s) = g.take() {
-        while let Some(c) = next_watched(this, &mut s).await? {
+        while let Some(c) = next_watched(this, &mut s, None).await? {
             let b = c.map_err(|e| {
                 let safe = mare_shared::redact::redact_str(&e.to_string());
                 if e.is_timeout() {
@@ -168,7 +200,7 @@ impl UserData for Response {
         m.add_async_method("read", |lua, this, ()| async move {
             let mut g = this.body.lock().await;
             let Some(s) = g.as_mut() else { return Ok(Value::Nil) };
-            match next_watched(&this, s).await {
+            match next_watched(&this, s, None).await {
                 Ok(Some(Ok(b))) => Ok(Value::String(lua.create_string(&b)?)),
                 Ok(Some(Err(e))) => {
                     g.take();
@@ -215,7 +247,9 @@ impl UserData for Response {
             }
             let s = sg.as_mut().unwrap();
             loop {
-                let next = match next_watched(&this, &mut s.blocks).await {
+                let first_event =
+                    (!s.seen_event).then(|| this.first_event_deadline.zip(this.first_event_timeout)).flatten();
+                let next = match next_watched(&this, &mut s.blocks, first_event).await {
                     Ok(v) => v,
                     Err(e) => {
                         sg.take();
@@ -247,6 +281,7 @@ impl UserData for Response {
                 };
                 // a block without data (only id / retry / event) dispatches nothing
                 let Some(ev) = sse::dispatch(&mut s.last_id, block) else { continue };
+                s.seen_event = true;
                 let t = lua.create_table()?;
                 t.set("event", ev.event)?;
                 t.set("data", ev.data)?;
@@ -322,6 +357,11 @@ pub(super) async fn request(lua: Lua, opts: Table, authz: Option<crate::exec_ctx
         .collect();
     let idle =
         opts.get::<Option<f64>>("idle_timeout_ms")?.filter(|ms| *ms > 0.0).map(|ms| Duration::from_millis(ms as u64));
+    let first_event_timeout = opts
+        .get::<Option<f64>>("first_event_timeout_ms")?
+        .filter(|ms| *ms > 0.0)
+        .map(|ms| Duration::from_millis(ms as u64));
+    let first_event_deadline = first_event_timeout.map(|d| tokio::time::Instant::now() + d);
     let cap = |k: &str, d: usize| -> mlua::Result<usize> {
         Ok(opts.get::<Option<f64>>(k)?.filter(|n| *n >= 1.0).map_or(d, |n| n as usize))
     };
@@ -345,6 +385,8 @@ pub(super) async fn request(lua: Lua, opts: Table, authz: Option<crate::exec_ctx
         bad_utf8: Default::default(),
         caps,
         idle,
+        first_event_timeout,
+        first_event_deadline,
         deadline,
         last_activity,
     })
@@ -370,6 +412,8 @@ mod tests {
             bad_utf8: Default::default(),
             caps: SseCaps { line: sse::DEFAULT_CAP, event: sse::DEFAULT_CAP },
             idle: None,
+            first_event_timeout: None,
+            first_event_deadline: None,
             deadline: None,
             last_activity: std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now())),
         }
@@ -402,5 +446,73 @@ mod tests {
         lua.globals().set("r_abort", r_abort).unwrap();
         let err_ab = lua.load("return r_abort:read()").eval_async::<Value>().await.unwrap_err().to_string();
         assert!(err_ab.contains("aborted"), "{err_ab}");
+    }
+
+    #[tokio::test]
+    async fn first_event_deadline_fires_on_keepalive_only_stream_but_clears_after_first_event() {
+        let lua = Lua::new();
+        let last_activity = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+        let keepalive_stream: ByteStream = Box::pin(futures_util::stream::unfold(0u8, |i| async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            Some((Ok(bytes::Bytes::from_static(b": keepalive\n\n")), i.wrapping_add(1)))
+        }));
+        let r_hang = Response {
+            status: 200,
+            url: "http://127.0.0.1/sse".into(),
+            headers: vec![],
+            body: AsyncMutex::new(Some(stamped(keepalive_stream, last_activity.clone()))),
+            sse: AsyncMutex::new(None),
+            close_token: CancellationToken::new(),
+            bad_utf8: Default::default(),
+            caps: SseCaps { line: sse::DEFAULT_CAP, event: sse::DEFAULT_CAP },
+            idle: Some(Duration::from_millis(300)),
+            first_event_timeout: Some(Duration::from_millis(90)),
+            first_event_deadline: Some(tokio::time::Instant::now() + Duration::from_millis(90)),
+            deadline: None,
+            last_activity,
+        };
+        lua.globals().set("r_hang", r_hang).unwrap();
+        let err = lua.load("return r_hang:next_event()").eval_async::<Value>().await.unwrap_err().to_string();
+        assert!(
+            err.contains("transport: stream timed out waiting for first event"),
+            "keepalive-only SSE stream must trip first-event timeout: {err}"
+        );
+
+        // Once the first data event arrives, subsequent keepalives past first_event_timeout keep
+        // the stream alive as long as bytes arrive within idle.
+        let last_ok = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+        let chunks: Vec<(u64, &'static [u8])> = vec![
+            (0, b"data: first\n\n"),
+            (35, b": keepalive\n\n"),
+            (35, b": keepalive\n\n"),
+            (35, b": keepalive\n\n"),
+            (35, b"data: second\n\n"),
+        ];
+        let ok_stream: ByteStream = Box::pin(futures_util::stream::unfold(chunks.into_iter(), |mut it| async move {
+            let (delay_ms, chunk) = it.next()?;
+            if delay_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+            Some((Ok(bytes::Bytes::from_static(chunk)), it))
+        }));
+        let r_ok = Response {
+            status: 200,
+            url: "http://127.0.0.1/sse".into(),
+            headers: vec![],
+            body: AsyncMutex::new(Some(stamped(ok_stream, last_ok.clone()))),
+            sse: AsyncMutex::new(None),
+            close_token: CancellationToken::new(),
+            bad_utf8: Default::default(),
+            caps: SseCaps { line: sse::DEFAULT_CAP, event: sse::DEFAULT_CAP },
+            idle: Some(Duration::from_millis(200)),
+            first_event_timeout: Some(Duration::from_millis(80)),
+            first_event_deadline: Some(tokio::time::Instant::now() + Duration::from_millis(80)),
+            deadline: None,
+            last_activity: last_ok,
+        };
+        lua.globals().set("r_ok", r_ok).unwrap();
+        let (d1, d2): (String, String) =
+            lua.load("return r_ok:next_event().data, r_ok:next_event().data").eval_async().await.unwrap();
+        assert_eq!((d1.as_str(), d2.as_str()), ("first", "second"));
     }
 }

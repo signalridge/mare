@@ -103,6 +103,7 @@
 ---@field on_attempt? fun(attempt: integer): boolean|nil
 ---@field header_timeout_ms? integer
 ---@field idle_timeout_ms? integer
+---@field first_event_timeout_ms? integer
 ---@field sse_max_event_bytes? integer
 ---@field sse_max_line_bytes? integer
 ---@field fresh_connection? boolean

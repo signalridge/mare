@@ -299,6 +299,170 @@ async fn heartbeat_comments_keep_the_idle_watchdog_alive() {
     .await
 }
 
+/// Issue #110: a heartbeat-only SSE stream that never emits a data event must time out on the
+/// first-event deadline as a retryable transport error instead of hanging indefinitely.
+#[tokio::test]
+async fn heartbeat_only_stream_times_out_waiting_for_first_event_and_retries() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let server = MockServer::start().await;
+        let keepalive = ": keepalive\n\n";
+        // Emit 15 keepalive comments 50ms apart (750ms total), well under the 250ms idle timeout
+        // per chunk, so idle alone would never fire before the first-event deadline expires.
+        let body = keepalive.repeat(15);
+        let at: Vec<usize> = (1..15).map(|i| i * keepalive.len()).collect();
+        server.route("/anthropic", vec![Resp::sse(body).chunked(at, 50), Resp::sse(fixture("anthropic.sse"))]);
+        let h = provider_host(
+            &mut env,
+            &server,
+            json!({
+                "plugins": {
+                    "llm": {
+                        "stream_idle_timeout_ms": 250,
+                        "retries": 1,
+                        "retry_base_ms": 1,
+                        "retry_max_ms": 2
+                    }
+                }
+            }),
+        )
+        .await;
+        let msg = stream(&h, "anthropic/claude-sonnet-5-5").await;
+        assert_fixture_message("anthropic", &msg, 5);
+        assert_eq!(server.count("/anthropic"), 2, "heartbeat-only stream must hit first-event timeout and retry once");
+        h.shutdown().await;
+    })
+    .await
+}
+
+/// Endpoint-configured `first_event_timeout_ms` must take effect on normal streams even when
+/// `stream_idle_timeout_ms` is much larger, while an explicit `req.first_event_timeout_ms` still
+/// overrides the endpoint value.
+#[tokio::test]
+async fn endpoint_first_event_timeout_takes_effect_and_request_overrides_it() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let server = MockServer::start().await;
+        let keepalive = ": keepalive\n\n";
+        // Attempt 1: 15 keepalives 50ms apart (750ms) -> must trip endpoint's 200ms deadline,
+        // NOT wait for the 30s global stream_idle_timeout_ms.
+        let long_ka = keepalive.repeat(15);
+        let long_at: Vec<usize> = (1..15).map(|i| i * keepalive.len()).collect();
+        // Attempt 2: immediate success after retry.
+        // Request 2 (explicit req.first_event_timeout_ms = 2000): 8 keepalives 50ms apart (400ms)
+        // followed by normal SSE -> must succeed on first attempt despite endpoint's 200ms limit.
+        let short_ka = format!("{}data: hello\n\n", keepalive.repeat(8));
+        let short_at: Vec<usize> = (1..=8).map(|i| i * keepalive.len()).collect();
+        server.route(
+            "/ep-first-event",
+            vec![
+                Resp::sse(long_ka).chunked(long_at, 50),
+                Resp::sse("data: ok-after-retry\n\n"),
+                Resp::sse(short_ka).chunked(short_at, 50),
+            ],
+        );
+        let h = provider_host(
+            &mut env,
+            &server,
+            json!({
+                "plugins": {
+                    "llm": {
+                        "stream_idle_timeout_ms": 30000,
+                        "retries": 1,
+                        "retry_base_ms": 1,
+                        "retry_max_ms": 2
+                    }
+                }
+            }),
+        )
+        .await;
+        let url = format!("{}/ep-first-event", server.base);
+        exec(
+            &h,
+            &format!(
+                r#"
+                local ep = function()
+                    return {{
+                        provider = "ep-deadline",
+                        url = {url:?},
+                        headers = {{ ["content-type"] = "application/json" }},
+                        first_event_timeout_ms = 200,
+                    }}
+                end
+                LLM:register_wire("ep-deadline-wire", {{
+                    route = "ep-deadline",
+                    encode = function(req, endpoint)
+                        return {{
+                            url = endpoint.url,
+                            headers = endpoint.headers,
+                            body = {{ model = req.model.id }},
+                        }}
+                    end,
+                    decoder = function(sink)
+                        local text = ""
+                        return {{
+                            event = function(ev)
+                                if ev.data and ev.data ~= "" then
+                                    text = text .. ev.data
+                                    if sink then sink({{ type = "text_delta", delta = ev.data }}) end
+                                end
+                            end,
+                            finish = function()
+                                return {{
+                                    role = "assistant",
+                                    stop_reason = "stop",
+                                    content = {{ {{ type = "text", text = text }} }},
+                                }}
+                            end,
+                        }}
+                    end,
+                }})
+                local wire_stream = assert(LLM:wire("ep-deadline-wire"))
+                LLM:register_provider({{
+                    provider = "ep-deadline",
+                    wire = "ep-deadline-wire",
+                    is_configured = function() return true end,
+                    endpoint = ep,
+                    stream = function(req, sink)
+                        return wire_stream(ep, req, sink)
+                    end,
+                    models = {{ {{ model_id = "m", name = "EP", context_window = 100000, max_output = 4096 }} }},
+                }})
+                "#
+            ),
+        )
+        .await;
+
+        let msg1 = stream(&h, "ep-deadline/m").await;
+        assert_eq!(msg1["stop_reason"], "stop", "{msg1}");
+        assert_eq!(text_of(&msg1), "ok-after-retry", "{msg1}");
+        assert_eq!(
+            server.count("/ep-first-event"),
+            2,
+            "endpoint first_event_timeout_ms (200ms) must fire despite 30s idle default and retry once"
+        );
+
+        let (stop2, text2): (String, String) = eval(
+            &h,
+            r#"
+            local m = assert(LLM:resolve("ep-deadline/m"))
+            local res = LLM:stream({
+                model = m,
+                first_event_timeout_ms = 2000,
+                messages = { { role = "user", content = { { type = "text", text = "hi" } } } },
+            }, function() end)
+            return tostring(res.stop_reason), tostring(res.content and res.content[1] and res.content[1].text or "")
+            "#,
+        )
+        .await;
+        assert_eq!(stop2, "stop", "explicit req.first_event_timeout_ms must override endpoint timeout");
+        assert_eq!(text2, "hello");
+        assert_eq!(server.count("/ep-first-event"), 3, "explicit request deadline must succeed without retry");
+        h.shutdown().await;
+    })
+    .await
+}
+
 /// Chat Completions tool-call deltas: without an index they continue the call by id / the last
 /// call (pi openai-completions.ts:488-509); calls interleaved by index stay apart.
 #[tokio::test]

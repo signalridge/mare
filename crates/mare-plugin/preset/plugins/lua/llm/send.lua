@@ -112,6 +112,11 @@ return function(D)
 				connect_timeout_ms = wire.connect_timeout_ms,
 				idle_timeout_ms = req.idle_timeout_ms or endpoint.idle_timeout_ms,
 				header_timeout_ms = req.header_timeout_ms,
+				first_event_timeout_ms = req.first_event_timeout_ms
+					or endpoint.first_event_timeout_ms
+					or req._default_first_event_timeout_ms
+					or req.idle_timeout_ms
+					or endpoint.idle_timeout_ms,
 				sse_max_line_bytes = req.sse_max_line_bytes,
 				sse_max_event_bytes = req.sse_max_event_bytes,
 				redirect = "same-origin",

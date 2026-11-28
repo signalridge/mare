@@ -387,11 +387,14 @@ return function(D)
 				provider_id = model.provider,
 			}
 		end
-		-- idle watchdog and header timeout for every provider
+		-- idle watchdog, header timeout, and default first-event deadline for every provider
+		-- (keep explicit req.first_event_timeout_ms untouched so send.lua resolves
+		-- request -> endpoint -> computed default in one place)
 		local idle = (tonumber(pcfg.stream_idle_timeout_ms) or cfg.stream_idle_timeout_ms or 300000)
 			* (IDLE_MULT[req.effort or ""] or 1)
 		req.idle_timeout_ms = req.idle_timeout_ms or idle
 		req.header_timeout_ms = req.header_timeout_ms or idle
+		req._default_first_event_timeout_ms = idle
 		req.sse_max_line_bytes = req.sse_max_line_bytes or cfg.sse_max_line_bytes
 		req.sse_max_event_bytes = req.sse_max_event_bytes or cfg.sse_max_event_bytes
 		local function emit_usage(result)
