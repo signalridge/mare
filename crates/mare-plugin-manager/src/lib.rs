@@ -79,7 +79,7 @@ pub use ops::clean::{clean_only, remove_unused};
 pub use ops::report::{Status, UpdateCheck, check, diff_of, doctor, doctor_for, list, log_of, status};
 pub use ops::restore::{repair_lock, restore, restore_only};
 pub use ops::sync::{install_missing, install_missing_with_progress, sync, sync_only};
-pub use ops::update::update;
+pub use ops::update::{apply_pending_updates_with_progress, queue_pending_updates, update};
 pub use repo::hash::content_hash;
 pub use repo::manifest::{
     Manifest, ManifestDiagnostic, PluginDependencies, PluginPlatform, PluginProvides, Recommended, WebManifest,

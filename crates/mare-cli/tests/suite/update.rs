@@ -326,3 +326,109 @@ async fn mare_update_plugins_updates_unpinned_and_respects_pins() {
     })
     .await
 }
+
+#[tokio::test]
+async fn update_check_opt_out_suppresses_background_plugin_and_release_checks() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        env.set_var("MARE_NO_UPDATE_CHECK", "1");
+        let mock = MockServer::start().await;
+        mock.route("/releases/latest", vec![Resp::status(200, r#"{"tag_name":"v99.0.0"}"#)]);
+        let url = format!("{}/releases/latest", mock.base);
+
+        let h = env
+            .host()
+            .builtins(&["update-check"])
+            .config(json!({ "plugins": { "update-check": { "url": url } } }))
+            .no_session()
+            .build()
+            .await;
+        expose(&h);
+        exec(
+            &h,
+            r#"
+            _G.OPT_OUT_NOTICES = 0
+            local orig = mare.ui.notify
+            mare.ui.notify = function(...) _G.OPT_OUT_NOTICES = _G.OPT_OUT_NOTICES + 1; return orig(...) end
+            mare.mode, mare.debug_build = "tui", false
+            C.cordis:get("bus"):emit("ui/ready", {})
+            "#,
+        )
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert_eq!(mock.count("/releases/latest"), 0, "MARE_NO_UPDATE_CHECK=1 must suppress release check");
+        assert_eq!(eval::<i64>(&h, "return _G.OPT_OUT_NOTICES").await, 0);
+        h.shutdown().await;
+    })
+    .await
+}
+
+#[tokio::test]
+async fn mare_offline_blocks_plugin_check_and_startup_clone_while_keeping_installed() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let repo_ok = tempfile::tempdir().unwrap();
+        let repo_missing = tempfile::tempdir().unwrap();
+        init_git_repo(repo_ok.path(), "installed_ok", "v1.0.0");
+        init_git_repo(repo_missing.path(), "missing_remote", "v1.0.0");
+
+        // Install only repo_ok first
+        std::fs::create_dir_all(env.config_dir()).unwrap();
+        std::fs::write(
+            env.config_dir().join("init.lua"),
+            format!(
+                "mare.plugins.add {{\n  {{ \"me/installed\", url = {:?}, version = \"^1\" }},\n}}\n",
+                repo_ok.path().to_string_lossy(),
+            ),
+        )
+        .unwrap();
+        let home_sync = env.home.path().to_path_buf();
+        let sync = tokio::task::spawn_blocking(move || {
+            run_output(mare_cmd().env("MARE_HOME", &home_sync).args(["plugin", "sync"]))
+        })
+        .await
+        .unwrap();
+        assert!(sync.status.success(), "sync failed: {}", String::from_utf8_lossy(&sync.stderr));
+
+        // Now add repo_missing to init.lua and enable MARE_OFFLINE=1
+        std::fs::write(
+            env.config_dir().join("init.lua"),
+            format!(
+                "mare.plugins.add {{\n  {{ \"me/installed\", url = {:?}, version = \"^1\" }},\n  {{ \"me/missing\", url = {:?}, version = \"^1\" }},\n}}\n",
+                repo_ok.path().to_string_lossy(),
+                repo_missing.path().to_string_lossy(),
+            ),
+        )
+        .unwrap();
+
+        // Explicit `mare plugin check` under MARE_OFFLINE=1 fails cleanly without fetching
+        let chk = run_output(
+            mare_cmd()
+                .env("MARE_HOME", env.home.path())
+                .env("MARE_OFFLINE", "1")
+                .args(["plugin", "check"]),
+        );
+        assert!(!chk.status.success());
+        assert!(String::from_utf8_lossy(&chk.stderr).contains("MARE_OFFLINE"));
+
+        // Offline startup skips missing clone while still loading already-installed plugin cleanly
+        env.set_var("MARE_OFFLINE", "1");
+        let h = mare_host::Host::new(env.host().user_config(false).faux(json!([])).no_session().opts)
+            .await
+            .unwrap();
+        let problems = h.kernel.problems();
+        assert!(
+            problems.iter().any(|p| p.contains("me/missing") && p.contains("MARE_OFFLINE")),
+            "expected offline notice for missing package: {problems:?}"
+        );
+        let warnings = h.plugin_warnings();
+        assert!(
+            warnings.iter().any(|w| w.contains("me/missing") && w.contains("MARE_OFFLINE")),
+            "expected offline warning for missing package: {warnings:?}"
+        );
+        let ok_active: bool = eval(&h, "return mare.plugins.status('installed_ok').active").await;
+        assert!(ok_active, "installed plugin must load offline");
+        h.shutdown().await;
+    })
+    .await
+}

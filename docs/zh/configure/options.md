@@ -509,6 +509,7 @@
 |---|---|---|---|
 | `enabled` | boolean | `true` | Check for a newer release. |
 | `interval_hours` | number | `24` | Hours between checks. |
+| `plugins` | boolean | `true` | Also check declared git plugins for updates. |
 | `timeout_ms` | integer | `5000` | Request timeout in milliseconds. |
 | `url` | string | `"https://api.github.com/repos/signalridge/mare/releases/latest"` | Release API endpoint to query. |
 

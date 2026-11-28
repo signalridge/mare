@@ -8,10 +8,10 @@ Release artifacts are built for six targets (`.github/workflows/release.yaml`):
 
 | Platform | Target | Artifacts |
 | --- | --- | --- |
-| macOS, Apple silicon | `aarch64-apple-darwin` | `.tar.gz`, Homebrew formula, Nix |
-| macOS, Intel | `x86_64-apple-darwin` | `.tar.gz`, Homebrew formula, Nix |
-| Linux, x86-64 (static musl) | `x86_64-unknown-linux-musl` | `.tar.gz`, `.deb`, `.rpm`, Homebrew formula, AUR, Nix, GHCR container |
-| Linux, ARM64 (static musl) | `aarch64-unknown-linux-musl` | `.tar.gz`, `.deb`, `.rpm`, Homebrew formula, AUR, Nix, GHCR container |
+| macOS, Apple silicon | `aarch64-apple-darwin` | `.tar.gz`, Homebrew cask, Nix |
+| macOS, Intel | `x86_64-apple-darwin` | `.tar.gz`, Homebrew cask, Nix |
+| Linux, x86-64 (glibc 2.39+) | `x86_64-unknown-linux-gnu` | `.tar.gz`, `.deb`, `.rpm`, Homebrew cask, AUR, Nix, GHCR container |
+| Linux, ARM64 (glibc 2.39+) | `aarch64-unknown-linux-gnu` | `.tar.gz`, `.deb`, `.rpm`, Homebrew cask, AUR, Nix, GHCR container |
 | Windows, x86-64 | `x86_64-pc-windows-msvc` | `.zip`, Scoop manifest |
 | Windows, ARM64 | `aarch64-pc-windows-msvc` | `.zip`, Scoop manifest |
 
@@ -29,12 +29,12 @@ curl -fsSL https://signalridge.github.io/mare/install.sh | sh
 
 By default, the script installs `mare` into `~/.local/bin`. Override `MARE_INSTALL_DIR` to change the target directory, or set `MARE_VERSION=vX.Y.Z` to install a specific release.
 
-### Homebrew
+### Homebrew formula
 
 ```sh
 brew tap signalridge/tap
 brew trust signalridge/tap
-brew install signalridge/tap/mare
+brew install mare
 ```
 
 ### Nix (Flake and NUR)
@@ -69,13 +69,11 @@ else
 fi
 ```
 
-If you downloaded the archive with a browser, clear the macOS quarantine attribute before running it: `xattr -d com.apple.quarantine ./mare`.
-
 ## Linux
 
 ### Quick install script
 
-Download the latest Linux archive (`x86_64-unknown-linux-musl` or `aarch64-unknown-linux-musl`, statically linked) and verify its SHA-256 checksum against `checksums.txt`:
+Download the latest Linux archive (`x86_64-unknown-linux-gnu` or `aarch64-unknown-linux-gnu`, glibc 2.39+) and verify its SHA-256 checksum against `checksums.txt`:
 
 ```sh
 curl -fsSL https://signalridge.github.io/mare/install.sh | sh
@@ -113,7 +111,7 @@ yay -S mare-bin
 ```sh
 brew tap signalridge/tap
 brew trust signalridge/tap
-brew install signalridge/tap/mare
+brew install mare
 ```
 
 ### Nix (Flake and NUR)
@@ -133,7 +131,7 @@ Download `mare-$VERSION-$TARGET.tar.gz` and its `.sha256` file from [GitHub Rele
 
 ```sh
 VERSION=vX.Y.Z
-TARGET=x86_64-unknown-linux-musl   # or aarch64-unknown-linux-musl for ARM64
+TARGET=x86_64-unknown-linux-gnu   # or aarch64-unknown-linux-gnu for ARM64
 ARCHIVE="mare-$VERSION-$TARGET.tar.gz"
 EXPECTED=$(awk 'NR==1 && length($1)==64 && $1 ~ /^[[:xdigit:]]+$/{print tolower($1)}' "$ARCHIVE.sha256")
 ACTUAL=$(sha256sum "$ARCHIVE" | awk 'NR==1{print tolower($1)}')
@@ -279,18 +277,24 @@ Restart the shell, or reload its completion system, to pick it up.
 
 ## Updating
 
-mare does not replace its own binary. To update:
+Use `mare update` to update mare and declared plugins together, or target one side:
 
-- If you installed via a package manager (`brew upgrade mare`, `scoop update mare`, `yay -S mare-bin`, `nix profile upgrade mare`), use that package manager.
-- Otherwise, re-run the quick install script (`install.sh` / `install.ps1`) or download the newer archive, verify it, and overwrite the old `mare` binary.
+- `mare update` / `mare update --all` updates mare and declared plugins.
+- `mare update --self` updates mare itself (`-y` skips confirmation, `--method` overrides install detection):
+  - Package manager installs run the detected manager command (`brew upgrade mare`, `scoop update mare`, `yay -S mare-bin` / `paru -S mare-bin`, `nix profile upgrade mare`) and never overwrite the binary directly.
+  - Standalone script installs (`install.sh` / `install.ps1`) download the release archive, verify its SHA-256 checksum against `checksums.txt`, and stage the replacement to activate on the next start.
+  - Other manual installs print release download instructions.
+- `mare update --plugins` updates declared plugins (equivalent to `mare plugin update`, respecting pins and commit locks) and reminds you to run `/reload` in active sessions.
 
-Release builds of the TUI check GitHub releases for a newer version every 24 hours by default (`update-check.interval_hours` adjusts the interval; debug builds skip automatic checks) and print one line if there is one. The request carries no identifier beyond `mare/<version>`. Turn the check off in `init.lua`:
+Release builds of the TUI check GitHub releases and declared git plugins every 24 hours by default (`update-check.interval_hours` adjusts the interval; debug builds skip automatic checks) and show one combined notice once per version/revision. The request carries no identifier beyond `mare/<version>`. Control or disable all automatic update checks via `init.lua` or the environment:
 
 ```lua
-mare.setup { update_check = false }
+mare.setup { update_check = "notify" } -- "notify" (default) | "auto" (stage standalone updates) | false
 ```
 
-When the version changes, mare re-extracts its built-in plugins and types into `~/.local/share/mare/runtime` the next time it starts. Packages declared in `init.lua` are updated separately with `mare plugin update`.
+Setting `MARE_NO_UPDATE_CHECK=1` disables automatic update checks; `MARE_OFFLINE=1` disables network checks across `mare update`, `mare plugin check`/`update`, and startup package clones while keeping locally installed packages usable.
+
+When the version changes, mare re-extracts its built-in plugins and types into `~/.local/share/mare/runtime` the next time it starts.
 
 ## Files mare uses
 

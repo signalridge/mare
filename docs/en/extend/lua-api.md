@@ -1091,6 +1091,7 @@ Defined in `types/mare/config.lua`, `types/mare/plugins.lua`.
 | `mare.plugins.install(name, opts)` | Install a catalog plugin by short name or sync a declared source. |
 | `mare.plugins.update(name, opts)` | Update declared packages to their newest allowed revision (`update`). |
 | `mare.plugins.check(names, opts)` | Fetch and compare revisions without moving checkouts or modifying locks. |
+| `mare.plugins.queue_auto_update(names)` | Queue `auto_update = true` package names so checkouts switch cleanly on the next `/reload` or start. |
 | `mare.plugins.uninstall(name, opts)` | Uninstall a catalog plugin by short name or clean an unused source. |
 | `mare.plugins.manifest(name)` | Read `mare-plugin.toml` for an installed, enabled package. |
 | `mare.plugins.catalog()` | The plugin catalog with `enabled` / `recommended` for this project. |

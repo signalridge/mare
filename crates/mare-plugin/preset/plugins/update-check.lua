@@ -20,6 +20,7 @@ return {
 		},
 		interval_hours = { type = "number", default = 24, desc = "Hours between checks." },
 		timeout_ms = { type = "integer", default = 5000, desc = "Request timeout in milliseconds." },
+		plugins = { type = "boolean", default = true, desc = "Also check declared git plugins for updates." },
 	},
 	apply = function(ctx, cfg)
 		local function policy()
@@ -119,25 +120,123 @@ return {
 			if mare.mode ~= "tui" or mare.debug_build or not enabled() then
 				return
 			end
-			local last = tonumber((mare.state.read() or {}).update_check_at) or 0
+			local state = mare.state.read() or {}
+			local last = tonumber(state.update_check_at) or 0
 			local age = os.time() - last
 			if age >= 0 and age < cfg.interval_hours * 3600 then
 				return
 			end
 			ctx:spawn(function()
 				local res = svc.check()
-				if res and res.newer and mare.ui.connected() then
+				local plug_rows = nil
+				if cfg.plugins ~= false and not mare.no_user_plugins and mare.plugins and mare.plugins.check then
+					local ok_p, rows = pcall(mare.plugins.check)
+					if ok_p and type(rows) == "table" then
+						plug_rows = rows
+					end
+				end
+				-- Ensure failed or plugin-only checks still update the throttle timestamp.
+				if not res then
+					pcall(mare.state.set, "update_check_at", os.time())
+				end
+
+				local noticed = type(state.update_notices) == "table" and state.update_notices or {}
+				local prev_plugins = type(noticed.plugins) == "table" and noticed.plugins or {}
+				local next_plugins = {}
+				local parts = {}
+				local next_self = noticed.self_version
+
+				if res and res.newer then
 					if res.policy == "auto" and res.channel == "standalone" and mare.install.stage_update then
-						local ok, stage = pcall(mare.install.stage_update, cfg.url)
-						if ok and type(stage) == "table" and stage.ok and stage.staged then
-							mare.ui.notify(
-								("mare %s staged (restart mare to apply)"):format(tostring(stage.staged.version)),
-								"info"
-							)
-							return
+						local ok_s, stage = pcall(mare.install.stage_update, cfg.url)
+						if ok_s and type(stage) == "table" and stage.ok and stage.staged then
+							local staged_ver = tostring(stage.staged.version):gsub("^v", "")
+							parts[#parts + 1] = ("mare %s staged (restart mare to apply)"):format(staged_ver)
+							next_self = res.latest
+						elseif noticed.self_version ~= res.latest then
+							parts[#parts + 1] = format_self_notice(res)
+							next_self = res.latest
+						end
+					elseif noticed.self_version ~= res.latest then
+						parts[#parts + 1] = format_self_notice(res)
+						next_self = res.latest
+					end
+				elseif res and not res.newer then
+					next_self = nil
+				end
+
+				local new_plugin_updates = 0
+				local auto_queue = {}
+				local new_auto_updates = 0
+				if plug_rows == nil then
+					-- Plugin check failed or was skipped: keep previously noticed plugin revisions intact.
+					for k, v in pairs(prev_plugins) do
+						next_plugins[k] = v
+					end
+				else
+					for _, row in ipairs(plug_rows) do
+						if row.status == "unreachable" then
+							if prev_plugins[row.name] ~= nil then
+								next_plugins[row.name] = prev_plugins[row.name]
+							end
+						elseif row.status == "outdated" then
+							local rev = type(row.target_commit) == "string"
+									and row.target_commit ~= ""
+									and row.target_commit
+								or tostring(row.behind_count or 1)
+							next_plugins[row.name] = rev
+							if row.auto_update then
+								auto_queue[#auto_queue + 1] = row.name
+								if prev_plugins[row.name] ~= rev then
+									new_auto_updates = new_auto_updates + 1
+								end
+							elseif prev_plugins[row.name] ~= rev then
+								new_plugin_updates = new_plugin_updates + 1
+							end
 						end
 					end
-					mare.ui.notify(format_self_notice(res), "info")
+				end
+
+				if #auto_queue > 0 and mare.plugins and mare.plugins.queue_auto_update then
+					pcall(mare.plugins.queue_auto_update, auto_queue)
+				end
+
+				if new_plugin_updates > 0 then
+					parts[#parts + 1] = ("%d %s (mare update --plugins)"):format(
+						new_plugin_updates,
+						new_plugin_updates == 1 and "plugin update" or "plugin updates"
+					)
+				end
+				if new_auto_updates > 0 then
+					parts[#parts + 1] = ("%d %s ready (/reload to apply)"):format(
+						new_auto_updates,
+						new_auto_updates == 1 and "plugin update" or "plugin updates"
+					)
+				end
+
+				if #parts > 0 and mare.ui.connected() then
+					mare.ui.notify(table.concat(parts, " · "), "info")
+					pcall(mare.state.set, "update_notices", {
+						self_version = next_self,
+						plugins = next_plugins,
+					})
+				elseif #parts == 0 then
+					-- Prune resolved plugins/versions without emitting a duplicate notice.
+					local pruned = next_self ~= noticed.self_version
+					if not pruned then
+						for k, v in pairs(prev_plugins) do
+							if next_plugins[k] ~= v then
+								pruned = true
+								break
+							end
+						end
+					end
+					if pruned then
+						pcall(mare.state.set, "update_notices", {
+							self_version = next_self,
+							plugins = next_plugins,
+						})
+					end
 				end
 			end)
 		end)

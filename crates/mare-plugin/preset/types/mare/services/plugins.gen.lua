@@ -7,7 +7,7 @@ local M = {}
 
 --- Fetch and compare plugin revisions without moving checkouts or modifying locks.
 ---@param names? string[]
----@return {data: ({behind_count: integer, breaking: boolean, commits: string[], error?: string, name: string, status: "up_to_date"|"outdated"|"pinned"|"local"|"unreachable"})[]}
+---@return {data: ({auto_update?: boolean, behind_count: integer, breaking: boolean, commits: string[], current_commit?: string, error?: string, name: string, status: "up_to_date"|"outdated"|"pinned"|"local"|"unreachable", target_commit?: string})[]}
 function M:check(names) end
 
 --- Offer the optional plugins, install selected packages, and return the outcome; nil when the offer is not due.

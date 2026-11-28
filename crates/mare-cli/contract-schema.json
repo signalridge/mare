@@ -3958,6 +3958,9 @@
           "items": {
             "additionalProperties": false,
             "properties": {
+              "auto_update": {
+                "type": "boolean"
+              },
               "behind_count": {
                 "minimum": 0,
                 "type": "integer"
@@ -3970,6 +3973,9 @@
                   "type": "string"
                 },
                 "type": "array"
+              },
+              "current_commit": {
+                "type": "string"
               },
               "error": {
                 "type": "string"
@@ -3985,6 +3991,9 @@
                   "local",
                   "unreachable"
                 ],
+                "type": "string"
+              },
+              "target_commit": {
                 "type": "string"
               }
             },

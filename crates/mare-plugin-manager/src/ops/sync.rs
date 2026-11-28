@@ -44,6 +44,9 @@ pub fn install_missing_with_progress(
     if missing.is_empty() {
         return vec![];
     }
+    if mare_shared::env::is_offline_env() {
+        return missing.into_iter().map(|s| format!("package {} not installed (MARE_OFFLINE=1)", s.name)).collect();
+    }
     let lock = match SharedLock::new(cfg) {
         Ok(l) => l,
         Err(e) => return vec![format!("packages not installed: {e:#}")],
@@ -100,6 +103,9 @@ pub fn sync(cfg: &serde_json::Value, log: Log) -> Result<()> {
 /// own and is locked as soon as it's done; packages removed from init.lua leave the lock
 /// (disabled ones keep their entries — lazy.nvim `lock.lua`).
 pub fn sync_only(cfg: &serde_json::Value, only: Option<&str>, log: Log) -> Result<()> {
+    if mare_shared::env::is_offline_env() {
+        bail!("offline mode is active (MARE_OFFLINE); cannot sync plugins");
+    }
     let o = PkgOptions::from_config(cfg);
     let specs = specs(cfg);
     validate_checkout_constraints(&specs)?;

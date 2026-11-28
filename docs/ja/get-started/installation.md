@@ -8,10 +8,10 @@
 
 | プラットフォーム | ターゲット | 配布形式 |
 | --- | --- | --- |
-| macOS、Apple シリコン | `aarch64-apple-darwin` | `.tar.gz`、Homebrew formula、Nix |
-| macOS、Intel | `x86_64-apple-darwin` | `.tar.gz`、Homebrew formula、Nix |
-| Linux、x86-64 (静的 musl) | `x86_64-unknown-linux-musl` | `.tar.gz`、`.deb`、`.rpm`、Homebrew formula、AUR、Nix、GHCR コンテナ |
-| Linux、ARM64 (静的 musl) | `aarch64-unknown-linux-musl` | `.tar.gz`、`.deb`、`.rpm`、Homebrew formula、AUR、Nix、GHCR コンテナ |
+| macOS、Apple シリコン | `aarch64-apple-darwin` | `.tar.gz`、Homebrew cask、Nix |
+| macOS、Intel | `x86_64-apple-darwin` | `.tar.gz`、Homebrew cask、Nix |
+| Linux、x86-64 (glibc 2.39+) | `x86_64-unknown-linux-gnu` | `.tar.gz`、`.deb`、`.rpm`、Homebrew cask、AUR、Nix、GHCR コンテナ |
+| Linux、ARM64 (glibc 2.39+) | `aarch64-unknown-linux-gnu` | `.tar.gz`、`.deb`、`.rpm`、Homebrew cask、AUR、Nix、GHCR コンテナ |
 | Windows、x86-64 | `x86_64-pc-windows-msvc` | `.zip`、Scoop マニフェスト |
 | Windows、ARM64 | `aarch64-pc-windows-msvc` | `.zip`、Scoop マニフェスト |
 
@@ -29,12 +29,12 @@ curl -fsSL https://signalridge.github.io/mare/install.sh | sh
 
 既定では `~/.local/bin` にインストールされます。配置先は `MARE_INSTALL_DIR`、バージョン固定は `MARE_VERSION=vX.Y.Z` で指定できます。
 
-### Homebrew
+### Homebrew formula
 
 ```sh
 brew tap signalridge/tap
 brew trust signalridge/tap
-brew install signalridge/tap/mare
+brew install mare
 ```
 
 ### Nix (Flake と NUR)
@@ -69,13 +69,11 @@ else
 fi
 ```
 
-ブラウザーからアーカイブをダウンロードした場合は、実行前に macOS の隔離属性を解除してください: `xattr -d com.apple.quarantine ./mare`。
-
 ## Linux
 
 ### ワンラインインストーラー
 
-最新の Linux アーカイブ (`x86_64-unknown-linux-musl` または `aarch64-unknown-linux-musl`、静的リンク) をダウンロードし、`checksums.txt` に基づく SHA-256 検証を行って導入します:
+最新の Linux アーカイブ (`x86_64-unknown-linux-gnu` または `aarch64-unknown-linux-gnu`、glibc 2.39+) をダウンロードし、`checksums.txt` に基づく SHA-256 検証を行って導入します:
 
 ```sh
 curl -fsSL https://signalridge.github.io/mare/install.sh | sh
@@ -113,7 +111,7 @@ yay -S mare-bin
 ```sh
 brew tap signalridge/tap
 brew trust signalridge/tap
-brew install signalridge/tap/mare
+brew install mare
 ```
 
 ### Nix (Flake と NUR)
@@ -133,7 +131,7 @@ nix profile install github:signalridge/nur-packages#mare
 
 ```sh
 VERSION=vX.Y.Z
-TARGET=x86_64-unknown-linux-musl   # ARM64 の場合は aarch64-unknown-linux-musl
+TARGET=x86_64-unknown-linux-gnu   # ARM64 の場合は aarch64-unknown-linux-gnu
 ARCHIVE="mare-$VERSION-$TARGET.tar.gz"
 EXPECTED=$(awk 'NR==1 && length($1)==64 && $1 ~ /^[[:xdigit:]]+$/{print tolower($1)}' "$ARCHIVE.sha256")
 ACTUAL=$(sha256sum "$ARCHIVE" | awk 'NR==1{print tolower($1)}')
@@ -279,18 +277,24 @@ mare completion fish > ~/.config/fish/completions/mare.fish
 
 ## アップデート
 
-mare は自分自身のバイナリを置き換えません。アップデート方法:
+`mare update` で mare 本体と宣言済みプラグインを一括更新するか、片方だけを更新できます:
 
-- パッケージマネージャーから導入した場合は、それぞれの更新コマンド (`brew upgrade mare`、`scoop update mare`、`yay -S mare-bin`、`nix profile upgrade mare` など) を使います。
-- それ以外の場合は、ワンラインインストーラー (`install.sh` / `install.ps1`) を再実行するか、新しいアーカイブをダウンロード・検証して上記のとおり古い `mare` を上書きしてください。
+- `mare update` / `mare update --all`: mare と宣言済みプラグインの両方を更新します。
+- `mare update --self`: mare 本体を更新します (`-y` で確認スキップ、`--method` で導入方式の上書き指定が可能):
+  - パッケージマネージャー導入では対応コマンド (`brew upgrade mare`、`scoop update mare`、`yay -S mare-bin` / `paru -S mare-bin`、`nix profile upgrade mare`) を実行し、バイナリを直接上書きしません。
+  - インストーラースクリプト (`install.sh` / `install.ps1`) 導入ではリリースアーカイブを取得し、`checksums.txt` の SHA-256 を検証して次回起動時に差し替えるようステージします。
+  - その他の手動導入では手動更新の案内を表示します。
+- `mare update --plugins`: 宣言済みプラグインを更新し (`mare plugin update` と同等で、pin や commit 固定を尊重)、起動中セッションでの `/reload` 実行を案内します。
 
-リリースビルドの TUI は、既定で 24 時間ごとに GitHub のリリースを確認し (`update-check.interval_hours` で間隔を変更可能、デバッグビルドは自動確認をスキップ)、新しいバージョンがあれば 1 行表示します。リクエストには `mare/<version>` 以外の識別情報は含まれません。確認を止めるには `init.lua` に次を書きます。
+リリースビルドの TUI は、既定で 24 時間ごとに GitHub リリースと宣言済み git プラグインの更新を確認し (`update-check.interval_hours` で間隔を変更可能、デバッグビルドはスキップ)、新しいバージョンやリビジョンがあれば 1 行にまとめて 1 度だけ通知します。リクエストには `mare/<version>` 以外の識別情報は含まれません。設定または無効化は `init.lua` で指定できます:
 
 ```lua
-mare.setup { update_check = false }
+mare.setup { update_check = "notify" } -- "notify" (既定) | "auto" (スタンドアロン更新の自動ステージ) | false
 ```
 
-バージョンが変わると、mare は次の起動時に組み込みプラグインと型定義を `~/.local/share/mare/runtime` へ展開し直します。`init.lua` で宣言したパッケージは、`mare plugin update` で別に更新します。
+`MARE_NO_UPDATE_CHECK=1` で自動更新チェックを無効にできます。`MARE_OFFLINE=1` を設定すると、`mare update`、`mare plugin check`/`update`、および起動時のリモート clone をスキップし、インストール済みのローカルパッケージのみを使用します。
+
+バージョンが変わると、mare は次の起動時に組み込みプラグインと型定義を `~/.local/share/mare/runtime` へ展開し直します。
 
 ## mare が使うファイル
 

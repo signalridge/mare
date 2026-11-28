@@ -138,8 +138,12 @@ function mare.plugins.update(name, opts) end
 ---@async
 ---@param names? string[]
 ---@param opts? {cancel?: mare.Token}
----@return {name: string, status: "up_to_date"|"outdated"|"pinned"|"local"|"unreachable", behind_count: integer, commits: string[], breaking: boolean, error?: string}[]
+---@return {name: string, status: "up_to_date"|"outdated"|"pinned"|"local"|"unreachable", behind_count: integer, commits: string[], breaking: boolean, current_commit?: string, target_commit?: string, auto_update?: boolean, error?: string}[]
 function mare.plugins.check(names, opts) end
+--- Queue `auto_update = true` package names so checkouts switch cleanly on the next `/reload` or start.
+---@param names string[]
+---@return integer count total queued packages
+function mare.plugins.queue_auto_update(names) end
 --- Uninstall a catalog plugin by short name or clean an unused source.
 ---@async
 ---@param name? string

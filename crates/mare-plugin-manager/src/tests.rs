@@ -264,7 +264,7 @@ themes = ["my-themes"]
     assert!(resource_dirs(&cfg, Some("bogus")).is_err());
 }
 
-static TEST_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static TEST_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn git_cmd(dir: &Path, args: &[&str]) -> String {
     let out = std::process::Command::new("git").current_dir(dir).args(args).output().unwrap();

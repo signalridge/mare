@@ -46,6 +46,8 @@ pub struct PackageSpec {
     pub dependencies: Vec<String>,
     /// `pin = true`: `update` leaves it alone
     pub pin: bool,
+    /// `auto_update = true`: allow opt-in background updates (default false)
+    pub auto_update: bool,
     /// `submodules = false` skips git submodules (lazy.nvim `submodules`)
     pub submodules: bool,
 }
@@ -229,6 +231,7 @@ pub(crate) fn parse_any(t: &serde_json::Value, o: &PkgOptions) -> Option<Package
         dir,
         dependencies: str_list(t.get("dependencies")),
         pin: t.get("pin").and_then(|v| v.as_bool()).unwrap_or(false),
+        auto_update: t.get("auto_update").and_then(|v| v.as_bool()).unwrap_or(false),
         submodules: t.get("submodules").and_then(|v| v.as_bool()).unwrap_or(true),
         name,
     })
