@@ -1281,3 +1281,159 @@ async fn side_and_btw_snapshot_context_succeed_after_compaction() {
     })
     .await;
 }
+
+/// Tool-result images are stored once as content-addressed attachments (never inline base64 in
+/// the session JSONL), hydrate cleanly on resume, stage/copy cleanly on fork, and reuse the same
+/// attachment path when compaction offloads them.
+#[tokio::test]
+async fn tool_result_images_store_as_attachments_and_survive_resume_fork_and_offload() {
+    local(async {
+        let env = TestEnv::new().await;
+        let cfg = json!({
+            "plugins": {
+                "compact": {
+                    "auto": false,
+                    "stages": ["offload"],
+                    "offload_keep_images": 0
+                }
+            }
+        });
+        let h = env
+            .host()
+            .builtins(&["compact", "usage"])
+            .config(cfg.clone())
+            .faux(json!([
+                { "tool_calls": [{ "id": "call_img_1", "name": "emit_img", "arguments": {} }] },
+                { "text": "saw tool image" }
+            ]))
+            .build()
+            .await;
+        expose(&h);
+        exec(
+            &h,
+            &format!(
+                r#"
+                T:register("emit_img", {{
+                    side_effect = "read",
+                    description = "return an image block",
+                    parameters = {{ type = "object" }},
+                    execute = function()
+                        return {{
+                            content = {{
+                                {{ type = "text", text = "rendered" }},
+                                {{ type = "image", mime = "image/png", data = {PNG_1X1_B64:?} }},
+                            }},
+                        }}
+                    end,
+                }})
+                "#
+            ),
+        )
+        .await;
+
+        let r1 = h.prompt("run emit_img", json!({})).await.unwrap();
+        assert_eq!(r1["text"], "saw tool image");
+
+        let (orig_path, fork_path, att_name): (String, String, String) = eval(
+            &h,
+            &format!(
+                r#"
+                local info = S:info()
+                local orig = assert(info.path, "expected persisted session path")
+                local forked = assert(S:snapshot({{ session_id = info.session_id }}), "expected fork snapshot")
+                local bytes = assert(mare.crypto.base64_decode({PNG_1X1_B64:?}))
+                local name = mare.crypto.sha256(bytes) .. ".png"
+                return orig, assert(forked.path, "expected forked path"), name
+                "#
+            ),
+        )
+        .await;
+
+        // 1. Original session JSONL references the attachment file with no inline base64 data.
+        let orig_jsonl = std::fs::read_to_string(&orig_path).unwrap();
+        assert!(
+            !orig_jsonl.contains(PNG_1X1_B64),
+            "tool_result image base64 must not be written inline to session JSONL: {orig_jsonl}"
+        );
+        assert!(
+            orig_jsonl.contains(&format!(r#""attachment":"{att_name}""#)),
+            "tool_result image must reference attachment {att_name} in session JSONL: {orig_jsonl}"
+        );
+        let orig_att_dir = format!("{}.attachments", orig_path.trim_end_matches(".jsonl"));
+        assert!(
+            std::path::Path::new(&orig_att_dir).join(&att_name).is_file(),
+            "attachment file must exist in {orig_att_dir}"
+        );
+
+        // 2. Forked session JSONL also stores the tool_result image as an attachment, not inline.
+        let fork_jsonl = std::fs::read_to_string(&fork_path).unwrap();
+        assert!(
+            !fork_jsonl.contains(PNG_1X1_B64),
+            "forked session JSONL must not inline tool_result image base64: {fork_jsonl}"
+        );
+        assert!(
+            fork_jsonl.contains(&format!(r#""attachment":"{att_name}""#)),
+            "forked session JSONL must reference {att_name}: {fork_jsonl}"
+        );
+        let fork_att_dir = format!("{}.attachments", fork_path.trim_end_matches(".jsonl"));
+        assert!(
+            std::path::Path::new(&fork_att_dir).join(&att_name).is_file(),
+            "forked attachment file must exist in {fork_att_dir}"
+        );
+
+        // 3. Compaction offload reuses the same canonical attachment file instead of duplicating it.
+        let offloaded_path: String = eval(
+            &h,
+            r#"
+            local res = C.cordis:get("bus"):waterfall("compact/overflow", {}).res
+            assert(res and res.status == "compacted", mare.json.encode(res))
+            for _, m in ipairs(A:list_messages().data) do
+                if m.role == "tool_result" then
+                    for _, b in ipairs(m.content or {}) do
+                        if b.type == "text" then
+                            local p = b.text:match("%[Attachment: (.-) %(read%-only")
+                            if p then return p end
+                        end
+                    end
+                end
+            end
+            error("missing offloaded attachment text")
+            "#,
+        )
+        .await;
+        assert_eq!(
+            std::path::Path::new(&offloaded_path).file_name().and_then(|s| s.to_str()),
+            Some(att_name.as_str()),
+            "offload must reuse canonical content-addressed attachment name: {offloaded_path}"
+        );
+        let att_files: Vec<String> = std::fs::read_dir(&orig_att_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(att_files, vec![att_name.clone()], "must store exactly one copy on disk: {att_files:?}");
+
+        h.shutdown().await;
+
+        // 4. Resuming the forked session hydrates the original tool_result image bytes.
+        let resumed = env.host().args(json!({ "resume": fork_path })).faux(json!([])).build().await;
+        expose(&resumed);
+        let hydrated: String = eval(
+            &resumed,
+            r#"
+            for _, m in ipairs(A:messages()) do
+                if m.role == "tool_result" then
+                    for _, b in ipairs(m.content or {}) do
+                        if b.type == "image" then return tostring(b.data or "") end
+                    end
+                end
+            end
+            return ""
+            "#,
+        )
+        .await;
+        assert_eq!(hydrated, PNG_1X1_B64, "resumed session must hydrate original tool_result image bytes");
+        resumed.shutdown().await;
+    })
+    .await;
+}

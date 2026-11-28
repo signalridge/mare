@@ -400,11 +400,11 @@ return function(D)
 		path = path or S.path
 		return path and require("mare_lib").attachments_dir(path) or nil
 	end
-	--- the entry as written: user-message image data moved to attachment files (the in-memory
-	--- entry keeps its data); unchanged when there's nothing to move or no session file
+	--- the entry as written: user and tool-result image data moved to attachment files (the
+	--- in-memory entry keeps its data); unchanged when there's nothing to move or no session file
 	stored_form = function(entry, path, stage, valid)
 		local m = entry.type == "message" and entry.message
-		if not (m and m.role == "user" and type(m.content) == "table") then
+		if not (m and (m.role == "user" or m.role == "tool_result") and type(m.content) == "table") then
 			return entry
 		end
 		local dir = attachments_dir(path)
@@ -501,7 +501,7 @@ return function(D)
 		local has_images = false
 		for _, e in ipairs(snapshot.list) do
 			local m = e.type == "message" and e.message
-			if m and m.role == "user" and type(m.content) == "table" then
+			if m and (m.role == "user" or m.role == "tool_result") and type(m.content) == "table" then
 				for _, b in ipairs(m.content) do
 					if b.type == "image" and type(b.data) == "string" and b.data ~= "" then
 						has_images = true

@@ -172,10 +172,14 @@ return function(deps)
 			return nil
 		end
 		local dir = attachment_dir()
-		-- Unsaved messages have position-based stems that can be reused by later contexts.
-		-- Include the content digest so an older reference never points at another image, and
-		-- rewrite atomically even if the path exists (it might have been modified externally).
-		local path = ("%s/%s-%s.%s"):format(dir, stem, mare.crypto.sha256(bytes), EXT[b.mime or ""] or "bin")
+		local digest = mare.crypto.sha256(bytes)
+		local ext = EXT[b.mime or ""] or "bin"
+		-- Persisted sessions already store user and tool-result images content-addressed as
+		-- `<sha256>.<ext>` under `<session>.attachments/`; reuse that path instead of writing a
+		-- second `<stem>-<sha256>.<ext>` copy. Unsaved messages keep `<stem>-<sha256>.<ext>` so
+		-- reused positions never collide. Always rewrite atomically from verified bytes.
+		local path = session_path() and ("%s/%s.%s"):format(dir, digest, ext)
+			or ("%s/%s-%s.%s"):format(dir, stem, digest, ext)
 		if mare.fs.write(path, bytes, { atomic = true, mode = 384 }) then
 			return path
 		end
