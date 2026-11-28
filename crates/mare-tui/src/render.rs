@@ -78,14 +78,7 @@ pub fn render_node(node: &Node, width: usize, theme: &Theme, frame: usize) -> Ve
                 // honor embedded newlines
                 for part in split_line(&line) {
                     if *hard_wrap {
-                        let iw: usize = indent.iter().map(Span::width).sum();
-                        let wrapped = mare_shared::style::wrap_line_hard(&part, width.saturating_sub(iw).max(1));
-                        for (idx, mut row) in wrapped.into_iter().enumerate() {
-                            if idx > 0 && !indent.is_empty() {
-                                row.spans.splice(0..0, indent.iter().cloned());
-                            }
-                            out.push(row);
-                        }
+                        out.extend(mare_shared::style::wrap_line_indent_hard(&part, width, &indent));
                     } else {
                         out.extend(wrap_line_indent(&part, width, &indent));
                     }

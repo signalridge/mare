@@ -1464,6 +1464,7 @@ return {{
 fn acp_permission_request_forwards_detail_and_session_grant_resets_on_new_session() {
     let home = tempfile::tempdir().unwrap();
     let ws = tempfile::tempdir().unwrap();
+    std::fs::write(ws.path().join("existing.txt"), "old-existing-body").unwrap();
     let long_cmd = format!("echo head && {} && echo ACP_TAIL_MARKER", "a".repeat(160));
     let faux_path = home.path().join("faux-acp-detail.json");
     std::fs::write(
@@ -1472,7 +1473,9 @@ fn acp_permission_request_forwards_detail_and_session_grant_resets_on_new_sessio
             { "tool_calls": [{ "name": "unconfined_sh", "arguments": { "command": long_cmd } }] },
             { "text": "s1-turn1" },
             { "tool_calls": [{ "name": "unconfined_sh", "arguments": { "command": long_cmd } }] },
-            { "text": "s1-turn2" }
+            { "text": "s1-turn2" },
+            { "tool_calls": [{ "name": "write", "arguments": { "path": "existing.txt", "content": "new-overwritten-body" } }] },
+            { "text": "s1-write-done" }
         ])
         .to_string(),
     )
@@ -1565,6 +1568,31 @@ fn acp_permission_request_forwards_detail_and_session_grant_resets_on_new_sessio
     );
     assert_eq!(r2["result"]["stopReason"], "end_turn", "{r2}");
     assert_eq!(asks_s1_t2, 0, "same call in same session should reuse session grant");
+
+    // Overwriting an existing file via `write` must asynchronously read the existing file and send
+    // a real ACP `Diff` with `oldText` (not a new-file diff or unreadable fallback).
+    let mut write_reqs = Vec::new();
+    let r_write = rpc.call_raw(
+        "session/prompt",
+        json!({ "sessionId": sid1, "prompt": [{ "type": "text", "text": "overwrite" }] }),
+        |req| {
+            if req["method"] == "session/request_permission" {
+                write_reqs.push(req["params"].clone());
+                return json!({ "outcome": { "outcome": "selected", "optionId": "reject-once" } });
+            }
+            json!(null)
+        },
+    );
+    assert_eq!(r_write["result"]["stopReason"], "end_turn", "{r_write}");
+    assert_eq!(write_reqs.len(), 1, "expected 1 permission prompt for write overwrite: {write_reqs:?}");
+    let write_content = write_reqs[0]["toolCall"]["content"].as_array().expect("write content array");
+    assert!(
+        write_content.iter().any(|c| {
+            c["type"] == "diff" && c["oldText"] == "old-existing-body" && c["newText"] == "new-overwritten-body"
+        }),
+        "ACP write overwrite must include real oldText in Diff content: {}",
+        write_reqs[0]
+    );
 
     // Same call in a NEW session MUST ask again.
     let s2 = rpc.call_raw("session/new", json!({ "cwd": cwd, "mcpServers": [] }), |_| json!(null));

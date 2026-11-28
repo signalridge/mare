@@ -77,7 +77,7 @@ enum WriteTargetState {
 /// `deny_read` rules are honored. Returns `NewFile` only when the path does not exist,
 /// `ExistingText` when the old file is readable text within `MAX_DIFF_BYTES`, and
 /// `ExistingUnreadable` otherwise (so we never misreport an overwrite as a new file).
-fn inspect_write_target(lua: &mlua::Lua, abs: &Path) -> WriteTargetState {
+async fn inspect_write_target(lua: &mlua::Lua, abs: &Path) -> WriteTargetState {
     const MAX_DIFF_BYTES: usize = 512 * 1024;
     let path_str = abs.to_string_lossy();
     let script = r#"
@@ -100,7 +100,7 @@ fn inspect_write_target(lua: &mlua::Lua, abs: &Path) -> WriteTargetState {
         end
         return "unreadable", nil
     "#;
-    match lua.load(script).call::<(String, Option<String>)>((path_str.as_ref(), MAX_DIFF_BYTES)) {
+    match lua.load(script).call_async::<(String, Option<String>)>((path_str.as_ref(), MAX_DIFF_BYTES)).await {
         Ok((tag, Some(old))) if tag == "existing" => WriteTargetState::ExistingText(old),
         Ok((tag, _)) if tag == "new" => WriteTargetState::NewFile,
         _ => WriteTargetState::ExistingUnreadable,
@@ -146,14 +146,19 @@ fn build_tool_call_update(
         if let Some(c) = cmd {
             content.push(ToolCallContent::from(c.to_string()));
         }
-        if let Some(p) = path {
+        if matches!(name, "write" | "edit")
+            && let Some(p) = path
+        {
             let abs = resolve_abs_path(&cwd, p);
             locations.push(ToolCallLocation::new(abs.clone()));
-            if let (Some(old_s), Some(new_s)) =
-                (args.get("old_string").and_then(J::as_str), args.get("new_string").and_then(J::as_str))
+            if name == "edit"
+                && let (Some(old_s), Some(new_s)) =
+                    (args.get("old_string").and_then(J::as_str), args.get("new_string").and_then(J::as_str))
             {
                 content.push(ToolCallContent::from(Diff::new(abs, new_s).old_text(old_s)));
-            } else if let Some(new_s) = args.get("content").and_then(J::as_str) {
+            } else if name == "write"
+                && let Some(new_s) = args.get("content").and_then(J::as_str)
+            {
                 match write_state.unwrap_or(WriteTargetState::ExistingUnreadable) {
                     WriteTargetState::NewFile => {
                         content.push(ToolCallContent::from(Diff::new(abs, new_s)));
@@ -302,16 +307,16 @@ pub(super) fn install(
                 let mut a = projected.json_args;
                 a.resize(3, J::Null);
                 let write_state = if kind == "tool"
+                    && a[0].get("name").and_then(J::as_str) == Some("write")
                     && let Some(args) = a[0].get("arguments")
                     && args.get("content").and_then(J::as_str).is_some()
-                    && (args.get("old_string").is_none() || args.get("new_string").is_none())
                     && let Some(p) = non_empty_str(args, "path").or_else(|| non_empty_str(args, "file_path"))
                 {
                     let cwd = non_empty_str(&a[0], "cwd")
                         .map(str::to_owned)
                         .unwrap_or_else(|| host_cwd.to_string_lossy().into_owned());
                     let abs = resolve_abs_path(&cwd, p);
-                    Some(inspect_write_target(&lua, &abs))
+                    Some(inspect_write_target(&lua, &abs).await)
                 } else {
                     None
                 };
@@ -485,6 +490,29 @@ mod tests {
         assert!(
             unreadable_json["content"].to_string().contains("Overwrite"),
             "unreadable overwrite must emit text content: {unreadable_json}"
+        );
+
+        // Non-write/edit tools (e.g. remote MCP tools) with `path` + `content` must not emit local
+        // Diff content or file locations.
+        let mcp_args = [
+            json!({
+                "id": "call-4",
+                "name": "mcp__docs__save",
+                "cwd": "/repo",
+                "arguments": { "path": "docs/spec.md", "content": "remote body" }
+            }),
+            json!({ "side_effect": "external", "unconfined": true }),
+            json!({ "reason": "unconfined tool" }),
+        ];
+        let mcp_json =
+            serde_json::to_value(build_tool_call_update("tool", &mcp_args, Path::new("/repo"), None)).unwrap();
+        assert!(
+            mcp_json["content"].as_array().unwrap().iter().all(|c| c["type"] != "diff"),
+            "MCP tool with path+content must not emit local Diff: {mcp_json}"
+        );
+        assert!(
+            mcp_json.get("locations").is_none() || mcp_json["locations"].as_array().is_some_and(Vec::is_empty),
+            "MCP tool with path+content must not emit local file locations: {mcp_json}"
         );
     }
 }
