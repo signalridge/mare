@@ -670,9 +670,10 @@ return function(D)
 
 	local function handle_response_outcome(S, msg, rid, message_started, message_id, reset_id)
 		-- an interrupted/failed response keeps what was streamed (marked interrupted);
-		-- one with nothing in it is not added to the history at all. Unexecuted tool_call
-		-- blocks from an aborted or failed model response are stripped before persistence.
-		if msg.stop_reason == "aborted" or msg.stop_reason == "error" then
+		-- one with nothing in it is not added to the history at all. Unexecuted local tool_call
+		-- blocks from an aborted, failed, or filtered model response are stripped before persistence;
+		-- filtered refusals still persist even when empty so their stop_reason and error stay recorded.
+		if msg.stop_reason == "aborted" or msg.stop_reason == "error" or msg.stop_reason == "filtered" then
 			local kept = {}
 			for _, b in ipairs(msg.content or {}) do
 				if type(b) ~= "table" or b.type ~= "tool_call" or b.hosted then
