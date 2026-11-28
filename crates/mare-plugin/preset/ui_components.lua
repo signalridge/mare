@@ -446,16 +446,45 @@ end
 --- rows a compact diff keeps before "… N more lines" (nil: diffs always show in full, today)
 ui.ToolCall.diff_fold = nil
 
+local function is_diff_node(node)
+	return type(node) == "table" and (node.type == "diff" or node.type == "unified")
+end
+
+local function diff_rendered_rows(node)
+	local unified = node.unified or node.diff
+	if type(unified) ~= "string" and node.type == "diff" and mare.text and mare.text.diff then
+		unified = mare.text.diff(node.old or "", node.new or "", { path = node.path })
+	end
+	if type(unified) ~= "string" then
+		return nil
+	end
+	local rows, hunks, in_hunk = 1, 0, false -- row 1 is the `+A −D` stats line
+	for _, line in ipairs(mare.text.split_lines(unified)) do
+		if line:match("^@@ %-%d+,?%d* %+%d+,?%d* @@") then
+			if hunks > 0 then
+				rows = rows + 1 -- separator between hunks
+			end
+			hunks = hunks + 1
+			in_hunk = true
+		elseif line:sub(1, 5) == "diff " or line:sub(1, 6) == "index " then
+			in_hunk = false
+		elseif in_hunk and line:sub(1, 1) ~= "\\" then
+			rows = rows + 1
+		end
+	end
+	return rows
+end
+
 --- has_diff(node) -> the node is, or holds, a diff (edit / write / apply_patch results)
 function ui.ToolCall:has_diff(node)
+	if is_diff_node(node) then
+		return true
+	end
 	if type(node) ~= "table" then
 		return false
 	end
-	if node.type == "diff" or node.type == "unified" then
-		return true
-	end
 	for _, c in ipairs(node.items or node) do
-		if type(c) == "table" and (c.type == "diff" or c.type == "unified") then
+		if is_diff_node(c) then
 			return true
 		end
 	end
@@ -496,10 +525,39 @@ function ui.ToolCall:render(call, result, expanded, info)
 	end
 	-- a long diff folds like command output (`diff_fold` rows, then "… N more lines"; nil keeps
 	-- today's full diff). The expanded view (ctrl+o, the Ctrl+T transcript) always shows it all.
+	-- Multi-item `ui.Lines` (e.g. multi-file apply_patch) clips each diff individually so later
+	-- file headers and status lines are not hidden behind the first file.
 	if node ~= nil and not expanded and self.diff_fold and self:has_diff(node) then
 		local fold_lines = self.diff_fold == true and 8 or self.diff_fold
 		if type(fold_lines) == "number" and fold_lines > 0 then
-			node = ui.Clip(node, fold_lines, false)
+			if node.type == "lines" and type(node.items) == "table" and #node.items > 1 then
+				local diffs_left = 0
+				for _, c in ipairs(node.items) do
+					if is_diff_node(c) then
+						diffs_left = diffs_left + 1
+					end
+				end
+				local remaining = fold_lines
+				local folded = {}
+				for i, c in ipairs(node.items) do
+					if is_diff_node(c) then
+						-- Share `fold_lines` sequentially across diffs while reserving 1 row
+						-- (`+A −D` stats) per later diff so total diff rows stay within budget
+						-- and uneven small patches that fit never emit a fold hint.
+						local allow = math.max(1, remaining - (diffs_left - 1))
+						local rows = diff_rendered_rows(c)
+						local used = rows and math.min(rows, allow) or allow
+						remaining = math.max(0, remaining - used)
+						diffs_left = diffs_left - 1
+						folded[i] = ui.Clip(c, allow, false)
+					else
+						folded[i] = c
+					end
+				end
+				node = ui.Lines(folded)
+			else
+				node = ui.Clip(node, fold_lines, false)
+			end
 		end
 	end
 	if node == nil then
