@@ -22,11 +22,23 @@ pub fn is_ctrl_c(ev: &KeyEvent) -> bool {
     is_c && ev.modifiers.contains(Modifiers::CONTROL) && !ev.modifiers.contains(Modifiers::ALT)
 }
 
-/// Printable character without Control or Alt modifiers (`Shift` and `Super` are preserved).
+/// Printable character suitable for text input.
+///
+/// Rejects `Super`-modified keys and plain `Ctrl+key` / ASCII `Alt+key` shortcuts while admitting
+/// composed text from AltGr (`Ctrl+Alt` producing non-ASCII or ASCII punctuation) and macOS Option
+/// (`Alt` producing non-ASCII characters).
 pub fn printable_char(ev: &KeyEvent) -> Option<char> {
-    match ev.code {
-        KeyCode::Char(c) if !ev.modifiers.intersects(Modifiers::CONTROL | Modifiers::ALT) => Some(c),
-        _ => None,
+    let KeyCode::Char(c) = ev.code else { return None };
+    if ev.modifiers.intersects(Modifiers::SUPER) {
+        return None;
+    }
+    let ctrl = ev.modifiers.contains(Modifiers::CONTROL);
+    let alt = ev.modifiers.contains(Modifiers::ALT);
+    match (ctrl, alt) {
+        (false, false) => Some(c),
+        (true, false) => None,
+        (true, true) => (!c.is_control() && (!c.is_ascii() || c.is_ascii_punctuation())).then_some(c),
+        (false, true) => (!c.is_control() && !c.is_ascii()).then_some(c),
     }
 }
 
@@ -243,12 +255,18 @@ mod tests {
     }
 
     #[test]
-    fn printable_char_keeps_turkish_capital_i_and_rejects_ctrl_alt() {
+    fn printable_char_keeps_turkish_capital_i_and_rejects_shortcuts() {
         assert_eq!(printable_char(&k(KeyCode::Char('İ'), Modifiers::NONE)), Some('İ'));
         assert_eq!(printable_char(&k(KeyCode::Char('İ'), Modifiers::SHIFT)), Some('İ'));
-        assert_eq!(printable_char(&k(KeyCode::Char('a'), Modifiers::SUPER)), Some('a'));
+        assert_eq!(printable_char(&k(KeyCode::Char('a'), Modifiers::SUPER)), None);
         assert_eq!(printable_char(&k(KeyCode::Char('a'), Modifiers::CONTROL)), None);
         assert_eq!(printable_char(&k(KeyCode::Char('a'), Modifiers::ALT)), None);
+        assert_eq!(printable_char(&k(KeyCode::Char('a'), Modifiers::CONTROL | Modifiers::ALT)), None);
+        assert_eq!(printable_char(&k(KeyCode::Char('1'), Modifiers::CONTROL | Modifiers::ALT)), None);
+        assert_eq!(printable_char(&k(KeyCode::Char('{'), Modifiers::CONTROL | Modifiers::ALT)), Some('{'));
+        assert_eq!(printable_char(&k(KeyCode::Char('€'), Modifiers::CONTROL | Modifiers::ALT)), Some('€'));
+        assert_eq!(printable_char(&k(KeyCode::Char('Ø'), Modifiers::ALT | Modifiers::SHIFT)), Some('Ø'));
+        assert_eq!(printable_char(&k(KeyCode::Char('\u{0085}'), Modifiers::ALT)), None);
     }
 
     #[test]
@@ -271,5 +289,26 @@ mod tests {
         assert_eq!(normalize_key("<lt>"), "<");
         assert_eq!(normalize_key("<gt>"), ">");
         assert_eq!(normalize_key("<C-lt>"), "ctrl+<");
+    }
+
+    #[test]
+    fn repro_226_composed_text_vs_modified_shortcuts() {
+        // Unbound Super-modified letters must not be inserted as plain text.
+        assert_eq!(
+            printable_char(&k(KeyCode::Char('k'), Modifiers::SUPER)),
+            None,
+            "unbound Super+k shortcut must not be admitted as printable editor text"
+        );
+        // AltGr (Ctrl+Alt) composed symbols and Option-composed characters must reach text input.
+        assert_eq!(
+            printable_char(&k(KeyCode::Char('@'), Modifiers::CONTROL | Modifiers::ALT)),
+            Some('@'),
+            "AltGr-composed '@' marked Ctrl+Alt must not be dropped"
+        );
+        assert_eq!(
+            printable_char(&k(KeyCode::Char('ø'), Modifiers::ALT)),
+            Some('ø'),
+            "Option-composed 'ø' marked Alt must not be dropped"
+        );
     }
 }
