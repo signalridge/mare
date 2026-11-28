@@ -35,6 +35,15 @@ local function check_kind(v, kind)
 			end
 		end
 		return true
+	elseif type(kind) == "string" and kind:sub(1, 5) == "enum:" then
+		local allowed = {}
+		for choice in kind:sub(6):gmatch("[^|]+") do
+			if v == choice then
+				return true
+			end
+			allowed[#allowed + 1] = choice
+		end
+		return false, "one of " .. table.concat(allowed, ", ")
 	end
 	return true
 end
@@ -98,7 +107,6 @@ local MODEL_FIELDS = {
 	hidden = "boolean",
 	tool_update = "tool_update",
 	cache_retention = "string",
-	reasoning_default = "boolean",
 	max_output_default = "boolean",
 	efforts = "string_array",
 	default_effort = "string",
@@ -150,7 +158,6 @@ local DATA_PROVIDER_FIELDS = {
 	default_context = "positive_number",
 	default_max_output = "positive_number",
 	default_reasoning = "boolean",
-	reasoning = "boolean",
 	tool_update = "tool_update",
 	no_key = "boolean",
 	models = "table",
@@ -200,7 +207,10 @@ local function check_fields(tbl, schema, scope)
 		if val ~= nil then
 			local ok, expected = check_kind(val, kind)
 			if not ok then
-				return false, field, ("expected %s for field `%s`, got %s"):format(expected, field, type(val)), scope
+				local got = (type(kind) == "string" and kind:sub(1, 5) == "enum:" and type(val) == "string")
+						and ("%q"):format(val)
+					or type(val)
+				return false, field, ("expected %s for field `%s`, got %s"):format(expected, field, got), scope
 			end
 		end
 	end
@@ -690,21 +700,14 @@ function M.provider_from_config(id, pc, opts, wire_spec)
 		models_copy = {}
 	end
 
-	local default_reasoning
-	if pc.default_reasoning ~= nil then
-		default_reasoning = pc.default_reasoning
-	elseif pc.reasoning ~= nil then
-		default_reasoning = pc.reasoning ~= false
-	else
-		default_reasoning = opts.default_reasoning
-	end
-
 	local function pick(a, b)
 		if a ~= nil then
 			return a
 		end
 		return b
 	end
+
+	local default_reasoning = pick(pc.default_reasoning, opts.default_reasoning)
 
 	local decl = {
 		provider = id,

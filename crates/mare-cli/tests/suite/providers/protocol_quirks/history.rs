@@ -249,7 +249,7 @@ async fn tool_call_id_duplicate_ids_across_turns_are_deduplicated_on_all_wires()
         assert_eq!(c_calls, c_outs);
 
         // Google (Gemini 3+ carries functionCall/functionResponse ids on the wire)
-        stream_with_history(&h, "google/gemini-3-pro", history, Some(read_tool_decl())).await;
+        stream_with_history(&h, "google/gemini-3-pro-preview", history, Some(read_tool_decl())).await;
         let g_contents = server.requests().pop().unwrap().json()["contents"].as_array().unwrap().clone();
         let g_calls: Vec<String> = g_contents.iter().filter(|c| c["role"] == "model").map(|c| c["parts"][0]["functionCall"]["id"].as_str().unwrap_or("").to_string()).collect();
         let g_outs: Vec<String> = g_contents.iter().filter_map(|c| c["parts"][0].get("functionResponse")).map(|r| r["id"].as_str().unwrap_or("").to_string()).collect();
@@ -446,7 +446,7 @@ async fn encrypted_content_replayed_only_to_same_provider_and_model() {
         assert_eq!(r_item["encrypted_content"], "enc123", "same provider+model must carry encrypted_content");
 
         // Same provider + DIFFERENT model -> encrypted_content MUST be dropped
-        stream_with_history(&h, "openai/gpt-5.4", history.clone(), Some(read_tool_decl())).await;
+        stream_with_history(&h, "openai/gpt-6.1-sol", history.clone(), Some(read_tool_decl())).await;
         let diff_model_req = server.requests().pop().unwrap().body;
         assert!(!diff_model_req.contains("enc123"), "switching model on same provider must drop encrypted_content: {diff_model_req}");
 

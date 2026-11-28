@@ -7,6 +7,16 @@ local native_map = {
 	type = "object",
 	additionalProperties = { type = "object", additionalProperties = true },
 }
+local usage_obj = object({
+	input = integer,
+	output = integer,
+	cache_read = integer,
+	cache_write = integer,
+	cache_write_1h = integer,
+	reasoning = integer,
+	cost = S.number,
+	cost_unknown = boolean,
+}, nil, true)
 return {
 	["llm"] = {
 		essential = true,
@@ -182,7 +192,6 @@ return {
 									{ type = "boolean", enum = { false } },
 								},
 							},
-							reasoning_default = boolean,
 							max_output_default = boolean,
 							cache_retention = { type = "string", enum = { "none", "short", "long" } },
 							efforts = { type = "array", items = string },
@@ -250,7 +259,7 @@ return {
 						result = object({
 							role = { type = "string", enum = { "assistant" } },
 							content = { type = "array", items = { type = "object", additionalProperties = true } },
-							usage = { type = "object", additionalProperties = true },
+							usage = usage_obj,
 							stop_reason = {
 								type = "string",
 								enum = {
@@ -264,6 +273,7 @@ return {
 									"other",
 								},
 							},
+							raw_stop_reason = string,
 							error_kind = string,
 							error_code = string,
 							error_data = { type = "object", additionalProperties = true },
@@ -304,7 +314,6 @@ return {
 					default_context = "integer",
 					default_max_output = "integer",
 					default_reasoning = "boolean",
-					reasoning = "boolean",
 					tool_update = '"addition_only"|false',
 					no_key = "boolean",
 					wire = "string",
@@ -549,7 +558,7 @@ return {
 				result = { type = { "string", "null" } },
 			},
 			effort_options = {
-				doc = "Return every effort value defined for `model` (built-in levels plus rule additions), or nil.",
+				doc = "Return the effort values offered for `model` on its active route (same source as `param_list`), or nil.",
 				lua_unchecked = true,
 				params = object({}),
 				lua = { model = "mare.Model?" },
@@ -1285,7 +1294,7 @@ return {
 				mode = "emit",
 				expose = "lua",
 				data = object({
-					usage = { type = "object", additionalProperties = true },
+					usage = usage_obj,
 					model_ref = string,
 					provider_id = string,
 					subscription = { type = "object", additionalProperties = true },

@@ -540,7 +540,8 @@ end
 --- Usage of a Chat Completions chunk: cache reads from prompt_tokens_details.cached_tokens
 --- (OpenAI, OpenRouter), prompt_cache_hit_tokens (DeepSeek), top-level cached_tokens or
 --- Anthropic-style cache_read_input_tokens (DigitalOcean); cache writes from
---- prompt_tokens_details.cache_write_tokens (OpenRouter) or Anthropic-style
+--- prompt_tokens_details.cache_write_tokens (OpenRouter),
+--- prompt_tokens_details.cache_creation_input_tokens (Alibaba), or Anthropic-style
 --- cache_created_input_tokens / cache_creation_input_tokens (DigitalOcean), never subtracted from
 --- the reads; input clamped at 0; completion_tokens already includes the reasoning tokens.
 function M.parse_usage(u, opts)
@@ -554,6 +555,7 @@ function M.parse_usage(u, opts)
 		or tonumber(u.cache_read_input_tokens)
 		or 0
 	local written = tonumber(details.cache_write_tokens)
+		or tonumber(details.cache_creation_input_tokens)
 		or tonumber(u.cache_created_input_tokens)
 		or tonumber(u.cache_creation_input_tokens)
 		or 0

@@ -3250,6 +3250,7 @@ checked against its result schema.
 | `key` | `string \| null` |  |  |
 | `filter` | `string \| null` |  |  |
 | `reason` | `string \| null` |  | Dismissal reason when cancelled (`"cancelled"` \| `"interrupted"`) |
+| `item_id` | `string \| null` |  | `item_id` of the chosen item as rendered by the client, so callers using `ui/select/update` resolve by identity even when a reply races with a live update. |
 
 ## エラーコード
 

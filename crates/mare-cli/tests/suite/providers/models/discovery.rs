@@ -74,14 +74,14 @@ async fn model_catalogue_reads_the_disk_cache_and_refreshes_in_the_background() 
         let _: bool = eval(&h, "return LLM:resolve('deepseek/cached-1') ~= nil").await;
         wait_until(10, "the cached list from disk", || {
             let h = h.clone();
-            async move { eval::<bool>(&h, "local m = LLM:resolve('deepseek/cached-1'); return m.listed == true").await }
+            async move { eval::<bool>(&h, "local m = LLM:resolve('deepseek/cached-1'); return m ~= nil and m.listed == true").await }
         })
         .await;
         assert_eq!(server.count("/compat/models"), 0, "no listing request on the startup path");
         exec(&h, "C.cordis:get('bus'):emit('ui/ready')").await;
         wait_until(10, "the refreshed model", || {
             let h = h.clone();
-            async move { eval::<bool>(&h, "local m = LLM:resolve('deepseek/listed-2'); return m.listed == true").await }
+            async move { eval::<bool>(&h, "local m = LLM:resolve('deepseek/listed-2'); return m ~= nil and m.listed == true").await }
         })
         .await;
         let (ctx_listed, ctx_static, name_static): (i64, i64, String) = eval(
@@ -219,7 +219,7 @@ assert(type(out.openai) == "number" and out.openai >= 2, "expected added models,
                    if m.id == "gpt-6-none" then none_picker = true end
                end
                local n = LLM:resolve("openai/gpt-6-none")
-               return h ~= nil, h and h.hidden == true, hidden_picker, none_picker, n ~= nil and n.listed == nil"#,
+               return h ~= nil, h and h.hidden == true, hidden_picker, none_picker, n == nil or (n.unlisted == true and not n.listed)"#,
         )
         .await;
         assert!(hidden_ok && hidden_flag, "visibility=hide resolves as hidden");
