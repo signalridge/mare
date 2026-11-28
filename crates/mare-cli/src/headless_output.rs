@@ -6,13 +6,21 @@
 use mare_shared::wire_projection::WireProjector;
 use serde_json::Value;
 use std::io::{self, Write};
+use std::sync::Mutex;
 use tokio::sync::{mpsc, oneshot};
 
 type Record = (String, oneshot::Sender<io::Result<()>>);
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum StdoutError {
+    BrokenPipe,
+    Io(String),
+}
+
 pub(crate) struct Output {
     sender: mpsc::Sender<Record>,
     projector: Option<WireProjector>,
+    first_error: Mutex<Option<StdoutError>>,
 }
 
 pub(crate) enum Line {
@@ -46,7 +54,33 @@ impl Output {
                 }
             }
         })?;
-        Ok(Self { sender, projector })
+        Ok(Self { sender, projector, first_error: Mutex::new(None) })
+    }
+
+    pub fn record_error(&self, err: &io::Error) {
+        let mut slot = self.first_error.lock().unwrap();
+        if slot.is_none() {
+            *slot = Some(if err.kind() == io::ErrorKind::BrokenPipe {
+                StdoutError::BrokenPipe
+            } else {
+                StdoutError::Io(err.to_string())
+            });
+        }
+    }
+
+    pub fn record_broken_pipe(&self) {
+        let mut slot = self.first_error.lock().unwrap();
+        if slot.is_none() {
+            *slot = Some(StdoutError::BrokenPipe);
+        }
+    }
+
+    pub fn first_error(&self) -> Option<StdoutError> {
+        self.first_error.lock().unwrap().clone()
+    }
+
+    pub fn has_error(&self) -> bool {
+        self.first_error.lock().unwrap().is_some()
     }
 
     pub async fn line(&self, line: Line) -> io::Result<()> {
@@ -198,5 +232,19 @@ mod tests {
         let written = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
         let lines: Vec<&str> = written.lines().collect();
         assert_eq!(lines, ["event-1", "event-2", "turn.failed", "settled"]);
+    }
+
+    #[test]
+    fn first_stdout_error_distinguishes_broken_pipe_from_other_io_errors() {
+        let output = Output::from_writer(io::sink(), None).unwrap();
+        assert!(!output.has_error());
+        output.record_error(&io::Error::new(io::ErrorKind::StorageFull, "No space left on device"));
+        // Subsequent BrokenPipe from the stopped writer thread must not overwrite the first error.
+        output.record_broken_pipe();
+        assert!(matches!(output.first_error(), Some(super::StdoutError::Io(msg)) if msg.contains("No space left")));
+
+        let output_pipe = Output::from_writer(io::sink(), None).unwrap();
+        output_pipe.record_error(&io::Error::new(io::ErrorKind::BrokenPipe, "Broken pipe"));
+        assert_eq!(output_pipe.first_error(), Some(super::StdoutError::BrokenPipe));
     }
 }

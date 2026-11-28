@@ -11,22 +11,26 @@ use serde_json::{Value, json};
 
 use mare_host::Host;
 
-/// Set once a write to stdout failed (the reader went away, e.g. `mare --json … | head`): the
-/// run stops instead of finishing the turn (and spending tokens) for nobody. Rust ignores
-/// SIGPIPE, so a closed pipe shows up as EPIPE here; `println!` would panic on it instead.
-static STDOUT_CLOSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-fn stdout_closed() -> bool {
-    STDOUT_CLOSED.load(std::sync::atomic::Ordering::SeqCst)
-}
-
 /// Runtime-owned records are serialized/flushed on the dedicated bounded writer.
 async fn write_out(output: &crate::headless_output::Output, line: crate::headless_output::Line) {
-    if stdout_closed() {
+    if output.has_error() {
         return;
     }
-    if output.line(line).await.is_err() {
-        STDOUT_CLOSED.store(true, std::sync::atomic::Ordering::SeqCst);
+    if let Err(err) = output.line(line).await {
+        output.record_error(&err);
+    }
+}
+
+fn settle_stdout_error(output: &crate::headless_output::Output) -> Option<i32> {
+    match output.first_error()? {
+        crate::headless_output::StdoutError::BrokenPipe => {
+            tracing::info!("headless: stdout closed — the turn was stopped");
+            Some(STDOUT_CLOSED_CODE)
+        }
+        crate::headless_output::StdoutError::Io(msg) => {
+            output.stderr(&format!("mare: failed to write stdout: {msg}"));
+            Some(Outcome::Error.code())
+        }
     }
 }
 
@@ -50,14 +54,27 @@ fn schedule_abort(host: Arc<Host>) -> tokio::sync::oneshot::Receiver<()> {
     rx
 }
 
-/// Unix: has the reader of stdout gone away? (`poll` reports POLLERR / POLLHUP on the write end
-/// of a pipe whose read end is closed.) Text mode writes only at the end, so it asks this.
+/// Unix: is `fd` a pipe/FIFO (`S_ISFIFO`) whose read end has gone away?
+/// `poll` reports `POLLERR | POLLHUP` on both a broken pipe and a closed PTY slave, even though
+/// writing to a closed PTY slave fails with `EIO` rather than `BrokenPipe`. Restricting the
+/// poll-based pre-check to confirmed FIFOs ensures non-pipe outputs (PTYs, regular files,
+/// `/dev/full`) report their actual write error instead of exiting quietly with 141.
 #[cfg(unix)]
-fn stdout_reader_gone() -> bool {
-    let mut p = libc::pollfd { fd: 1, events: 0, revents: 0 };
+fn fifo_reader_gone_on_fd(fd: libc::c_int) -> bool {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: valid stat pointer for `fd`.
+    if unsafe { libc::fstat(fd, &mut st) } != 0 || (st.st_mode & libc::S_IFMT) != libc::S_IFIFO {
+        return false;
+    }
+    let mut p = libc::pollfd { fd, events: 0, revents: 0 };
     // SAFETY: one valid pollfd, zero timeout
     let n = unsafe { libc::poll(&mut p, 1, 0) };
     n > 0 && p.revents & (libc::POLLERR | libc::POLLHUP) != 0
+}
+
+#[cfg(unix)]
+fn stdout_reader_gone() -> bool {
+    fifo_reader_gone_on_fd(libc::STDOUT_FILENO)
 }
 #[cfg(not(unix))]
 fn stdout_reader_gone() -> bool {
@@ -500,8 +517,8 @@ async fn run_turn_loop(
     let mut pipe_check = tokio::time::interval(std::time::Duration::from_millis(250));
     pipe_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let res = loop {
-        if stdout_closed() {
-            // nobody reads the output any more: stop the turn and leave quietly
+        if output.has_error() {
+            // stdout failed or its reader went away: stop the turn and settle the error
             rx.close();
             let _ = host.abort().await;
             break Err(anyhow::anyhow!("stdout closed"));
@@ -524,7 +541,7 @@ async fn run_turn_loop(
             },
             _ = pipe_check.tick() => {
                 if stdout_reader_gone() {
-                    STDOUT_CLOSED.store(true, std::sync::atomic::Ordering::SeqCst);
+                    output.record_broken_pipe();
                 }
             }
             r = &mut fut => break r.map_err(anyhow::Error::from).and_then(|result| result),
@@ -583,7 +600,7 @@ async fn drain_abort(
                     rx.close();
                     break;
                 }
-                if stdout_closed() {
+                if output.has_error() {
                     rx.close();
                     break;
                 }
@@ -621,7 +638,7 @@ async fn drain_shutdown(
 ) {
     let mut shutdown = tokio::task::spawn_local(async move { host.shutdown().await });
     loop {
-        if *event_failed || stdout_closed() {
+        if *event_failed || output.has_error() {
             rx.close();
             break;
         }
@@ -787,8 +804,8 @@ async fn emit_settled_and_denials(
     {
         write_out(output, crate::headless_output::Line::Text(settled.text.clone())).await;
     }
-    if stdout_closed() {
-        return Ok(STDOUT_CLOSED_CODE);
+    if let Some(code) = settle_stdout_error(output) {
+        return Ok(code);
     }
     // what was denied, whatever the exit code
     if !denials.is_empty() {
@@ -856,7 +873,7 @@ async fn run_inner(
         res = Err(anyhow::anyhow!("event stream incomplete: delivery failed"));
         rx.close();
     }
-    if !event_failed && !stdout_closed() {
+    if !event_failed && !output.has_error() {
         drain_flush_lagged(&tap, &mut rx, &mut tap_failure, &mut state, output, &mut event_failed, &mut res).await;
     }
     if tap_failure.borrow().is_some() {
@@ -864,13 +881,12 @@ async fn run_inner(
         res = Err(anyhow::anyhow!("event stream incomplete: delivery failed"));
         rx.close();
     }
-    if !event_failed && !stdout_closed() {
+    if !event_failed && !output.has_error() {
         drain_ready(&mut rx, &mut state, output, &mut res).await;
     }
     drop(host);
-    if stdout_closed() {
-        tracing::info!("headless: stdout closed — the turn was stopped");
-        return Ok(STDOUT_CLOSED_CODE);
+    if let Some(code) = settle_stdout_error(output) {
+        return Ok(code);
     }
     let (settled, invalid_output, save_warning) =
         build_settled(&res, forced, state.approval_abort, &mut state.run_cost);
