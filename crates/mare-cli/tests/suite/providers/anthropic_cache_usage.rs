@@ -15,7 +15,7 @@
 //! split-across-events case.
 use super::*;
 
-/// claude-sonnet-5-5 prices per million tokens: 5m cache write $3.75, 1h cache write $6.
+/// claude-sonnet-5-5 prices per million tokens: 5m cache write $2.50, 1h cache write $4.
 const M: i64 = 1_000_000;
 
 fn sse(start: Value, deltas: &[Value]) -> String {
@@ -75,7 +75,7 @@ async fn total_only_is_priced_as_5m() {
         &[out(0)],
         M,
         None,
-        Some(3.75),
+        Some(2.50),
     ))
     .await
 }
@@ -84,7 +84,7 @@ async fn total_only_is_priced_as_5m() {
 async fn total_with_matching_breakdown_in_message_start() {
     let start = json!({"input_tokens": 0, "output_tokens": 0, "cache_creation_input_tokens": M,
         "cache_creation": {"ephemeral_5m_input_tokens": 600_000, "ephemeral_1h_input_tokens": 400_000}});
-    local(check(start, &[out(0)], M, Some(400_000), Some(4.65))).await
+    local(check(start, &[out(0)], M, Some(400_000), Some(3.10))).await
 }
 
 #[tokio::test]
@@ -92,14 +92,14 @@ async fn cumulative_delta_repeating_the_total_keeps_it_exact() {
     let start = json!({"input_tokens": 0, "output_tokens": 0, "cache_creation_input_tokens": M,
         "cache_creation": {"ephemeral_5m_input_tokens": 600_000, "ephemeral_1h_input_tokens": 400_000}});
     let delta = json!({"output_tokens": 0, "cache_creation_input_tokens": M});
-    local(check(start, &[delta], M, Some(400_000), Some(4.65))).await
+    local(check(start, &[delta], M, Some(400_000), Some(3.10))).await
 }
 
 #[tokio::test]
 async fn total_with_one_bucket_in_the_same_event_derives_the_other() {
     let start = json!({"input_tokens": 0, "output_tokens": 0, "cache_creation_input_tokens": M,
         "cache_creation": {"ephemeral_1h_input_tokens": 400_000}});
-    local(check(start, &[out(0)], M, Some(400_000), Some(4.65))).await
+    local(check(start, &[out(0)], M, Some(400_000), Some(3.10))).await
 }
 
 // --- buckets without a total -----------------------------------------------------------------
@@ -109,7 +109,7 @@ async fn buckets_split_across_events_without_a_total_sum_5m_then_1h() {
     let start =
         json!({"input_tokens": 0, "output_tokens": 0, "cache_creation": {"ephemeral_5m_input_tokens": 600_000}});
     let delta = json!({"output_tokens": 0, "cache_creation": {"ephemeral_1h_input_tokens": 400_000}});
-    local(check(start, &[delta], M, Some(400_000), Some(4.65))).await
+    local(check(start, &[delta], M, Some(400_000), Some(3.10))).await
 }
 
 #[tokio::test]
@@ -117,7 +117,7 @@ async fn buckets_split_across_events_without_a_total_sum_1h_then_5m() {
     let start =
         json!({"input_tokens": 0, "output_tokens": 0, "cache_creation": {"ephemeral_1h_input_tokens": 400_000}});
     let delta = json!({"output_tokens": 0, "cache_creation": {"ephemeral_5m_input_tokens": 600_000}});
-    local(check(start, &[delta], M, Some(400_000), Some(4.65))).await
+    local(check(start, &[delta], M, Some(400_000), Some(3.10))).await
 }
 
 // --- three events, the last one output-only --------------------------------------------------
@@ -128,8 +128,8 @@ async fn three_events_consistent_then_output_only_keeps_the_exact_state() {
         "cache_creation": {"ephemeral_5m_input_tokens": 600_000, "ephemeral_1h_input_tokens": 400_000}});
     let grew = json!({"output_tokens": 0, "cache_creation_input_tokens": 1_100_000,
         "cache_creation": {"ephemeral_1h_input_tokens": 500_000}});
-    // 0.6M * 3.75 + 0.5M * 6 = 2.25 + 3.00
-    local(check(start, &[grew, out(0)], 1_100_000, Some(500_000), Some(5.25))).await
+    // 0.6M * 2.50 + 0.5M * 4 = 1.50 + 2.00
+    local(check(start, &[grew, out(0)], 1_100_000, Some(500_000), Some(3.50))).await
 }
 
 // An output-only delta must not shrink an earlier total to the bucket sum.

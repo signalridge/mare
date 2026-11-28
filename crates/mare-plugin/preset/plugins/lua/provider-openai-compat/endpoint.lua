@@ -48,6 +48,14 @@ local function resolve_reasoning_format(entry, base_url)
 		return "openrouter"
 	elseif d == "deepseek" or host_matches(url, "deepseek.com") then
 		return "deepseek"
+	elseif
+		d == "kimi"
+		or host_matches(url, "moonshot.ai")
+		or host_matches(url, "moonshot.cn")
+		or host_matches(url, "kimi.com")
+		or host_matches(url, "kimi.ai")
+	then
+		return "kimi"
 	elseif d == "zai" or host_matches(url, "z.ai") or host_matches(url, "bigmodel.cn") then
 		return "zai"
 	elseif d == "together" or host_matches(url, "together.xyz") then
@@ -58,6 +66,10 @@ local function resolve_reasoning_format(entry, base_url)
 		return "qwen-chat-template"
 	end
 	return nil
+end
+
+local function has_efforts(m)
+	return type(m) == "table" and type(m.efforts) == "table" and #m.efforts > 0
 end
 
 local function build_param_rules(name, entry, live_entry, live_base_url)
@@ -102,6 +114,67 @@ local function build_param_rules(name, entry, live_entry, live_base_url)
 			},
 		}
 	elseif tf or budget_field then
+		local function wire_chat(req, c)
+			local cur = live_entry()
+			local cur_tf = resolve_reasoning_format(cur, live_base_url(cur))
+			local on = c.value ~= "off"
+			if cur_tf == "deepseek" then
+				req.body.thinking = { type = on and "enabled" or "disabled" }
+				if on and cur.supports_reasoning_effort then
+					req.body.reasoning_effort = c.value
+				end
+			elseif cur_tf == "kimi" then
+				-- Kimi OpenAI-compat models declaring effort levels take top-level reasoning_effort.
+				if on and has_efforts(c.model) then
+					req.body.reasoning_effort = c.value
+				end
+			elseif cur_tf == "zai" then
+				req.body.thinking = on and { type = "enabled", clear_thinking = false } or { type = "disabled" }
+			elseif cur_tf == "qwen" then
+				req.body.enable_thinking = on
+			elseif cur_tf == "qwen-chat-template" or cur_tf == "chat-template" then
+				req.body.chat_template_kwargs = {
+					enable_thinking = on,
+					preserve_thinking = true,
+				}
+			elseif cur_tf == "together" then
+				req.body.reasoning = { enabled = on }
+			end
+			apply_budget(cur, req, c.value)
+		end
+
+		if tf == "kimi" then
+			local rules = {
+				{
+					provider = name,
+					route = "chat",
+					when = function(m)
+						return m.reasoning == true and has_efforts(m)
+					end,
+					define = {
+						effort = {
+							wire = { chat = wire_chat },
+						},
+					},
+				},
+			}
+			if budget_field then
+				rules[#rules + 1] = {
+					provider = name,
+					route = "chat",
+					when = function(m)
+						return m.reasoning == true and not has_efforts(m)
+					end,
+					define = {
+						effort = {
+							wire = { chat = wire_chat },
+						},
+					},
+				}
+			end
+			return rules
+		end
+
 		return {
 			{
 				provider = name,
@@ -111,32 +184,7 @@ local function build_param_rules(name, entry, live_entry, live_base_url)
 				end,
 				define = {
 					effort = {
-						wire = {
-							chat = function(req, c)
-								local cur = live_entry()
-								local cur_tf = resolve_reasoning_format(cur, live_base_url(cur))
-								local on = c.value ~= "off"
-								if cur_tf == "deepseek" then
-									req.body.thinking = { type = on and "enabled" or "disabled" }
-									if on and cur.supports_reasoning_effort then
-										req.body.reasoning_effort = c.value
-									end
-								elseif cur_tf == "zai" then
-									req.body.thinking = on and { type = "enabled", clear_thinking = false }
-										or { type = "disabled" }
-								elseif cur_tf == "qwen" then
-									req.body.enable_thinking = on
-								elseif cur_tf == "qwen-chat-template" or cur_tf == "chat-template" then
-									req.body.chat_template_kwargs = {
-										enable_thinking = on,
-										preserve_thinking = true,
-									}
-								elseif cur_tf == "together" then
-									req.body.reasoning = { enabled = on }
-								end
-								apply_budget(cur, req, c.value)
-							end,
-						},
+						wire = { chat = wire_chat },
 					},
 				},
 			},

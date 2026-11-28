@@ -543,6 +543,104 @@ local function apply_code_entry(entry, err, allow_weak_invalid)
 	return nil
 end
 
+-- Detect vendor 400 effort refusals and extract the vendor's "Supported values are …" clause
+-- (adapted from magpie internal/gateway/effort_accounts.go, MIT). No automatic learning.
+local EFFORT_DENIED_PATTERNS = {
+	"not supported",
+	"unsupported",
+	"not available",
+	"isn't available",
+	"isnt available",
+	"not allowed",
+	"invalid value",
+	"upgrade",
+	"your plan",
+}
+
+local EFFORT_LEVEL_WORDS = {
+	none = true,
+	off = true,
+	minimal = true,
+	low = true,
+	medium = true,
+	high = true,
+	xhigh = true,
+	max = true,
+}
+
+local function matches_effort_refusal(text, param)
+	local param_is_effort = false
+	if type(param) == "string" and param ~= "" then
+		if not param:lower():match("reasoning[._ ]?effort") then
+			return false
+		end
+		param_is_effort = true
+	end
+	if type(text) ~= "string" or text == "" then
+		return false
+	end
+	local low = text:lower()
+	local text_is_effort = low:match("reasoning[._ ]?effort") ~= nil
+		or low:match("reasoning%s+effort") ~= nil
+		or low:match("thinking[._ ]?effort") ~= nil
+		or low:match("effort%s+level") ~= nil
+	if not param_is_effort and not text_is_effort then
+		return false
+	end
+	local unsupported_val = low:match("unsupported value:?%s*['\"`]?([a-z_]+)['\"`]?%s+is not supported")
+	if unsupported_val and (param_is_effort or EFFORT_LEVEL_WORDS[unsupported_val]) then
+		return true
+	end
+	if low:find("invalid", 1, true) or low:find("supported values are", 1, true) then
+		return true
+	end
+	for _, pat in ipairs(EFFORT_DENIED_PATTERNS) do
+		if low:find(pat, 1, true) then
+			return true
+		end
+	end
+	return false
+end
+
+local function extract_supported_values_clause(text)
+	if type(text) ~= "string" or text == "" then
+		return nil
+	end
+	local low = text:lower()
+	local s, e = low:find("supported values are:?%s*")
+	if not s then
+		return nil
+	end
+	local tail = text:sub(e + 1)
+	local clause = tail:match("^([^.\r\n}]+)")
+	if not clause then
+		return nil
+	end
+	clause = clause:gsub('["\\]+$', ""):match("^%s*(.-)%s*$")
+	if not clause or clause == "" then
+		return nil
+	end
+	return "Supported values are: " .. clause
+end
+
+local function effort_refusal_hint(err)
+	if err.status ~= 400 then
+		return nil
+	end
+	local raw_msg = type(err.raw_message) == "string" and err.raw_message or ""
+	local body = type(err.body) == "string" and err.body or ""
+	local matched = matches_effort_refusal(raw_msg, err.param) or matches_effort_refusal(body, err.param)
+	if not matched then
+		return nil
+	end
+	local supported = extract_supported_values_clause(raw_msg) or extract_supported_values_clause(body)
+	local cur = tostring(err.message or "")
+	if supported and not cur:lower():find("supported values are", 1, true) then
+		return supported .. " — change reasoning effort with /effort"
+	end
+	return "change reasoning effort with /effort"
+end
+
 local function header_ci(headers, target)
 	if type(headers) ~= "table" then
 		return nil
@@ -808,6 +906,11 @@ local function classify_raw(raw, opts, providers)
 
 	if not err.kind and err.status and err.status >= 400 and err.status < 500 and not status_kind(err.status) then
 		err.kind = "invalid"
+	end
+
+	local effort_hint = effort_refusal_hint(err)
+	if effort_hint then
+		err.message = append_hint(err.message, effort_hint)
 	end
 
 	if err.request_id and not tostring(err.message or ""):find(err.request_id, 1, true) then

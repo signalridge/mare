@@ -80,7 +80,7 @@ async fn thinking_signature_cross_provider_strips_foreign_signatures() {
         ]);
 
         // Anthropic -> Responses, Chat Completions, Google: foreign signatures must be stripped
-        for target in ["openai/gpt-6.1-terra", "deepseek/deepseek-reasoner", "google/gemini-2.5-pro"] {
+        for target in ["openai/gpt-6.1-terra", "compat/reasoner-model", "google/gemini-2.5-pro"] {
             let msg = stream_with_history(&h, target, anthropic_history.clone(), None).await;
             assert!(msg.get("error").is_none_or(Value::is_null), "{target}: {msg}");
             let raw = server.requests().pop().unwrap().body;
@@ -174,7 +174,7 @@ async fn tool_call_id_formats_and_truncates_per_wire() {
         assert!(valid_chars(&o_call_id) && o_call_id.len() <= 64, "responses id: {o_call_id}");
 
         // Chat Completions: [A-Za-z0-9_-], max 40
-        stream_with_history(&h, "deepseek/deepseek-reasoner", history.clone(), Some(read_tool_decl())).await;
+        stream_with_history(&h, "compat/reasoner-model", history.clone(), Some(read_tool_decl())).await;
         let c_body = server.requests().pop().unwrap().json();
         let c_msgs = c_body["messages"].as_array().unwrap();
         let c_call_id = c_msgs.iter().find(|m| m["role"] == "assistant").unwrap()["tool_calls"][0]["id"]
@@ -240,7 +240,7 @@ async fn tool_call_id_duplicate_ids_across_turns_are_deduplicated_on_all_wires()
         assert_eq!(o_calls, o_outs);
 
         // Chat Completions
-        stream_with_history(&h, "deepseek/deepseek-reasoner", history.clone(), Some(read_tool_decl())).await;
+        stream_with_history(&h, "compat/reasoner-model", history.clone(), Some(read_tool_decl())).await;
         let c_msgs = server.requests().pop().unwrap().json()["messages"].as_array().unwrap().clone();
         let c_calls: Vec<String> = c_msgs.iter().filter(|m| m["role"] == "assistant").map(|m| m["tool_calls"][0]["id"].as_str().unwrap().to_string()).collect();
         let c_outs: Vec<String> = c_msgs.iter().filter(|m| m["role"] == "tool").map(|m| m["tool_call_id"].as_str().unwrap().to_string()).collect();
@@ -249,7 +249,7 @@ async fn tool_call_id_duplicate_ids_across_turns_are_deduplicated_on_all_wires()
         assert_eq!(c_calls, c_outs);
 
         // Google (Gemini 3+ carries functionCall/functionResponse ids on the wire)
-        stream_with_history(&h, "google/gemini-3-pro", history, Some(read_tool_decl())).await;
+        stream_with_history(&h, "google/gemini-3-pro-preview", history, Some(read_tool_decl())).await;
         let g_contents = server.requests().pop().unwrap().json()["contents"].as_array().unwrap().clone();
         let g_calls: Vec<String> = g_contents.iter().filter(|c| c["role"] == "model").map(|c| c["parts"][0]["functionCall"]["id"].as_str().unwrap_or("").to_string()).collect();
         let g_outs: Vec<String> = g_contents.iter().filter_map(|c| c["parts"][0].get("functionResponse")).map(|r| r["id"].as_str().unwrap_or("").to_string()).collect();
@@ -315,9 +315,9 @@ async fn tool_call_id_missing_id_is_deterministic_across_replays() {
                 .collect()
         };
 
-        let c_a1 = tool_ids(&ask(&h, "deepseek/deepseek-reasoner").await);
-        let c_b = tool_ids(&ask(&h, "deepseek/deepseek-reasoner").await);
-        let c_a2 = tool_ids(&ask(&h, "deepseek/deepseek-reasoner").await);
+        let c_a1 = tool_ids(&ask(&h, "compat/reasoner-model").await);
+        let c_b = tool_ids(&ask(&h, "compat/reasoner-model").await);
+        let c_a2 = tool_ids(&ask(&h, "compat/reasoner-model").await);
         assert_eq!(c_a1.len(), 2);
         assert!(c_a1.iter().all(|id| !id.is_empty()));
         assert_ne!(c_a1[0], c_a1[1], "chat: multiple missing IDs in one record must be distinct: {c_a1:?}");
@@ -375,7 +375,7 @@ async fn deterministic_missing_call_ids_skip_existing_ids_on_both_wires() {
             ] }, "finishReason": "STOP" }] })
         );
         server.route("/google", vec![Resp::sse(google)]);
-        let chat = ask(&h, "deepseek/deepseek-reasoner").await;
+        let chat = ask(&h, "compat/reasoner-model").await;
         let google = ask(&h, "google/gemini-2.5-pro").await;
         let ids = |message: &Value| -> Vec<String> {
             message["content"]
@@ -446,7 +446,7 @@ async fn encrypted_content_replayed_only_to_same_provider_and_model() {
         assert_eq!(r_item["encrypted_content"], "enc123", "same provider+model must carry encrypted_content");
 
         // Same provider + DIFFERENT model -> encrypted_content MUST be dropped
-        stream_with_history(&h, "openai/gpt-5.4", history.clone(), Some(read_tool_decl())).await;
+        stream_with_history(&h, "openai/gpt-6.1-sol", history.clone(), Some(read_tool_decl())).await;
         let diff_model_req = server.requests().pop().unwrap().body;
         assert!(!diff_model_req.contains("enc123"), "switching model on same provider must drop encrypted_content: {diff_model_req}");
 

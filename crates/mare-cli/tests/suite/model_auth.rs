@@ -284,8 +284,8 @@ async fn capabilities_detach_param_functions_and_report_unavailable_models() {
         assert_eq!(down["unavailable_reason"], "maintenance window");
         assert_eq!(down["ready"], false);
 
-        // a hidden model is not listed but can be described; so can an id the provider serves
-        // without listing it
+        // a hidden model is not listed but can be described; a catalogued provider rejects unlisted ids
+        // while a catalog-less provider serves arbitrary ids
         let listed: String = eval(
             &host,
             r#"local refs = {} for _, m in ipairs(C.cordis:get("llm"):list_models().data) do refs[#refs + 1] = m.ref end return table.concat(refs, ",")"#,
@@ -294,8 +294,16 @@ async fn capabilities_detach_param_functions_and_report_unavailable_models() {
         assert!(!listed.contains("probe/secret-model") && !listed.contains("probe/unlisted"), "{listed}");
         let hidden: Value = serde_json::from_str(&eval::<String>(&host, &by_ref("probe/secret-model")).await).unwrap();
         assert_eq!((hidden["ref"].clone(), hidden["reasoning"].clone()), (json!("probe/secret-model"), json!(true)), "{hidden}");
-        let unlisted: Value = serde_json::from_str(&eval::<String>(&host, &by_ref("probe/unlisted-1")).await).unwrap();
-        assert_eq!((unlisted["ref"].clone(), unlisted["provider"].clone()), (json!("probe/unlisted-1"), json!("probe")), "{unlisted}");
+        let unlisted_rejected: bool =
+            eval(&host, r#"return pcall(function() return C.cordis:get("llm"):get_model("probe/unlisted-1") end)"#).await;
+        assert!(!unlisted_rejected, "catalogued provider must reject unlisted model id");
+        exec(
+            &host,
+            r#"LLM:register_provider({ provider = "free", no_key = true, stream = function() return { role = "assistant", content = {}, stop_reason = "stop" } end })"#,
+        )
+        .await;
+        let unlisted: Value = serde_json::from_str(&eval::<String>(&host, &by_ref("free/unlisted-1")).await).unwrap();
+        assert_eq!((unlisted["ref"].clone(), unlisted["provider"].clone()), (json!("free/unlisted-1"), json!("free")), "{unlisted}");
         let unknown_described: bool =
             eval(&host, r#"return pcall(function() return C.cordis:get("llm"):get_model("nonexistent/missing") end)"#).await;
         assert!(!unknown_described, "a ref no provider resolves is an error");
@@ -456,13 +464,22 @@ async fn providers_login_logout_and_usage_through_contracts() {
             assert(status().logged_in == true)
             P:logout("fakeauth")
 
-            -- A pasted key must be masked and identify the provider; prefixes alone can be ambiguous.
-            local hints, secret = {}, false
+            -- A pasted key must be masked; no unsolicited prefix spam is printed when a provider
+            -- has no unique prefix, and a mismatched provider prefix warns clearly without leaking.
+            local hints, secret, got_title = {}, false, nil
             P:login("fakeauth", { method = "api_key", say = function(t) hints[#hints + 1] = t end,
-                ask = function(title, opts) secret = opts.secret == true; return fake_secret end })
-            local hint = table.concat(hints, " ")
-            assert(secret and hint:find("fakeauth", 1, true) and hint:find("prefix", 1, true), hint)
-            assert(not hint:find(fake_secret, 1, true), "key leaked in login hint")
+                ask = function(title, opts) got_title = title; secret = opts.secret == true; return fake_secret end })
+            assert(secret and got_title == "Fake API key", tostring(got_title))
+            assert(#hints == 0, "unexpected login hint on normal login: " .. table.concat(hints, " | "))
+            P:logout("fakeauth")
+
+            local mismatch_hints = {}
+            local wrong_secret = "sk-ant-api03-wrong-provider-9876543210"
+            P:login("fakeauth", { method = "api_key", say = function(t) mismatch_hints[#mismatch_hints + 1] = t end,
+                ask = function(_, opts) assert(opts.secret == true); return wrong_secret end })
+            local mismatch = table.concat(mismatch_hints, " ")
+            assert(mismatch:find("anthropic", 1, true) and mismatch:find("fakeauth", 1, true), mismatch)
+            assert(not mismatch:find(wrong_secret, 1, true), "key leaked in mismatch warning")
             P:logout("fakeauth")
             local isolated = {auth_set=function() error("injected storage error " .. fake_secret, 0) end,
                 invalidate_api_key=function() end}
@@ -560,8 +577,9 @@ fn get_model_by_ref_over_real_rpc() {
         (json!("probe/secret-model"), json!("secret-model"), json!(true)),
         "{hidden}"
     );
-    let unlisted = get(&mut rpc, json!({ "session_id": session, "ref": "probe/unlisted-1" }));
-    assert_eq!(unlisted["ref"], "probe/unlisted-1", "{unlisted}");
+    let unlisted =
+        rpc.call_raw("llm.get_model", json!({ "session_id": session, "ref": "probe/unlisted-1" }), |_| json!(null));
+    assert_eq!(unlisted["error"]["data"]["code"], "llm.unknown_model", "{unlisted}");
     let listed = rpc.call_raw("llm.list_models", json!({}), |_| json!(null));
     let refs: Vec<&str> =
         listed["result"]["data"].as_array().unwrap().iter().filter_map(|m| m["ref"].as_str()).collect();

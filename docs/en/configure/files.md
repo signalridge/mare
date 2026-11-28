@@ -47,7 +47,7 @@ mare init
 ```lua
 -- ~/.config/mare/init.lua
 mare.setup {
-  model = "openai/gpt-6.1-terra",
+  model = "openai/gpt-6-luna",
   border = "single",
 }
 

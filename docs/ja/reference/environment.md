@@ -48,8 +48,11 @@ mare は、Windows と macOS を含むすべてのプラットフォームで XD
 | `GEMINI_API_KEY`、`GOOGLE_API_KEY` | Google (`GEMINI_API_KEY` が先に確認されます) |
 | `OPENCODE_API_KEY` | opencode Go |
 | `DEEPSEEK_API_KEY` | DeepSeek |
-| `MOONSHOT_API_KEY` | Moonshot (`kimi`) |
-| `KIMI_API_KEY` | Kimi Code (`kimi-code`) |
+| `MOONSHOT_API_KEY` | Moonshot (`kimi`、`kimi-cn`) |
+| `KIMI_API_KEY` | Kimi Code (`kimi-code`、`kimi-code-global`) |
+| `MINIMAX_API_KEY` | MiniMax (`minimax`、`minimax-cn`) |
+| `ZAI_API_KEY` | Z.ai (`zai`) |
+| `ZHIPU_API_KEY` | Zhipu GLM (`zhipu-cn`) |
 | `OPENROUTER_API_KEY` | OpenRouter |
 
 自分で定義した OpenAI 互換のプロバイダーは、`api_key_env` で独自の変数を指定できます。環境変数の名前である `api_key` オプションは、その変数から読み取られます。MCP サーバーの設定も、環境から値を取り込めます。文字列内の `${VAR}`、`${env:VAR}`、`${VAR:-default}`、`bearer_token_env_var`、`env_http_headers` です。

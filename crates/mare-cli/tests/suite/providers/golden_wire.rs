@@ -18,7 +18,7 @@ for _, c in ipairs(cases) do
     max_tokens = c.max_tokens, no_fallback = true }
   if c.mode == "session" then
     LLM:set_model(c.ref, { save = false })
-    LLM:set_effort(c.effort, { save = false })
+    LLM:restore_selection({ effort = c.effort })
   elseif c.mode == "request" then
     req.effort = c.effort
   end
@@ -45,10 +45,11 @@ async fn golden_host(env: &mut TestEnv, server: &MockServer, extra: Value) -> Ar
     server.route("/openai", ok_responses());
     server.route("/og", ok_responses());
     server.route("/myresp", ok_responses());
+    server.route("/compat", ok_responses());
     server.route("/anthropic", vec![Resp::sse(fixture("anthropic-text.sse"))]);
     server.route("/google", vec![Resp::sse(fixture("google.sse"))]);
     let compat = Resp::sse(compat_events(&[compat_text("ok"), compat_stop()]));
-    for p in ["/compat", "/openrouter", "/localre"] {
+    for p in ["/openrouter", "/localre"] {
         server.route(p, vec![compat.clone()]);
     }
     let config = json!({
@@ -56,7 +57,10 @@ async fn golden_host(env: &mut TestEnv, server: &MockServer, extra: Value) -> Ar
             "myresp": { "wire_api": "responses", "base_url": format!("{base}/myresp"), "api_key_env": "MYRESP_KEY" },
             "openrouter": { "base_url": format!("{base}/openrouter") },
             "localre": { "base_url": format!("{base}/localre"), "no_key": true, "effort_param": "reasoning_effort",
-                "models": [{ "model_id": "qwen3", "context_window": 32000, "max_output": 8000, "reasoning": true }] },
+                "models": [
+                    { "model_id": "qwen3", "context_window": 32000, "max_output": 8000, "reasoning": true },
+                    { "model_id": "qwen3-plain", "context_window": 32000, "max_output": 8000 },
+                ] },
         },
         "plugins": {
             "llm": { "retries": 0 },
@@ -141,20 +145,21 @@ async fn wire_bodies_match_the_golden_file() {
         let server = MockServer::start().await;
         let h = golden_host(&mut env, &server, Value::Null).await;
         let mut cases = vec![];
-        // One default case per wire-mapping style (plus the two non-reasoning models).
+        // One default case per wire-mapping style (plus a non-reasoning model).
         for r in [
+            "openai/gpt-6.2-sol",
             "openai/gpt-6.1-terra",
+            "openai/gpt-6-luna",
             "opencode-go/glm-5.3-flash",
             "myresp/some-model",
             "anthropic/claude-sonnet-5-5",
             "anthropic/claude-sonnet-4-5",
-            "google/gemini-3-pro-preview",
-            "google/gemini-2.5-pro",
-            "deepseek/deepseek-reasoner",
-            "openrouter/anthropic/claude-sonnet-5-5",
+            "google/gemini-4-argon",
+            "google/gemini-3.5-flash-lite",
+            "deepseek/deepseek-flash",
+            "openrouter/anthropic/claude-sonnet-5.5",
             "localre/qwen3",
-            "deepseek/deepseek-chat",
-            "openrouter/deepseek/deepseek-chat",
+            "localre/qwen3-plain",
         ] {
             cases.push(case(r, "default", None, None));
         }
@@ -165,10 +170,10 @@ async fn wire_bodies_match_the_golden_file() {
             "myresp/some-model",
             "anthropic/claude-sonnet-5-5",
             "anthropic/claude-sonnet-4-5",
-            "google/gemini-3-pro-preview",
-            "google/gemini-2.5-pro",
-            "google/gemini-2.5-flash",
-            "openrouter/anthropic/claude-sonnet-5-5",
+            "google/gemini-4-argon",
+            "google/gemini-3.5-flash-lite",
+            "deepseek/deepseek-flash",
+            "openrouter/anthropic/claude-sonnet-5.5",
             "localre/qwen3",
         ] {
             cases.push(case(r, "request", Some("off"), None));
@@ -177,17 +182,21 @@ async fn wire_bodies_match_the_golden_file() {
         for r in [
             "openai/gpt-6.1-terra",
             "anthropic/claude-sonnet-5-5",
-            "google/gemini-3-pro-preview",
-            "openrouter/anthropic/claude-sonnet-5-5",
+            "google/gemini-4-argon",
+            "openrouter/anthropic/claude-sonnet-5.5",
             "localre/qwen3",
-            "deepseek/deepseek-chat",
+            "localre/qwen3-plain",
         ] {
             cases.push(case(r, "request", Some("high"), None));
         }
+        // Fable 5.2 distinguishes native xhigh and max on Anthropic output_config.effort.
+        cases.push(case("anthropic/claude-fable-5-2", "request", Some("xhigh"), None));
+        cases.push(case("anthropic/claude-fable-5-2", "request", Some("max"), None));
         // The session effort is clamped to the model's declared levels (down, tie, explicit map).
         for (r, e) in [
             ("openai/gpt-6-luna", "max"),
-            ("google/gemini-3-pro-preview", "medium"),
+            ("google/gemini-4-argon", "xhigh"),
+            ("deepseek/deepseek-flash", "xhigh"),
             ("opencode-go/deepseek-v4.1-flash", "xhigh"),
             ("anthropic/claude-sonnet-4-5", "high"),
         ] {
@@ -199,8 +208,8 @@ async fn wire_bodies_match_the_golden_file() {
             ("anthropic/claude-sonnet-4-5", 30000),
             ("anthropic/claude-sonnet-5-5", 2000),
             ("openai/gpt-6.1-terra", 1000),
-            ("google/gemini-2.5-pro", 1000),
-            ("deepseek/deepseek-reasoner", 1000),
+            ("google/gemini-3.5-flash-lite", 1000),
+            ("deepseek/deepseek-flash", 1000),
         ] {
             cases.push(case(r, "request", Some("high"), Some(n)));
         }
@@ -265,7 +274,7 @@ async fn wire_bodies_on_the_opencode_go_routes_match_the_golden_file() {
         });
         let h = provider_host(&mut env, &server, config).await;
         let mut cases = vec![];
-        for r in ["opencode-go/glm-5.3-flash", "opencode-go/deepseek-v4.1-flash", "opencode-go/crouton-alpha-free"] {
+        for r in ["opencode-go/glm-5.3-flash", "opencode-go/deepseek-v4.1-flash", "opencode-go/gpt-6-luna"] {
             cases.push(case(r, "default", None, None));
         }
         cases.push(case("opencode-go/glm-5.3-flash", "request", Some("off"), None));
@@ -318,7 +327,7 @@ async fn wire_bodies_for_kimi_code_and_lmstudio_presets() {
             "#,
         )
         .await;
-        assert_eq!(kc_mdev, "kimi-for-coding");
+        assert_eq!(kc_mdev, "kimi-code-plan-cn");
         assert_eq!(kc_def, "kimi-for-coding");
         assert!(lm_no_key, "lmstudio must be keyless");
 
@@ -1150,6 +1159,114 @@ mare.provider("tuned-ant", {{
             adaptive_body["thinking"]["display"], "omitted",
             "provider reasoning_display must win for adaptive model: {adaptive_body}"
         );
+    })
+    .await
+}
+
+/// Issue #90: China-region and global presets (`kimi`, `kimi-cn`, `kimi-code`, `kimi-code-global`,
+/// `minimax`, `minimax-cn`, `zai`, `zhipu-cn`) register as independent built-in providers with
+/// distinct endpoints and `models_dev` IDs, preserving `kimi-code`'s existing `.com` endpoint and
+/// hydrating offline from the merged bundled `models_dev.json.gz` snapshot (retaining both
+/// regional providers and `reasoning_options` effort metadata).
+#[tokio::test]
+async fn china_region_presets_register_independently_with_bundled_models_dev_hydration() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        env.set_var("MOONSHOT_API_KEY", "k-moon");
+        env.set_var("KIMI_API_KEY", "k-kimi");
+        env.set_var("MINIMAX_API_KEY", "k-mm");
+        env.set_var("ZAI_API_KEY", "");
+        env.set_var("ZHIPU_API_KEY", "k-zhipu");
+        let h = env.host().user_config(false).no_session().build().await;
+        global(&h, "LLM", h.service_table("llm").unwrap());
+
+        let summary_json: String = eval(
+            &h,
+            r#"
+            local out = {}
+            local cases = {
+              { "kimi", "kimi-k3.1-pro" },
+              { "kimi-cn", "kimi-k3.1-pro" },
+              { "kimi-code", "kimi-for-coding" },
+              { "kimi-code-global", "kimi-for-coding" },
+              { "minimax", "MiniMax-M3.1-Flash" },
+              { "minimax-cn", "MiniMax-M3.1-Flash" },
+              { "zai", "glm-5.3" },
+              { "zhipu-cn", "glm-5.3" },
+            }
+            for _, c in ipairs(cases) do
+              local pid, mid = c[1], c[2]
+              local p = assert(LLM:provider(pid), "missing preset " .. pid)
+              local m = assert(LLM:resolve(pid .. "/" .. mid), "missing model " .. pid .. "/" .. mid)
+              out[pid] = {
+                models_dev = p.models_dev,
+                base_url = p.warm_url and p.warm_url() or nil,
+                configured = p.is_configured and p.is_configured() == true or false,
+                default_model = p.default_model,
+                ctx = m.context_window,
+                max_out = m.max_output,
+                reasoning = m.reasoning == true,
+              }
+            end
+            local raw = assert(mare.plugins.read_resource("models_dev.json.gz"))
+            local snap = mare.json.decode(raw)
+            local ro_count = 0
+            for _, pm in pairs(snap.providers or {}) do
+              for _, entry in pairs(pm or {}) do
+                if type(entry) == "table" and type(entry.reasoning_options) == "table" and #entry.reasoning_options > 0 then
+                  ro_count = ro_count + 1
+                end
+              end
+            end
+            out._reasoning_options_count = ro_count
+            return mare.json.encode(out)
+            "#,
+        )
+        .await;
+        let v: Value = serde_json::from_str(&summary_json).unwrap();
+
+        let expected = [
+            ("kimi", "moonshotai", "https://api.moonshot.ai/v1", true, "kimi-k3.1-pro", 1_048_576, 131_072),
+            ("kimi-cn", "moonshotai-cn", "https://api.moonshot.cn/v1", true, "kimi-k3.1-pro", 1_048_576, 131_072),
+            (
+                "kimi-code",
+                "kimi-code-plan-cn",
+                "https://api.kimi.com/coding/v1",
+                true,
+                "kimi-for-coding",
+                1_048_576,
+                32_768,
+            ),
+            (
+                "kimi-code-global",
+                "kimi-code-plan-global",
+                "https://api.kimi.ai/coding/v1",
+                true,
+                "kimi-for-coding",
+                1_048_576,
+                32_768,
+            ),
+            ("minimax", "minimax", "https://api.minimax.io/v1", true, "MiniMax-M3.1-Flash", 1_000_000, 524_288),
+            ("minimax-cn", "minimax-cn", "https://api.minimaxi.com/v1", true, "MiniMax-M3.1-Flash", 1_000_000, 524_288),
+            ("zai", "zai", "https://api.z.ai/api/paas/v4", false, "glm-5.3", 1_000_000, 131_072),
+            ("zhipu-cn", "zhipuai", "https://open.bigmodel.cn/api/paas/v4", true, "glm-5.3", 1_000_000, 131_072),
+        ];
+        for (pid, mdev, base_url, configured, default_model, ctx, max_out) in expected {
+            let row = &v[pid];
+            assert_eq!(row["models_dev"], mdev, "{pid}: {row}");
+            assert_eq!(row["base_url"], base_url, "{pid}: {row}");
+            assert_eq!(row["configured"], configured, "{pid}: {row}");
+            assert_eq!(row["default_model"], default_model, "{pid}: {row}");
+            assert_eq!(row["ctx"], ctx, "{pid}: {row}");
+            assert_eq!(row["max_out"], max_out, "{pid}: {row}");
+            assert_eq!(row["reasoning"], true, "{pid}: {row}");
+        }
+        assert!(
+            v["_reasoning_options_count"].as_u64().unwrap_or(0) > 100,
+            "merged bundled models_dev snapshot must retain offline reasoning_options metadata: {v}"
+        );
+
+        h.shutdown().await;
     })
     .await
 }

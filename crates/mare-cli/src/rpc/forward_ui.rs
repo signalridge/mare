@@ -642,10 +642,10 @@ pub(super) fn forward_ui_on(conn: &Rc<Conn>, session_id: &str, host: &Arc<Host>,
             let sid_cap = sid_cap.clone();
             async move {
                 let (Some(conn), Some(host)) = (w.upgrade(), wh.upgrade()) else {
-                    return Ok((None, Some(Value::String(lua.create_string("unavailable")?)), None, None));
+                    return Ok((None, Some(Value::String(lua.create_string("unavailable")?)), None, None, None));
                 };
                 if ui_unavailable(&conn, &host) {
-                    return Ok((None, Some(Value::String(lua.create_string("unavailable")?)), None, None));
+                    return Ok((None, Some(Value::String(lua.create_string("unavailable")?)), None, None, None));
                 }
                 let items = parse_select_items(&lua, t.get::<Option<Table>>("items")?)?;
                 let tabs = parse_select_tabs(&lua, t.get::<Option<Table>>("tabs")?)?;
@@ -715,7 +715,7 @@ pub(super) fn forward_ui_on(conn: &Rc<Conn>, session_id: &str, host: &Arc<Host>,
                 };
                 let cancel = parse_cancel(&t)?;
                 if cancel.as_ref().is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
-                    return Ok((None, Some(Value::String(lua.create_string("cancelled")?)), None, None));
+                    return Ok((None, Some(Value::String(lua.create_string("cancelled")?)), None, None, None));
                 }
                 let payload = serde_json::to_value(params).unwrap_or(J::Null);
                 let r = if let (Some(f), Some(sid)) = (on_open, select_id) {
@@ -757,13 +757,15 @@ pub(super) fn forward_ui_on(conn: &Rc<Conn>, session_id: &str, host: &Arc<Host>,
                 };
                 let v = match r {
                     Ok(v) => v,
-                    Err(reason) => return Ok((None, Some(Value::String(lua.create_string(reason)?)), None, None)),
+                    Err(reason) => {
+                        return Ok((None, Some(Value::String(lua.create_string(reason)?)), None, None, None));
+                    }
                 };
                 let r: proto::UiSelectResult = serde_json::from_value(v).unwrap_or_default();
                 let multi = t.get::<Option<bool>>("multi")?.unwrap_or(false);
                 if (multi && r.selected_indices.is_none()) || (!multi && r.index.is_none() && r.key.is_none()) {
                     let reason = dismiss_reason(r.reason.as_deref());
-                    return Ok((None, Some(Value::String(lua.create_string(reason)?)), None, None));
+                    return Ok((None, Some(Value::String(lua.create_string(reason)?)), None, None, None));
                 }
                 let selected = if multi {
                     let indices =
@@ -773,7 +775,7 @@ pub(super) fn forward_ui_on(conn: &Rc<Conn>, session_id: &str, host: &Arc<Host>,
                 } else {
                     r.index.map(|i| Value::Integer((i + 1) as i64))
                 };
-                Ok((selected, r.tab.map(|t| Value::Integer((t + 1) as i64)), r.key, r.filter))
+                Ok((selected, r.tab.map(|t| Value::Integer((t + 1) as i64)), r.key, r.filter, r.item_id))
             }
         })?,
     )?;

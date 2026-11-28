@@ -22,6 +22,7 @@ mod golden_wire;
 mod interrupted_call;
 mod kimi_loop;
 mod markup_healing;
+mod model_resolve;
 mod models;
 mod native_metadata;
 mod native_metadata_edges;
@@ -82,6 +83,7 @@ async fn provider_host(env: &mut TestEnv, server: &MockServer, extra: Value) -> 
         ("OPENAI_API_KEY", "test-openai"),
         ("ANTHROPIC_API_KEY", "test-anthropic"),
         ("DEEPSEEK_API_KEY", "test-deepseek"),
+        ("COMPAT_API_KEY", "test-compat"),
         ("GEMINI_API_KEY", "test-google"),
     ] {
         env.set_var(k, v);
@@ -92,7 +94,19 @@ async fn provider_host(env: &mut TestEnv, server: &MockServer, extra: Value) -> 
         // `"jobs"` avoids `shell_tools.lua:220-226` re-registering `bash` on `app/ready` and dropping `user-config` shadow (tracked in closeout).
         .builtins(&["tools-apply-patch", "mcp", "usage", "compact", "user-config", "jobs"])
         .config(json!({
-            "providers": { "deepseek": { "base_url": format!("{base}/compat") } },
+            "providers": {
+                "deepseek": { "base_url": format!("{base}/compat") },
+                "compat": {
+                    "wire": "openai-chat",
+                    "base_url": format!("{base}/compat"),
+                    "api_key_env": "COMPAT_API_KEY",
+                    "list_models": false,
+                    "models": [
+                        { "model_id": "chat-model", "context_window": 128000, "max_output": 8192 },
+                        { "model_id": "reasoner-model", "context_window": 128000, "max_output": 8192, "reasoning": true, "images": true },
+                    ],
+                },
+            },
             "plugins": {
                 "provider-openai": { "base_url": format!("{base}/openai") },
                 "provider-anthropic": { "base_url": format!("{base}/anthropic") },

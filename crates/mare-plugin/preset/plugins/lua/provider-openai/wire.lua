@@ -881,7 +881,16 @@ function M.new_parser(sink, on_error, opts)
 			if item.type == "reasoning" then
 				local parts = {}
 				for _, s in ipairs(item.summary or {}) do
-					parts[#parts + 1] = s.text
+					if type(s.text) == "string" and s.text ~= "" then
+						parts[#parts + 1] = s.text
+					end
+				end
+				if #parts == 0 then
+					for _, c in ipairs(item.content or {}) do
+						if c.type == "reasoning_text" and type(c.text) == "string" and c.text ~= "" then
+							parts[#parts + 1] = c.text
+						end
+					end
 				end
 				table.insert(P.content, {
 					type = "reasoning",

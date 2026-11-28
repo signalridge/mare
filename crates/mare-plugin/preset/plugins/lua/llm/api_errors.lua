@@ -143,6 +143,9 @@ return function(D)
 		local status = resp.status
 		local headers = resp.headers or {}
 		local rid = extract_request_id(headers, j, api)
+		local param = (type(api.param) == "string" and api.param ~= "" and api.param)
+			or (type(j) == "table" and type(j.param) == "string" and j.param ~= "" and j.param)
+			or nil
 		local raw = {
 			source = "http",
 			provider = opts.provider,
@@ -153,6 +156,7 @@ return function(D)
 			api_type = api.type or api.status,
 			code = code,
 			type = api.type or api.status,
+			param = param,
 			message = ("%s %d: %s"):format(label, status, tostring(msg)),
 			raw_message = tostring(msg),
 			body = type(text) == "string" and (#text > MAX_RAW_BODY_BYTES and text:sub(1, MAX_RAW_BODY_BYTES) or text)
@@ -198,6 +202,7 @@ return function(D)
 		end
 		local headers = type(e.headers) == "table" and e.headers or nil
 		local rid = extract_request_id(headers, e, e)
+		local param = type(e.param) == "string" and e.param ~= "" and e.param or nil
 		local raw = {
 			source = opts.source or "stream",
 			provider = opts.provider,
@@ -208,6 +213,7 @@ return function(D)
 			api_type = etype,
 			code = code,
 			type = etype,
+			param = param,
 			message = status and ("%s %d: %s"):format(label, status, tostring(msg))
 				or ("%s: %s"):format(label, tostring(msg)),
 			raw_message = tostring(msg),

@@ -257,20 +257,38 @@ local function append_detail(details, raw)
 	end
 end
 
+local MIN_CONTEXT_WINDOW = 2048
+
+local function valid_window(n)
+	n = tonumber(n)
+	return (n and n >= MIN_CONTEXT_WINDOW) and n or nil
+end
+
 --- One entry of GET /models, keeping what the endpoint says about the model: the
---- context window, output limit, input modalities, reasoning and price (OpenRouter's
---- `architecture.input_modalities`, `supported_parameters`, `top_provider`, per-token `pricing`);
+--- context window, output limit, input modalities, reasoning, effort levels, dynamic tool
+--- loading and price (OpenRouter's `architecture.input_modalities`, `supported_parameters`,
+--- `top_provider`, per-token `pricing`; Kimi's `supports_dynamic_tools`/`tools.dynamic_load`,
+--- `think_efforts`/`reasoning.effort`, `supports_thinking_type`/`reasoning.type`, `modalities`);
 --- anything missing is filled from models.dev, then conservative defaults, by the llm plugin.
 function M.listed_model(m)
 	local arch = type(m.architecture) == "table" and m.architecture or {}
 	local top = type(m.top_provider) == "table" and m.top_provider or {}
+	local lim = type(m.limit) == "table" and m.limit or nil
+	local lim_ctx = lim and valid_window(lim.context) or nil
+	local lim_in = lim and valid_window(lim.input) or nil
+	local lim_win = (lim_in and (not lim_ctx or lim_in <= lim_ctx)) and lim_in or lim_ctx
 	local out = {
 		id = m.id,
-		name = type(m.name) == "string" and m.name or nil,
-		context_window = tonumber(m.context_length or m.context_window or top.context_length),
-		max_output = tonumber(m.max_output_tokens or m.max_completion_tokens or top.max_completion_tokens),
+		name = (type(m.name) == "string" and m.name) or (type(m.display_name) == "string" and m.display_name) or nil,
+		context_window = valid_window(m.context_length or m.context_window or top.context_length) or lim_win,
+		max_output = tonumber(
+			m.max_output_tokens or m.max_completion_tokens or top.max_completion_tokens or (lim and lim.output)
+		),
 	}
-	local mods = arch.input_modalities or m.input_modalities
+	local mods = arch.input_modalities
+		or m.input_modalities
+		or (type(m.modalities) == "table" and m.modalities.input)
+		or nil
 	if type(mods) == "table" then
 		local inp = {}
 		for _, x in ipairs(mods) do
@@ -288,6 +306,39 @@ function M.listed_model(m)
 			end
 		end
 	end
+	local thinking_type = (type(m.supports_thinking_type) == "string" and m.supports_thinking_type)
+		or (type(m.reasoning) == "table" and type(m.reasoning.type) == "string" and m.reasoning.type)
+		or nil
+	if m.supports_reasoning == true or thinking_type == "only" or thinking_type == "both" then
+		out.reasoning = true
+	end
+	local think_efforts = type(m.think_efforts) == "table" and m.think_efforts or nil
+	local r_effort = type(m.reasoning) == "table" and type(m.reasoning.effort) == "table" and m.reasoning.effort or nil
+	local raw_efforts = (think_efforts and type(think_efforts.valid_efforts) == "table" and think_efforts.valid_efforts)
+		or (r_effort and type(r_effort.valid) == "table" and r_effort.valid)
+		or (type(m.supported_reasoning_levels) == "table" and m.supported_reasoning_levels)
+		or nil
+	if raw_efforts then
+		local efforts = {}
+		for _, v in ipairs(raw_efforts) do
+			if type(v) == "string" and v ~= "" then
+				if not (thinking_type == "only" and (v == "off" or v == "none")) then
+					efforts[#efforts + 1] = v
+				end
+			end
+		end
+		if #efforts > 0 then
+			out.efforts = efforts
+			out.reasoning = true
+		end
+	end
+	local def_eff = (think_efforts and type(think_efforts.default_effort) == "string" and think_efforts.default_effort)
+		or (r_effort and type(r_effort.default) == "string" and r_effort.default)
+		or (type(m.default_effort) == "string" and m.default_effort)
+		or nil
+	if def_eff and def_eff ~= "" then
+		out.default_effort = def_eff
+	end
 	local pr = type(m.pricing) == "table" and m.pricing or nil
 	if pr and tonumber(pr.prompt) and tonumber(pr.completion) then
 		-- per token -> per million tokens
@@ -298,7 +349,13 @@ function M.listed_model(m)
 			cache_write = tonumber(pr.input_cache_write) and tonumber(pr.input_cache_write) * 1e6 or nil,
 		}
 	end
-	if m.dynamically_loaded_tools == true or m.supports_dynamically_loaded_tools == true then
+	local tools_obj = type(m.tools) == "table" and m.tools or nil
+	if
+		m.dynamically_loaded_tools == true
+		or m.supports_dynamically_loaded_tools == true
+		or m.supports_dynamic_tools == true
+		or (tools_obj and tools_obj.dynamic_load == true)
+	then
 		out.tool_update = "addition_only"
 	elseif type(m.capabilities) == "table" then
 		for _, c in ipairs(m.capabilities) do
@@ -307,6 +364,8 @@ function M.listed_model(m)
 				break
 			end
 		end
+	elseif m.supports_dynamic_tools == false or (tools_obj and tools_obj.dynamic_load == false) then
+		out.tool_update = false
 	end
 	return out
 end

@@ -2,7 +2,7 @@
 
 How to sign in to a provider, pick a model and a reasoning effort, override model metadata, and add a custom provider.
 
-A model is named `provider/id`, for example `openai/gpt-6.1-terra`. The providers are built-in plugins; each registers its models, and some also fetch a live model list once you are signed in.
+A model is named `provider/id`, for example `openai/gpt-6-luna`. The providers are built-in plugins; each registers its models, and some also fetch a live model list once you are signed in.
 
 ## Providers
 
@@ -14,7 +14,13 @@ A model is named `provider/id`, for example `openai/gpt-6.1-terra`. The provider
 | `opencode-go` | `provider-opencode-go` | opencode Go API key | `OPENCODE_API_KEY` |
 | `deepseek` | `provider-openai-compat` | API key | `DEEPSEEK_API_KEY` |
 | `kimi` | `provider-openai-compat` | Moonshot API key | `MOONSHOT_API_KEY` |
+| `kimi-cn` | `provider-openai-compat` | Moonshot China API key | `MOONSHOT_API_KEY` |
 | `kimi-code` | `provider-openai-compat` | Kimi Code API key | `KIMI_API_KEY` |
+| `kimi-code-global` | `provider-openai-compat` | Kimi Code Global API key | `KIMI_API_KEY` |
+| `minimax` | `provider-openai-compat` | MiniMax API key | `MINIMAX_API_KEY` |
+| `minimax-cn` | `provider-openai-compat` | MiniMax China API key | `MINIMAX_API_KEY` |
+| `zai` | `provider-openai-compat` | Z.ai API key | `ZAI_API_KEY` |
+| `zhipu-cn` | `provider-openai-compat` | Zhipu GLM China API key | `ZHIPU_API_KEY` |
 | `openrouter` | `provider-openai-compat` | API key | `OPENROUTER_API_KEY` |
 | `ollama` | `provider-openai-compat` | none (`http://localhost:11434/v1`) | |
 | `lmstudio` | `provider-openai-compat` | none (`http://localhost:1234/v1`) | |
@@ -67,7 +73,7 @@ mare.provider("anthropic", { api_key = { cmd = { "pass", "show", "anthropic/api-
 ## Choosing a model
 
 ```sh
-mare -m openai/gpt-6.1-terra            # this run
+mare -m openai/gpt-6-luna               # this run
 mare -m sonnet                          # an alias
 ```
 
@@ -77,8 +83,8 @@ To set a default, use `init.lua`:
 
 ```lua
 mare.setup {
-  model = "openai/gpt-6.1-terra",
-  favorite_models = { "openai/gpt-6.1-terra", "anthropic/claude-sonnet-5-5" },
+  model = "openai/gpt-6-luna",
+  favorite_models = { "openai/gpt-6-luna", "anthropic/claude-sonnet-5-5" },
   fallback_models = { "google/gemini-2.5-pro" },   -- tried when the current model is overloaded or out of quota
 }
 ```
@@ -86,7 +92,7 @@ mare.setup {
 You can also set `MARE_MODEL`. An explicit `model` in `init.lua` (or the flag or variable) wins over the model you last picked with `/model`, which mare remembers in `state.json` (see below). The built-in aliases `sonnet`, `opus` and `haiku` select the newest Anthropic model of that family. Define your own with `mare.model`:
 
 ```lua
-mare.model { provider = "openai", id = "gpt-6.1-terra", alias = "main" }
+mare.model { provider = "openai", id = "gpt-6-luna", alias = "main" }
 ```
 
 After that `-m main`, `/model main` and `fallback_models` accept `main`.

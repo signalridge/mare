@@ -247,7 +247,7 @@ async fn openai_compat_tool_result_images_emit_trailing_user_message() {
 
         stream_history(
             &h,
-            "deepseek/deepseek-reasoner",
+            "compat/reasoner-model",
             r#"{
               { role = "user", content = { { type = "text", text = "look" } } },
               { role = "assistant", provider = "other", content = {
@@ -290,16 +290,12 @@ async fn openai_compat_non_vision_model_downgrades_tool_result_images_to_text() 
         let mut env = TestEnv::new().await;
         let server = MockServer::start().await;
         server.route("/compat", vec![Resp::sse(fixture("openai-compat.sse"))]);
-        let h = provider_host(
-            &mut env,
-            &server,
-            json!({ "models": { "deepseek/deepseek-reasoner": { "images": false } } }),
-        )
-        .await;
+        let h = provider_host(&mut env, &server, json!({ "models": { "compat/reasoner-model": { "images": false } } }))
+            .await;
 
         stream_history(
             &h,
-            "deepseek/deepseek-reasoner",
+            "compat/reasoner-model",
             r#"{
               { role = "user", content = { { type = "text", text = "look" } } },
               { role = "assistant", provider = "other", content = {
@@ -433,7 +429,7 @@ async fn agent_turn_read_image_reaches_openai_compat_wire() {
                 Resp::sse(openai_compat_text_sse("saw dot.png")),
             ],
         );
-        let h = provider_host(&mut env, &server, json!({ "model": "deepseek/deepseek-reasoner" })).await;
+        let h = provider_host(&mut env, &server, json!({ "model": "compat/reasoner-model" })).await;
 
         let res = h.prompt("read dot.png", json!({})).await.unwrap();
         assert_eq!(res["termination_reason"], "completed", "{res}");

@@ -583,25 +583,11 @@ pub(super) async fn set_config_option(
     };
     match config_id {
         "model" => {
-            let models = call_service(host, "llm", "models", vec![]).await.map_err(|e| e.to_string())?;
-            let known = models
-                .as_array()
-                .into_iter()
-                .flatten()
-                .any(|m| m.get("ref").and_then(|v| v.as_str()) == Some(val.as_str()));
-            if !known {
-                return Err(format!("unknown model option: {val}"));
-            }
             call_service(host, "llm", "set_model", vec![J::String(val), json!({ "target": "session" })])
                 .await
                 .map_err(|e| e.to_string())?;
         }
         "reasoning_effort" => {
-            let efforts = call_service(host, "llm", "effort_options", vec![]).await.map_err(|e| e.to_string())?;
-            let known = efforts.as_array().into_iter().flatten().any(|e| e.as_str() == Some(val.as_str()));
-            if !known {
-                return Err(format!("unknown reasoning effort: {val}"));
-            }
             call_service(host, "llm", "set_effort", vec![J::String(val), json!({ "target": "session" })])
                 .await
                 .map_err(|e| e.to_string())?;

@@ -85,7 +85,7 @@ async fn truncated_response_with_a_tool_call_never_runs_it_on_every_wire() {
                 ),
                 _ => (
                     "/compat",
-                    "deepseek/deepseek-reasoner",
+                    "compat/reasoner-model",
                     compat_events(&[
                         json!({ "choices": [{ "index": 0, "delta": { "tool_calls": [{ "index": 0, "id": "call_w",
                             "type": "function", "function": { "name": "write", "arguments": args.to_string() } }] } }] }),
@@ -140,7 +140,7 @@ async fn unparseable_tool_arguments_return_an_error_to_the_model() {
             + "data: [DONE]\n\n";
         let done = chunk(json!({ "content": "ok" }), json!("stop")) + "data: [DONE]\n\n";
         server.route("/compat", vec![Resp::sse(bad), Resp::sse(done)]);
-        let h = provider_host(&mut env, &server, json!({ "model": "deepseek/deepseek-reasoner" })).await;
+        let h = provider_host(&mut env, &server, json!({ "model": "compat/reasoner-model" })).await;
         let result = h.prompt("list", json!({})).await.unwrap();
         assert!(result["error"].is_null(), "{result}");
         let next = server.requests().pop().unwrap().json().to_string();
@@ -165,7 +165,7 @@ async fn compat_tool_arguments_before_the_name_are_buffered_and_get_an_id() {
         ]);
         server.route("/compat", vec![Resp::sse(body)]);
         let h = provider_host(&mut env, &server, json!({})).await;
-        let msg = stream(&h, "deepseek/deepseek-reasoner").await;
+        let msg = stream(&h, "compat/reasoner-model").await;
         let call = msg["content"]
             .as_array()
             .unwrap()
@@ -238,7 +238,7 @@ async fn sse_frames_split_mid_crlf_and_mid_character_reassemble() {
         let second_crlf = body[mid_crlf + 4..].find("\r\n").unwrap() + mid_crlf + 5;
         server.route("/compat", vec![Resp::sse(body).chunked(vec![mid_char, mid_crlf, second_crlf], 10)]);
         let h = provider_host(&mut env, &server, json!({})).await;
-        let msg = ask(&h, "deepseek/deepseek-chat").await;
+        let msg = ask(&h, "compat/chat-model").await;
         assert_eq!(text_of(&msg), "你好 world", "{msg}");
         assert_eq!(server.count("/compat"), 1);
         h.shutdown().await;
@@ -264,7 +264,7 @@ async fn sse_lines_and_events_over_the_configured_caps_fail_without_retry() {
         let caps = json!({ "plugins": { "llm": { "sse_max_line_bytes": 1024, "sse_max_event_bytes": 2048 } } });
         let h = provider_host(&mut env, &server, caps).await;
         for (n, what) in [(1, "line is longer than 1024"), (2, "event is larger than 2048")] {
-            let msg = ask(&h, "deepseek/deepseek-chat").await;
+            let msg = ask(&h, "compat/chat-model").await;
             assert_eq!(msg["error_kind"], "malformed_response", "{msg}");
             assert!(msg.to_string().contains(what), "{msg}");
             assert_eq!(server.count("/compat"), n, "not retried");
@@ -326,11 +326,11 @@ async fn compat_tool_calls_without_index_and_interleaved_by_index() {
         let calls = |msg: &Value| -> Vec<Value> {
             msg["content"].as_array().unwrap().iter().filter(|b| b["type"] == "tool_call").cloned().collect()
         };
-        let msg = ask(&h, "deepseek/deepseek-chat").await;
+        let msg = ask(&h, "compat/chat-model").await;
         let c = calls(&msg);
         assert_eq!(c.len(), 1, "{msg}");
         assert_eq!((c[0]["id"].as_str(), c[0]["arguments"]["path"].as_str()), (Some("c1"), Some("a.txt")), "{msg}");
-        let msg = ask(&h, "deepseek/deepseek-chat").await;
+        let msg = ask(&h, "compat/chat-model").await;
         let c = calls(&msg);
         assert_eq!(c.len(), 2, "{msg}");
         assert_eq!((c[0]["name"].as_str(), c[0]["arguments"]["path"].as_str()), (Some("read"), Some("a.txt")));
@@ -395,7 +395,7 @@ async fn fragmented_tool_arguments_preserve_nested_null_and_empty_containers() {
         }
         let h = provider_host(&mut env, &server, json!({})).await;
         for model in
-            ["anthropic/claude-sonnet-5-5", "openai/gpt-6.1-terra", "deepseek/deepseek-chat", "google/gemini-2.5-pro"]
+            ["anthropic/claude-sonnet-5-5", "openai/gpt-6.1-terra", "compat/chat-model", "google/gemini-2.5-pro"]
         {
             let msg = stream(&h, model).await;
             let call = msg["content"].as_array().unwrap().iter().find(|b| b["type"] == "tool_call").unwrap();
@@ -426,7 +426,7 @@ async fn compat_skips_empty_data_lines_and_completes() {
         );
         server.route("/compat", vec![Resp::sse(body)]);
         let h = provider_host(&mut env, &server, json!({})).await;
-        let msg = ask(&h, "deepseek/deepseek-chat").await;
+        let msg = ask(&h, "compat/chat-model").await;
         assert_eq!(msg["stop_reason"], "stop", "{msg}");
         assert_eq!(text_of(&msg), "hello compat", "{msg}");
         assert_eq!(server.count("/compat"), 1);

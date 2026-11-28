@@ -37,20 +37,20 @@ async fn compat_finish_reasons_error_filtered_and_unknown_never_become_stop() {
 
         let h = provider_host(&mut env, &server, json!({ "plugins": { "llm": { "retries": 0 } } })).await;
 
-        let err_msg = stream(&h, "deepseek/deepseek-chat").await;
+        let err_msg = stream(&h, "compat/chat-model").await;
         assert_eq!(err_msg["stop_reason"], "error", "{err_msg}");
         assert_eq!(err_msg["error_kind"], "server", "{err_msg}");
         assert_eq!(err_msg["usage"]["input"], 7, "usage must be preserved on finish_reason=error: {err_msg}");
         assert_eq!(err_msg["usage"]["output"], 2, "{err_msg}");
 
         for reason in ["sensitive", "data_inspection_failed", "DataInspectionFailed", "censorship_blocked"] {
-            let msg = stream(&h, "deepseek/deepseek-chat").await;
+            let msg = stream(&h, "compat/chat-model").await;
             assert_eq!(msg["stop_reason"], "filtered", "{reason}: {msg}");
             assert_eq!(msg["raw_stop_reason"], reason, "{reason}: {msg}");
             assert!(msg["error"].is_string(), "{reason}: {msg}");
         }
 
-        let unknown = stream(&h, "deepseek/deepseek-chat").await;
+        let unknown = stream(&h, "compat/chat-model").await;
         assert_eq!(unknown["stop_reason"], "error", "{unknown}");
         assert_eq!(unknown["raw_stop_reason"], "insufficient_system_resource", "{unknown}");
         assert_eq!(unknown["error"], "Provider finish_reason: insufficient_system_resource", "{unknown}");
@@ -209,12 +209,12 @@ async fn compat_usage_choice_fallback_and_placeholder_chunks() {
 
         let h = provider_host(&mut env, &server, json!({})).await;
 
-        let m1 = stream(&h, "deepseek/deepseek-chat").await;
+        let m1 = stream(&h, "compat/chat-model").await;
         assert_eq!(m1["usage"]["input"], 5, "{m1}");
         assert_eq!(m1["usage"]["output"], 1, "{m1}");
         assert!(m1["usage"].get("reasoning").is_none_or(Value::is_null), "unreported reasoning must be null: {m1}");
 
-        let m2 = stream(&h, "deepseek/deepseek-chat").await;
+        let m2 = stream(&h, "compat/chat-model").await;
         assert_eq!(m2["content"][0]["text"], "Hello", "{m2}");
         assert_eq!(m2["usage"]["input"], 10, "{m2}");
         assert_eq!(m2["usage"]["output"], 1, "{m2}");
@@ -260,7 +260,7 @@ async fn usage_edge_cases_empty_overwrite_reasoning_fallback_and_unknown() {
 
         let h = provider_host(&mut env, &server, json!({})).await;
 
-        let c1 = stream(&h, "deepseek/deepseek-chat").await;
+        let c1 = stream(&h, "compat/chat-model").await;
         assert_eq!(c1["usage"]["input"], 12, "usage:{{}} must not clobber prior usage: {c1}");
         assert_eq!(c1["usage"]["output"], 4, "{c1}");
         assert_eq!(c1["usage"]["reasoning"], 3, "top-level reasoning_tokens fallback: {c1}");
@@ -327,7 +327,7 @@ async fn vertex_thoughts_and_rotating_item_ids() {
 
         let h = provider_host(&mut env, &server, json!({})).await;
 
-        let v = stream(&h, "deepseek/deepseek-chat").await;
+        let v = stream(&h, "compat/chat-model").await;
         let v_content = v["content"].as_array().unwrap();
         assert_eq!(v_content[0]["type"], "reasoning", "{v}");
         assert!(v_content[0]["text"].as_str().unwrap().contains("Acknowledging Greeting"), "{v}");

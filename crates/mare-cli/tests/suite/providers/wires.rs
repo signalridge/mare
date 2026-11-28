@@ -77,7 +77,7 @@ async fn wire_host(env: &mut TestEnv, server: &MockServer, extra: Value) -> Arc<
             "provider-opencode-go": {
                 "base_url": format!("{base}/gw"),
                 "routes": { "echo": { "path": "/x", "wire": "echo-chat" } },
-                "model_routes": { "crouton-*": "echo" },
+                "model_routes": { "crouton-*": "echo", "mimo-*": "echo" },
             },
         } }))
         .config(extra)
@@ -383,7 +383,7 @@ async fn prepared_overlay_does_not_run_wire_callbacks_during_compaction_measurem
         let mut env = TestEnv::new().await;
         let server = MockServer::start().await;
         let h = wire_host(&mut env, &server, json!({ "models": {
-            "opencode-go/crouton-alpha-free": { "context_window": 100000, "max_output": 8000 }
+            "opencode-go/mimo-v2.6-flash": { "context_window": 100000, "max_output": 8000 }
         }, "plugins": { "compact": { "threshold_ratio": 1, "headroom_tokens": 0 } } })).await;
         exec(&h, r#"
             BUILDS, APPLIES, MAPS, ENCODES, FINALIZES, WIRES, COMPACT = 0, 0, 0, 0, 0, 0, 0
@@ -406,7 +406,7 @@ async fn prepared_overlay_does_not_run_wire_callbacks_during_compaction_measurem
                 MAPS = MAPS + 1
                 wire.body.level = c.value
             end } } } } }
-            LLM:set_model("opencode-go/crouton-alpha-free", { save = false })
+            LLM:set_model("opencode-go/mimo-v2.6-flash", { save = false })
             local apply = LLM.apply_params
             LLM.apply_params = function(self, ...) APPLIES = APPLIES + 1 return apply(self, ...) end
             C.cordis:on("request/build", function(req, next)
@@ -1045,7 +1045,7 @@ async fn provider_request_count_matches_mock_requests_across_all_four_wires() {
             &server,
             json!({
                 "providers": {
-                    "deepseek": {
+                    "compat": {
                         "base_url": format!("{}/compat", server.base),
                         "api_key": { "cmd": ["sh", "-c", cmd_script], "refresh_interval_ms": 600000 }
                     }
@@ -1070,11 +1070,11 @@ C.cordis:on("provider/request", function(w, next)
 end)
 local msgs = { { role = "user", content = { { type = "text", text = "hi" } } } }
 local r1 = LLM:stream({ model = LLM:resolve("openai/gpt-6.1-terra"), messages = msgs, no_fallback = true }, function() end)
-local r2 = LLM:stream({ model = LLM:resolve("deepseek/deepseek-chat"), messages = msgs, no_fallback = true }, function() end)
+local r2 = LLM:stream({ model = LLM:resolve("compat/chat-model"), messages = msgs, no_fallback = true }, function() end)
 local r3 = LLM:stream({ model = LLM:resolve("anthropic/claude-opus-5-5"), messages = msgs, no_fallback = true }, function() end)
 local r4 = LLM:stream({ model = LLM:resolve("google/gemini-2.5-pro"), messages = msgs, no_fallback = true }, function() end)
 assert(r1.stop_reason ~= "error" and r2.stop_reason ~= "error" and r3.stop_reason ~= "error" and r4.stop_reason ~= "error")
-return string.format("%d,%d,%d,%d", counts.openai or 0, counts.deepseek or 0, counts.anthropic or 0, counts.google or 0)
+return string.format("%d,%d,%d,%d", counts.openai or 0, counts.compat or 0, counts.anthropic or 0, counts.google or 0)
 "#,
         )
         .await;

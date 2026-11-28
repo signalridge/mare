@@ -235,7 +235,7 @@ async fn provider_settings_apply_per_provider() {
         .await;
         let err: String = eval(
             &h,
-            r#"local m = LLM:resolve("deepseek/deepseek-chat")
+            r#"local m = LLM:resolve("deepseek/deepseek-flash")
                local r = LLM:stream({ model = m, messages = { { role = "user", content = { { type = "text", text = "hi" } } } } })
                return r.error"#,
         )
@@ -263,7 +263,7 @@ async fn missing_credentials_say_how_to_log_in_headless() {
             r#"local function err(ref)
                  return LLM:stream({ model = LLM:resolve(ref), messages = { { role = "user", content = { { type = "text", text = "hi" } } } } }).error
                end
-               return err("google/gemini-2.5-pro"), err("anthropic/claude-sonnet-5-5")"#,
+               return err("google/gemini-4-argon"), err("anthropic/claude-sonnet-5-5")"#,
         )
         .await;
         assert!(g.contains("`mare login google` or set GEMINI_API_KEY"), "{g}");
@@ -318,9 +318,9 @@ async fn model_aliases_resolve() {
     local(async {
         let env = TestEnv::new().await;
         let server = MockServer::start().await;
-        let h = host(&env, &server, json!({ "model_aliases": { "fast": "deepseek/deepseek-chat" } })).await;
+        let h = host(&env, &server, json!({ "model_aliases": { "fast": "deepseek/deepseek-flash" } })).await;
         let fast: String = eval(&h, r#"return LLM:resolve("fast").ref"#).await;
-        assert_eq!(fast, "deepseek/deepseek-chat");
+        assert_eq!(fast, "deepseek/deepseek-flash");
         // a family alias is the newest catalogue entry of that family (computed from the
         // catalogue here, so a new model never needs this test touched)
         let (ok, detail): (bool, String) = eval(
@@ -369,8 +369,8 @@ async fn fallback_models_answer_when_the_model_does_not_exist() {
             "/anthropic",
             vec![Resp::status(404, r#"{"type":"error","error":{"type":"not_found_error","message":"model: claude-x"}}"#)],
         );
-        server.route("/compat", vec![Resp::sse(fixture("openai-compat.sse"))]);
-        let h = host(&env, &server, json!({ "fallback_models": ["fast", "deepseek/deepseek-chat"], "model_aliases": { "fast": "deepseek/deepseek-chat" } })).await;
+        server.route("/compat", vec![Resp::sse(fixture("openai-responses.sse"))]);
+        let h = host(&env, &server, json!({ "fallback_models": ["fast", "deepseek/deepseek-flash"], "model_aliases": { "fast": "deepseek/deepseek-flash" } })).await;
         let (provider, from, events): (String, String, i64) = eval(
             &h,
             r#"local r = LLM:stream({ model = LLM:resolve("anthropic/claude-sonnet-5-5"), messages = { { role = "user", content = { { type = "text", text = "hi" } } } } })
@@ -1133,11 +1133,11 @@ async fn provider_header_cmd_recovers_after_failure_refreshes_and_invalidates_on
         server.route(
             "/compat",
             vec![
-                Resp::sse(fixture("openai-compat.sse")),
-                Resp::sse(fixture("openai-compat.sse")),
-                Resp::sse(fixture("openai-compat.sse")),
+                Resp::sse(fixture("openai-responses.sse")),
+                Resp::sse(fixture("openai-responses.sse")),
+                Resp::sse(fixture("openai-responses.sse")),
                 Resp::status(401, r#"{"error":{"message":"expired token"}}"#),
-                Resp::sse(fixture("openai-compat.sse")),
+                Resp::sse(fixture("openai-responses.sse")),
             ],
         );
 
@@ -1177,7 +1177,7 @@ async fn provider_header_cmd_recovers_after_failure_refreshes_and_invalidates_on
 
         let ok: bool = eval(
             &h,
-            r#"local m = LLM:resolve("deepseek/deepseek-chat")
+            r#"local m = LLM:resolve("deepseek/deepseek-flash")
                local req = function()
                  return LLM:stream({ model = m, messages = { { role = "user", content = { { type = "text", text = "hi" } } } } })
                end
@@ -1206,6 +1206,312 @@ async fn provider_header_cmd_recovers_after_failure_refreshes_and_invalidates_on
         assert_eq!(reqs[4].header("x-long"), Some("long-tok-2"), "401 must invalidate long-TTL header cmd cache");
         assert_ne!(reqs[3].header("x-dyn"), reqs[4].header("x-dyn"), "401 must refresh dynamic header cmd");
         assert_ne!(reqs[3].path, reqs[4].path, "401 must refresh dynamic query cmd");
+        h.shutdown().await;
+    })
+    .await
+}
+
+/// Interactive API-key login does not print ambiguous shared-prefix advice into scrollback,
+/// passes declared `key_prefixes` as transient input placeholder, warns only on real prefix
+/// mismatches, and onboarding refreshes live `GET /models` before opening the default-model picker.
+#[tokio::test]
+async fn login_api_key_avoids_ambiguous_prefix_scrollback_and_onboarding_refreshes_live_models() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        for var in [
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+            "OPENCODE_API_KEY",
+            "DEEPSEEK_API_KEY",
+            "MOONSHOT_API_KEY",
+            "KIMI_API_KEY",
+            "OPENROUTER_API_KEY",
+        ] {
+            env.set_var(var, "");
+        }
+        let server = MockServer::start().await;
+        server.route(
+            "/compat/models",
+            vec![
+                Resp::status(200, r#"{"object":"list","data":[{"id":"deepseek-live-a"},{"id":"deepseek-live-b"}]}"#),
+                Resp::status(200, r#"{"object":"list","data":[{"id":"deepseek-live-a"},{"id":"deepseek-live-b"}]}"#),
+            ],
+        );
+
+        let h = host(&env, &server, json!({ "plugins": { "llm": { "catalog_refresh_ms": 0 } } })).await;
+
+        let res_json: String = eval(
+            &h,
+            r#"
+            -- 1. DeepSeek (no unique key_prefixes): no say() spam, secret=true, no placeholder.
+            local ds_said, ds_secret, ds_placeholder = {}, false, "unset"
+            LLM:login("deepseek", {
+                method = "api_key",
+                say = function(t) ds_said[#ds_said + 1] = t end,
+                ask = function(_, opts)
+                    ds_secret = opts.secret == true
+                    ds_placeholder = opts.placeholder
+                    return "sk-deepseek-test-123456"
+                end,
+            })
+            LLM:logout("deepseek")
+
+            -- 2. Anthropic (key_prefixes = { "sk-ant-api" }): placeholder is set; matching key emits no warning;
+            -- non-matching key emits a clear warning; setup-token (`sk-ant-oat...`) is rejected without saving.
+            local ant_ok_said, ant_placeholder = {}, nil
+            LLM:login("anthropic", {
+                method = "api_key",
+                say = function(t) ant_ok_said[#ant_ok_said + 1] = t end,
+                ask = function(_, opts)
+                    ant_placeholder = opts.placeholder
+                    return "sk-ant-api03-valid-123456"
+                end,
+            })
+            LLM:logout("anthropic")
+
+            local oat_secret = "sk-ant-oat01-setup-token-999999"
+            local oat_ok, oat_err = pcall(function()
+                LLM:login("anthropic", {
+                    method = "api_key",
+                    say = function() end,
+                    ask = function() return oat_secret end,
+                })
+            end)
+            local oat_saved = LLM:has_api_key("anthropic", {})
+
+            local ant_bad_said = {}
+            LLM:login("anthropic", {
+                method = "api_key",
+                say = function(t) ant_bad_said[#ant_bad_said + 1] = t end,
+                ask = function() return "sk-not-anthropic-123456" end,
+            })
+            LLM:logout("anthropic")
+
+            -- 3. Pasting an Anthropic key into DeepSeek emits a clear mismatch warning without leaking the key.
+            local cross_said = {}
+            local cross_secret = "sk-ant-api03-cross-provider-999999"
+            LLM:login("deepseek", {
+                method = "api_key",
+                say = function(t) cross_said[#cross_said + 1] = t end,
+                ask = function() return cross_secret end,
+            })
+            LLM:logout("deepseek")
+
+            local oat_err_str = tostring(type(oat_err) == "table" and oat_err.message or oat_err)
+            return mare.json.encode({
+                ds_said = mare.json.array(ds_said),
+                ds_secret = ds_secret,
+                ds_placeholder = ds_placeholder or mare.json.null,
+                ant_placeholder = ant_placeholder or mare.json.null,
+                ant_ok_said = mare.json.array(ant_ok_said),
+                oat_ok = oat_ok,
+                oat_err = oat_err_str,
+                oat_saved = oat_saved,
+                oat_leaked = oat_err_str:find(oat_secret, 1, true) ~= nil,
+                ant_bad_said = mare.json.array(ant_bad_said),
+                cross_said = mare.json.array(cross_said),
+                cross_leaked = table.concat(cross_said, " "):find(cross_secret, 1, true) ~= nil,
+            })
+            "#,
+        )
+        .await;
+        let v: Value = serde_json::from_str(&res_json).unwrap();
+        assert_eq!(v["ds_secret"], true, "{v}");
+        assert_eq!(v["ds_placeholder"], Value::Null, "{v}");
+        assert_eq!(v["ds_said"], json!([]), "normal deepseek login must not emit scrollback prefix text: {v}");
+        assert_eq!(v["ant_placeholder"], "sk-ant-api...", "{v}");
+        assert_eq!(v["ant_ok_said"], json!([]), "matching prefix must not emit scrollback warning: {v}");
+        assert_eq!(v["oat_ok"], false, "setup-token sk-ant-oat must be rejected: {v}");
+        assert_eq!(v["oat_saved"], false, "rejected setup-token must not be saved: {v}");
+        assert_eq!(v["oat_leaked"], false, "setup-token error must not leak token: {v}");
+        assert!(
+            v["oat_err"].as_str().unwrap_or("").contains("setup-token"),
+            "setup-token rejection must explain why: {v}"
+        );
+        assert!(
+            v["ant_bad_said"].as_array().unwrap().iter().any(|s| s.as_str().unwrap_or("").contains("sk-ant-api")),
+            "non-matching prefix must warn about expected prefix: {v}"
+        );
+        assert!(
+            v["cross_said"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s.as_str().unwrap_or("").contains("anthropic") && s.as_str().unwrap_or("").contains("deepseek")),
+            "cross-provider key must warn clearly: {v}"
+        );
+        assert_eq!(v["cross_leaked"], false, "{v}");
+        h.shutdown().await;
+        drop(env);
+
+        // 4. Guided onboarding flow: after entering a DeepSeek key, no prefix text is printed to
+        // scrollback and the Default model picker shows the live GET /models response (not seeds).
+        let server2 = MockServer::start().await;
+        server2.route(
+            "/compat/models",
+            vec![Resp::status(
+                200,
+                r#"{"object":"list","data":[{"id":"deepseek-live-a","name":"DeepSeek Live A"},{"id":"deepseek-live-b","name":"DeepSeek Live B"}]}"#,
+            )],
+        );
+        let mut env2 = TestEnv::new().await;
+        for var in [
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+            "OPENCODE_API_KEY",
+            "DEEPSEEK_API_KEY",
+            "MOONSHOT_API_KEY",
+            "KIMI_API_KEY",
+            "OPENROUTER_API_KEY",
+        ] {
+            env2.set_var(var, "");
+        }
+        let h2 = env2
+            .host()
+            .builtins(&["onboarding"])
+            .config(json!({
+                "model": "",
+                "providers": { "deepseek": { "base_url": format!("{}/compat", server2.base) } },
+                "plugins": {
+                    "provider-faux": { "enabled": false },
+                    "onboarding": { "enabled": true, "plugins": false },
+                },
+            }))
+            .no_session()
+            .build()
+            .await;
+        expose(&h2);
+        global(&h2, "LLM", h2.service_table("llm").unwrap());
+        assert!(!eval::<bool>(&h2, "return LLM:has_credentials()").await, "onboarding requires no credentials");
+
+        exec(
+            &h2,
+            r#"
+            mare.mode = "tui"
+            mare.ui.connected = function() return true end
+            _G.__printed = {}
+            _G.__notified = {}
+            _G.__picked_models = nil
+            _G.__done = false
+            mare.ui.print = function(node)
+                _G.__printed[#_G.__printed + 1] = mare.json.encode(node)
+            end
+            mare.ui.notify = function(msg, lvl)
+                _G.__notified[#_G.__notified + 1] = tostring(lvl) .. ":" .. tostring(msg)
+            end
+            mare.ui.input = function(opts)
+                assert(opts.secret == true, "key input must be masked")
+                return "sk-deepseek-onboard-123"
+            end
+            mare.ui.select = function(t)
+                if t.title:find("pick a provider", 1, true) then
+                    for i, it in ipairs(t.items) do
+                        if it.label == "deepseek" then return i end
+                    end
+                    error("deepseek not in provider picker")
+                elseif t.title == "Default model" then
+                    local labels = {}
+                    for _, it in ipairs(t.items) do labels[#labels + 1] = it.label end
+                    _G.__picked_models = labels
+                    _G.__done = true
+                    return 1
+                end
+            end
+            C.cordis:get("bus"):emit("ui/ready")
+            "#,
+        )
+        .await;
+        wait_until(10, "onboarding Default model picker", || {
+            let h2 = h2.clone();
+            async move { eval::<bool>(&h2, "return _G.__done == true").await }
+        })
+        .await;
+
+        let (printed_json, picked_json, cur_ref): (String, String, String) = eval(
+            &h2,
+            r#"return mare.json.encode(mare.json.array(_G.__printed)),
+                      mare.json.encode(mare.json.array(_G.__picked_models or {})),
+                      (LLM:current() and LLM:current().ref) or "" "#,
+        )
+        .await;
+        let printed: Vec<String> = serde_json::from_str(&printed_json).unwrap();
+        let picked: Vec<String> = serde_json::from_str(&picked_json).unwrap();
+        assert!(printed.is_empty(), "onboarding deepseek login must not print prefix text to scrollback: {printed:?}");
+        assert_eq!(
+            picked,
+            vec!["deepseek-live-a", "deepseek-live-b"],
+            "Default model picker must show live GET /models results, not offline seeds"
+        );
+        assert_eq!(cur_ref, "deepseek/deepseek-live-a");
+        assert!(
+            server2.count("/compat/models") >= 1,
+            "onboarding foreground refresh must hit GET /models"
+        );
+        h2.shutdown().await;
+    })
+    .await
+}
+
+/// Opening `/model` updates the open picker in place when `llm/providers-changed` fires after a
+/// catalog refresh, and selecting the newly added item switches to that live model.
+#[tokio::test]
+async fn model_picker_updates_in_place_when_catalog_refreshes() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        env.set_var("DEEPSEEK_API_KEY", "test-deepseek");
+        let server = MockServer::start().await;
+        server.route(
+            "/compat/models",
+            vec![Resp::status(200, r#"{"object":"list","data":[{"id":"deepseek-flash"},{"id":"deepseek-live-new"}]}"#)],
+        );
+        let h = host(&env, &server, json!({ "plugins": { "llm": { "catalog_open_refresh_ms": 999999999 } } })).await;
+        global(&h, "CM", h.service_table("commands").unwrap());
+
+        let (initial_has_new, updated_has_new, selected_ref): (bool, bool, String) = eval(
+            &h,
+            r#"
+            mare.ui.connected = function() return true end
+            mare.ui.notify = function() end
+            local initial_has_new, updated_has_new = false, false
+            mare.ui.select = function(opts)
+                local cur_items = opts.items
+                for _, it in ipairs(cur_items) do
+                    if it.item_id == "deepseek/deepseek-live-new" then initial_has_new = true end
+                end
+                local open = true
+                local handle = {
+                    is_open = function() return open end,
+                    update = function(_, next_items)
+                        cur_items = next_items
+                        return true
+                    end,
+                }
+                if opts.on_open then opts.on_open(handle) end
+                -- Simulate background refresh finishing while the picker is open.
+                LLM:refresh_catalog({ name = "deepseek", force = true })
+                local pick_idx
+                for i, it in ipairs(cur_items) do
+                    if it.item_id == "deepseek/deepseek-live-new" then
+                        updated_has_new = true
+                        pick_idx = i
+                    end
+                end
+                open = false
+                return pick_idx, 1, nil, "", pick_idx and cur_items[pick_idx].item_id or nil
+            end
+            CM:run("/model")
+            local cur = LLM:current()
+            return initial_has_new, updated_has_new, cur and cur.ref or ""
+            "#,
+        )
+        .await;
+        assert!(!initial_has_new, "newly listed model must not exist before refresh");
+        assert!(updated_has_new, "open /model picker must update in place on llm/providers-changed");
+        assert_eq!(selected_ref, "deepseek/deepseek-live-new");
         h.shutdown().await;
     })
     .await

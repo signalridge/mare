@@ -1,10 +1,18 @@
+# openai/gpt-6.2-sol default
+POST /openai/responses
+{"include":["reasoning.encrypted_content"],"input":[{"content":[{"text":"hi","type":"input_text"}],"role":"user"}],"instructions":"S","max_output_tokens":128000,"model":"gpt-6.2-sol","parallel_tool_calls":true,"prompt_cache_key":"sess-golden","reasoning":{"effort":"medium","summary":"auto"},"store":false,"stream":true,"text":{"verbosity":"low"},"tool_choice":"auto"}
+
 # openai/gpt-6.1-terra default
 POST /openai/responses
 {"include":["reasoning.encrypted_content"],"input":[{"content":[{"text":"hi","type":"input_text"}],"role":"user"}],"instructions":"S","max_output_tokens":128000,"model":"gpt-6.1-terra","parallel_tool_calls":true,"prompt_cache_key":"sess-golden","reasoning":{"effort":"medium","summary":"auto"},"store":false,"stream":true,"text":{"verbosity":"low"},"tool_choice":"auto"}
 
+# openai/gpt-6-luna default
+POST /openai/responses
+{"include":["reasoning.encrypted_content"],"input":[{"content":[{"text":"hi","type":"input_text"}],"role":"user"}],"instructions":"S","max_output_tokens":128000,"model":"gpt-6-luna","parallel_tool_calls":true,"prompt_cache_key":"sess-golden","reasoning":{"effort":"max","summary":"auto"},"store":false,"stream":true,"text":{"verbosity":"low"},"tool_choice":"auto"}
+
 # opencode-go/glm-5.3-flash default
 POST /og/responses
-{"include":["reasoning.encrypted_content"],"input":[{"content":[{"text":"hi","type":"input_text"}],"role":"user"}],"instructions":"S","max_output_tokens":131072,"model":"glm-5.3-flash","parallel_tool_calls":true,"prompt_cache_key":"sess-golden","reasoning":{"effort":"medium"},"store":false,"stream":true,"tool_choice":"auto"}
+{"include":["reasoning.encrypted_content"],"input":[{"content":[{"text":"hi","type":"input_text"}],"role":"user"}],"instructions":"S","max_output_tokens":131072,"model":"glm-5.3-flash","parallel_tool_calls":true,"prompt_cache_key":"sess-golden","reasoning":{"effort":"high"},"store":false,"stream":true,"tool_choice":"auto"}
 
 # myresp/some-model default
 POST /myresp/responses
@@ -12,39 +20,35 @@ POST /myresp/responses
 
 # anthropic/claude-sonnet-5-5 default
 POST /anthropic/v1/messages
-{"max_tokens":64000,"messages":[{"content":[{"cache_control":{"type":"ephemeral"},"text":"hi","type":"text"}],"role":"user"}],"model":"claude-sonnet-5-5","output_config":{"effort":"medium"},"stream":true,"system":[{"cache_control":{"type":"ephemeral"},"text":"S","type":"text"}],"thinking":{"display":"summarized","type":"adaptive"}}
+{"max_tokens":128000,"messages":[{"content":[{"cache_control":{"type":"ephemeral"},"text":"hi","type":"text"}],"role":"user"}],"model":"claude-sonnet-5-5","output_config":{"effort":"medium"},"stream":true,"system":[{"cache_control":{"type":"ephemeral"},"text":"S","type":"text"}],"thinking":{"display":"summarized","type":"adaptive"}}
 
 # anthropic/claude-sonnet-4-5 default
 POST /anthropic/v1/messages
 {"max_tokens":64000,"messages":[{"content":[{"cache_control":{"type":"ephemeral"},"text":"hi","type":"text"}],"role":"user"}],"model":"claude-sonnet-4-5","stream":true,"system":[{"cache_control":{"type":"ephemeral"},"text":"S","type":"text"}],"thinking":{"budget_tokens":10240,"display":"summarized","type":"enabled"}}
 
-# google/gemini-3-pro-preview default
-POST /google/models/gemini-3-pro-preview:streamGenerateContent?alt=sse
-{"contents":[{"parts":[{"text":"hi"}],"role":"user"}],"generationConfig":{"maxOutputTokens":65536,"thinkingConfig":{"includeThoughts":true,"thinkingLevel":"low"}},"systemInstruction":{"parts":[{"text":"S"}]}}
+# google/gemini-4-argon default
+POST /google/models/gemini-4-argon:streamGenerateContent?alt=sse
+{"contents":[{"parts":[{"text":"hi"}],"role":"user"}],"generationConfig":{"maxOutputTokens":32768,"thinkingConfig":{"includeThoughts":true,"thinkingLevel":"medium"}},"systemInstruction":{"parts":[{"text":"S"}]}}
 
-# google/gemini-2.5-pro default
-POST /google/models/gemini-2.5-pro:streamGenerateContent?alt=sse
+# google/gemini-3.5-flash-lite default
+POST /google/models/gemini-3.5-flash-lite:streamGenerateContent?alt=sse
 {"contents":[{"parts":[{"text":"hi"}],"role":"user"}],"generationConfig":{"maxOutputTokens":65536,"thinkingConfig":{"includeThoughts":true,"thinkingBudget":8192}},"systemInstruction":{"parts":[{"text":"S"}]}}
 
-# deepseek/deepseek-reasoner default
-POST /compat/chat/completions
-{"messages":[{"content":"S","role":"system"},{"content":"hi","role":"user"}],"model":"deepseek-reasoner","stream":true,"stream_options":{"include_usage":true},"thinking":{"type":"enabled"}}
+# deepseek/deepseek-flash default
+POST /compat/responses
+{"include":["reasoning.encrypted_content"],"input":[{"content":[{"text":"hi","type":"input_text"}],"role":"user"}],"instructions":"S","max_output_tokens":393216,"model":"deepseek-flash","parallel_tool_calls":true,"prompt_cache_key":"sess-golden","reasoning":{"effort":"high"},"store":false,"stream":true,"tool_choice":"auto"}
 
-# openrouter/anthropic/claude-sonnet-5-5 default
+# openrouter/anthropic/claude-sonnet-5.5 default
 POST /openrouter/chat/completions
-{"messages":[{"content":[{"cache_control":{"type":"ephemeral"},"text":"S","type":"text"}],"role":"system"},{"content":[{"cache_control":{"type":"ephemeral"},"text":"hi","type":"text"}],"role":"user"}],"model":"anthropic/claude-sonnet-5-5","reasoning":{"effort":"medium"},"stream":true,"stream_options":{"include_usage":true}}
+{"messages":[{"content":[{"cache_control":{"type":"ephemeral"},"text":"S","type":"text"}],"role":"system"},{"content":[{"cache_control":{"type":"ephemeral"},"text":"hi","type":"text"}],"role":"user"}],"model":"anthropic/claude-sonnet-5.5","reasoning":{"effort":"medium"},"stream":true,"stream_options":{"include_usage":true}}
 
 # localre/qwen3 default
 POST /localre/chat/completions
 {"messages":[{"content":"S","role":"system"},{"content":"hi","role":"user"}],"model":"qwen3","reasoning_effort":"medium","stream":true,"stream_options":{"include_usage":true}}
 
-# deepseek/deepseek-chat default
-POST /compat/chat/completions
-{"messages":[{"content":"S","role":"system"},{"content":"hi","role":"user"}],"model":"deepseek-chat","stream":true,"stream_options":{"include_usage":true}}
-
-# openrouter/deepseek/deepseek-chat default
-POST /openrouter/chat/completions
-{"messages":[{"content":"S","role":"system"},{"content":"hi","role":"user"}],"model":"deepseek/deepseek-chat","stream":true,"stream_options":{"include_usage":true}}
+# localre/qwen3-plain default
+POST /localre/chat/completions
+{"messages":[{"content":"S","role":"system"},{"content":"hi","role":"user"}],"model":"qwen3-plain","stream":true,"stream_options":{"include_usage":true}}
 
 # openai/gpt-6.1-terra request off
 POST /openai/responses
@@ -60,27 +64,27 @@ POST /myresp/responses
 
 # anthropic/claude-sonnet-5-5 request off
 POST /anthropic/v1/messages
-{"max_tokens":64000,"messages":[{"content":[{"cache_control":{"type":"ephemeral"},"text":"hi","type":"text"}],"role":"user"}],"model":"claude-sonnet-5-5","stream":true,"system":[{"cache_control":{"type":"ephemeral"},"text":"S","type":"text"}]}
+{"max_tokens":128000,"messages":[{"content":[{"cache_control":{"type":"ephemeral"},"text":"hi","type":"text"}],"role":"user"}],"model":"claude-sonnet-5-5","stream":true,"system":[{"cache_control":{"type":"ephemeral"},"text":"S","type":"text"}]}
 
 # anthropic/claude-sonnet-4-5 request off
 POST /anthropic/v1/messages
 {"max_tokens":64000,"messages":[{"content":[{"cache_control":{"type":"ephemeral"},"text":"hi","type":"text"}],"role":"user"}],"model":"claude-sonnet-4-5","stream":true,"system":[{"cache_control":{"type":"ephemeral"},"text":"S","type":"text"}]}
 
-# google/gemini-3-pro-preview request off
-POST /google/models/gemini-3-pro-preview:streamGenerateContent?alt=sse
-{"contents":[{"parts":[{"text":"hi"}],"role":"user"}],"generationConfig":{"maxOutputTokens":65536},"systemInstruction":{"parts":[{"text":"S"}]}}
+# google/gemini-4-argon request off
+POST /google/models/gemini-4-argon:streamGenerateContent?alt=sse
+{"contents":[{"parts":[{"text":"hi"}],"role":"user"}],"generationConfig":{"maxOutputTokens":32768},"systemInstruction":{"parts":[{"text":"S"}]}}
 
-# google/gemini-2.5-pro request off
-POST /google/models/gemini-2.5-pro:streamGenerateContent?alt=sse
+# google/gemini-3.5-flash-lite request off
+POST /google/models/gemini-3.5-flash-lite:streamGenerateContent?alt=sse
 {"contents":[{"parts":[{"text":"hi"}],"role":"user"}],"generationConfig":{"maxOutputTokens":65536,"thinkingConfig":{"thinkingBudget":0}},"systemInstruction":{"parts":[{"text":"S"}]}}
 
-# google/gemini-2.5-flash request off
-POST /google/models/gemini-2.5-flash:streamGenerateContent?alt=sse
-{"contents":[{"parts":[{"text":"hi"}],"role":"user"}],"generationConfig":{"maxOutputTokens":65536,"thinkingConfig":{"thinkingBudget":0}},"systemInstruction":{"parts":[{"text":"S"}]}}
+# deepseek/deepseek-flash request off
+POST /compat/responses
+{"include":["reasoning.encrypted_content"],"input":[{"content":[{"text":"hi","type":"input_text"}],"role":"user"}],"instructions":"S","max_output_tokens":393216,"model":"deepseek-flash","parallel_tool_calls":true,"prompt_cache_key":"sess-golden","reasoning":{"effort":"none"},"store":false,"stream":true,"tool_choice":"auto"}
 
-# openrouter/anthropic/claude-sonnet-5-5 request off
+# openrouter/anthropic/claude-sonnet-5.5 request off
 POST /openrouter/chat/completions
-{"messages":[{"content":[{"cache_control":{"type":"ephemeral"},"text":"S","type":"text"}],"role":"system"},{"content":[{"cache_control":{"type":"ephemeral"},"text":"hi","type":"text"}],"role":"user"}],"model":"anthropic/claude-sonnet-5-5","stream":true,"stream_options":{"include_usage":true}}
+{"messages":[{"content":[{"cache_control":{"type":"ephemeral"},"text":"S","type":"text"}],"role":"system"},{"content":[{"cache_control":{"type":"ephemeral"},"text":"hi","type":"text"}],"role":"user"}],"model":"anthropic/claude-sonnet-5.5","stream":true,"stream_options":{"include_usage":true}}
 
 # localre/qwen3 request off
 POST /localre/chat/completions
@@ -92,31 +96,43 @@ POST /openai/responses
 
 # anthropic/claude-sonnet-5-5 request high
 POST /anthropic/v1/messages
-{"max_tokens":64000,"messages":[{"content":[{"cache_control":{"type":"ephemeral"},"text":"hi","type":"text"}],"role":"user"}],"model":"claude-sonnet-5-5","output_config":{"effort":"high"},"stream":true,"system":[{"cache_control":{"type":"ephemeral"},"text":"S","type":"text"}],"thinking":{"display":"summarized","type":"adaptive"}}
+{"max_tokens":128000,"messages":[{"content":[{"cache_control":{"type":"ephemeral"},"text":"hi","type":"text"}],"role":"user"}],"model":"claude-sonnet-5-5","output_config":{"effort":"high"},"stream":true,"system":[{"cache_control":{"type":"ephemeral"},"text":"S","type":"text"}],"thinking":{"display":"summarized","type":"adaptive"}}
 
-# google/gemini-3-pro-preview request high
-POST /google/models/gemini-3-pro-preview:streamGenerateContent?alt=sse
-{"contents":[{"parts":[{"text":"hi"}],"role":"user"}],"generationConfig":{"maxOutputTokens":65536,"thinkingConfig":{"includeThoughts":true,"thinkingLevel":"high"}},"systemInstruction":{"parts":[{"text":"S"}]}}
+# google/gemini-4-argon request high
+POST /google/models/gemini-4-argon:streamGenerateContent?alt=sse
+{"contents":[{"parts":[{"text":"hi"}],"role":"user"}],"generationConfig":{"maxOutputTokens":32768,"thinkingConfig":{"includeThoughts":true,"thinkingLevel":"high"}},"systemInstruction":{"parts":[{"text":"S"}]}}
 
-# openrouter/anthropic/claude-sonnet-5-5 request high
+# openrouter/anthropic/claude-sonnet-5.5 request high
 POST /openrouter/chat/completions
-{"messages":[{"content":[{"cache_control":{"type":"ephemeral"},"text":"S","type":"text"}],"role":"system"},{"content":[{"cache_control":{"type":"ephemeral"},"text":"hi","type":"text"}],"role":"user"}],"model":"anthropic/claude-sonnet-5-5","reasoning":{"effort":"high"},"stream":true,"stream_options":{"include_usage":true}}
+{"messages":[{"content":[{"cache_control":{"type":"ephemeral"},"text":"S","type":"text"}],"role":"system"},{"content":[{"cache_control":{"type":"ephemeral"},"text":"hi","type":"text"}],"role":"user"}],"model":"anthropic/claude-sonnet-5.5","reasoning":{"effort":"high"},"stream":true,"stream_options":{"include_usage":true}}
 
 # localre/qwen3 request high
 POST /localre/chat/completions
 {"messages":[{"content":"S","role":"system"},{"content":"hi","role":"user"}],"model":"qwen3","reasoning_effort":"high","stream":true,"stream_options":{"include_usage":true}}
 
-# deepseek/deepseek-chat request high
-POST /compat/chat/completions
-{"messages":[{"content":"S","role":"system"},{"content":"hi","role":"user"}],"model":"deepseek-chat","stream":true,"stream_options":{"include_usage":true}}
+# localre/qwen3-plain request high
+POST /localre/chat/completions
+{"messages":[{"content":"S","role":"system"},{"content":"hi","role":"user"}],"model":"qwen3-plain","stream":true,"stream_options":{"include_usage":true}}
+
+# anthropic/claude-fable-5-2 request xhigh
+POST /anthropic/v1/messages
+{"max_tokens":128000,"messages":[{"content":[{"cache_control":{"type":"ephemeral"},"text":"hi","type":"text"}],"role":"user"}],"model":"claude-fable-5-2","output_config":{"effort":"xhigh"},"stream":true,"system":[{"cache_control":{"type":"ephemeral"},"text":"S","type":"text"}],"thinking":{"display":"summarized","type":"adaptive"}}
+
+# anthropic/claude-fable-5-2 request max
+POST /anthropic/v1/messages
+{"max_tokens":128000,"messages":[{"content":[{"cache_control":{"type":"ephemeral"},"text":"hi","type":"text"}],"role":"user"}],"model":"claude-fable-5-2","output_config":{"effort":"max"},"stream":true,"system":[{"cache_control":{"type":"ephemeral"},"text":"S","type":"text"}],"thinking":{"display":"summarized","type":"adaptive"}}
 
 # openai/gpt-6-luna session max
 POST /openai/responses
-{"include":["reasoning.encrypted_content"],"input":[{"content":[{"text":"hi","type":"input_text"}],"role":"user"}],"instructions":"S","max_output_tokens":128000,"model":"gpt-6-luna","parallel_tool_calls":true,"prompt_cache_key":"sess-golden","reasoning":{"effort":"high","summary":"auto"},"store":false,"stream":true,"text":{"verbosity":"low"},"tool_choice":"auto"}
+{"include":["reasoning.encrypted_content"],"input":[{"content":[{"text":"hi","type":"input_text"}],"role":"user"}],"instructions":"S","max_output_tokens":128000,"model":"gpt-6-luna","parallel_tool_calls":true,"prompt_cache_key":"sess-golden","reasoning":{"effort":"max","summary":"auto"},"store":false,"stream":true,"text":{"verbosity":"low"},"tool_choice":"auto"}
 
-# google/gemini-3-pro-preview session medium
-POST /google/models/gemini-3-pro-preview:streamGenerateContent?alt=sse
-{"contents":[{"parts":[{"text":"hi"}],"role":"user"}],"generationConfig":{"maxOutputTokens":65536,"thinkingConfig":{"includeThoughts":true,"thinkingLevel":"low"}},"systemInstruction":{"parts":[{"text":"S"}]}}
+# google/gemini-4-argon session xhigh
+POST /google/models/gemini-4-argon:streamGenerateContent?alt=sse
+{"contents":[{"parts":[{"text":"hi"}],"role":"user"}],"generationConfig":{"maxOutputTokens":32768,"thinkingConfig":{"includeThoughts":true,"thinkingLevel":"high"}},"systemInstruction":{"parts":[{"text":"S"}]}}
+
+# deepseek/deepseek-flash session xhigh
+POST /compat/responses
+{"include":["reasoning.encrypted_content"],"input":[{"content":[{"text":"hi","type":"input_text"}],"role":"user"}],"instructions":"S","max_output_tokens":393216,"model":"deepseek-flash","parallel_tool_calls":true,"prompt_cache_key":"sess-golden","reasoning":{"effort":"max"},"store":false,"stream":true,"tool_choice":"auto"}
 
 # opencode-go/deepseek-v4.1-flash session xhigh
 POST /og/responses
@@ -142,13 +158,13 @@ POST /anthropic/v1/messages
 POST /openai/responses
 {"include":["reasoning.encrypted_content"],"input":[{"content":[{"text":"hi","type":"input_text"}],"role":"user"}],"instructions":"S","max_output_tokens":1000,"model":"gpt-6.1-terra","parallel_tool_calls":true,"prompt_cache_key":"sess-golden","reasoning":{"effort":"high","summary":"auto"},"store":false,"stream":true,"text":{"verbosity":"low"},"tool_choice":"auto"}
 
-# google/gemini-2.5-pro request high 1000
-POST /google/models/gemini-2.5-pro:streamGenerateContent?alt=sse
+# google/gemini-3.5-flash-lite request high 1000
+POST /google/models/gemini-3.5-flash-lite:streamGenerateContent?alt=sse
 {"contents":[{"parts":[{"text":"hi"}],"role":"user"}],"generationConfig":{"maxOutputTokens":1000,"thinkingConfig":{"includeThoughts":true,"thinkingBudget":24576}},"systemInstruction":{"parts":[{"text":"S"}]}}
 
-# deepseek/deepseek-reasoner request high 1000
-POST /compat/chat/completions
-{"max_tokens":1000,"messages":[{"content":"S","role":"system"},{"content":"hi","role":"user"}],"model":"deepseek-reasoner","stream":true,"stream_options":{"include_usage":true},"thinking":{"type":"enabled"}}
+# deepseek/deepseek-flash request high 1000
+POST /compat/responses
+{"include":["reasoning.encrypted_content"],"input":[{"content":[{"text":"hi","type":"input_text"}],"role":"user"}],"instructions":"S","max_output_tokens":1000,"model":"deepseek-flash","parallel_tool_calls":true,"prompt_cache_key":"sess-golden","reasoning":{"effort":"high"},"store":false,"stream":true,"tool_choice":"auto"}
 
 # openai/gpt-6.1-terra compact
 POST /openai/responses/compact

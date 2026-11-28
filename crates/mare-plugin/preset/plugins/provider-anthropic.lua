@@ -3,7 +3,7 @@
 -- budget-based thinking (older models)
 local BUDGETS = { minimal = 1024, low = 4096, medium = 10240, high = 24576, xhigh = 32768 }
 -- adaptive thinking effort (newer models)
-local ADAPTIVE = { minimal = "low", low = "low", medium = "medium", high = "high", xhigh = "max" }
+local ADAPTIVE = { minimal = "low", low = "low", medium = "medium", high = "high", xhigh = "xhigh", max = "max" }
 
 return {
 	name = "provider-anthropic",
@@ -87,10 +87,14 @@ return {
 				end
 				local out = {}
 				for _, m in ipairs(items) do
+					local ctx_win = tonumber(m.max_input_tokens)
+					if ctx_win and ctx_win < 2048 then
+						ctx_win = nil
+					end
 					out[#out + 1] = {
 						id = m.id,
 						name = type(m.display_name) == "string" and m.display_name or nil,
-						context_window = tonumber(m.max_input_tokens),
+						context_window = ctx_win,
 						max_output = tonumber(m.max_tokens),
 					}
 				end
@@ -101,7 +105,7 @@ return {
 		local function build_anthropic_param_rules(provider_scope, budgets_cfg, display_cfg, headroom)
 			local display = (display_cfg == "summarized" or display_cfg == "omitted") and display_cfg or nil
 			local adaptive = { { value = "off", wire = { anthropic = {} } } }
-			for _, e in ipairs({ "minimal", "low", "medium", "high", "xhigh" }) do
+			for _, e in ipairs({ "minimal", "low", "medium", "high", "xhigh", "max" }) do
 				local wire = { ["thinking.type"] = "adaptive", ["output_config.effort"] = ADAPTIVE[e] }
 				if display then
 					wire["thinking.display"] = display
@@ -400,7 +404,8 @@ return {
 			return wire_stream(endpoint, req, sink)
 		end
 
-		local efforts = { "off", "low", "medium", "high", "xhigh" }
+		local efforts = { "off", "low", "medium", "high", "xhigh", "max" }
+		local always_on_efforts = { "low", "medium", "high", "xhigh", "max" }
 		llm:register_provider({
 			warm_url = function()
 				return (cfg.base_url or "https://api.anthropic.com")
@@ -408,12 +413,30 @@ return {
 			provider = "anthropic",
 			label = "Anthropic",
 			wire = "anthropic-messages",
-			key_prefixes = { "sk-ant-" },
+			key_prefixes = { "sk-ant-api" },
 			endpoint = endpoint,
 			login = {
 				methods = { "api_key" },
 				run = function(lio)
-					llm:login_api_key("anthropic", "Anthropic API key", lio)
+					lio = llm:login_io(lio)
+					local key = lio.key
+						or lio.ask("Anthropic API key", { secret = true, placeholder = "sk-ant-api..." })
+					key = key and key:match("^%s*(.-)%s*$")
+					if not key or key == "" then
+						lib.fail("llm.login_failed", "no API key given")
+					end
+					if key:sub(1, 10) == "sk-ant-oat" then
+						lib.fail(
+							"llm.login_failed",
+							"setup-token (sk-ant-oat...) is not an Anthropic API key — create an API key (sk-ant-api...) at console.anthropic.com"
+						)
+					end
+					local next_lio = {}
+					for k, v in pairs(lio) do
+						next_lio[k] = v
+					end
+					next_lio.key = key
+					llm:login_api_key("anthropic", "Anthropic API key", next_lio)
 				end,
 			},
 			catalog_target = function()
@@ -453,55 +476,37 @@ return {
 				haiku = { family = "haiku" },
 			},
 			stream = stream,
+			-- Offline fallback seeds keep only fields absent from the bundled models.dev snapshot
+			-- (adaptive thinking mode, effort lists, default_effort); names, limits, modalities,
+			-- reasoning flags and pricing are hydrated from preset/resources/models_dev.json.gz (MIT).
 			models = {
 				{
-					model_id = "claude-opus-5-5",
-					name = "Claude Opus 5.5",
-					context_window = 200000,
-					max_output = 64000,
-					reasoning = true,
+					model_id = "claude-fable-5-2",
 					adaptive = true,
-					efforts = efforts,
-					cost = { input = 5, output = 25, cache_read = 0.5, cache_write = 6.25 },
+					-- Fable 5.2 always thinks (rejects thinking.type = "disabled"); default high.
+					efforts = always_on_efforts,
+					default_effort = "high",
+				},
+				{
+					model_id = "claude-opus-5-5",
+					adaptive = true,
+					efforts = always_on_efforts,
 				},
 				{
 					model_id = "claude-sonnet-5-5",
-					name = "Claude Sonnet 5.5",
-					context_window = 200000,
-					max_output = 64000,
-					reasoning = true,
 					adaptive = true,
 					efforts = efforts,
-					cost = { input = 3, output = 15, cache_read = 0.3, cache_write = 3.75 },
 				},
 				{
 					model_id = "claude-haiku-5-5",
-					name = "Claude Haiku 5.5",
-					context_window = 200000,
-					max_output = 64000,
-					reasoning = true,
 					adaptive = true,
 					efforts = efforts,
-					cost = { input = 1, output = 5, cache_read = 0.1, cache_write = 1.25 },
-				},
-				{
-					model_id = "claude-fable-5-1",
-					name = "Claude Fable 5.1",
-					context_window = 200000,
-					max_output = 64000,
-					reasoning = true,
-					adaptive = true,
-					efforts = efforts,
-					cost = { input = 3, output = 15, cache_read = 0.3, cache_write = 3.75 },
 				},
 				{
 					model_id = "claude-sonnet-4-5",
-					name = "Claude Sonnet 4.5",
-					context_window = 200000,
-					max_output = 64000,
-					reasoning = true,
+					-- Legacy budget-thinking tier (non-adaptive); kept visible despite models.dev deprecated status.
+					hidden = false,
 					efforts = { "off", "minimal", "low", "medium", "high", "xhigh" },
-					cost = { input = 3, output = 15, cache_read = 0.3, cache_write = 3.75 },
 				},
 			},
 		})

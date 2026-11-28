@@ -99,6 +99,73 @@ pub fn news_text() -> std::borrow::Cow<'static, str> {
         std::borrow::Cow::Owned(out)
     }
 }
+
+/// Maximum decompressed size of a read-only plugin resource (32 MiB).
+const MAX_PLUGIN_RESOURCE_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Validate a relative resource path (no leading slash, backslashes, NUL, or `..` components).
+pub(crate) fn validate_resource_path(rel: &str) -> Result<String, String> {
+    if rel.is_empty() || rel.starts_with('/') || rel.contains('\\') || rel.contains('\0') {
+        return Err(format!("invalid resource path: {rel:?}"));
+    }
+    let mut parts = Vec::new();
+    for comp in std::path::Path::new(rel).components() {
+        match comp {
+            std::path::Component::Normal(seg) => parts.push(seg.to_string_lossy().into_owned()),
+            _ => return Err(format!("invalid resource path: {rel:?}")),
+        }
+    }
+    if parts.is_empty() {
+        return Err(format!("invalid resource path: {rel:?}"));
+    }
+    Ok(parts.join("/"))
+}
+
+/// Decode raw resource bytes into UTF-8 text, transparently gunzipping `.gz` files.
+pub(crate) fn decode_resource_bytes(rel: &str, bytes: &[u8]) -> Result<String, String> {
+    use std::io::Read as _;
+    if rel.ends_with(".gz") {
+        let decoder = flate2::read::GzDecoder::new(std::io::Cursor::new(bytes));
+        let mut buf = Vec::new();
+        decoder
+            .take(MAX_PLUGIN_RESOURCE_BYTES + 1)
+            .read_to_end(&mut buf)
+            .map_err(|e| format!("decompressing resource {rel}: {e}"))?;
+        if (buf.len() as u64) > MAX_PLUGIN_RESOURCE_BYTES {
+            return Err(format!("resource {rel} exceeds maximum decompressed size"));
+        }
+        String::from_utf8(buf).map_err(|e| format!("resource {rel} is not valid UTF-8: {e}"))
+    } else {
+        if (bytes.len() as u64) > MAX_PLUGIN_RESOURCE_BYTES {
+            return Err(format!("resource {rel} exceeds maximum size"));
+        }
+        String::from_utf8(bytes.to_vec()).map_err(|e| format!("resource {rel} is not valid UTF-8: {e}"))
+    }
+}
+
+/// Read a built-in read-only resource under `preset/resources/<rel>` (gunzipping `.gz` files
+/// transparently). Returns `Ok(None)` when the resource does not exist.
+pub fn read_builtin_resource(rel: &str) -> Result<Option<String>, String> {
+    let norm = validate_resource_path(rel)?;
+    #[cfg(debug_assertions)]
+    {
+        let root = std::path::Path::new(mare_macro::preset_dir!()).join("resources");
+        let path = root.join(&norm);
+        match std::fs::read(&path) {
+            Ok(bytes) => decode_resource_bytes(&norm, &bytes).map(Some),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("reading preset/resources/{norm}: {e}")),
+        }
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        const BUILTIN_RESOURCES: &[(&str, &[u8])] = include!(concat!(env!("OUT_DIR"), "/builtin_resources.rs"));
+        match BUILTIN_RESOURCES.iter().find(|(k, _)| *k == norm.as_str()) {
+            Some((_, bytes)) => decode_resource_bytes(&norm, bytes).map(Some),
+            None => Ok(None),
+        }
+    }
+}
 /// LuaLS definitions, `(path under types/, text)`: the entry `mare.lua` (`---@class mare` and
 /// its scalar fields) and one `mare/<namespace>.lua` per namespace. A test keeps the list
 /// equal to `preset/types/` (`tests::types_list_matches_the_directory`).
@@ -1146,6 +1213,44 @@ mod tests {
         }
         // Verify runtime extraction sources (deflate-archived in release builds) also match disk.
         let preset_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("preset");
+        assert!(super::read_builtin_resource("../NEWS.md").is_err(), "path traversal must be rejected");
+        assert_eq!(super::read_builtin_resource("does-not-exist.json").unwrap(), None);
+        let bundled_mdev_text = super::read_builtin_resource("models_dev.json.gz")
+            .expect("read built-in models_dev.json.gz")
+            .expect("built-in models_dev.json.gz present");
+        let bundled_mdev: serde_json::Value =
+            serde_json::from_str(&bundled_mdev_text).expect("valid bundled models_dev JSON");
+        assert_eq!(bundled_mdev["source"], "https://models.dev/api.json");
+        assert!(bundled_mdev["license"].as_str().unwrap_or("").contains("MIT"));
+        let providers = bundled_mdev["providers"].as_object().expect("providers map");
+        for pid in [
+            "anthropic",
+            "deepseek",
+            "google",
+            "kimi-code-plan-cn",
+            "kimi-code-plan-global",
+            "minimax",
+            "minimax-cn",
+            "moonshotai",
+            "moonshotai-cn",
+            "openai",
+            "opencode-go",
+            "openrouter",
+            "zai",
+            "zhipuai",
+        ] {
+            assert!(providers.contains_key(pid), "bundled models.dev snapshot missing `{pid}`");
+        }
+        let reasoning_options_count: usize = providers
+            .values()
+            .filter_map(|p| p.as_object())
+            .flat_map(|pm| pm.values())
+            .filter(|m| m.get("reasoning_options").and_then(|v| v.as_array()).is_some_and(|a| !a.is_empty()))
+            .count();
+        assert!(
+            reasoning_options_count > 100,
+            "bundled models.dev snapshot must preserve reasoning_options metadata (got {reasoning_options_count})"
+        );
         assert_eq!(
             super::loader::builtin_text("agent").unwrap().as_ref(),
             std::fs::read_to_string(preset_root.join("plugins/agent.lua")).unwrap()
