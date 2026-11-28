@@ -210,3 +210,69 @@ async fn http_client_blocks_cross_origin_redirect_without_leaking_custom_headers
     origin_task.abort();
     target_task.abort();
 }
+
+async fn status_body_server(
+    status: &'static str,
+    content_type: &'static str,
+    body: &'static str,
+) -> (u16, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else { break };
+            let mut buf = vec![0u8; 8192];
+            let _ = sock.read(&mut buf).await;
+            let resp = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+        }
+    });
+    (port, task)
+}
+
+#[tokio::test]
+async fn repro_318_legacy_http_400_expired_session_maps_to_session_expired() {
+    let body =
+        r#"{"jsonrpc":"2.0","error":{"code":-32000,"message":"Bad Request: No valid session ID provided"},"id":null}"#;
+    let (port, task) = status_body_server("400 Bad Request", "application/json", body).await;
+    let guard = ReplyGuard::new(crate::http::build_client(crate::http::base_builder().unwrap()).unwrap());
+    let req_msg: rmcp::model::ClientJsonRpcMessage = serde_json::from_value(
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{}}}),
+    )
+    .unwrap();
+    let uri: Arc<str> = format!("http://127.0.0.1:{port}/mcp").into();
+
+    let err =
+        guard.post_message(uri, req_msg, Some(Arc::from("stale-session-id")), None, HashMap::new()).await.unwrap_err();
+    task.abort();
+    assert!(
+        matches!(err, StreamableHttpError::SessionExpired),
+        "legacy HTTP 400 explicit session expiry with session_id should map to SessionExpired, got: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn unrelated_http_400_json_error_does_not_map_to_session_expired() {
+    let body = r#"{"jsonrpc":"2.0","error":{"code":-32602,"message":"Bad Request: invalid tool arguments"},"id":1}"#;
+    let (port, task) = status_body_server("400 Bad Request", "application/json", body).await;
+    let guard = ReplyGuard::new(crate::http::build_client(crate::http::base_builder().unwrap()).unwrap());
+    let req_msg: rmcp::model::ClientJsonRpcMessage = serde_json::from_value(
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{}}}),
+    )
+    .unwrap();
+    let uri: Arc<str> = format!("http://127.0.0.1:{port}/mcp").into();
+
+    let resp = guard
+        .post_message(uri, req_msg, Some(Arc::from("active-session-id")), None, HashMap::new())
+        .await
+        .expect("unrelated JSON-RPC 400 error should pass through as Json error, not SessionExpired");
+    task.abort();
+    assert!(
+        matches!(resp, StreamableHttpPostResponse::Json(rmcp::model::ServerJsonRpcMessage::Error(_), _)),
+        "expected JSON-RPC error response, got: {resp:?}"
+    );
+}
