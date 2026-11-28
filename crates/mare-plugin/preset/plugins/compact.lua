@@ -153,6 +153,11 @@ return {
 
 		-- Synchronous config validation during `apply` via the lightweight shared budget module.
 		local budget = require("compact.budget")
+		local function is_headroom_explicit()
+			local raw = mare.config and mare.config.plugins and mare.config.plugins.compact
+			return type(raw) == "table" and raw.headroom_tokens ~= nil
+		end
+		S.headroom_explicit = is_headroom_explicit
 		local valid, config_error = budget.validate_config(cfg)
 		if not valid then
 			error(config_error, 0)
@@ -187,7 +192,7 @@ return {
 			if not model then
 				return
 			end
-			local _, err = budget.compute(cfg, model)
+			local _, err = budget.compute(cfg, model, nil, is_headroom_explicit())
 			if err then
 				ctx.bus:emit("host/notice", { level = "error", text = err })
 				if mare.ui.connected() then

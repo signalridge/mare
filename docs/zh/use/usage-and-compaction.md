@@ -25,7 +25,7 @@ mare 按会话累计 token 与费用并记录服务商额度窗口（`usage`）�
 
 `min(configured_threshold, context_window - max_output - headroom_tokens)`
 
-默认 `threshold_ratio = 0.8`，`headroom_tokens = 32768`。用量超过阈值的 90% 时状态栏会给出提醒。也可以随时手动运行：
+默认 `threshold_ratio = 0.8`，`headroom_tokens = 32768`（未显式配置时，在较小上下文窗口上会自动按 `context_window - max_output` 的 20% 缩放，避免压力预算归零）。用量超过阈值的 90% 时状态栏会给出提醒。也可以随时手动运行：
 
 ```text
 /compact

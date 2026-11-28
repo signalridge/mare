@@ -25,7 +25,7 @@ mare はモデルリクエストを送る直前に、種別ごとの優先順位
 
 `min(configured_threshold, context_window - max_output - headroom_tokens)`
 
-既定値は `threshold_ratio = 0.8`、`headroom_tokens = 32768` です。使用量がしきい値の 90% を超えるとステータスラインに警告が出ます。手動で実行したい場合はいつでも `/compact` を呼べます。
+既定値は `threshold_ratio = 0.8`、`headroom_tokens = 32768` です（明示指定されていない場合、小さいコンテキストウィンドウでは `context_window - max_output` の 20% に縮小され、プレッシャー予算が枯渇しないようにします）。使用量がしきい値の 90% を超えるとステータスラインに警告が出ます。手動で実行したい場合はいつでも `/compact` を呼べます。
 
 ```text
 /compact
