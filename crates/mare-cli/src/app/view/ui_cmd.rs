@@ -144,10 +144,12 @@ impl App {
             UiCmd::BlockUpdate { id, patch } => {
                 if let Some(index) = self.blocks.iter().rposition(|block| block.id == id) {
                     let block = &mut self.blocks[index];
-                    let replaces_layout = patch.node.is_some()
+                    let visible_change = patch.node.is_some()
                         || patch.markdown.is_some()
-                        || patch.expanded.is_some()
-                        || patch.kind.is_some();
+                        || patch.kind.is_some()
+                        || (patch.expanded.is_some()
+                            && (self.expand_all || (block.kind == "reasoning" && self.show_reasoning)));
+                    let replaces_layout = visible_change || patch.expanded.is_some();
                     let replaces_partial = block.partial > 0 && replaces_layout;
                     block.apply(patch);
                     if replaces_partial {
@@ -157,10 +159,12 @@ impl App {
                         block.sc = Default::default();
                     }
                     if index < self.committed || replaces_partial {
-                        // Late asynchronous presentation updates use the same bounded,
-                        // debounced history replay as resize/theme changes.
                         self.transcript.invalidate_cache();
-                        self.reflow.invalidated(Instant::now());
+                        if visible_change || replaces_partial {
+                            // Late asynchronous presentation updates use the same bounded,
+                            // debounced history replay as resize/theme changes.
+                            self.reflow.invalidated(Instant::now());
+                        }
                     }
                 }
             }
