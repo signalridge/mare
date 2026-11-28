@@ -739,3 +739,57 @@ fn shape_and_validate_reuses_cached_validator_and_tracks_reshaping() {
     let mut res_bad = json!({ "bindings": "nope" });
     assert!(wrapped_schema.shape_and_validate_wrapped_result(&mut res_bad, &result_schema, 10_000).is_err());
 }
+
+#[test]
+fn compile_external_accepts_standard_keywords_and_rejects_unsafe_schemas() {
+    let schema = Schema::compile_external(json!({
+        "type": "object",
+        "$defs": {
+            "tag": { "type": "string", "pattern": "^[a-z]+$" }
+        },
+        "properties": {
+            "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
+            "filter": { "anyOf": [{ "$ref": "#/$defs/tag" }, { "type": "null" }] },
+            "email": { "type": "string", "format": "email" },
+            "extra": { "allOf": [{ "type": "string" }, { "minLength": 2 }] }
+        },
+        "required": ["limit"]
+    }))
+    .expect("standard external JSON Schema should compile");
+    assert!(schema.is_external());
+    assert!(schema.is_validator_built());
+
+    assert!(schema.validate(&json!({ "limit": 5, "filter": "ok", "email": "a@b.com", "extra": "hi" })).is_ok());
+    assert!(schema.validate(&json!({ "limit": 1, "filter": null })).is_ok());
+    assert!(schema.validate(&json!({ "limit": 0 })).is_err(), "minimum: 1 must be enforced");
+    assert!(schema.validate(&json!({ "limit": 1, "filter": "BAD" })).is_err(), "$defs pattern must be enforced");
+    assert!(schema.validate(&json!({ "limit": 1, "extra": "a" })).is_err(), "allOf minLength must be enforced");
+
+    // Non-object root rejected.
+    assert!(Schema::compile_external(json!({ "type": "array", "items": { "type": "string" } })).is_err());
+    // Remote $ref rejected offline.
+    assert!(
+        Schema::compile_external(json!({
+            "type": "object",
+            "properties": { "a": { "$ref": "https://example.invalid/a.json" } }
+        }))
+        .is_err()
+    );
+    // Same-instance $ref cycle rejected.
+    assert!(
+        Schema::compile_external(json!({
+            "type": "object",
+            "$defs": { "loop": { "$ref": "#/$defs/loop" } },
+            "properties": { "a": { "$ref": "#/$defs/loop" } }
+        }))
+        .is_err()
+    );
+    // Built-in compile remains strict.
+    assert!(
+        Schema::compile(json!({
+            "type": "object",
+            "properties": { "limit": { "type": "integer", "minimum": 1 } }
+        }))
+        .is_err()
+    );
+}

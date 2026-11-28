@@ -692,3 +692,165 @@ async fn mcp_disconnect_disposes_client_effect_without_leaking() {
     })
     .await
 }
+
+/// Issue #187: valid standard JSON Schema MCP input schemas (using `$defs`/`$ref`, `anyOf`,
+/// `minimum`, `pattern`, `format`) must register cleanly, enforce their constraints at call time,
+/// and remain compatible with `tools:shadow` and `tools:bind_declarations`.
+#[tokio::test]
+async fn mcp_registers_tools_with_standard_json_schema_keywords() {
+    local(async {
+        let env = TestEnv::new().await;
+        let script = env.home.path().join("std_schema_mcp.py");
+        std::fs::write(
+            &script,
+            r##"import json, sys
+for line in sys.stdin:
+    msg = json.loads(line)
+    if "id" not in msg:
+        continue
+    mid, meth = msg["id"], msg["method"]
+    if meth == "initialize":
+        res = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}, "serverInfo": {"name": "std", "version": "1"}}
+    elif meth == "tools/list":
+        res = {"tools": [{
+            "name": "query_items",
+            "description": "Query items with standard JSON Schema",
+            "inputSchema": {
+                "type": "object",
+                "$defs": {"tag": {"type": "string", "pattern": "^[a-z]+$"}},
+                "properties": {
+                    "limit": {"type": "integer", "minimum": 1},
+                    "filter": {"anyOf": [{"$ref": "#/$defs/tag"}, {"type": "null"}]},
+                    "email": {"type": "string", "format": "email"}
+                },
+                "required": ["limit"]
+            }
+        }]}
+    elif meth == "tools/call":
+        args = msg.get("params", {}).get("arguments", {})
+        res = {"content": [{"type": "text", "text": f"queried:{args.get('limit')}:{args.get('filter')}"}]}
+    else:
+        res = {}
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": mid, "result": res}) + "\n")
+    sys.stdout.flush()
+"##,
+        )
+        .unwrap();
+        let entry = json!({
+            "command": "python3",
+            "args": [script.to_string_lossy()],
+            "tier": "direct"
+        });
+        let h = env.host().builtins(&["mcp"]).config(servers(json!({ "std": entry }))).no_session().build().await;
+        expose(&h);
+        global(&h, "M", h.service_table("mcp").unwrap());
+        wait_until(15, "std MCP server connected", || {
+            let h = h.clone();
+            async move {
+                eval::<bool>(
+                    &h,
+                    r#"for _, s in ipairs(M:list_servers().data) do
+                         if s.name == "std" and s.state == "connected" then return true end
+                       end
+                       return false"#,
+                )
+                .await
+            }
+        })
+        .await;
+
+        let registered: bool = eval(&h, "return T:get('mcp__std__query_items') ~= nil").await;
+        assert!(
+            registered,
+            "standard MCP inputSchema (with $defs/$ref, anyOf, minimum, pattern, format) was dropped at registration"
+        );
+
+        let (bad_min_err, bad_pat_err, ok_text, bind_ok, shadow_ok): (bool, bool, String, bool, bool) = eval(
+            &h,
+            r#"
+            local r_min = T:execute({ id = "c1", name = "mcp__std__query_items", arguments = { limit = 0 } }, {})
+            local r_pat = T:execute({ id = "c2", name = "mcp__std__query_items", arguments = { limit = 2, filter = "BAD123" } }, {})
+            local r_ok = T:execute({ id = "c3", name = "mcp__std__query_items", arguments = { limit = 2, filter = "ok", email = "a@b.com" } }, {})
+            local decls = T:definitions(nil, { "mcp__std__query_items" })
+            local bound_ok = pcall(T.bind_declarations, T, decls)
+            local def = T:get("mcp__std__query_items")
+            def.description = "shadowed standard schema tool"
+            local shadow_ok = pcall(T.shadow, T, "mcp__std__query_items", def)
+            local ok_text = type(r_ok.content) == "table" and r_ok.content[1] and r_ok.content[1].text or r_ok.content
+            return r_min.is_error == true, r_pat.is_error == true, tostring(ok_text), bound_ok, shadow_ok
+            "#,
+        )
+        .await;
+        assert!(bad_min_err, "minimum: 1 constraint must reject limit = 0");
+        assert!(bad_pat_err, "$defs/$ref pattern constraint must reject invalid filter");
+        assert_eq!(ok_text, "queried:2:ok");
+        assert!(bind_ok, "bind_declarations must accept registered external MCP schema");
+        assert!(shadow_ok, "tools:shadow must preserve external MCP schema");
+
+        // Dynamic parameters(model) tools must share the exact same external-schema policy
+        // (both via `external_schema = true` and via pre-compiled `mare.schema.compile_external`),
+        // and `compile_value` handles must never bypass object-root tool schema requirements.
+        let (dyn_flag_ok, dyn_flag_shadow_ok, dyn_handle_ok, scalar_rejected, obj_val_rejected): (
+            bool,
+            bool,
+            bool,
+            bool,
+            bool,
+        ) = eval(
+            &h,
+            r#"
+            T:register("dyn_ext_flag", {
+                description = "dynamic external schema via flag",
+                external_schema = true,
+                parameters = function()
+                    return { type = "object", properties = { limit = { type = "integer", minimum = 1 } }, required = { "limit" } }
+                end,
+                execute = function(args) return "ok:" .. tostring(args.limit) end,
+            })
+            local d1 = T:definitions(nil, { "dyn_ext_flag" })
+            local b1 = pcall(T.bind_declarations, T, d1)
+            local def1 = T:get("dyn_ext_flag")
+            def1.description = "shadowed dynamic external"
+            local s1 = pcall(T.shadow, T, "dyn_ext_flag", def1)
+            local d1s = s1 and T:definitions(nil, { "dyn_ext_flag" }) or nil
+            local b1s = s1 and pcall(T.bind_declarations, T, d1s) or false
+
+            T:register("dyn_ext_handle", {
+                description = "dynamic external schema via compiled handle",
+                parameters = function()
+                    return mare.schema.compile_external({
+                        type = "object",
+                        properties = { limit = { type = "integer", minimum = 2 } },
+                        required = { "limit" },
+                    })
+                end,
+                execute = function(args) return "ok:" .. tostring(args.limit) end,
+            })
+            local d2 = T:definitions(nil, { "dyn_ext_handle" })
+            local b2 = pcall(T.bind_declarations, T, d2)
+
+            local scalar_h = mare.schema.compile_value({ type = "string" })
+            local obj_val_h = mare.schema.compile_value({ type = "object" })
+            local reg_scalar_ok = pcall(T.register, T, "bad_scalar", {
+                description = "must reject scalar compile_value",
+                parameters = scalar_h,
+                execute = function() return "no" end,
+            })
+            local reg_obj_val_ok = pcall(T.register, T, "bad_obj_val", {
+                description = "must reject object compile_value",
+                parameters = obj_val_h,
+                execute = function() return "no" end,
+            })
+            return b1, b1s, b2, not reg_scalar_ok, not reg_obj_val_ok
+            "#,
+        )
+        .await;
+        assert!(dyn_flag_ok, "dynamic parameters(model) with external_schema=true must compile in definitions()");
+        assert!(dyn_flag_shadow_ok, "shadowing dynamic external_schema tool must preserve external compilation");
+        assert!(dyn_handle_ok, "dynamic parameters(model) returning mare.schema.compile_external must work");
+        assert!(scalar_rejected, "tools:register must reject scalar compile_value handle");
+        assert!(obj_val_rejected, "tools:register must reject non-object-root compile_value handle");
+        h.shutdown().await;
+    })
+    .await
+}

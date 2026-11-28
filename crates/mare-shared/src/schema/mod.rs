@@ -32,6 +32,7 @@ struct SchemaInner {
     validator: OnceLock<Result<jsonschema::Validator, String>>,
     is_object_root: bool,
     schema_nodes: usize,
+    external: bool,
 }
 
 /// An owned tool schema snapshot. Compilation rejects unsupported or malformed keywords; the
@@ -48,6 +49,33 @@ impl Schema {
 
     pub fn compile(value: Value) -> Result<Self, String> {
         Self::compile_object(value, check_schema)
+    }
+
+    /// Compile an object-root external JSON Schema (such as an MCP tool `inputSchema`) using the
+    /// bounded offline validator rather than the built-in tool schema keyword allowlist.
+    pub fn compile_external(value: Value) -> Result<Self, String> {
+        check_value(&value, "$", 0, &mut MAX_NODES.clone())?;
+        if !value.is_object() {
+            return Err("$: schema must be an object".into());
+        }
+        if value.get("type").and_then(Value::as_str) != Some("object") {
+            return Err("$: root schema must have type object".into());
+        }
+        let mut budget = MAX_NODES;
+        check_output_schema(&value, "$", &mut budget)?;
+        let schema_nodes = MAX_NODES - budget;
+        let validator = build_validator(&value, true)?;
+        let cell = OnceLock::new();
+        let _ = cell.set(Ok(validator));
+        Ok(Self(Arc::new(SchemaInner { value, validator: cell, is_object_root: true, schema_nodes, external: true })))
+    }
+
+    pub fn is_external(&self) -> bool {
+        self.0.external
+    }
+
+    pub fn is_object_root(&self) -> bool {
+        self.0.is_object_root
     }
 
     /// Service contracts share the tool schema subset plus scalar bounds (`minimum`, `maximum`,
@@ -102,7 +130,13 @@ impl Schema {
         checker: fn(&Value, &str, usize, &mut usize) -> Result<(), String>,
     ) -> Result<Self, String> {
         let schema_nodes = Self::validate_object_with(&value, checker)?;
-        Ok(Self(Arc::new(SchemaInner { value, validator: OnceLock::new(), is_object_root: true, schema_nodes })))
+        Ok(Self(Arc::new(SchemaInner {
+            value,
+            validator: OnceLock::new(),
+            is_object_root: true,
+            schema_nodes,
+            external: false,
+        })))
     }
 
     /// A canonical result may be any lossless JSON value; argument schemas remain objects.
@@ -129,7 +163,13 @@ impl Schema {
         checker: fn(&Value, &str, usize, &mut usize) -> Result<(), String>,
     ) -> Result<Self, String> {
         let schema_nodes = Self::check_value_with(&value, checker)?;
-        Ok(Self(Arc::new(SchemaInner { value, validator: OnceLock::new(), is_object_root: false, schema_nodes })))
+        Ok(Self(Arc::new(SchemaInner {
+            value,
+            validator: OnceLock::new(),
+            is_object_root: false,
+            schema_nodes,
+            external: false,
+        })))
     }
 
     pub fn validate(&self, value: &Value) -> Result<(), String> {

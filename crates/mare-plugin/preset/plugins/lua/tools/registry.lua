@@ -145,17 +145,27 @@ return function(D)
 		end
 	end
 
-	local function compile_schema(name, params, param_order)
+	local function compile_schema(name, params, param_order, external)
 		-- Validate the original value before adding the ordering hint. Copying or overwriting
 		-- first could hide an unsupported metatable or an invalid x-mare-order annotation.
-		local ok, schema = pcall(mare.schema.compile, params)
+		local compiler
+		if type(params) == "userdata" then
+			local ext_ok, is_ext = pcall(function()
+				return params:is_external()
+			end)
+			compiler = (ext_ok and is_ext == true) and mare.schema.compile_external or mare.schema.compile
+		else
+			compiler = external and mare.schema.compile_external or mare.schema.compile
+		end
+		local ok, schema = pcall(compiler, params)
 		if not ok then
 			error(("tool %s schema: %s"):format(tostring(name), tostring(schema)))
 		end
 		if param_order ~= nil then
 			local value = schema:value()
 			value["x-mare-order"] = param_order
-			ok, schema = pcall(mare.schema.compile, value)
+			local recompile = schema:is_external() and mare.schema.compile_external or mare.schema.compile
+			ok, schema = pcall(recompile, value)
 			if not ok then
 				error(("tool %s schema: %s"):format(tostring(name), tostring(schema)))
 			end
@@ -247,8 +257,15 @@ return function(D)
 			def.freeform = table.copy(def.freeform)
 		end
 		def._removed, def._schema, def._parent, def._remove = nil, nil, parent, nil
+		local is_external = (not is_rpc and def.external_schema == true)
+			or (
+				parent ~= nil
+				and (parent._external_schema == true or (parent._schema ~= nil and parent._schema:is_external()))
+			)
+		def.external_schema = nil
+		def._external_schema = is_external
 		if type(def.parameters) ~= "function" then
-			local ok, schema_or_err = pcall(compile_schema, name, def.parameters, def.param_order)
+			local ok, schema_or_err = pcall(compile_schema, name, def.parameters, def.param_order, is_external)
 			if not ok then
 				if is_rpc then
 					require("mare_lib").fail("invalid_arguments", tostring(schema_or_err))
@@ -256,6 +273,7 @@ return function(D)
 				error(schema_or_err, 0)
 			end
 			def._schema = schema_or_err
+			def._external_schema = is_external or schema_or_err:is_external()
 			def.parameters = schema_or_err:value()
 		end
 		if def.output_schema ~= nil then
@@ -349,7 +367,7 @@ return function(D)
 		end
 		local copy = table.copy(def)
 		copy._running, copy._schema, copy._removed, copy._parent, copy._remove = nil, nil, nil, nil, nil
-		copy._output_validator = nil
+		copy._output_validator, copy._external_schema = nil, nil
 		if def._schema then
 			copy.parameters = def._schema:value()
 		end
@@ -568,7 +586,7 @@ return function(D)
 					if not ok then
 						error(("tool %s schema: %s"):format(n, tostring(params)))
 					end
-					schema = compile_schema(n, params, d.param_order)
+					schema = compile_schema(n, params, d.param_order, d._external_schema)
 				end
 				local defer_loading = d.exposure == "deferred" and native_tool_update(model)
 				local declaration = {
@@ -630,8 +648,8 @@ return function(D)
 			then
 				error("unregistered, changed or duplicate tool declaration: " .. tostring(declaration.name))
 			end
-			local ok, schema = pcall(mare.schema.compile, declaration.parameters)
-			if not ok or schema:fingerprint() ~= record.schema:fingerprint() then
+			local ok, matched = pcall(record.schema.matches, record.schema, declaration.parameters)
+			if not ok or not matched then
 				error("changed or invalid tool schema: " .. tostring(declaration.name))
 			end
 			local token = {}
