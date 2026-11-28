@@ -612,27 +612,130 @@ async fn remove_queued_input(host: &Host, input_id: &str) -> bool {
     call_service(host, "agent", "delete_queued", vec![json!(input_id)]).await.is_ok()
 }
 
-fn drain_for_consumed_turn(watch: &mut mare_kernel::EventCursor, input_id: &str) -> anyhow::Result<Option<String>> {
-    while let Ok(Some(rec)) = watch.try_recv() {
-        if let mare_kernel::CursorRecord::Event { event, selected: true } = rec
-            && event.name == "item/completed"
-            && event.payload.pointer("/item/message/input_id").and_then(J::as_str) == Some(input_id)
-        {
+fn classify_watch_record(
+    rec: mare_kernel::CursorRecord,
+    input_id: &str,
+    seen_in_queue: &mut bool,
+) -> anyhow::Result<Option<CancelQueuedOutcome>> {
+    let mare_kernel::CursorRecord::Event { event, selected: true } = rec else {
+        return Ok(None);
+    };
+    match event.name.as_str() {
+        "item/completed" if event.payload.pointer("/item/message/input_id").and_then(J::as_str) == Some(input_id) => {
             if let Some(turn_id) = event.payload["turn_id"].as_str() {
-                return Ok(Some(turn_id.to_string()));
+                return Ok(Some(CancelQueuedOutcome::Consumed(turn_id.to_string())));
             }
             anyhow::bail!("queued prompt was consumed without a turn_id");
+        }
+        "queue/changed" => {
+            let present = event.payload["items"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|it| it["input_id"].as_str() == Some(input_id)));
+            if present {
+                *seen_in_queue = true;
+            } else if *seen_in_queue && event.payload["action"].as_str() != Some("consumed") {
+                return Ok(Some(CancelQueuedOutcome::ExternallyRemoved));
+            }
+        }
+        _ => {}
+    }
+    Ok(None)
+}
+
+fn drain_for_consumed_turn(watch: &mut mare_kernel::EventCursor, input_id: &str) -> anyhow::Result<Option<String>> {
+    let mut seen_in_queue = false;
+    while let Ok(Some(rec)) = watch.try_recv() {
+        if let Some(CancelQueuedOutcome::Consumed(turn_id)) = classify_watch_record(rec, input_id, &mut seen_in_queue)?
+        {
+            return Ok(Some(turn_id));
         }
     }
     Ok(None)
 }
 
-async fn cancel_queued_input(host: &Host, watch: &mut mare_kernel::EventCursor, input_id: &str) {
-    if !remove_queued_input(host, input_id).await
-        && let Ok(Some(turn_id)) = drain_for_consumed_turn(watch, input_id)
-    {
-        let _ = host.abort_turn(&turn_id).await;
+enum CancelQueuedOutcome {
+    Consumed(String),
+    ExternallyRemoved,
+    Pending,
+}
+
+fn inspect_watch_for_cancel(
+    watch: &mut mare_kernel::EventCursor,
+    input_id: &str,
+    seen_in_queue: &mut bool,
+) -> anyhow::Result<CancelQueuedOutcome> {
+    while let Ok(Some(rec)) = watch.try_recv() {
+        if let Some(resolved) = classify_watch_record(rec, input_id, seen_in_queue)? {
+            return Ok(resolved);
+        }
     }
+    Ok(CancelQueuedOutcome::Pending)
+}
+
+async fn wait_watch_for_cancel(
+    watch: &mut mare_kernel::EventCursor,
+    input_id: &str,
+    seen_in_queue: &mut bool,
+) -> anyhow::Result<CancelQueuedOutcome> {
+    match inspect_watch_for_cancel(watch, input_id, seen_in_queue)? {
+        CancelQueuedOutcome::Pending => {}
+        resolved => return Ok(resolved),
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(50);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Ok(CancelQueuedOutcome::Pending);
+        }
+        match tokio::time::timeout(remaining, watch.recv()).await {
+            Ok(Some(rec)) => {
+                if let Some(resolved) = classify_watch_record(rec, input_id, seen_in_queue)? {
+                    return Ok(resolved);
+                }
+            }
+            Ok(None) | Err(_) => return Ok(CancelQueuedOutcome::Pending),
+        }
+    }
+}
+
+/// Resolve the owning `turn_id` for `input_id` from admitted messages in conversation history.
+/// Returns `None` unless a message with matching `input_id` carries a non-empty `turn_id`.
+async fn lookup_consumed_turn_id(host: &Host, input_id: &str) -> Option<String> {
+    let msgs = call_service(host, "agent", "list_messages", vec![]).await.ok()?;
+    msgs["data"].as_array()?.iter().rev().find_map(|msg| {
+        (msg["input_id"].as_str() == Some(input_id))
+            .then(|| msg["turn_id"].as_str().filter(|id| !id.is_empty()).map(str::to_string))
+            .flatten()
+    })
+}
+
+async fn cancel_queued_input(
+    host: &Host,
+    watch: &mut mare_kernel::EventCursor,
+    input_id: &str,
+    seen_in_queue: &mut bool,
+    turn_cancel: &CancellationToken,
+) -> anyhow::Result<J> {
+    if remove_queued_input(host, input_id).await {
+        return Ok(json!({ "error_kind": "aborted" }));
+    }
+    match wait_watch_for_cancel(watch, input_id, seen_in_queue).await? {
+        CancelQueuedOutcome::Consumed(turn_id) => {
+            return wait_for_started_turn(host, &turn_id, turn_cancel).await;
+        }
+        CancelQueuedOutcome::ExternallyRemoved => {
+            return Ok(json!({ "error_kind": "aborted" }));
+        }
+        CancelQueuedOutcome::Pending => {}
+    }
+    // `delete_queued` reported the item is no longer queued and `watch` did not carry a matching
+    // `item/completed` event within the bounded wait. Only abort/settle a turn if conversation
+    // history verifiably attributes `input_id` to that exact `turn_id`; never cancel an unrelated
+    // currently-active turn on timeout.
+    if let Some(turn_id) = lookup_consumed_turn_id(host, input_id).await {
+        return wait_for_started_turn(host, &turn_id, turn_cancel).await;
+    }
+    Ok(json!({ "error_kind": "aborted" }))
 }
 
 enum QueuedProbe {
@@ -720,17 +823,15 @@ pub(super) async fn wait_for_queued_input(
     input_id: &str,
     turn_cancel: &CancellationToken,
 ) -> anyhow::Result<J> {
-    if turn_cancel.is_cancelled() {
-        cancel_queued_input(host, watch, input_id).await;
-        return Ok(json!({ "error_kind": "aborted" }));
-    }
     let mut seen_in_queue = false;
+    if turn_cancel.is_cancelled() {
+        return cancel_queued_input(host, watch, input_id, &mut seen_in_queue, turn_cancel).await;
+    }
     let owned_turn_id = loop {
         tokio::select! {
             biased;
             _ = turn_cancel.cancelled() => {
-                cancel_queued_input(host, watch, input_id).await;
-                return Ok(json!({ "error_kind": "aborted" }));
+                return cancel_queued_input(host, watch, input_id, &mut seen_in_queue, turn_cancel).await;
             }
             rec = watch.recv() => {
                 let Some(rec) = rec else {
@@ -1739,6 +1840,226 @@ mod tests {
                 assert_eq!(stop.as_deref(), Some("cancelled"), "pre-cancelled token must abort the started turn: {res:?}");
                 assert!(!marker.exists(), "aborted turn must not execute tools");
 
+                host.shutdown().await;
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn repro_issue_201_cancel_consumed_queued_input_returns_before_turn_settles() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let dir = tempfile::tempdir().unwrap();
+                let slow_body = "x".repeat(400);
+                let host = Host::new(mare_host::HostOptions {
+                    cwd: dir.path().to_owned(),
+                    mode: mare_plugin::Mode::Acp,
+                    config: json!({
+                        "model": "faux/echo",
+                        "plugins": {
+                            "permissions": { "enabled": false },
+                            "provider-faux": {
+                                "script_json": json!([{ "text": slow_body, "delay_ms": 20 }]).to_string()
+                            }
+                        }
+                    }),
+                    load_init: false,
+                    project_trusted: true,
+                    args: json!({ "no_session": true }),
+                    no_user_plugins: true,
+                })
+                .await
+                .unwrap();
+
+                // Enqueue a real queued prompt and start a consuming turn via `agent.continue`,
+                // then wait until the prompt has been admitted into message history (`input_id`
+                // present on the persisted user message, removed from the queue) while `watch`
+                // never received the `item/completed` event before `turn_cancel` fires.
+                let queued = host
+                    .prompt("slow consuming turn", json!({ "source": "acp", "queue_only": true }))
+                    .await
+                    .unwrap();
+                assert_eq!(queued["status"], "queued", "{queued}");
+                let input_id = queued["input_id"].as_str().unwrap().to_string();
+                let started = call_service(&host, "agent", "continue", vec![]).await.unwrap();
+                assert!(started["turn_id"].as_str().is_some(), "{started}");
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+                while lookup_consumed_turn_id(&host, &input_id).await.is_none() {
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "running turn never admitted queued input_id={input_id} into message history"
+                    );
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                let log = mare_kernel::EventLog::new();
+                let mut watch = log.open_cursor(Arc::new(|_| Some(true)));
+
+                let cancel_tok = CancellationToken::new();
+                cancel_tok.cancel();
+                let res = wait_for_queued_input(&host, &mut watch, &input_id, &cancel_tok).await;
+                assert_eq!(res.unwrap()["error_kind"], "aborted");
+
+                let busy_after_return = call_service(&host, "agent", "activity", vec![])
+                    .await
+                    .ok()
+                    .and_then(|v| v["busy"].as_bool())
+                    .unwrap_or(false);
+                let _ = host.abort().await;
+                host.shutdown().await;
+
+                assert!(
+                    !busy_after_return,
+                    "wait_for_queued_input returned aborted while the consuming turn was still busy (not aborted/settled)"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn cancel_unattributed_or_finished_input_never_cancels_unrelated_active_turn() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let dir = tempfile::tempdir().unwrap();
+                let slow_body = "z".repeat(400);
+                let host = Host::new(mare_host::HostOptions {
+                    cwd: dir.path().to_owned(),
+                    mode: mare_plugin::Mode::Acp,
+                    config: json!({
+                        "model": "faux/echo",
+                        "plugins": {
+                            "permissions": { "enabled": false },
+                            "provider-faux": {
+                                "script_json": json!([
+                                    { "text": "finished-turn-a" },
+                                    { "text": slow_body, "delay_ms": 20 }
+                                ]).to_string()
+                            }
+                        }
+                    }),
+                    load_init: false,
+                    project_trusted: true,
+                    args: json!({ "no_session": true }),
+                    no_user_plugins: true,
+                })
+                .await
+                .unwrap();
+
+                // Turn A consumes a real queued `input_a_id` and finishes cleanly.
+                let queued_a = host.prompt("turn A", json!({ "source": "acp", "queue_only": true })).await.unwrap();
+                assert_eq!(queued_a["status"], "queued", "{queued_a}");
+                let input_a_id = queued_a["input_id"].as_str().unwrap().to_string();
+                let started_a = call_service(&host, "agent", "continue", vec![]).await.unwrap();
+                let turn_a_id = started_a["turn_id"].as_str().unwrap().to_string();
+                let turn_a = call_service(&host, "agent", "wait", vec![json!(turn_a_id)]).await.unwrap();
+                assert_eq!(turn_a["text"], "finished-turn-a", "{turn_a}");
+
+                // Unrelated Turn B is now actively running.
+                let started_b = host.prompt("turn B", json!({ "source": "acp", "wait": false })).await.unwrap();
+                let turn_b_id = started_b["turn_id"].as_str().unwrap().to_string();
+
+                let log = mare_kernel::EventLog::new();
+                let mut watch = log.open_cursor(Arc::new(|_| Some(true)));
+                let cancel_tok = CancellationToken::new();
+                cancel_tok.cancel();
+
+                // 1. Unknown/unattributed input_id must NOT cancel unrelated active Turn B on timeout.
+                let res_unknown = wait_for_queued_input(&host, &mut watch, "never-existed-id", &cancel_tok).await;
+                assert_eq!(res_unknown.unwrap()["error_kind"], "aborted");
+                let busy_after_unknown = call_service(&host, "agent", "activity", vec![])
+                    .await
+                    .ok()
+                    .and_then(|v| v["busy"].as_bool())
+                    .unwrap_or(false);
+                assert!(
+                    busy_after_unknown,
+                    "cancelling unattributed input_id must leave unrelated active Turn B running"
+                );
+
+                // 2. Already-finished `input_a_id` (owned by finished Turn A) must settle Turn A without
+                //    cancelling unrelated active Turn B.
+                let res_finished = wait_for_queued_input(&host, &mut watch, &input_a_id, &cancel_tok).await;
+                assert_eq!(res_finished.unwrap()["text"], "finished-turn-a");
+                let busy_after_finished = call_service(&host, "agent", "activity", vec![])
+                    .await
+                    .ok()
+                    .and_then(|v| v["busy"].as_bool())
+                    .unwrap_or(false);
+                assert!(
+                    busy_after_finished,
+                    "cancelling already-finished input-a must not cancel unrelated active Turn B"
+                );
+
+                // Unrelated Turn B completes normally without error.
+                let b_settled = call_service(&host, "agent", "wait", vec![json!(turn_b_id)]).await.unwrap();
+                assert!(b_settled["error"].is_null(), "unrelated Turn B should finish normally: {b_settled}");
+                assert_eq!(b_settled["text"], slow_body);
+
+                host.shutdown().await;
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn cancel_consumed_queued_input_with_item_completed_on_watch_settles_exact_turn_and_keeps_other_queued() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let dir = tempfile::tempdir().unwrap();
+                let slow_body = "y".repeat(400);
+                let host = Host::new(mare_host::HostOptions {
+                    cwd: dir.path().to_owned(),
+                    mode: mare_plugin::Mode::Acp,
+                    config: json!({
+                        "model": "faux/echo",
+                        "plugins": {
+                            "permissions": { "enabled": false },
+                            "provider-faux": {
+                                "script_json": json!([{ "text": slow_body, "delay_ms": 20 }]).to_string()
+                            }
+                        }
+                    }),
+                    load_init: false,
+                    project_trusted: true,
+                    args: json!({ "no_session": true }),
+                    no_user_plugins: true,
+                })
+                .await
+                .unwrap();
+
+                let started = host.prompt("slow turn", json!({ "source": "acp", "wait": false })).await.unwrap();
+                let running_turn_id = started["turn_id"].as_str().unwrap().to_string();
+                let unrelated =
+                    call_service(&host, "agent", "prompt", vec![json!("keep-me"), json!({ "when_busy": "queue" })])
+                        .await
+                        .unwrap();
+                let unrelated_id = unrelated["input_id"].as_str().unwrap().to_string();
+
+                let log = mare_kernel::EventLog::new();
+                let mut watch = log.open_cursor(Arc::new(|_| Some(true)));
+                log.admit_json(
+                    "item/completed",
+                    json!({ "turn_id": running_turn_id, "item": { "message": { "input_id": "consumed-on-watch" } } }),
+                )
+                .await
+                .unwrap();
+
+                let cancel_tok = CancellationToken::new();
+                cancel_tok.cancel();
+                let res = wait_for_queued_input(&host, &mut watch, "consumed-on-watch", &cancel_tok).await;
+                assert_eq!(map_turn_result(&res).ok().as_deref(), Some("cancelled"), "{res:?}");
+
+                let busy = call_service(&host, "agent", "activity", vec![])
+                    .await
+                    .ok()
+                    .and_then(|v| v["busy"].as_bool())
+                    .unwrap_or(true);
+                assert!(!busy, "consuming turn must be settled before wait_for_queued_input returns");
+
+                let queue = call_service(&host, "agent", "list_queue", vec![]).await.unwrap();
+                assert!(
+                    queue["data"].as_array().is_some_and(|a| a.iter().any(|x| x["input_id"] == unrelated_id)),
+                    "cancelling consumed queued input must preserve unrelated queued entries: {queue}"
+                );
+                let _ = host.abort().await;
                 host.shutdown().await;
             })
             .await;
