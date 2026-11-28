@@ -44,7 +44,7 @@
 ---@field slow_callback_table_rows? integer maximum number of (plugin, event) rows shown in the /profile callback timing table
 ---@field spinner? table spinner glyphs: a list { "a", "b", … } or { frames = {…}, still = "•" } (still: the marker under reduce_motion); default braille
 ---@field stall_ms? integer a plugin still loading, unloading or waiting for a service after this many ms is reported (/plugins tree, `mare plugin tree --json`, the log, a notice); never aborted; 0 turns it off
----@field terminal? mare.TerminalOpts terminal capability, probing, and ambiwidth configuration (`terminal.{ambiwidth,color,probe.{enabled,background}}`)
+---@field terminal? mare.TerminalOpts terminal capability, probing, reflow, and ambiwidth configuration (`terminal.{ambiwidth,color,probe.{enabled,background},reflow.{mode,max_rows}}`)
 ---@field terminal_caps? table terminal capability overrides { { match = { TERM_PROGRAM = "…" }, caps = { sync = false, … } }, … }; ui/caps listeners may also adjust them
 ---@field theme? table<mare.StyleName, string|mare.Style> named style overrides { MareX = spec }
 ---@field trust_default? string project trust for a folder with no saved decision (after --trust/--no-trust and trust/resolve plugins): ask|trust|distrust

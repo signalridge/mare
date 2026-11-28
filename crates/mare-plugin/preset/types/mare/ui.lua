@@ -966,10 +966,15 @@ function ui.image_id() end
 ---@field enabled? boolean Enable post-first-frame terminal capability probe (default `true`).
 ---@field background? boolean Include OSC 11 background query in the terminal probe (default `true`).
 
+---@class mare.TerminalReflowOpts
+---@field mode? "auto"|"full"|"preserve" Scrollback resize reflow policy (default `"auto"`).
+---@field max_rows? integer Maximum rows replayed on resize reflow (`0` = unlimited; unset = terminal default).
+
 ---@class mare.TerminalOpts
 ---@field ambiwidth? "single"|"double" Width of East Asian ambiguous characters (`"single"` | `"double"`).
 ---@field color? "auto"|"truecolor"|"256"|"16"|"none" Terminal color depth override (default `"auto"`).
 ---@field probe? mare.TerminalProbeOpts Startup terminal probe controls.
+---@field reflow? mare.TerminalReflowOpts Scrollback resize reflow mode and row cap.
 
 ---@class mare.UiWorkingOpts
 ---@field preset? string Working-line preset name (`"combined"|"mare"|"spinner"|"codex"|"cc"|"kimi"|"shimmer"|"pulse"|"dots"|"wave"|"foam"|"sail"|"sea"` or custom key in `presets`, default `"combined"`).

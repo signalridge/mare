@@ -238,7 +238,7 @@ impl Vt {
         let later = app_now() + Duration::from_secs(5);
         while let Some(due) = self.app.reflow.take_due(later, self.app.width) {
             match due {
-                mare_tui::reflow::Due::Rebuild => self.app.rebuild_history(),
+                mare_tui::reflow::Due::Rebuild => self.app.rebuild_history_from_reflow(),
                 mare_tui::reflow::Due::Repaint => self.app.renderer.erase(),
             }
         }
