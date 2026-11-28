@@ -59,6 +59,88 @@ async fn compat_finish_reasons_error_filtered_and_unknown_never_become_stop() {
     .await
 }
 
+/// OpenAI-compatible Chat refusals:
+/// - streamed `delta.refusal` chunks with `finish_reason: "stop"` preserve refusal text and map to `filtered`
+/// - non-streamed `message.refusal` JSON body with `finish_reason: "stop"` preserves refusal text and maps to `filtered`
+/// - `finish_reason: "refusal"` maps to `filtered` with `raw_stop_reason: "refusal"`
+#[tokio::test]
+async fn compat_refusals_streamed_non_streamed_and_finish_reason_refusal() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let server = MockServer::start().await;
+
+        let streamed_refusal = compat_events(&[
+            json!({"choices":[{"index":0,"delta":{"role":"assistant","content":null,"refusal":"I cannot "},"finish_reason":null}]}),
+            json!({"choices":[{"index":0,"delta":{"refusal":"assist with that."},"finish_reason":null}]}),
+            json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":6}}),
+        ]);
+        let non_streamed_refusal = json!({
+            "id": "chatcmpl-refusal-1",
+            "object": "chat.completion",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "refusal": "Sorry, I can't fulfill that request."
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 9, "completion_tokens": 7}
+        })
+        .to_string();
+        let finish_reason_refusal = compat_events(&[
+            json!({"choices":[{"index":0,"delta":{"refusal":"Blocked by policy."},"finish_reason":null}]}),
+            json!({"choices":[{"index":0,"delta":{},"finish_reason":"refusal"}]}),
+        ]);
+        let finish_reason_refusal_no_text = compat_events(&[
+            json!({"choices":[{"index":0,"delta":{},"finish_reason":"refusal"}]}),
+        ]);
+
+        server.route(
+            "/compat",
+            vec![
+                Resp::sse(streamed_refusal),
+                Resp::status(200, &non_streamed_refusal),
+                Resp::sse(finish_reason_refusal),
+                Resp::sse(finish_reason_refusal_no_text),
+            ],
+        );
+
+        let h = provider_host(&mut env, &server, json!({ "plugins": { "llm": { "retries": 0 } } })).await;
+
+        let m1 = stream(&h, "deepseek/deepseek-chat").await;
+        assert_eq!(m1["stop_reason"], "filtered", "{m1}");
+        assert_eq!(m1["raw_stop_reason"], "stop", "{m1}");
+        assert_eq!(text_of(&m1), "I cannot assist with that.", "{m1}");
+        assert_eq!(m1["error"], "I cannot assist with that.", "{m1}");
+        assert_eq!(m1["usage"]["input"], 12, "{m1}");
+        assert_eq!(m1["usage"]["output"], 6, "{m1}");
+
+        let m2 = stream(&h, "deepseek/deepseek-chat").await;
+        assert_eq!(m2["stop_reason"], "filtered", "{m2}");
+        assert_eq!(m2["raw_stop_reason"], "stop", "{m2}");
+        assert_eq!(text_of(&m2), "Sorry, I can't fulfill that request.", "{m2}");
+        assert_eq!(m2["error"], "Sorry, I can't fulfill that request.", "{m2}");
+        assert_eq!(m2["usage"]["input"], 9, "{m2}");
+        assert_eq!(m2["usage"]["output"], 7, "{m2}");
+
+        let m3 = stream(&h, "deepseek/deepseek-chat").await;
+        assert_eq!(m3["stop_reason"], "filtered", "{m3}");
+        assert_eq!(m3["raw_stop_reason"], "refusal", "{m3}");
+        assert_eq!(text_of(&m3), "Blocked by policy.", "{m3}");
+        assert_eq!(m3["error"], "Blocked by policy.", "{m3}");
+
+        let m4 = stream(&h, "deepseek/deepseek-chat").await;
+        assert_eq!(m4["stop_reason"], "filtered", "{m4}");
+        assert_eq!(m4["raw_stop_reason"], "refusal", "{m4}");
+        assert!(m4["error"].as_str().is_some_and(|e| e.contains("refusal")), "{m4}");
+
+        h.shutdown().await;
+    })
+    .await
+}
+
 /// Google finish reasons: `IMAGE_SAFETY` / `IMAGE_PROHIBITED_CONTENT` -> `filtered`;
 /// `MALFORMED_FUNCTION_CALL`, `UNEXPECTED_TOOL_CALL`, `TOO_MANY_TOOL_CALLS`, `OTHER`, `LANGUAGE`,
 /// `NO_IMAGE`, `FINISH_REASON_UNSPECIFIED` -> `error` preserving `raw_stop_reason`, even with empty

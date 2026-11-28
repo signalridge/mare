@@ -377,7 +377,7 @@ return {
 					is_openrouter = lib.is_openrouter(ep.dialect, wire_req.url),
 					markup_healing = healing_pattern,
 				})
-				return { event = P.feed, finish = P.finish_message }
+				return { event = P.feed, body = P.feed_body, finish = P.finish_message }
 			end,
 		})
 
