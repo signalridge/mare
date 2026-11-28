@@ -362,20 +362,33 @@ return {
 		D.discovery = require("mcp.discovery")(D)
 		require("mcp.resources")(D)
 
-		-- ---- system prompt: one line per server -----------------------
+		-- ---- system prompt: server summary + bounded, source-marked server instructions -----------------------
 
-		local function description_of(e)
-			if type(e.srv.description) == "string" and e.srv.description ~= "" then
-				return e.srv.description
+		local MAX_SERVER_INSTRUCTIONS_BYTES = 2000
+		local MAX_TOTAL_INSTRUCTIONS_BYTES = 8000
+		local INSTRUCTIONS_TRUNCATE_SUFFIX = "\n... (truncated)"
+
+		local function server_instructions_block(name, e, budget)
+			if budget <= 0 then
+				return nil, 0
 			end
-			local ins = type(e.info) == "table" and e.info.instructions
-			if type(ins) == "string" then
-				local first = ins:match("^%s*([^\n]+)")
-				if first then
-					return first
-				end
+			local raw = type(e.info) == "table" and e.info.instructions
+			if type(raw) ~= "string" then
+				return nil, 0
 			end
-			return nil
+			local text = raw:gsub("\r\n", "\n"):gsub("\r", "\n"):gsub("^%s+", ""):gsub("%s+$", "")
+			if text == "" then
+				return nil, 0
+			end
+			local block = require("mare_lib").data_block("mcp-instructions", { server = name }, text, {
+				escape_tags = { "mcp" },
+				max_bytes = math.min(MAX_SERVER_INSTRUCTIONS_BYTES, budget),
+				truncate_suffix = INSTRUCTIONS_TRUNCATE_SUFFIX,
+			})
+			if not block then
+				return nil, 0
+			end
+			return block, #block
 		end
 		-- registered while the optional `context` service is up (a child fiber on the cordis tree)
 		ctx:inject({ "context" }, function(ctx)
@@ -385,6 +398,7 @@ return {
 				interpolate = false, -- server names and descriptions: third-party text, verbatim
 				text = function()
 					local lines = {}
+					local remaining = MAX_TOTAL_INSTRUCTIONS_BYTES
 					for _, n in ipairs(order) do
 						local e = servers[n]
 						if not blocked(e) then
@@ -392,8 +406,16 @@ return {
 							local how = effective_tier == "direct" and "tools already loaded"
 								or effective_tier == "codemode" and "from codemode scripts"
 								or "find its tools with tool_search"
-							local d = description_of(e)
-							lines[#lines + 1] = ("- %s%s (%s)"):format(n, d and (": " .. d) or "", how)
+							local desc = type(e.srv.description) == "string"
+									and e.srv.description ~= ""
+									and e.srv.description
+								or nil
+							lines[#lines + 1] = ("- %s%s (%s)"):format(n, desc and (": " .. desc) or "", how)
+							local block, used = server_instructions_block(n, e, remaining)
+							if block then
+								remaining = remaining - used
+								lines[#lines + 1] = block
+							end
 						end
 					end
 					if #lines == 0 then

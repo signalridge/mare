@@ -45,7 +45,11 @@ async fn mcp_resources_prompts_instructions_and_result_shaping() {
         assert!(texts[2].contains("audio") && !texts[2].contains("AAAA"), "{}", texts[2]);
         assert!(texts[3].contains("{\"n\":1}"), "{}", texts[3]);
         let system: String = eval(&h, "return C.cordis:get('context'):system_prompt()").await;
-        assert!(system.contains("- fake: Docs search. (tools already loaded)"), "{system}");
+        assert!(
+            system.contains("- fake (tools already loaded)")
+                && system.contains("<mcp-instructions server=\"fake\">\nDocs search.\nMore detail.\n</mcp-instructions>"),
+            "{system}"
+        );
         let submitted: String = eval(
             &h,
             r#"local got
