@@ -18,11 +18,21 @@ return {
 			default = 50 * 1024,
 			desc = "Bytes of output the model sees (middle-truncated beyond this).",
 		},
-		-- collapsed transcript preview; the expanded view (Ctrl+O) always shows everything
+		-- collapsed transcript preview; the expanded view (Ctrl+O) shows retained output
 		preview_lines = {
 			type = "integer",
 			default = 5,
-			desc = "Lines of the collapsed transcript preview; Ctrl+O always shows everything.",
+			desc = "Lines of the collapsed transcript preview; Ctrl+O expands retained output.",
+		},
+		expanded_max_bytes = {
+			type = "integer",
+			default = 64 * 1024,
+			desc = "Maximum inline bytes kept per expanded shell-mode block before spilling full output to disk.",
+		},
+		retained_blocks = {
+			type = "integer",
+			default = 20,
+			desc = "Recent large shell-mode blocks kept inline-expandable in memory before spilling older blocks.",
 		},
 	},
 	apply = function(ctx, cfg)
@@ -60,9 +70,13 @@ return {
 		-- the running `!cmd`s: Esc / Ctrl+C abort them — SIGINT to
 		-- the process group, then SIGTERM, then SIGKILL; a second Ctrl+C forces the kill
 		local running = {}
+		local retained = {}
 		ctx:on("session/changed", function()
 			for tok in pairs(running) do
 				tok:cancel()
+			end
+			for i = #retained, 1, -1 do
+				retained[i] = nil
 			end
 		end)
 		-- when the last command ended: the interrupt that stopped it can reach this handler after
@@ -102,7 +116,7 @@ return {
 			ctx:spawn(function()
 				local run, show = require("shell-mode.execute")(ctx, cfg, running, function()
 					last_end = mare.task.clock()
-				end)
+				end, retained)
 				local agent = svc.agent
 				if U.connected() and not (agent and agent:activity().busy) then
 					U.working("Running " .. mare.text.trunc_width(cmd, 40))

@@ -416,6 +416,210 @@ async fn shell_lines_and_plugin_processes_run_while_the_session_is_saved() {
     .await
 }
 
+/// Repro #217: a completed `!` command must not duplicate its full captured output across both
+/// `node` (collapsed) and `expanded` and retain unbounded copies across committed blocks.
+#[cfg(unix)]
+#[tokio::test]
+async fn repro_217_shell_mode_duplicates_and_retains_unbounded_output() {
+    local(async {
+        let mut t = Term::new(json!([]), 100, 30).await;
+        t.until_vt("startup", |t| !t.vt.starting()).await;
+
+        exec(
+            &t.vt.host,
+            r#"
+            REPRO_217_PUSHES = {}
+            local orig_push = mare.ui.push
+            mare.ui.push = function(kind, opts)
+                if kind == "tool" and type(opts) == "table" and opts.node and opts.expanded then
+                    REPRO_217_PUSHES[#REPRO_217_PUSHES + 1] = {
+                        node_bytes = #mare.json.encode(opts.node),
+                        expanded_bytes = #mare.json.encode(opts.expanded),
+                    }
+                end
+                return orig_push(kind, opts)
+            end
+            "#,
+        )
+        .await;
+
+        // Run a `!` shell command producing 400 lines (~40 KB), well above preview_lines (default 6).
+        t.vt.type_str("!awk 'BEGIN{for(i=1;i<=400;i++) printf \"line-%04d %090d\\n\", i, i}'");
+        t.key(KeyCode::Enter, Modifiers::NONE);
+        t.until("shell output committed", |s| s.contains("line-0001")).await;
+
+        let (count, node_bytes, expanded_bytes): (i64, i64, i64) = eval(
+            &t.vt.host,
+            r#"
+            local last = REPRO_217_PUSHES[#REPRO_217_PUSHES]
+            return #REPRO_217_PUSHES, last and last.node_bytes or 0, last and last.expanded_bytes or 0
+            "#,
+        )
+        .await;
+        assert_eq!(count, 1, "expected one shell-mode tool block push");
+        assert!(
+            node_bytes < expanded_bytes / 2,
+            "collapsed `node` duplicates full shell output alongside `expanded` (node_bytes={node_bytes}, expanded_bytes={expanded_bytes})"
+        );
+    })
+    .await
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn shell_mode_spills_older_large_outputs_and_keeps_recent_expandable() {
+    local(async {
+        let mut t = Term::with(
+            json!([]),
+            json!({
+                "plugins": {
+                    "shell-mode": {
+                        "retained_blocks": 2,
+                        "preview_lines": 5
+                    }
+                }
+            }),
+            100,
+            30,
+        )
+        .await;
+        t.until_vt("startup", |t| !t.vt.starting()).await;
+
+        exec(
+            &t.vt.host,
+            r#"
+            REPRO_217_UPDATES = {}
+            local orig_update = mare.ui.update
+            mare.ui.update = function(id, opts)
+                if type(opts) == "table" and opts.expanded then
+                    REPRO_217_UPDATES[#REPRO_217_UPDATES + 1] = mare.json.encode(opts.expanded)
+                end
+                return orig_update(id, opts)
+            end
+            "#,
+        )
+        .await;
+
+        for run in 1..=3 {
+            let cmd = format!("!awk 'BEGIN{{for(i=1;i<=120;i++) printf \"run{run}-line-%03d %080d\\n\", i, i}}'");
+            t.vt.type_str(&cmd);
+            t.key(KeyCode::Enter, Modifiers::NONE);
+            let marker = format!("run{run}-line-001");
+            t.until("shell output committed", |s| s.contains(&marker)).await;
+        }
+
+        let (evicted_count, spill_path): (i64, String) = eval(
+            &t.vt.host,
+            r#"
+            local first = REPRO_217_UPDATES[1] or ""
+            local p = first:match("([^%s%[%]\"']+spill/shell%-[^%s%[%]\"']+%.log)") or ""
+            return #REPRO_217_UPDATES, p
+            "#,
+        )
+        .await;
+        assert_eq!(evicted_count, 1, "oldest large shell block must be evicted once retained_blocks=2 is exceeded");
+        assert!(!spill_path.is_empty(), "evicted shell block must record a retrievable spill file path");
+        let spilled = std::fs::read_to_string(&spill_path).expect("spill file must exist on disk");
+        assert!(
+            spilled.contains("run1-line-001") && spilled.contains("run1-line-120"),
+            "spill file must preserve full output of evicted shell command"
+        );
+    })
+    .await
+}
+
+/// Oversized (> expanded_max_bytes) spilled shell outputs must still participate in retention
+/// eviction so their 64 KiB expanded preview prefixes cannot leak across repeated commands;
+/// single-line outputs without newlines must still clip by visual rows on narrow screens; and
+/// the expand hint must follow `mare.keymap.hint("toggle-expand", "editor")`.
+#[cfg(unix)]
+#[tokio::test]
+async fn shell_mode_evicts_oversized_spills_clips_wrapped_lines_and_uses_keymap_hint() {
+    local(async {
+        let mut t = Term::with(
+            json!([]),
+            json!({
+                "plugins": {
+                    "shell-mode": {
+                        "expanded_max_bytes": 4096,
+                        "retained_blocks": 1,
+                        "preview_lines": 3
+                    }
+                }
+            }),
+            50,
+            24,
+        )
+        .await;
+        t.until_vt("startup", |t| !t.vt.starting()).await;
+        t.vt.dismiss_notices();
+
+        exec(
+            &t.vt.host,
+            r#"
+            OVERSIZED_UPDATES = {}
+            local orig_update = mare.ui.update
+            mare.ui.update = function(id, opts)
+                if type(opts) == "table" and opts.expanded then
+                    OVERSIZED_UPDATES[#OVERSIZED_UPDATES + 1] = mare.json.encode(opts.expanded)
+                end
+                return orig_update(id, opts)
+            end
+            -- Rebind toggle-expand to verify the collapsed footer uses the live keymap hint.
+            mare.keymap.set("editor", "<C-o>", false)
+            mare.keymap.set("editor", "<M-e>", "toggle-expand")
+            "#,
+        )
+        .await;
+
+        // 1) Two oversized (> 4096 B) commands with retained_blocks=1: the first oversized block's
+        //    expanded prefix must be evicted to a short preview + spill reference (no memory leak).
+        for run in 1..=2 {
+            let cmd = format!("!awk 'BEGIN{{for(i=1;i<=180;i++) printf \"big{run}-%03d %020d\\n\", i, i}}'");
+            t.vt.type_str(&cmd);
+            t.key(KeyCode::Enter, Modifiers::NONE);
+            let marker = format!("big{run}-001");
+            t.until("oversized shell output committed", |s| s.contains(&marker)).await;
+        }
+        let (evicted, evicted_len, has_spill): (i64, i64, bool) = eval(
+            &t.vt.host,
+            r#"
+            local u = OVERSIZED_UPDATES[1] or ""
+            return #OVERSIZED_UPDATES, #u, u:find("spill/shell%-", 1) ~= nil
+            "#,
+        )
+        .await;
+        assert_eq!(evicted, 1, "oversized spilled block must enter retention queue and be evicted");
+        assert!(has_spill, "evicted oversized block must keep spill file reference");
+        assert!(
+            evicted_len < 2048,
+            "evicted oversized expanded node must shrink to short preview, got {evicted_len} B"
+        );
+
+        // 2) Collapsed footer reflects the rebound toggle-expand key rather than hardcoded ctrl+o.
+        let hist = t.history();
+        assert!(
+            hist.contains("(Alt+E to expand)")
+                && !hist.contains("(ctrl+o to expand)")
+                && !hist.contains("(Ctrl+O to expand)"),
+            "collapsed footer must reflect live toggle-expand keymap hint:\n{hist}"
+        );
+
+        // 3) Single-line 3500-char output (0 newlines) must still collapse via visual-row ui.Clip
+        //    on a 50-column terminal rather than flooding ~70 visual rows.
+        t.vt.type_str("!awk 'BEGIN{for(i=1;i<=350;i++) printf \"0123456789\"; printf \"\\n\"}'");
+        t.key(KeyCode::Enter, Modifiers::NONE);
+        t.until("wrapped single-line clipped", |s| s.contains("0123456789") && s.contains("more line")).await;
+        let screen = t.screen();
+        let digit_rows = screen.lines().filter(|l| l.contains("0123456789")).count();
+        assert!(
+            digit_rows <= 4,
+            "3500-char single-line output must clip to <= preview_lines (3) visual rows, got {digit_rows}:\n{screen}"
+        );
+    })
+    .await
+}
+
 /// `!` shell mode: `!` on an empty input becomes the prompt (never shown twice), a
 /// `/path` after it opens no command menu, Backspace on the empty line leaves the mode.
 #[tokio::test]
