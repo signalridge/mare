@@ -115,13 +115,14 @@ return function(D)
 		if not S.run_error then
 			preflight.check_readiness(S)
 		end
-		local first_lease <close> = preflight.acquire_first_lease(S)
-		if S.run_error then
+		local readiness_failed = S.run_error ~= nil
+		local first_lease <close> = (not readiness_failed) and preflight.acquire_first_lease(S) or nil
+		if readiness_failed or (S.run_error and S.termination_reason ~= "interrupted") then
 			preflight.enqueue_initial_inputs(S, first_user, opts)
 		end
 
 		local tool_cache = { defs = nil, model = nil, gen = nil }
-		local lease_state = { used_first = false, enqueued_initial = false }
+		local lease_state = { used_first = false }
 		local pending_turn_end = nil
 		while not S.run_error do
 			-- A request owns the reload gate from assembly through streaming. Closing the Lua
@@ -135,8 +136,8 @@ return function(D)
 			-- then stage state participants so they see the admitted input while denials leave
 			-- conversation history and queued inputs untouched.
 			local function on_admit()
-				if not lease_state.enqueued_initial then
-					lease_state.enqueued_initial = true
+				if not S.initial_admitted then
+					S.initial_admitted = true
 					preflight.enqueue_initial_inputs(S, first_user, opts)
 					if S.run_error then
 						return false, S.run_error
@@ -315,6 +316,13 @@ return function(D)
 			end
 			pending_turn_end = pending
 			::continue::
+		end
+
+		if not readiness_failed and not S.initial_admitted and S.termination_reason == "interrupted" then
+			if not (first_user and D.inputs.is_trusted_notification(first_user)) then
+				S.unadmitted = true
+				S.skip_turn_aborted = true
+			end
 		end
 
 		return preflight.finalize_run(S)

@@ -17,6 +17,8 @@ return function(D)
 			error_kind = nil,
 			turns = 0,
 			requested = false,
+			initial_admitted = false,
+			skip_turn_aborted = false,
 			overflow_rounds = 0,
 			image_rounds = 0,
 			token = A.token,
@@ -277,7 +279,7 @@ return function(D)
 	end
 
 	local function finalize_run(S)
-		if S.termination_reason == "interrupted" then
+		if S.termination_reason == "interrupted" and not S.skip_turn_aborted then
 			-- Settle any unexecuted tool calls on the last assistant turn before appending
 			-- the turn-aborted marker so no orphan tool_call sits behind `<turn_aborted>`.
 			orphans().settle()
