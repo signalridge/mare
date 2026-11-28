@@ -271,6 +271,13 @@ pub fn install(lua: &Lua, mare: &Table) -> mlua::Result<()> {
         })?,
     )?;
     t.set(
+        "queue_auto_update",
+        lua.create_function(|lua, names: Vec<String>| {
+            let cfg = current_config(lua)?;
+            mare_plugin_manager::queue_pending_updates(&cfg, &names).map_err(rt_err)
+        })?,
+    )?;
+    t.set(
         "list_installed",
         lua.create_async_function(|lua, opts: Option<Table>| async move {
             let cfg = current_config(&lua)?;

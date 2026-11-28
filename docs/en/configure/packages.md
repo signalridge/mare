@@ -82,7 +82,9 @@ The first of these fields present decides the target, in this order:
 | `rev = "<ref>"` | Any git revision. `rev = "=<sha>"` is an exact pin. |
 | none | The newest semver tag, else the default branch. |
 
-Add `pin = true` to hold any package where it is until you change the declaration.
+Add `pin = true` to hold any package where it is until you change the declaration. Add `auto_update = true` (default `false`) on a source to let periodic background checks fetch updates and queue the checkout switch for the next `/reload` or start (never mid-session under loaded plugins).
+
+By default, background checks in the TUI notify once per plugin per new revision and suggest `mare update --plugins` (`MARE_NO_UPDATE_CHECK=1` disables background checks; `MARE_OFFLINE=1` also blocks `mare plugin check`/`update` and remote clones on startup while keeping installed packages usable).
 
 ## The lock file
 

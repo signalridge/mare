@@ -14,7 +14,7 @@ impl Drop for ProcessLockGuard {
     }
 }
 
-fn sibling_lock_path(path: &Path) -> PathBuf {
+pub(crate) fn sibling_lock_path(path: &Path) -> PathBuf {
     let mut os = path.as_os_str().to_os_string();
     os.push(".lock");
     PathBuf::from(os)

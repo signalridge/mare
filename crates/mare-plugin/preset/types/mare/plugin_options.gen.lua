@@ -408,6 +408,7 @@
 ---@field enabled? boolean Enable or disable this plugin.
 ---@field enabled? boolean Check for a newer release.
 ---@field interval_hours? number Hours between checks.
+---@field plugins? boolean Also check declared git plugins for updates.
 ---@field timeout_ms? integer Request timeout in milliseconds.
 ---@field url? string Release API endpoint to query.
 

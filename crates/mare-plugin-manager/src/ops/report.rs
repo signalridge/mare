@@ -332,11 +332,19 @@ pub struct UpdateCheck {
     pub behind_count: u64,
     pub commits: Vec<String>,
     pub breaking: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_commit: Option<String>,
+    pub auto_update: bool,
     pub error: Option<String>,
 }
 
 /// Fetch and compare declared packages. A failed fetch is reported as unreachable, never current.
 pub fn check(cfg: &serde_json::Value, names: &[String]) -> Result<Vec<UpdateCheck>> {
+    if mare_shared::env::is_offline_env() {
+        bail!("offline mode is active (MARE_OFFLINE); cannot run plugin check");
+    }
     let _ = read_lock(cfg)?;
     let specs = specs(cfg);
     validate_checkout_constraints(&specs)?;
@@ -354,6 +362,9 @@ pub fn check(cfg: &serde_json::Value, names: &[String]) -> Result<Vec<UpdateChec
             behind_count: 0,
             commits: Vec::new(),
             breaking: false,
+            current_commit: None,
+            target_commit: None,
+            auto_update: spec.auto_update,
             error: None,
         };
         if spec.dir.is_some() {
@@ -373,6 +384,8 @@ pub fn check(cfg: &serde_json::Value, names: &[String]) -> Result<Vec<UpdateChec
                 if current.starts_with('-') || target.starts_with('-') {
                     bail!("invalid revision range for {}", spec.name);
                 }
+                row.current_commit = Some(current.clone());
+                row.target_commit = Some(target.clone());
                 let range = format!("{current}..{target}");
                 row.behind_count =
                     o.git(Some(&dir), &["rev-list", "--count", "--end-of-options", &range, "--"])?.parse()?;
