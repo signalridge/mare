@@ -868,3 +868,127 @@ async fn enter_does_not_accept_stale_completion_popup_after_typing() {
     })
     .await
 }
+
+#[tokio::test]
+async fn notify_delivers_when_focus_reporting_never_arrived_repro_280() {
+    local(async {
+        let env = TestEnv::new().await;
+        let mut b = env.host().builtins(&["status", "notify"]).faux(json!([])).config(json!({
+            "logo": false,
+            "plugins": {
+                "permissions": { "enabled": true },
+                "onboarding": { "plugins": false },
+                "notify": {
+                    "enabled": true,
+                    "only_unfocused": true,
+                    "protocol": "osc9",
+                    "dedupe_ms": 0
+                }
+            }
+        }));
+        b.opts.mode = Mode::Tui;
+        let owned = OwnedVt::new(env, b.opts, 80, 16).await;
+        let mut t = Term::from_vt(owned, vt100::Parser::new(nz(16), nz(80), 2000));
+        t.step().await;
+        t.until_vt("startup settled", |t| t.vt.startup_finished()).await;
+        t.vt.wait_startup_settled().await;
+        t.vt.reset_loop_state();
+        expose(&t.vt.host);
+
+        // Simulate a terminal that never sends FocusIn/FocusOut: user presses a key only.
+        t.vt.send_tty_event(mare_tui::tty::Event::Key(KeyEvent::new(KeyCode::Char('a'), Modifiers::NONE)));
+        t.vt.run_production_loop_for(Duration::from_millis(50)).await;
+        let _ = t.vt.output();
+
+        // Trigger an eligible notification with only_unfocused=true; focus reporting never arrived.
+        let sent: bool = eval(
+            &t.vt.host,
+            r#"return mare.ui.notify_os("Turn finished", { only_unfocused = true, protocol = "osc9" })"#,
+        )
+        .await;
+        assert!(
+            sent,
+            "notify_os with only_unfocused=true must still deliver when terminal never reported FocusIn/FocusOut (focus_known={})",
+            t.vt.ui().focus_known.load(std::sync::atomic::Ordering::Relaxed)
+        );
+    })
+    .await
+}
+
+#[tokio::test]
+async fn notify_delivers_turn_completion_after_input_without_focus_reports_and_suppresses_after_focus_in() {
+    local(async {
+        let env = TestEnv::new().await;
+        let mut b =
+            env.host().builtins(&["status", "notify"]).faux(json!([{ "text": "done without focus" }])).config(json!({
+                "logo": false,
+                "plugins": {
+                    "permissions": { "enabled": true },
+                    "onboarding": { "plugins": false },
+                    "notify": {
+                        "enabled": true,
+                        "only_unfocused": true,
+                        "min_turn_ms": 0,
+                        "protocol": "osc9",
+                        "dedupe_ms": 0
+                    }
+                }
+            }));
+        b.opts.mode = Mode::Tui;
+        let owned = OwnedVt::new(env, b.opts, 80, 16).await;
+        let mut t = Term::from_vt(owned, vt100::Parser::new(nz(16), nz(80), 2000));
+        t.step().await;
+        t.until_vt("startup settled", |t| t.vt.startup_finished()).await;
+        t.vt.wait_startup_settled().await;
+        t.vt.reset_loop_state();
+        expose(&t.vt.host);
+
+        // Input events alone (Key, Paste, Mouse) must not claim focus-report availability.
+        t.vt.send_tty_event(mare_tui::tty::Event::Paste("hi".into()));
+        t.vt.send_tty_event(mare_tui::tty::Event::Mouse(mare_tui::tty::MouseEvent {
+            kind: mare_tui::tty::MouseEventKind::Moved,
+            column: 1,
+            row: 1,
+            modifiers: Modifiers::NONE,
+        }));
+        t.vt.send_tty_event(mare_tui::tty::Event::Key(KeyEvent::new(KeyCode::Char('!'), Modifiers::NONE)));
+        t.vt.run_production_loop_for(Duration::from_millis(50)).await;
+        assert!(!t.vt.ui().focus_known.load(std::sync::atomic::Ordering::Relaxed));
+        assert_eq!(eval::<Option<bool>>(&t.vt.host, "return mare.ui.focused()").await, None);
+        let _ = t.vt.output();
+
+        // Submit the editor via Enter (still no FocusIn/FocusOut) and wait for turn completion.
+        t.vt.send_tty_event(mare_tui::tty::Event::Key(KeyEvent::new(KeyCode::Enter, Modifiers::NONE)));
+        let mut saw_osc9 = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            t.vt.run_production_loop_for(Duration::from_millis(30)).await;
+            let out = String::from_utf8_lossy(&t.vt.output()).into_owned();
+            if out.contains("\x1b]9;") {
+                saw_osc9 = true;
+                break;
+            }
+        }
+        assert!(saw_osc9, "expected OSC 9 turn-completion notification when focus reporting never arrived");
+        assert!(!t.vt.ui().focus_known.load(std::sync::atomic::Ordering::Relaxed));
+
+        // Once the terminal reports FocusIn, focus is known and only_unfocused suppresses notifications.
+        t.vt.send_tty_event(mare_tui::tty::Event::FocusIn);
+        t.vt.run_production_loop_for(Duration::from_millis(30)).await;
+        assert!(t.vt.ui().focus_known.load(std::sync::atomic::Ordering::Relaxed));
+        assert_eq!(eval::<Option<bool>>(&t.vt.host, "return mare.ui.focused()").await, Some(true));
+        let sent_while_focused: bool =
+            eval(&t.vt.host, r#"return mare.ui.notify_os("Suppressed", { only_unfocused = true, protocol = "osc9" })"#)
+                .await;
+        assert!(!sent_while_focused, "notify_os with only_unfocused=true must suppress once FocusIn arrived");
+
+        // After FocusOut, a subsequent keypress still restores known focused=true.
+        t.vt.send_tty_event(mare_tui::tty::Event::FocusOut);
+        t.vt.run_production_loop_for(Duration::from_millis(30)).await;
+        assert_eq!(eval::<Option<bool>>(&t.vt.host, "return mare.ui.focused()").await, Some(false));
+        t.vt.send_tty_event(mare_tui::tty::Event::Key(KeyEvent::new(KeyCode::Char('x'), Modifiers::NONE)));
+        t.vt.run_production_loop_for(Duration::from_millis(30)).await;
+        assert_eq!(eval::<Option<bool>>(&t.vt.host, "return mare.ui.focused()").await, Some(true));
+    })
+    .await
+}

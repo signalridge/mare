@@ -392,9 +392,10 @@ fn drain_tty_events(
         match ev {
             Some(Ok(tty::TimedEvent { event: Event::Key(k), at })) => {
                 let now = loop_now();
-                // Receiving keyboard input proves the terminal has focus.
+                // Input recovers focus after a prior FocusOut without claiming focus reporting
+                // exists; only FocusIn/FocusOut establish `focus_known` so terminals that never
+                // send FocusOut still deliver `only_unfocused` notifications.
                 app.ui.focused.store(true, Relaxed);
-                app.ui.focus_known.store(true, Relaxed);
                 state.sched.set_focused(true);
                 state.sched.activity(now);
                 state.urgent = true;
@@ -437,7 +438,6 @@ fn drain_tty_events(
             Some(Ok(tty::TimedEvent { event: Event::Paste(s), at })) => {
                 let now = loop_now();
                 app.ui.focused.store(true, Relaxed);
-                app.ui.focus_known.store(true, Relaxed);
                 state.sched.set_focused(true);
                 state.sched.activity(now);
                 state.urgent = true;
@@ -450,7 +450,6 @@ fn drain_tty_events(
             Some(Ok(tty::TimedEvent { event: Event::Mouse(m), at })) => {
                 let now = loop_now();
                 app.ui.focused.store(true, Relaxed);
-                app.ui.focus_known.store(true, Relaxed);
                 state.sched.set_focused(true);
                 state.sched.activity(now);
                 state.urgent = true;
