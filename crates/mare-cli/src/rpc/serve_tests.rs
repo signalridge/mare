@@ -5185,7 +5185,8 @@ async fn remote_non_admin_session_create_omitted_cwd_matches_explicit_project_cw
                 load_init: false,
                 project_trusted: true,
                 args: json!({}),
-                no_user_plugins: true,
+                // `no_user_plugins: true` represents `--clean`, which forces untrusted workspaces.
+                no_user_plugins: false,
             };
             let manager = mare_host::HostManager::new();
             // Project A (server default cwd) is narrowed to `read-only`.
