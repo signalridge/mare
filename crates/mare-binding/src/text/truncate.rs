@@ -23,6 +23,74 @@ pub struct Truncated {
     pub tail_lines: usize,
 }
 
+/// If a byte cut between `prev` (up to 3 trailing bytes before the cut) and `next` (leading bytes
+/// after the cut) splits a single valid multi-byte UTF-8 character, returns `(prefix_len, cont_len)`
+/// where `prefix_len` bytes are at the end of `prev` and `cont_len` continuation bytes are at the
+/// start of `next`. Returns `None` for complete characters or genuinely invalid UTF-8 bytes.
+pub(crate) fn split_utf8_boundary(prev: &[u8], next: &[u8]) -> Option<(usize, usize)> {
+    let cont_max = next.iter().take(3).take_while(|&&b| (0x80..0xC0).contains(&b)).count();
+    if cont_max == 0 || prev.is_empty() {
+        return None;
+    }
+    let prev_max = prev.len().min(3);
+    for pre in 1..=prev_max {
+        let lead = prev[prev.len() - pre];
+        if !(0xC2..=0xF4).contains(&lead) {
+            continue;
+        }
+        for cont in 1..=cont_max {
+            let total = pre + cont;
+            if total > 4 {
+                break;
+            }
+            let mut buf = [0u8; 4];
+            buf[..pre].copy_from_slice(&prev[prev.len() - pre..]);
+            buf[pre..total].copy_from_slice(&next[..cont]);
+            if std::str::from_utf8(&buf[..total]).ok().is_some_and(|s| s.chars().count() == 1) {
+                return Some((pre, cont));
+            }
+        }
+    }
+    None
+}
+
+/// Length of an incomplete valid UTF-8 prefix at the end of `bytes` (0 for complete characters or
+/// genuinely invalid raw bytes).
+pub(crate) fn trailing_incomplete_utf8_len(bytes: &[u8]) -> usize {
+    let max_back = bytes.len().min(3);
+    for len in 1..=max_back {
+        let slice = &bytes[bytes.len() - len..];
+        if let Err(e) = std::str::from_utf8(slice)
+            && e.valid_up_to() == 0
+            && e.error_len().is_none()
+        {
+            return len;
+        }
+    }
+    0
+}
+
+/// Align a 0-based start byte cut `pos` (keeping `bytes[start..]`) forward past any continuation
+/// bytes of a split valid UTF-8 character. Preserves genuinely invalid raw bytes untouched.
+pub(crate) fn align_start_cut(bytes: &[u8], pos: usize) -> usize {
+    let pos = pos.min(bytes.len());
+    if pos == 0 || pos == bytes.len() {
+        return pos;
+    }
+    if let Some((_, cont)) = split_utf8_boundary(&bytes[..pos], &bytes[pos..]) { pos + cont } else { pos }
+}
+
+/// Align a 0-based end byte cut `stop` (keeping `bytes[..end]`) backward before any lead byte of a
+/// split valid UTF-8 character (may return `0` when `stop` is smaller than the first codepoint).
+/// Preserves genuinely invalid raw bytes untouched.
+pub(crate) fn align_end_cut(bytes: &[u8], stop: usize) -> usize {
+    let stop = stop.min(bytes.len());
+    if stop == 0 || stop == bytes.len() {
+        return stop;
+    }
+    if let Some((pre, _)) = split_utf8_boundary(&bytes[..stop], &bytes[stop..]) { stop - pre } else { stop }
+}
+
 /// The first (`tail = false`) or last `n` units of `s`, never splitting a UTF-8 sequence — the
 /// one boundary helper behind `mare.text.cut`. `chars = false`: `n` bytes, the cut moved inward
 /// off continuation bytes (so the result may be shorter than `n`). `chars = true`: `n` code
@@ -225,5 +293,122 @@ pub(super) fn register_truncate_ops(lua: &Lua, t: &Table) -> mlua::Result<()> {
             lua.create_string(cut(&b, n.max(0) as usize, tail, chars))
         })?,
     )?;
+    // Shared UTF-8 byte-boundary helpers (same rules as Rust `job::Ring`): never split a valid
+    // multi-byte UTF-8 sequence while leaving genuinely invalid raw bytes untouched.
+    // Indices follow Lua 1-based byte conventions (`align_start` returns 1..=#s+1; `align_end`
+    // returns 0..=#s so `string.sub(s, 1, stop)` returns `""` when budget < first codepoint).
+    t.set(
+        "utf8_align_start",
+        lua.create_function(|_, (s, start): (mlua::LuaString, i64)| {
+            let b = s.as_bytes();
+            let pos = if start <= 1 { 0 } else { ((start - 1) as usize).min(b.len()) };
+            Ok(align_start_cut(&b, pos) + 1)
+        })?,
+    )?;
+    t.set(
+        "utf8_align_end",
+        lua.create_function(|_, (s, stop): (mlua::LuaString, i64)| {
+            let b = s.as_bytes();
+            let pos = if stop <= 0 { 0 } else { (stop as usize).min(b.len()) };
+            Ok(align_end_cut(&b, pos))
+        })?,
+    )?;
+    t.set(
+        "utf8_trim_tail",
+        lua.create_function(|lua, s: mlua::LuaString| {
+            let b = s.as_bytes();
+            let trim = trailing_incomplete_utf8_len(&b);
+            lua.create_string(&b[..b.len() - trim])
+        })?,
+    )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_utf8_boundary_helpers_handle_small_budgets_and_invalid_bytes() {
+        // Budget smaller than a single 3-byte codepoint ("中" = 3 bytes).
+        assert_eq!(align_end_cut("中a".as_bytes(), 2), 0);
+        assert_eq!(align_start_cut("中".as_bytes(), 1), 3);
+        assert_eq!(align_start_cut("中a".as_bytes(), 1), 3);
+        assert_eq!(align_end_cut("a中b".as_bytes(), 3), 1);
+        assert_eq!(trailing_incomplete_utf8_len(&"中".as_bytes()[..2]), 2);
+        assert_eq!(trailing_incomplete_utf8_len("中".as_bytes()), 0);
+        // Genuinely invalid raw bytes are preserved untouched.
+        assert_eq!(align_start_cut(b"\xff\x80abcd", 1), 1);
+        assert_eq!(align_end_cut(b"\xff\x80abcd", 1), 1);
+        assert_eq!(trailing_incomplete_utf8_len(b"abc\xff"), 0);
+    }
+
+    #[test]
+    fn lua_bash_output_and_persistent_shell_share_utf8_boundary_semantics() {
+        let lua = Lua::new();
+        let mare = lua.create_table().unwrap();
+        let text = lua.create_table().unwrap();
+        register_truncate_ops(&lua, &text).unwrap();
+        text.set("trunc_width", lua.create_function(|_, (s, _): (String, usize)| Ok(s)).unwrap()).unwrap();
+        mare.set("text", text).unwrap();
+        lua.globals().set("mare", mare).unwrap();
+
+        let bash_output_src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../mare-plugin/preset/plugins/lua/tools/bash_output.lua"),
+        )
+        .unwrap();
+        let (out, dropped, tail, tail_small, end_small, invalid_start, split_start, split_end): (
+            String,
+            i64,
+            String,
+            String,
+            i64,
+            i64,
+            i64,
+            i64,
+        ) = lua
+            .load(format!(
+                r###"
+                mare.paths = {{ tmp = "/tmp", state = "/tmp" }}
+                mare.date = function() return "20260101-000000" end
+                mare.crypto = {{ random_hex = function() return "abc" end }}
+                mare.proc = {{ spill_write = function() end }}
+                mare.fs = {{ list = function() return {{}} end }}
+                local mod = (function() {bash_output_src} end)()({{
+                    ctx = {{ on = function() end, spawn = function() end }},
+                    cfg = {{ max_lines = 100, max_bytes = 1024 }},
+                }})
+                local acc = mod.new_output_acc(20)
+                acc:push(string.rep("中", 12))
+                local r = acc:result()
+                assert(utf8.len(r.out) ~= nil, "acc:result produced invalid UTF-8")
+                local t = acc:tail_of(10)
+                assert(utf8.len(t) ~= nil, "acc:tail_of produced invalid UTF-8")
+                local small = mod.new_output_acc(20)
+                small:push("中")
+                local ts = small:tail_of(2)
+                assert(utf8.len(ts) ~= nil, "tail_of(2) on 中 produced invalid UTF-8")
+                return r.out,
+                    r.dropped,
+                    t,
+                    ts,
+                    mod.utf8_align_end("中a", 2),
+                    mod.utf8_align_start("\255\128abcd", 2),
+                    mod.utf8_align_start("中a", 2),
+                    mod.utf8_align_end("a中b", 3)
+                "###
+            ))
+            .eval()
+            .unwrap();
+        assert!(out.starts_with("中中中"), "head must keep whole chars: {out:?}");
+        assert!(out.ends_with("中中中"), "tail must keep whole chars: {out:?}");
+        assert_eq!(dropped, 18, "dropped byte count must match trimmed head/tail");
+        assert_eq!(tail, "中中中");
+        assert_eq!(tail_small, "", "tail_of(2) on 中 must not start on continuation byte");
+        assert_eq!(end_small, 0, "utf8_align_end on 中a with budget 2 must return 0 (no split UTF-8)");
+        assert_eq!(invalid_start, 2, "genuinely invalid 0x80 after 0xFF must not be swallowed");
+        assert_eq!(split_start, 4, "valid split UTF-8 start must advance past continuation bytes");
+        assert_eq!(split_end, 1, "valid split UTF-8 end must back up before lead byte");
+    }
 }

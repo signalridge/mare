@@ -2,7 +2,7 @@
 //! engines (replace / apply_patch) plus diffs.
 
 mod edit;
-mod truncate;
+pub(crate) mod truncate;
 mod web;
 
 use std::cell::RefCell;

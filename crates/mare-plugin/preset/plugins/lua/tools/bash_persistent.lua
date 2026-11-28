@@ -196,12 +196,14 @@ local function new_command_handle(s, h, sc)
 		q.total = q.total + #chunk
 		q.unread = q.unread .. chunk
 		if #q.unread > cap then
-			q.lost = q.lost + #q.unread - cap
-			q.unread = string.sub(q.unread, -cap)
+			local start = s.utf8_align_start(q.unread, #q.unread - cap + 1)
+			q.lost = q.lost + (start - 1)
+			q.unread = string.sub(q.unread, start)
 		end
 		q.tail = q.tail .. chunk
 		if #q.tail > cap then
-			q.tail = string.sub(q.tail, -cap)
+			local start = s.utf8_align_start(q.tail, #q.tail - cap + 1)
+			q.tail = string.sub(q.tail, start)
 		end
 	end
 	local function ended(code, signal)
@@ -251,8 +253,9 @@ local function new_command_handle(s, h, sc)
 	function hd.read(_, o)
 		pump()
 		local max = (o and o.max_bytes) or 50 * 1024
-		local text = string.sub(q.unread, 1, max)
-		q.unread = string.sub(q.unread, max + 1)
+		local stop = #q.unread > max and s.utf8_align_end(q.unread, max) or #q.unread
+		local text = string.sub(q.unread, 1, stop)
+		q.unread = string.sub(q.unread, stop + 1)
 		local dropped = q.lost
 		q.lost = 0
 		return { text = text, dropped = dropped, done = q.state ~= nil and q.unread == "" }
@@ -268,12 +271,21 @@ local function new_command_handle(s, h, sc)
 		end
 		local max = (o and o.max_bytes) or 50 * 1024
 		local rel = req - base + 1
-		local slice = rel <= #q.tail and string.sub(q.tail, rel, rel + max - 1) or ""
+		local slice = ""
+		if rel <= #q.tail then
+			local avail = string.sub(q.tail, rel)
+			local stop = #avail > max and s.utf8_align_end(avail, max) or #avail
+			slice = string.sub(avail, 1, stop)
+		end
 		return { text = slice, next = math.min(q.total, req + #slice), dropped = dropped }
 	end
 	function hd.tail(_, n)
 		pump()
-		return string.sub(q.tail, -(n or 4096))
+		local want = n or 4096
+		if #q.tail <= want then
+			return q.tail
+		end
+		return string.sub(q.tail, s.utf8_align_start(q.tail, #q.tail - want + 1))
 	end
 	function hd.wait(self, o)
 		local deadline = o and o.timeout_ms and (mare.task.clock() + o.timeout_ms)
@@ -573,6 +585,8 @@ return function(D, opts)
 		shell_config = D.shell_env.shell_config,
 		input_prompt_hint = D.bash_output.input_prompt_hint,
 		new_output_acc = D.bash_output.new_output_acc,
+		utf8_align_start = D.bash_output.utf8_align_start,
+		utf8_align_end = D.bash_output.utf8_align_end,
 		sandbox_report = opts.sandbox_report,
 		ensure_shell_cwd = opts.ensure_shell_cwd,
 		set_shell_cwd = opts.set_shell_cwd,
