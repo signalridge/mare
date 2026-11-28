@@ -67,6 +67,10 @@ pub struct TurnCompleted {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_sent: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_truncated: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub truncated: Option<bool>,
     #[serde(flatten)]
     pub extra: Extra,
@@ -750,7 +754,9 @@ payload!(SubagentCompleted {
     text: Option<String>,
     error: Option<EventError>,
     error_kind: Option<String>,
-    usage: Option<Value>
+    usage: Option<Value>,
+    output_truncated: Option<bool>,
+    stop_reason: Option<String>
 });
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

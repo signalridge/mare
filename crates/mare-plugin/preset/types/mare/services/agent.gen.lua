@@ -190,5 +190,5 @@ function M:update_queued(input_id, opts) end
 --- Block until the specified (or active) turn settles and return its `Turn` snapshot.
 ---@param turn_id? string
 ---@param opts? {timeout_ms?: integer}
----@return {cancellation_cause?: "user"|"parent"|"hook"|"disposed", completed_at_ms?: integer, error?: {code: string, data?: any, message: string}, error_kind?: string, messages?: table[], not_sent?: boolean, save_warning?: string, started_at_ms: integer, status: "completed"|"cancelled"|"failed"|"running", structured?: any, termination_reason?: "completed"|"usage_limit"|"interrupted"|"aborted"|"turn_limit"|"error", text?: string, timed_out?: boolean, turn_id: string, usage?: table}
+---@return {cancellation_cause?: "user"|"parent"|"hook"|"disposed", completed_at_ms?: integer, error?: {code: string, data?: any, message: string}, error_kind?: string, messages?: table[], not_sent?: boolean, save_warning?: string, started_at_ms: integer, status: "completed"|"cancelled"|"failed"|"running", stop_reason?: string, structured?: any, termination_reason?: "completed"|"usage_limit"|"interrupted"|"aborted"|"turn_limit"|"error", text?: string, timed_out?: boolean, truncated?: boolean, turn_id: string, usage?: table}
 function M:wait(turn_id, opts) end

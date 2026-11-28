@@ -747,7 +747,21 @@ fn build_settled(
             if let (Some(serde_json::Value::Object(u)), Some(c)) = (usage.as_mut(), run_cost.take()) {
                 u.insert("cost".into(), c);
             }
-            (headless::Settled { text, structured, usage, error, termination_reason, ..Default::default() }, outcome)
+            let stop_reason = v.get("stop_reason").and_then(|s| s.as_str()).map(str::to_string);
+            let truncated = v.get("truncated").and_then(|t| t.as_bool()).unwrap_or(false);
+            (
+                headless::Settled {
+                    text,
+                    structured,
+                    usage,
+                    error,
+                    termination_reason,
+                    truncated,
+                    stop_reason,
+                    ..Default::default()
+                },
+                outcome,
+            )
         }
         Err(e) => (
             headless::Settled {

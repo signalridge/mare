@@ -14,6 +14,8 @@ return function(D)
 			run_error = nil,
 			structured = nil,
 			termination_reason = "completed",
+			stop_reason = nil,
+			truncated = false,
 			error_kind = nil,
 			turns = 0,
 			requested = false,
@@ -347,6 +349,8 @@ return function(D)
 			error_kind = error_kind,
 			save_warning = save_warning,
 			termination_reason = S.termination_reason,
+			stop_reason = S.stop_reason,
+			truncated = S.truncated or nil,
 			cancellation_cause = S.termination_reason == "interrupted" and cancellation_cause_of(A.cancel_reason)
 				or nil,
 			-- stopped before any request (preparation or readiness refused, or cancelled before admission):

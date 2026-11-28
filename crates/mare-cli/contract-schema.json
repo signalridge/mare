@@ -882,6 +882,10 @@
           ],
           "type": "string"
         },
+        "stop_reason": {
+          "description": "Final model stop reason when reported (e.g. `stop`, `length`, `filtered`).",
+          "type": "string"
+        },
         "structured": {
           "description": "Validated structured output when `output_schema` was supplied."
         },
@@ -903,6 +907,10 @@
         },
         "timed_out": {
           "description": "True when `agent.wait` returned on `timeout_ms` before settlement.",
+          "type": "boolean"
+        },
+        "truncated": {
+          "description": "True when the final model response stopped at the output token limit.",
           "type": "boolean"
         },
         "turn_id": {
@@ -7670,6 +7678,9 @@
           ],
           "type": "string"
         },
+        "stop_reason": {
+          "type": "string"
+        },
         "subagent_id": {
           "description": "Unique identifier (child session id) of the subagent.",
           "type": "string"
@@ -7678,6 +7689,9 @@
           "type": "string"
         },
         "timed_out": {
+          "type": "boolean"
+        },
+        "truncated": {
           "type": "boolean"
         },
         "usage": {

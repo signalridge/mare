@@ -48,5 +48,5 @@ function M:steer(subagent_id, text) end
 --- Wait for a subagent to finish (non-consuming; timeout or cancellation does not cancel the child).
 ---@param subagent_id string
 ---@param opts? {timeout_ms?: integer}
----@return {error?: {code: string, data?: any, message: string}, error_kind?: string, messages?: table[], status: "running"|"completed"|"failed"|"cancelled"|"interrupted", subagent_id: string, text?: string, timed_out: boolean, usage?: table}
+---@return {error?: {code: string, data?: any, message: string}, error_kind?: string, messages?: table[], status: "running"|"completed"|"failed"|"cancelled"|"interrupted", stop_reason?: string, subagent_id: string, text?: string, timed_out: boolean, truncated?: boolean, usage?: table}
 function M:wait(subagent_id, opts) end

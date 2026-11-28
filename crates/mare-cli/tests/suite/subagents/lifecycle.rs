@@ -1333,3 +1333,71 @@ async fn direct_session_load_and_self_reload_succeed_while_background_subagent_i
     })
     .await;
 }
+
+#[tokio::test]
+async fn background_subagent_completion_notice_signals_output_truncation() {
+    local(async {
+        let run_case = |child_reply: serde_json::Value| async move {
+            let env = TestEnv::new().await;
+            let h = env
+                .host()
+                .builtins(SUBAGENT_BUILTINS)
+                .faux(json!([
+                    {"tool_calls": [{"name": "subagent", "arguments": {"prompt": "bg work", "description": "child task"}}]},
+                    {"text": "parent turn done"}
+                ]))
+                .config(json!({"agents": {"max_depth": 1}}))
+                .build()
+                .await;
+            expose(&h);
+            global(&h, "CHILD_SCRIPT", json!([child_reply]).to_string());
+            exec(
+                &h,
+                r#"
+                NOTICE_TX, NOTICE_RX = mare.task.channel()
+                ORIG_NOTIFY = A.notify
+                A.notify = function(_self, msg, _opts)
+                    NOTICE_TX:send(msg)
+                end
+                local orig_start = mare.subagent.start
+                mare.subagent.start = function(opts)
+                    opts.config = { plugins = { ["provider-faux"] = { script_json = CHILD_SCRIPT } } }
+                    return orig_start(opts)
+                end
+                "#,
+            )
+            .await;
+            let turn = within("parent prompt launching bg subagent", h.prompt("launch bg", json!({}))).await.unwrap();
+            assert_eq!(turn["text"], "parent turn done", "{turn}");
+            let notice: String = within(
+                "background subagent completion notice",
+                eval(
+                    &h,
+                    r#"
+                    local msg = NOTICE_RX:recv()
+                    A.notify = ORIG_NOTIFY
+                    return msg or ""
+                    "#,
+                ),
+            )
+            .await;
+            within("host shutdown", h.shutdown()).await;
+            notice
+        };
+
+        let trunc_notice = run_case(json!({ "text": "short cut-off reply", "stop": "length" })).await;
+        assert!(
+            trunc_notice.contains("output truncated") && trunc_notice.contains("max output tokens reached"),
+            "default background subagent completion notice must signal output truncation even for short replies: {trunc_notice}"
+        );
+        assert!(trunc_notice.contains("short cut-off reply"), "{trunc_notice}");
+
+        let clean_notice = run_case(json!({ "text": "complete reply", "stop": "stop" })).await;
+        assert!(
+            !clean_notice.contains("output truncated"),
+            "non-truncated subagent completion notice must not claim output truncation: {clean_notice}"
+        );
+        assert!(clean_notice.contains("complete reply"), "{clean_notice}");
+    })
+    .await;
+}

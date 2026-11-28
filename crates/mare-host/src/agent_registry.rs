@@ -72,6 +72,10 @@ pub struct AgentWaitResult {
     pub error: Option<mare_protocol::events::EventError>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
 }
 
 pub(crate) fn parse_event_error(
@@ -456,6 +460,8 @@ impl AgentRegistry {
             Ok(value) => {
                 let error_kind = value.get("error_kind").and_then(|v| v.as_str()).map(str::to_string);
                 let err = parse_event_error(&value, error_kind.as_deref());
+                let stop_reason = value.get("stop_reason").and_then(|v| v.as_str()).map(str::to_string);
+                let truncated = value.get("truncated").and_then(|v| v.as_bool()).unwrap_or(false);
                 let status = info_status.filter(|s| *s != AgentStatus::Running).unwrap_or_else(|| {
                     if agent_cancel.is_cancelled() {
                         AgentStatus::Cancelled
@@ -475,6 +481,8 @@ impl AgentRegistry {
                     usage: value.get(mare_shared::USAGE_KEY).filter(|v| v.is_object()).cloned(),
                     error: err,
                     error_kind,
+                    truncated,
+                    stop_reason,
                 }
             }
             Err(err) => {
@@ -500,6 +508,8 @@ impl AgentRegistry {
                         data: None,
                     }),
                     error_kind: Some(kind.into()),
+                    truncated: false,
+                    stop_reason: None,
                 }
             }
         }
@@ -517,6 +527,8 @@ impl AgentRegistry {
             usage: None,
             error: None,
             error_kind: None,
+            truncated: false,
+            stop_reason: None,
         }
     }
 
@@ -532,6 +544,8 @@ impl AgentRegistry {
             usage: None,
             error: None,
             error_kind: None,
+            truncated: false,
+            stop_reason: None,
         }
     }
 }
@@ -754,5 +768,45 @@ mod tests {
         assert!(count <= 256, "uncollected finished entries must be bounded by high-water cap (<= 256), got {count}");
         // Most recent uncollected entries remain retrievable.
         assert!(reg.get(&format!("child-{total}")).is_some());
+    }
+
+    #[tokio::test]
+    async fn wait_preserves_output_truncation_and_omits_when_false() {
+        let reg = AgentRegistry::default();
+        let res1 = reg.reserve_name(Some("trunc-worker")).unwrap();
+        let (entry1, tx1, _steer1) = dummy_entry(21, Some("trunc-worker"));
+        reg.insert(res1, entry1);
+        reg.mark_finished("child-21", AgentStatus::Completed, None, None);
+        tx1.send(Some(Ok(serde_json::json!({
+            "text": "partial child output",
+            "stop_reason": "length",
+            "truncated": true
+        }))))
+        .unwrap();
+
+        let waited = reg.wait("trunc-worker", Some(1000), None).await.unwrap();
+        assert_eq!(waited.status, AgentStatus::Completed);
+        assert_eq!(waited.text.as_deref(), Some("partial child output"));
+        assert!(waited.truncated);
+        assert_eq!(waited.stop_reason.as_deref(), Some("length"));
+        let serialized = serde_json::to_value(&waited).unwrap();
+        assert_eq!(serialized["truncated"], true);
+        assert_eq!(serialized["stop_reason"], "length");
+
+        let res2 = reg.reserve_name(Some("clean-worker")).unwrap();
+        let (entry2, tx2, _steer2) = dummy_entry(22, Some("clean-worker"));
+        reg.insert(res2, entry2);
+        reg.mark_finished("child-22", AgentStatus::Completed, None, None);
+        tx2.send(Some(Ok(serde_json::json!({
+            "text": "full child output",
+            "stop_reason": "stop"
+        }))))
+        .unwrap();
+
+        let clean = reg.wait("clean-worker", Some(1000), None).await.unwrap();
+        assert!(!clean.truncated);
+        assert_eq!(clean.stop_reason.as_deref(), Some("stop"));
+        let clean_json = serde_json::to_value(&clean).unwrap();
+        assert!(clean_json.get("truncated").is_none(), "non-truncated wait result must omit truncated: {clean_json}");
     }
 }

@@ -100,6 +100,8 @@ struct ChildEndOutcome {
     error: Option<mare_protocol::events::EventError>,
     error_kind: Option<String>,
     usage: Option<serde_json::Value>,
+    truncated: bool,
+    stop_reason: Option<String>,
 }
 
 impl ChildEndOutcome {
@@ -112,6 +114,8 @@ impl ChildEndOutcome {
             error: Some(mare_protocol::events::EventError { code: "error".into(), message: msg, data: None }),
             error_kind: Some("error".into()),
             usage: None,
+            truncated: false,
+            stop_reason: None,
         }
     }
 }
@@ -142,6 +146,8 @@ fn emit_child_end(
             error: outcome.error,
             error_kind: outcome.error_kind,
             usage: outcome.usage,
+            truncated: outcome.truncated,
+            stop_reason: outcome.stop_reason,
         })));
     }
 }
@@ -302,7 +308,19 @@ fn run_child_thread(mut args: ChildRuntimeArgs) {
     };
     let text = res.as_ref().ok().and_then(|v| v.get("text").and_then(|t| t.as_str())).map(str::to_string);
     let usage = res.as_ref().ok().and_then(|v| v.get(mare_shared::USAGE_KEY).cloned());
-    end_guard.finish(ChildEndOutcome { ok, status, status_str, text, error, error_kind, usage });
+    let stop_reason = res.as_ref().ok().and_then(|v| v.get("stop_reason").and_then(|s| s.as_str())).map(str::to_string);
+    let truncated = res.as_ref().ok().and_then(|v| v.get("truncated").and_then(|t| t.as_bool())).unwrap_or(false);
+    end_guard.finish(ChildEndOutcome {
+        ok,
+        status,
+        status_str,
+        text,
+        error,
+        error_kind,
+        usage,
+        truncated,
+        stop_reason,
+    });
     let _ = args.res_tx.send(Some(res));
 }
 
@@ -695,11 +713,20 @@ mod tests {
             error: None,
             error_kind: None,
             usage: None,
+            truncated: true,
+            stop_reason: Some("length".into()),
         });
 
         let entries = registry.list();
         assert_eq!(entries[0].status, AgentStatus::Completed);
-        assert!(matches!(ev_rx.try_recv().ok(), Some(ChildEvent::End(end)) if end.ok && end.status == "completed"));
+        assert!(matches!(
+            ev_rx.try_recv().ok(),
+            Some(ChildEvent::End(end))
+                if end.ok
+                    && end.status == "completed"
+                    && end.truncated
+                    && end.stop_reason.as_deref() == Some("length")
+        ));
         assert!(ev_rx.try_recv().is_err(), "disarmed guard must not emit a duplicate ChildEvent::End");
     }
 

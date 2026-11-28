@@ -194,10 +194,12 @@
 | `save_warning` | `string` |  | Quarantine/save failure warning when another error took precedence. |
 | `started_at_ms` | `integer` | 是 | Unix epoch milliseconds when the turn started. |
 | `status` | `"completed" \| "cancelled" \| "failed" \| "running"` | 是 | Turn completion outcome (or `running` when `wait` timed out). |
+| `stop_reason` | `string` |  | Final model stop reason when reported (e.g. `stop`, `length`, `filtered`). |
 | `structured` | `any` |  | Validated structured output when `output_schema` was supplied. |
 | `termination_reason` | `"completed" \| "usage_limit" \| "interrupted" \| "aborted" \| "turn_limit" \| "error"` |  | Machine-readable turn termination outcome. |
 | `text` | `string` |  | Final assistant text produced during the turn. |
 | `timed_out` | `boolean` |  | True when `agent.wait` returned on `timeout_ms` before settlement. |
+| `truncated` | `boolean` |  | True when the final model response stopped at the output token limit. |
 | `turn_id` | `string` | 是 | Turn identifier. |
 | `usage` | `object` |  | Aggregated token/cost usage for the turn. |
 
@@ -1990,9 +1992,11 @@ Absent or deleted namespaces report `exists: false` and `null` value with tombst
 | `error_kind` | `string` |  |  |
 | `messages` | `object[]` |  |  |
 | `status` | `"running" \| "completed" \| "failed" \| "cancelled" \| "interrupted"` | 是 |  |
+| `stop_reason` | `string` |  |  |
 | `subagent_id` | `string` | 是 | Unique identifier (child session id) of the subagent. |
 | `text` | `string` |  |  |
 | `timed_out` | `boolean` | 是 |  |
+| `truncated` | `boolean` |  |  |
 | `usage` | `object` |  |  |
 
 ### terminal

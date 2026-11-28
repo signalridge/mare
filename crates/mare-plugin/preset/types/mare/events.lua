@@ -33,7 +33,7 @@
 -- item/delta {turn_id, item_id, kind, delta, offset, tool_call_id?, partial?, event?},
 -- item/completed {turn_id?, item_id, status, item?, item_omitted?},
 -- queue/changed {items, action?},
--- turn/completed {turn_id, status = "completed"|"cancelled"|"failed", termination_reason?, cancellation_cause?, text?, structured?, usage?, error?, error_kind?, not_sent?},
+-- turn/completed {turn_id, status = "completed"|"cancelled"|"failed", termination_reason?, cancellation_cause?, text?, structured?, usage?, error?, error_kind?, not_sent?, output_truncated?, stop_reason?},
 -- agent/settled {turn_id, busy} (after every turn/completed listener of that run returned; busy = another
 --   run or an outer turn/completed dispatch is still in progress),
 -- host/notice {level, text, message?},
@@ -61,7 +61,7 @@
 --   dismissed (a declined request); nil = pass. Nobody answering, an error or any other answer is
 --   `unavailable` (denied). The agent-approvals plugin draws it; a higher priority replaces it),
 -- subagent/started / subagent/completed {subagent_id, agent_id, name?, label?, status?, run_id?,
---   seq?, task?, parent_session_id?, parent_session_epoch?, text?, error?, usage?}:
+--   seq?, task?, parent_session_id?, parent_session_epoch?, text?, error?, usage?, output_truncated?, stop_reason?}:
 --   the host-generated child session identity and terminal outcome, where recorded;
 -- subagent/progress {subagent_id, parent_session_id?, parent_session_epoch?, progress}:
 --   the latest coalesced status snapshot for that child;

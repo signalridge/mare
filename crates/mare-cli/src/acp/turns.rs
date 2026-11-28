@@ -861,8 +861,17 @@ pub(super) fn map_turn_result(res: &anyhow::Result<J>) -> Result<String, AcpErr>
             let msg = v["error"]["message"].as_str().or_else(|| v["error"].as_str()).unwrap_or("error");
             Err(AcpErr::Internal(msg.to_string()))
         }
-        Ok(v) if matches!(last_message_stop_reason(v), Some("filtered" | "refusal")) => Ok("refusal".into()),
-        Ok(v) if last_message_stop_reason(v) == Some("length") => Ok("max_tokens".into()),
+        Ok(v)
+            if matches!(
+                v["stop_reason"].as_str().or_else(|| last_message_stop_reason(v)),
+                Some("filtered" | "refusal")
+            ) =>
+        {
+            Ok("refusal".into())
+        }
+        Ok(v) if v["truncated"].as_bool().unwrap_or_else(|| last_message_stop_reason(v) == Some("length")) => {
+            Ok("max_tokens".into())
+        }
         _ => Ok("end_turn".into()),
     }
 }
@@ -1180,6 +1189,11 @@ mod tests {
         assert_eq!(
             map_turn_result(&Ok(json!({ "messages": [{ "stop_reason": "refusal" }] }))).ok().as_deref(),
             Some("refusal")
+        );
+        assert_eq!(map_turn_result(&Ok(json!({ "truncated": true }))).ok().as_deref(), Some("max_tokens"));
+        assert_eq!(
+            map_turn_result(&Ok(json!({ "truncated": false, "stop_reason": "length" }))).ok().as_deref(),
+            Some("end_turn")
         );
         assert_eq!(
             map_turn_result(&Ok(json!({ "messages": [{ "stop_reason": "length" }] }))).ok().as_deref(),
