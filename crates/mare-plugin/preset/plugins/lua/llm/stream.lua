@@ -590,9 +590,16 @@ return function(D)
 				local has_visible = false
 				if ok and res then
 					for _, b in ipairs(res.content or {}) do
-						if type(b) == "table" and b.type ~= "reasoning" then
-							has_visible = true
-							break
+						if type(b) == "table" then
+							if b.type == "text" then
+								if type(b.text) == "string" and b.text:match("%S") ~= nil then
+									has_visible = true
+									break
+								end
+							elseif b.type ~= "reasoning" then
+								has_visible = true
+								break
+							end
 						end
 					end
 				end
@@ -602,9 +609,11 @@ return function(D)
 					and res.stop_reason ~= "aborted"
 					and res.stop_reason ~= "filtered"
 					and res.stop_reason ~= "paused"
-					and (#(res.content or {}) == 0 or (res.stop_reason == "length" and not has_visible))
+					and not has_visible
 					and res.stop_reason ~= "error"
 				then
+					-- Never persist reasoning-only or whitespace-only text as an interrupted partial reply.
+					partial = {}
 					if res.stop_reason == "length" then
 						local cw = type(model) == "table" and tonumber(model.context_window) or nil
 						local u = type(res.usage) == "table" and res.usage or nil

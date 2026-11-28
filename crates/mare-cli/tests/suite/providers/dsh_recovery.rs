@@ -478,3 +478,149 @@ async fn pre_execute_tool_denial_skips_execution_and_reports_to_model() {
     })
     .await
 }
+
+/// Issue #91: a normal-stop reply with only reasoning or whitespace text and no tool call is
+/// retried through the bounded retry policy, fails visibly when retries are exhausted without
+/// being persisted to history (leaving no orphaned thinking in the next Anthropic request), while
+/// real tool calls and normal text succeed on the first attempt.
+#[tokio::test]
+async fn empty_stop_reply_retries_and_never_stores_orphaned_thinking_or_whitespace() {
+    local(async {
+        let reasoning_only_sse = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m_think\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"private reasoning only\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig_orphan_1\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":4}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        );
+
+        // 1) Reasoning-only reply retries and recovers when the next attempt returns normal text.
+        let r_think = run_wire(
+            Wire::Anthropic,
+            vec![Step::Raw(Resp::sse(reasoning_only_sse)), recovered()],
+            json!({ "retries": 1, "retry_base_ms": 1, "retry_max_ms": 2 }),
+            None,
+        )
+        .await;
+        assert_eq!(r_think.res["text"], "recovered", "{}", r_think.res);
+        assert_eq!(r_think.requests, 2);
+        assert_eq!(r_think.retries.len(), 1, "{:?}", r_think.retries);
+
+        // 2) Whitespace-only reply retries and recovers when the next attempt returns normal text.
+        let r_ws = run_wire(
+            Wire::Anthropic,
+            vec![Step::Reply(vec![Part::Text("   \n\t  ".into())]), recovered()],
+            json!({ "retries": 1, "retry_base_ms": 1, "retry_max_ms": 2 }),
+            None,
+        )
+        .await;
+        assert_eq!(r_ws.res["text"], "recovered", "{}", r_ws.res);
+        assert_eq!(r_ws.requests, 2);
+        assert_eq!(r_ws.retries.len(), 1, "{:?}", r_ws.retries);
+
+        // 3) Exhausted retries on reasoning-only and whitespace-only turns fail visibly, store no
+        //    assistant message in history, and leak no orphaned thinking into the next Anthropic request.
+        let mut env = TestEnv::new().await;
+        env.set_var("ANTHROPIC_API_KEY", "test-anthropic");
+        let mock = ScriptedModel::start(
+            Wire::Anthropic,
+            vec![
+                // Turn 1: two reasoning-only replies (initial + 1 retry) -> fails visibly.
+                Step::Raw(Resp::sse(reasoning_only_sse)),
+                Step::Raw(Resp::sse(reasoning_only_sse)),
+                // Turn 2: two whitespace-only replies (initial + 1 retry) -> fails visibly.
+                Step::Reply(vec![Part::Text("  \n\t ".into())]),
+                Step::Reply(vec![Part::Text("\n ".into())]),
+                // Turn 3: real tool call with no text (succeeds on attempt 1) -> then normal text.
+                Step::Reply(vec![
+                    Part::ToolCall { id: "c_ok".into(), name: "ping_tool".into(), args: json!({}) },
+                    Part::Finish(Finish::ToolCalls),
+                ]),
+                Step::Reply(vec![Part::Text("final normal answer".into())]),
+            ],
+        )
+        .await;
+        let mut cfg = mock.host_config();
+        merge(&mut cfg, json!({ "plugins": { "llm": { "retries": 1, "retry_base_ms": 1, "retry_max_ms": 2 } } }));
+        let h = env.host().builtins(&["compact", "usage"]).config(cfg).build().await;
+        expose(&h);
+        exec(
+            &h,
+            r#"PING_RAN = 0
+               T:register("ping_tool", {
+                   description = "ping",
+                   parameters = { type = "object" },
+                   execute = function() PING_RAN = PING_RAN + 1 return "pong" end,
+               })"#,
+        )
+        .await;
+
+        let fail_think = h.prompt("turn one", json!({})).await.unwrap();
+        assert_eq!(fail_think["status"], "failed", "reasoning-only must fail visibly: {fail_think}");
+        assert_eq!(fail_think["termination_reason"], "error", "reasoning-only must fail visibly: {fail_think}");
+        let err_msg = fail_think["error"]["message"].as_str().unwrap_or("");
+        assert!(
+            err_msg.contains("empty response"),
+            "error must describe empty response without quoting reasoning: {fail_think}"
+        );
+        assert!(
+            !err_msg.contains("private reasoning only"),
+            "error must never quote reasoning content: {fail_think}"
+        );
+        assert!(
+            fail_think["messages"].as_array().unwrap().iter().all(|m| m["role"] != "assistant"),
+            "failed reasoning-only reply must never be stored in history: {fail_think}"
+        );
+
+        let fail_ws = h.prompt("turn two", json!({})).await.unwrap();
+        assert_eq!(fail_ws["status"], "failed", "whitespace-only must fail visibly: {fail_ws}");
+        assert_eq!(fail_ws["termination_reason"], "error", "whitespace-only must fail visibly: {fail_ws}");
+        assert!(
+            fail_ws["messages"].as_array().unwrap().iter().all(|m| m["role"] != "assistant"),
+            "failed whitespace-only reply must never be stored in history: {fail_ws}"
+        );
+
+        let ok_turn = h.prompt("turn three", json!({})).await.unwrap();
+        assert_eq!(ok_turn["text"], "final normal answer", "{ok_turn}");
+        let ping_ran: i64 = eval(&h, "return PING_RAN").await;
+        assert_eq!(ping_ran, 1, "tool-call-only reply must execute cleanly without retry");
+
+        h.shutdown().await;
+        let reqs = mock.requests();
+        mock.finish();
+        assert_eq!(reqs.len(), 6, "2 failed reasoning + 2 failed whitespace + 1 tool call + 1 final text");
+
+        // Every Anthropic request after the failed reasoning-only and whitespace-only turns must
+        // contain zero orphaned thinking blocks and zero whitespace-only assistant messages.
+        for (idx, req) in reqs.iter().enumerate().skip(2) {
+            let body: Value = serde_json::from_str(&req.body).unwrap();
+            let body_str = body.to_string();
+            assert!(
+                !body_str.contains("private reasoning only") && !body_str.contains("sig_orphan_1"),
+                "request {idx} leaked orphaned thinking from failed turn: {body}"
+            );
+            let msgs = body["messages"].as_array().unwrap();
+            for m in msgs {
+                if m["role"] == "assistant" {
+                    let has_only_ws = m["content"].as_array().is_some_and(|arr| {
+                        !arr.is_empty()
+                            && arr.iter().all(|b| {
+                                b["type"] == "text" && b["text"].as_str().is_some_and(|t| t.trim().is_empty())
+                            })
+                    });
+                    assert!(!has_only_ws, "request {idx} replayed a whitespace-only assistant message: {body}");
+                }
+            }
+        }
+    })
+    .await
+}
