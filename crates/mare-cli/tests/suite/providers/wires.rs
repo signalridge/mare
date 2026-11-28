@@ -1173,3 +1173,90 @@ async fn wire_estimate_hints_register_with_wire_and_dispose_on_unload() {
     })
     .await
 }
+
+#[tokio::test]
+async fn repro_311_skip_empty_assistant_message_in_chat_completions() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let server = MockServer::start().await;
+        server.route("/compat", vec![Resp::sse(fixture("openai-compat.sse"))]);
+        let h = provider_host(&mut env, &server, json!({ "plugins": { "llm": { "retries": 0 } } })).await;
+
+        let msg: Value = mare_shared::lua::lua_to_json(
+            h.lua(),
+            h.lua()
+                .load(
+                    r#"local m = assert(LLM:resolve("deepseek/deepseek-chat"))
+                    return LLM:stream({
+                        model = m,
+                        system = "S",
+                        messages = {
+                            { role = "user", content = { { type = "text", text = "hi" } } },
+                            { role = "assistant", content = {}, stop_reason = "filtered", error = "blocked" },
+                            { role = "user", content = { { type = "text", text = "next" } } },
+                        },
+                    }, function() end)"#,
+                )
+                .call_async::<mlua::Value>(())
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_ne!(msg["stop_reason"], "error", "{msg}");
+
+        let reqs = server.requests();
+        assert_eq!(reqs.len(), 1);
+        let body: Value = serde_json::from_str(&reqs[0].body).unwrap();
+        let messages = body["messages"].as_array().expect("messages array");
+        let empty_assistant = messages.iter().any(|m| {
+            m["role"] == "assistant"
+                && m["content"].as_str().is_none_or(str::is_empty)
+                && m.get("tool_calls").is_none_or(Value::is_null)
+                && m.get("reasoning_content").is_none_or(Value::is_null)
+        });
+        assert!(
+            !empty_assistant,
+            "Chat Completions wire should skip empty filtered assistant messages, got: {messages:?}"
+        );
+
+        // Non-empty assistant turns (tool calls or reasoning) must still be preserved.
+        server.route("/compat", vec![Resp::sse(fixture("openai-compat.sse"))]);
+        let msg2: Value = mare_shared::lua::lua_to_json(
+            h.lua(),
+            h.lua()
+                .load(
+                    r#"local m = assert(LLM:resolve("deepseek/deepseek-chat"))
+                    return LLM:stream({
+                        model = m,
+                        system = "S",
+                        messages = {
+                            { role = "user", content = { { type = "text", text = "hi" } } },
+                            {
+                                role = "assistant",
+                                provider_id = "deepseek",
+                                model_id = "deepseek-chat",
+                                content = {
+                                    { type = "tool_call", id = "call_keep", name = "echo", arguments = { x = 1 } },
+                                },
+                            },
+                            { role = "tool_result", tool_call_id = "call_keep", tool_name = "echo", content = { { type = "text", text = "ok" } } },
+                        },
+                    }, function() end)"#,
+                )
+                .call_async::<mlua::Value>(())
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_ne!(msg2["stop_reason"], "error", "{msg2}");
+        let reqs2 = server.requests();
+        let body2: Value = serde_json::from_str(&reqs2.last().unwrap().body).unwrap();
+        let has_tool_assistant = body2["messages"].as_array().unwrap().iter().any(|m| {
+            m["role"] == "assistant"
+                && m["tool_calls"].as_array().is_some_and(|calls| calls.iter().any(|c| c["id"] == "call_keep"))
+        });
+        assert!(has_tool_assistant, "assistant turn with tool_calls must be preserved: {body2}");
+        h.shutdown().await;
+    })
+    .await
+}

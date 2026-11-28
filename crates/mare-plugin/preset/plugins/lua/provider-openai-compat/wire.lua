@@ -461,14 +461,22 @@ function M.convert_messages(system, messages, endpoint, opts)
 					msg.reasoning_details = out_details
 				end
 			end
-			if
-				placeholder_reasoning
-				and msg.reasoning_content == nil
-				and (#calls > 0 or after_tool or opts.has_tools)
-			then
-				msg.reasoning_content = " "
+			local has_payload = msg.content ~= ""
+				or #calls > 0
+				or msg.reasoning_content ~= nil
+				or msg.reasoning ~= nil
+				or msg.reasoning_details ~= nil
+				or msg.thought_signature ~= nil
+			if has_payload then
+				if
+					placeholder_reasoning
+					and msg.reasoning_content == nil
+					and (#calls > 0 or after_tool or opts.has_tools)
+				then
+					msg.reasoning_content = " "
+				end
+				out[#out + 1] = msg
 			end
-			out[#out + 1] = msg
 		elseif m.role == "tool_result" then
 			after_tool = true
 			local parts, has_images = {}, false
