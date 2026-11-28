@@ -107,6 +107,31 @@ local function complete_paths(ev)
 	return #items > 0 and items or nil
 end
 
+local function normalize_image(img)
+	if type(img) ~= "table" then
+		return nil
+	end
+	if type(img.type) == "string" then
+		return img
+	end
+	if type(img.mime) == "string" and type(img.data) == "string" then
+		return {
+			type = "image",
+			mime = img.mime,
+			data = img.data,
+			path = type(img.path) == "string" and img.path or nil,
+		}
+	end
+	return nil
+end
+
+local function image_key(b)
+	if type(b) == "table" and b.type == "image" and type(b.mime) == "string" and type(b.data) == "string" then
+		return b.mime .. "\0" .. b.data .. "\0" .. tostring(b.path or "")
+	end
+	return nil
+end
+
 function M.register(ctx, reg)
 	local commands = reg.commands
 	-- route input: a step of ui's ordered submit chain,
@@ -116,9 +141,41 @@ function M.register(ctx, reg)
 			local text = ev.text or ""
 			if string.sub(text, 1, 1) == "/" and not string.find(string.sub(text, 1, 40), "^/%S*/") then
 				local args = string.match(text, "^/%S*%s*(.-)%s*$") or ""
-				local content = { { type = "text", text = args } }
+				local content = {}
+				local seen_images = {}
+				local placed_text = false
+				if type(ev.content) == "table" then
+					for _, b in ipairs(ev.content) do
+						if type(b) == "table" and type(b.type) == "string" then
+							if b.type == "text" then
+								if not placed_text then
+									content[#content + 1] = { type = "text", text = args }
+									placed_text = true
+								end
+							else
+								content[#content + 1] = b
+								local k = image_key(b)
+								if k then
+									seen_images[k] = true
+								end
+							end
+						end
+					end
+				end
+				if not placed_text then
+					table.insert(content, 1, { type = "text", text = args })
+				end
 				for _, img in ipairs(ev.images or {}) do
-					content[#content + 1] = img
+					local norm = normalize_image(img)
+					if norm then
+						local k = image_key(norm)
+						if not k or not seen_images[k] then
+							if k then
+								seen_images[k] = true
+							end
+							content[#content + 1] = norm
+						end
+					end
 				end
 				local handled, res = reg.run_local(text, { content = content })
 				ev.handled = handled

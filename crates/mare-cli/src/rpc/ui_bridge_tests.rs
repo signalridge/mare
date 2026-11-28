@@ -2521,3 +2521,64 @@ async fn commands_run_tree_completes_navigation_before_returning() {
         })
         .await;
 }
+
+#[tokio::test]
+async fn rpc_send_editor_slash_command_preserves_resolved_attachments() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (_dir, _guard, rpc, mut cr, mut cw, task, sid) = setup_rpc(true).await;
+            let rt = rpc.manager.session(&sid).unwrap();
+            let lua = rt.host.lua();
+            let cmds = rt.host.service_table("commands").unwrap();
+            lua.globals().set("TEST_CMDS", cmds).unwrap();
+            lua.load(
+                r#"
+                _G.RPC_SLASH_RECEIVED = nil
+                TEST_CMDS:register("rpc-img-check", {
+                    description = "verify RPC slash command receives resolved attachments",
+                    run = function(args, input)
+                        _G.RPC_SLASH_RECEIVED = {
+                            args = args,
+                            content = input and input.content or nil,
+                        }
+                    end,
+                })
+                "#,
+            )
+            .exec()
+            .unwrap();
+
+            let png_b64 =
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+            rpc_send(
+                &mut cw,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 77,
+                    "method": "ui.send_editor",
+                    "params": {
+                        "session_id": sid,
+                        "text": "/rpc-img-check inspect",
+                        "attachments": [{ "kind": "image", "mime": "image/png", "data": png_b64 }]
+                    }
+                }),
+            )
+            .await;
+            let rep = read_reply(&mut cr, 77).await;
+            assert!(rep.get("error").is_none(), "ui.send_editor slash command failed: {rep}");
+
+            let received: String = lua.load("return mare.json.encode(_G.RPC_SLASH_RECEIVED)").eval().unwrap();
+            let val: J = serde_json::from_str(&received).unwrap();
+            assert_eq!(val["args"], "inspect", "slash args mismatch: {val}");
+            let parts = val["content"].as_array().expect("content array");
+            assert!(
+                parts.iter().any(|p| p["type"] == "image" && p["mime"] == "image/png" && p["data"] == png_b64),
+                "RPC ui.send_editor slash submission dropped resolved image attachment: {val}"
+            );
+
+            drop((cw, cr));
+            tokio::time::timeout(Duration::from_secs(5), task).await.unwrap().unwrap();
+            let _ = rpc.manager.shutdown_all().await;
+        })
+        .await;
+}
