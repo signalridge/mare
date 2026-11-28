@@ -863,3 +863,73 @@ return {
     })
     .await;
 }
+
+/// Issue #190: local schema validation accepts `enum` on `type: "array"`, so the Kimi/Moonshot
+/// sanitizer must adapt it instead of forwarding `enum` on an array node unchanged.
+#[tokio::test]
+async fn kimi_schema_sanitize_adapts_array_enum() {
+    local(async {
+        let env = TestEnv::new().await;
+        let h = env.host().no_session().build().await;
+        let schema_json = json!({
+            "type": "object",
+            "properties": {
+                "tags": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "enum": [["alpha"], ["beta"]]
+                }
+            }
+        });
+        // Confirm local tool schema validation accepts this schema and enforces the array enum.
+        let compiled =
+            mare_shared::schema::Schema::compile(schema_json.clone()).expect("local schema accepts array enum");
+        assert!(compiled.validate(&json!({ "tags": ["alpha"] })).is_ok());
+        assert!(compiled.validate(&json!({ "tags": ["gamma"] })).is_err());
+
+        let out = lua_call(
+            &h,
+            r#"
+local S = require("mare_lib.schema_sanitize")
+local src = ...
+return S.sanitize(src, "kimi-for-coding", "https://api.kimi.com/coding/v1", "kimi-k2.5")
+"#,
+            json!([schema_json]),
+        )
+        .await;
+        let tags = &out["properties"]["tags"];
+        assert!(
+            !(tags["type"] == "array" && tags.get("enum").is_some()),
+            "Kimi sanitizer passed `enum` on `type: array` through unchanged: {tags}"
+        );
+        assert_eq!(tags["type"], "array", "array type should be preserved: {tags}");
+        assert_eq!(tags["items"], json!({ "type": "string" }), "items schema should be preserved: {tags}");
+        let desc = tags["description"].as_str().unwrap_or("");
+        assert!(
+            desc.contains("[\"alpha\"]") && desc.contains("[\"beta\"]"),
+            "adapted array enum should preserve allowed values in description: {tags}"
+        );
+
+        // Structured output (`output_schema = true`, as used by provider-openai-compat response_format)
+        // must preserve the array `enum` contract rather than downgrading it to prose.
+        let out_schema = lua_call(
+            &h,
+            r#"
+local S = require("mare_lib.schema_sanitize")
+local src = ...
+local d = S.detect_dialect("kimi-for-coding", "https://api.kimi.com/coding/v1", "kimi-k2.5", { output_schema = true })
+return S.sanitize(src, d)
+"#,
+            json!([schema_json]),
+        )
+        .await;
+        let out_tags = &out_schema["properties"]["tags"];
+        assert_eq!(
+            out_tags["enum"],
+            json!([["alpha"], ["beta"]]),
+            "Kimi output_schema must preserve array enum constraint: {out_tags}"
+        );
+        h.shutdown().await;
+    })
+    .await;
+}

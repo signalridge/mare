@@ -613,16 +613,28 @@ sanitize_node = function(node, d)
 		end
 	end
 
-	if d.kimi and s.type == nil then
-		if s.enum ~= nil then
-			local inferred = infer_enum_type(s.enum)
-			if inferred ~= nil then
-				s.type = inferred
+	if d.kimi then
+		if s.type == nil then
+			if s.enum ~= nil then
+				local inferred = infer_enum_type(s.enum)
+				if inferred ~= nil then
+					s.type = inferred
+				end
+			elseif s.const ~= nil then
+				local inferred = value_json_type(s.const)
+				if inferred ~= nil then
+					s.type = inferred
+				end
 			end
-		elseif s.const ~= nil then
-			local inferred = value_json_type(s.const)
-			if inferred ~= nil then
-				s.type = inferred
+		end
+		if not d.output_schema and schema_has_type(s.type, "array") and type(s.enum) == "table" then
+			local encoded = {}
+			for _, v in ipairs(s.enum) do
+				encoded[#encoded + 1] = mare.json.encode(v)
+			end
+			s.enum = nil
+			if #encoded > 0 then
+				append_constraint_notes(s, { "Allowed values: " .. table.concat(encoded, ", ") })
 			end
 		end
 	end
