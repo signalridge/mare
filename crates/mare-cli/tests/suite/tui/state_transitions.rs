@@ -1480,6 +1480,71 @@ async fn external_editor_rejects_sync_lua_mutations_while_open() {
     .await
 }
 
+/// A `/side` failure backfill arriving while an external editor owns the terminal must not be
+/// dropped by the busy bridge or overwrite the edited text; once the editor closes, both the
+/// backfill and the external editor text must be preserved in defined order and rendered on screen.
+#[cfg(unix)]
+#[tokio::test]
+async fn external_editor_preserves_side_failure_backfill_while_open() {
+    struct ReleaseGuard(std::path::PathBuf);
+    impl Drop for ReleaseGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::write(&self.0, "release");
+        }
+    }
+
+    tokio::time::timeout(Duration::from_secs(30), local(async {
+        let dir = tempfile::tempdir().unwrap();
+        let ready = dir.path().join("ready");
+        let release = dir.path().join("release");
+        let _release_guard = ReleaseGuard(release.clone());
+        let script = dir.path().join("editor.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\ntouch '{}'\ni=0\nwhile [ ! -f '{}' ] && [ \"$i\" -lt 500 ]; do sleep 0.02; i=$((i + 1)); done\nprintf 'from external editor\\n' > \"$1\"\n",
+                ready.display(),
+                release.display(),
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut t =
+            Term::build(json!([]), json!({ "editor": script.to_string_lossy().as_ref() }), json!({}), 80, 20, |_| {})
+                .await;
+        expose(&t.vt.host);
+        wait_vt(&mut t, "startup to finish", |t| !t.vt.starting()).await;
+
+        t.ctrl('g');
+        wait_vt(&mut t, "editor process started", |_| ready.exists()).await;
+
+        // Empty session causes `/side` start to fail and backfill `/side why failed` into the editor.
+        exec(&t.vt.host, r#"C.cordis:get("commands"):run("/side why failed")"#).await;
+        t.vt.drain_cmds();
+        assert_ne!(
+            t.vt.editor_text(),
+            "/side why failed",
+            "backfill must not overwrite the live buffer while the external editor is open"
+        );
+
+        std::fs::write(&release, "go").unwrap();
+        wait_vt(&mut t, "editor exited and preserved backfill + edited text", |t| {
+            t.vt.editor_text() == "/side why failed\n\nfrom external editor"
+        })
+        .await;
+
+        let screen = t.screen();
+        let backfill_pos = screen.find("/side why failed").expect("screen must display /side backfill");
+        let editor_pos = screen.find("from external editor").expect("screen must display external editor text");
+        assert!(backfill_pos < editor_pos, "backfill must precede external editor text on screen:\n{screen}");
+    }))
+    .await
+    .expect("external_editor_preserves_side_failure_backfill_while_open timed out")
+}
+
 /// Resizing while a `CSI 6n` CPR query is in flight must account for the stale reply rather than
 /// letting that old reply anchor the post-resize renderer; only after the stale reply is drained
 /// may a fresh `CSI 6n` be emitted and anchored.
