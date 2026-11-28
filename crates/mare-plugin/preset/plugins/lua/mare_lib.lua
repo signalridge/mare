@@ -2432,4 +2432,43 @@ function M.mutex()
 	return m
 end
 
+--- Authoritative single-window input token count for silent context-overflow checks.
+--- Prefers provider-reported per-iteration window occupancy over cumulative billed totals.
+function M.usage_window_input(u)
+	if type(u) ~= "table" then
+		return 0
+	end
+	return tonumber(u.max_iteration_input)
+		or tonumber(u.context_input)
+		or ((tonumber(u.input) or 0) + (tonumber(u.cache_read) or 0))
+end
+
+--- Authoritative final-window output token count for silent length-overflow checks.
+--- Prefers provider-reported final-iteration output over cumulative billed output.
+function M.usage_window_output(u)
+	if type(u) ~= "table" then
+		return 0
+	end
+	return tonumber(u.context_output) or tonumber(u.output) or 0
+end
+
+--- Authoritative final-window context occupancy (`context_tokens`, or `context_input + context_output`,
+--- falling back to total input + cache + output when no per-iteration breakdown was reported).
+function M.usage_context_tokens(u)
+	if type(u) ~= "table" then
+		return 0
+	end
+	if type(u.context_tokens) == "number" then
+		return u.context_tokens
+	end
+	if type(u.context_input) == "number" then
+		local out = type(u.context_output) == "number" and u.context_output or (tonumber(u.output) or 0)
+		return u.context_input + out
+	end
+	return (tonumber(u.input) or 0)
+		+ (tonumber(u.cache_read) or 0)
+		+ (tonumber(u.cache_write) or 0)
+		+ (tonumber(u.output) or 0)
+end
+
 return M

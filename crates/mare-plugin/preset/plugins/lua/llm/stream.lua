@@ -632,8 +632,9 @@ return function(D)
 					if res.stop_reason == "length" then
 						local cw = type(model) == "table" and tonumber(model.context_window) or nil
 						local u = type(res.usage) == "table" and res.usage or nil
-						local inp = u and ((tonumber(u.input) or 0) + (tonumber(u.cache_read) or 0)) or 0
-						if cw and cw > 0 and u and (tonumber(u.output) or 0) == 0 and inp >= cw * 0.99 then
+						local lib = require("mare_lib")
+						local inp = u and lib.usage_window_input(u) or 0
+						if cw and cw > 0 and u and lib.usage_window_output(u) == 0 and inp >= cw * 0.99 then
 							-- Xiaomi MiMo style silent overflow
 							ok, res =
 								false, {
