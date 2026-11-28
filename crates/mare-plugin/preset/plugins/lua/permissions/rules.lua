@@ -435,12 +435,13 @@ return function(D)
 	end
 	--- permission/parse: listeners see a copy of the authoritative parse; only tightening
 	--- survives (analyzable → not, a segment → unanalyzable, deny reasons, notes)
-	function tighten_parse(parsed, command, tool, shell)
+	function tighten_parse(parsed, command, tool, shell, arguments)
 		local wf = ctx.bus:waterfall("permission/parse", {
 			parsed = copy(parsed),
 			command = command,
 			tool = tool,
 			shell = shell,
+			arguments = type(arguments) == "table" and copy(arguments) or nil,
 		})
 		local got = (type(wf) == "table" and type(wf.parsed) == "table" and wf.parsed) or wf
 		if type(got) ~= "table" then
@@ -607,10 +608,16 @@ return function(D)
 					reason = ("command argument `%s` is missing or not a string"):format(spec.arg),
 				}
 			end
-			return { kind = "shell", shell = shell, text = text }
+			return { kind = "shell", shell = shell, text = text, dynamic = spec.dynamic and true or nil }
 		end
 		if type(spec.argv) == "table" then
-			local argv, err = require("mare_lib").expand_argv_template(spec.argv, spec.defaults, args)
+			local ml = require("mare_lib")
+			local argv, err
+			if spec.dynamic then
+				argv = ml.copy_deep(spec.argv)
+			else
+				argv, err = ml.expand_argv_template(spec.argv, spec.defaults, args)
+			end
 			if not argv then
 				return { kind = "unanalyzable", reason = err }
 			end
@@ -619,6 +626,7 @@ return function(D)
 				shell = argv_shell(argv),
 				argv = argv,
 				text = table.concat(argv, " "),
+				dynamic = spec.dynamic and true or nil,
 			}
 		end
 		return { kind = "unanalyzable", reason = "command representation is not declared" }
@@ -676,7 +684,7 @@ return function(D)
 		-- only tighten: mark the command or single segments not analyzable, add deny reasons,
 		-- add notes for the dialog. A different parse (other argv, ops, more segments) or
 		-- turning "not analyzable" into segments is ignored.
-		parsed = tighten_parse(parsed, command or "", call.name, shell)
+		parsed = tighten_parse(parsed, command or "", call.name, shell, call.arguments)
 		local v = { parsed = parsed, segs = {}, unmatched = 0 }
 		if parsed.deny_reasons and #parsed.deny_reasons > 0 then
 			v.decision = "forbidden"

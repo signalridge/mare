@@ -40,8 +40,53 @@ return function(D)
 		return mare.fs.read(path, { policies = policies, max_bytes = cap })
 	end
 
-	local function edit_result_display(path, old, new)
-		return ui.Diff({ old = mare.projection.project(old or ""), new = mare.projection.project(new), path = path })
+	local function resolve_preview_path(raw_path, call_cwd)
+		if type(raw_path) ~= "string" or raw_path == "" then
+			return nil
+		end
+		if type(call_cwd) == "string" and call_cwd ~= "" and mare.fs.resolve_path then
+			local ok, resolved = pcall(mare.fs.resolve_path, raw_path, call_cwd)
+			if ok and type(resolved) == "table" and type(resolved.logical) == "string" and resolved.logical ~= "" then
+				return resolved.logical
+			end
+		end
+		return abs(raw_path)
+	end
+
+	local function edit_result_display(path, old, new, extra)
+		local node = { old = mare.projection.project(old or ""), new = mare.projection.project(new), path = path }
+		if type(extra) == "table" then
+			if extra.full_path ~= nil then
+				node.full_path = extra.full_path
+			end
+			if extra.is_new == true then
+				node.is_new = true
+			end
+		end
+		return ui.Diff(node)
+	end
+
+	local LIVE_CHANGE_MAX_BYTES = 512 * 1024
+
+	local function live_file_change(path, old, new, diff)
+		local project = mare.projection and mare.projection.project or function(s)
+			return s
+		end
+		local proj_new = project(new)
+		local proj_old = old and mare.text.is_utf8(old) and project(old) or nil
+		local kind = old and "update" or "add"
+		local change = { path = path, kind = kind }
+		if old then
+			if proj_old and (#proj_old + #proj_new) <= LIVE_CHANGE_MAX_BYTES then
+				change.old = proj_old
+				change.new = proj_new
+			elseif diff and diff ~= "" then
+				change.diff = diff
+			end
+		elseif #proj_new <= LIVE_CHANGE_MAX_BYTES then
+			change.new = proj_new
+		end
+		return { change }
 	end
 
 	-- edit / write results store the change, not both texts (one 8 MB edit wrote
@@ -261,20 +306,26 @@ return function(D)
 						.. (" (%d line%s)"):format(lines, lines == 1 and "" or "s"),
 					details = details,
 					display = details.diff and stored_display(rel(path), details) or nil,
+					_mare_changes = live_file_change(path, old, a.content, details.diff),
 				}
 			end)
 		end,
 		-- the approval dialog's diff: the file as it is against the new content
-		preview = function(a)
-			local path = abs(a.path)
+		preview = function(a, call_cwd)
+			local path = resolve_preview_path(a.path, call_cwd)
+			if not path then
+				return nil
+			end
 			local old = preview_read(path)
+			local is_new = false
 			if old == nil then
 				if mare.fs.exists(path) then
 					return nil
 				end
 				old = ""
+				is_new = true
 			end
-			return edit_result_display(rel(path), old, a.content or "")
+			return edit_result_display(rel(path), old, a.content or "", { full_path = path, is_new = is_new })
 		end,
 		render = function(a, res, expanded)
 			if res.is_error then
@@ -367,16 +418,23 @@ return function(D)
 				end
 				local details, add, del = stored_change(path, old, new)
 				local out = ("Edited %s (+%d -%d)"):format(rel(path), add, del)
-				return { content = out, details = details }
+				return {
+					content = out,
+					details = details,
+					_mare_changes = live_file_change(path, old, new, details.diff),
+				}
 			end)
 		end,
 		-- the approval dialog's diff: the replacement applied in memory (nothing when it
 		-- wouldn't apply — the call then fails with its own error)
-		preview = function(a)
-			local path = abs(a.path)
+		preview = function(a, call_cwd)
+			local path = resolve_preview_path(a.path, call_cwd)
+			if not path then
+				return nil
+			end
 			local old = preview_read(path)
 			local new = old and mare.text.replace(old, a.old_string or "", a.new_string or "", a.replace_all)
-			return new and edit_result_display(rel(path), old, new) or nil
+			return new and edit_result_display(rel(path), old, new, { full_path = path }) or nil
 		end,
 		render = function(a, res)
 			if res.is_error then

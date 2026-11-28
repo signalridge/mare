@@ -162,6 +162,7 @@ return {
 					command = string,
 					tool = string,
 					shell = string,
+					arguments = open_object,
 				}, { "parsed" }, true),
 				result = object({ parsed = open_object }, nil, true),
 			},

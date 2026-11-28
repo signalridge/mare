@@ -56,3 +56,4 @@ mod concurrent_sessions;
 mod core_and_media;
 mod lifecycle;
 mod permissions_and_config;
+mod session_updates;

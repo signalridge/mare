@@ -361,7 +361,10 @@ Result:
 
 #### `commands.list`
 
-No parameters.
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `allow_local` | `boolean` |  |  |
+| `available` | `boolean` |  |  |
 
 Result:
 

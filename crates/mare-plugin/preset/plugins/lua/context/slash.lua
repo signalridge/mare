@@ -161,6 +161,7 @@ return function(D)
 		if base then
 			commands:register("skills", {
 				description = base.description,
+				availability = base.availability,
 				run = function()
 					local probs = context.skill_problems(context, ctx)
 					if #probs > 0 then

@@ -154,6 +154,62 @@ return {
 				end
 				return ("Patch(%s)"):format(table.concat(files, ", "))
 			end,
+			preview = function(a)
+				if type(a) ~= "table" or type(a.input) ~= "string" or a.input == "" then
+					return nil
+				end
+				local policy = mare.proc
+					and mare.proc.sandbox
+					and mare.proc.sandbox.current
+					and mare.proc.sandbox.current()
+				local policies = policy and { policy } or nil
+				local parsed = mare.text.patch_paths(a.input, { resolve = true })
+				if type(parsed) == "table" then
+					local readable = true
+					for _, item in ipairs(parsed) do
+						local check_path = item.path
+						if item.kind ~= "add" then
+							local st = mare.fs.stat(check_path, { policies = policies })
+							if not st or st.kind ~= "file" then
+								readable = false
+								break
+							end
+						end
+					end
+					if readable then
+						local ok, sim = pcall(mare.text.apply_patch, a.input, { dry_run = true })
+						if ok and type(sim) == "table" and type(sim.changes) == "table" and #sim.changes > 0 then
+							local out = {}
+							for _, ch in ipairs(sim.changes) do
+								local target = ch.move_to or ch.path
+								local display_path = mare.fs.relative(target)
+								local project = mare.projection and mare.projection.project
+									or function(s)
+										return s
+									end
+								if ch.kind == "delete" then
+									out[#out + 1] = ui.Line({ ui.Span("Delete " .. display_path):hl("MareMuted") })
+								else
+									out[#out + 1] = ui.Diff({
+										old = project(ch.old or ""),
+										new = project(ch.new or ""),
+										path = display_path,
+										full_path = target,
+										is_new = ch.kind == "add" or nil,
+									})
+								end
+							end
+							if #out > 0 then
+								return ui.Lines(out)
+							end
+						end
+					end
+				end
+				local project = mare.projection and mare.projection.project or function(s)
+					return s
+				end
+				return ui.Code(project(a.input), "diff")
+			end,
 			execute = function(a)
 				-- (1) preflight — simulate the whole patch in memory and collect every refusal; any
 				-- refusal → nothing is written; (2) commit in order, stop at the first failure, no
@@ -357,20 +413,47 @@ return {
 						ctx.bus:emit("fs/changes-inexact", { tool = "apply_patch", paths = unsure })
 					end
 					-- the result keeps each written file's diff, not its old and new text (
-					-- `version = 2`; older results carry `old` / `new` per change)
-					local stored = {}
+					-- `version = 2`; older results carry `old` / `new` per change). Live
+					-- consumers (e.g. ACP) also receive bounded projected full before/after
+					-- snapshots via transient `_mare_changes`, which are not persisted.
+					local LIVE_CHANGE_MAX_BYTES = 512 * 1024
+					local project = mare.projection and mare.projection.project or function(s)
+						return s
+					end
+					local stored, live_changes, live_bytes = {}, {}, 0
 					for i, ch in ipairs(changes) do
 						local s = { path = ch.path, move_to = ch.move_to, kind = ch.kind }
+						local lc = {
+							path = ch.path,
+							move_to = ch.move_to,
+							kind = ch.kind,
+							status = outcomes[i].status,
+						}
 						if ch.kind ~= "delete" and outcomes[i].status == "completed" then
+							local proj_old = ch.kind ~= "add" and project(ch.old or "") or nil
+							local proj_new = project(ch.new or "")
 							local diff, _, _, lines =
-								mare.text.diff(ch.old or "", ch.new or "", { path = outcomes[i].path })
+								mare.text.diff(proj_old or "", proj_new, { path = outcomes[i].path })
 							s.diff, s.lines = diff, lines
+							local sz = (proj_old and #proj_old or 0) + #proj_new
+							if live_bytes + sz <= LIVE_CHANGE_MAX_BYTES then
+								live_bytes = live_bytes + sz
+								lc.old = proj_old
+								lc.new = proj_new
+							elseif diff and diff ~= "" then
+								lc.diff = diff
+							end
 						end
 						stored[i] = s
+						live_changes[i] = lc
 					end
 					local details = { version = 2, changes = stored, outcomes = outcomes, exact = exact }
 					if not stop then
-						return { content = "Success. Updated the following files:\n" .. res.summary, details = details }
+						return {
+							content = "Success. Updated the following files:\n" .. res.summary,
+							details = details,
+							_mare_changes = live_changes,
+						}
 					end
 					local lines = {
 						("Patch stopped at file %d of %d (%d completed, not rolled back)."):format(
@@ -382,7 +465,12 @@ return {
 					for _, o in ipairs(outcomes) do
 						lines[#lines + 1] = ("%s %s%s"):format(o.status, o.path, o.error and (": " .. o.error) or "")
 					end
-					return { content = table.concat(lines, "\n"), is_error = true, details = details }
+					return {
+						content = table.concat(lines, "\n"),
+						is_error = true,
+						details = details,
+						_mare_changes = live_changes,
+					}
 				end)
 			end,
 			render = function(a, res)

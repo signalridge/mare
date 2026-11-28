@@ -84,6 +84,7 @@ return function(ctx, args)
 	local lines = {
 		ui.Line({ ui.Span(("%-24s %-30s %s"):format("option", "value", "source")):hl("MareDim") }),
 	}
+	local plain = { ("%-24s %-30s %s"):format("option", "value", "source") }
 	local names = {}
 	for k in pairs(mare.options or {}) do
 		names[#names + 1] = k
@@ -96,11 +97,14 @@ return function(ctx, args)
 			if v == nil then
 				v = mare.options[k].default
 			end
+			local shown = show(k, v, mare.options[k], true)
+			local source = src(k)
 			lines[#lines + 1] = ui.Line({
 				ui.Span(("%-24s "):format(k)):hl("MareAccent"),
-				ui.Span(("%-30s "):format(show(k, v, mare.options[k], true))),
-				ui.Span(src(k)):hl("MareMuted"),
+				ui.Span(("%-30s "):format(shown)),
+				ui.Span(source):hl("MareMuted"),
 			})
+			plain[#plain + 1] = ("%-24s %-30s %s"):format(k, shown, source)
 		end
 	end
 	-- plugin opts: every declared leaf and anything else set
@@ -135,30 +139,44 @@ return function(ctx, args)
 	if #pkeys > 0 then
 		lines[#lines + 1] = ui.Gap()
 		lines[#lines + 1] = ui.Line({ ui.Span("plugin opts"):hl("MareDim") })
+		plain[#plain + 1] = ""
+		plain[#plain + 1] = "plugin opts"
 		for _, k in ipairs(pkeys) do
 			if not filter or string.find(k, filter, 1, true) then
 				local v = pvalue(k)
+				local shown = show(k, v, nil, true)
+				local source = src(k, described[k] and described[k].source)
 				lines[#lines + 1] = ui.Line({
 					ui.Span(("%-24s "):format(k)):hl("MareAccent"),
-					ui.Span(("%-30s "):format(show(k, v, nil, true))),
-					ui.Span(src(k, described[k] and described[k].source)):hl("MareMuted"),
+					ui.Span(("%-30s "):format(shown)),
+					ui.Span(source):hl("MareMuted"),
 				})
+				plain[#plain + 1] = ("%-24s %-30s %s"):format(k, shown, source)
 			end
 		end
 	end
 	local warns = mare.config_warnings()
 	if #warns > 0 then
 		lines[#lines + 1] = ui.Gap()
+		plain[#plain + 1] = ""
 		for _, w in ipairs(warns) do
-			lines[#lines + 1] = ui.Line({ ui.Span("! " .. mare.text.redact(w)):hl("MareWarning") })
+			local rw = "! " .. mare.text.redact(w)
+			lines[#lines + 1] = ui.Line({ ui.Span(rw):hl("MareWarning") })
+			plain[#plain + 1] = rw
 		end
 	end
 	lines[#lines + 1] = ui.Gap()
 	lines[#lines + 1] = ui.Line({
 		ui.Span("layers: default < state.json < user init.lua < project < env MARE_* < cli"):hl("MareHint"),
 	})
-	if filter or not (ui.connected and ui.connected()) then
+	plain[#plain + 1] = ""
+	plain[#plain + 1] = "layers: default < state.json < user init.lua < project < env MARE_* < cli"
+	local connected = ui.connected and ui.connected()
+	if filter or not connected then
 		ui.overlay("Configuration", ui.Lines(lines))
+		if not connected then
+			return table.concat(plain, "\n")
+		end
 		return
 	end
 	-- multi-pane overlay: Options │ Plugin opts │ Warnings, preview on the

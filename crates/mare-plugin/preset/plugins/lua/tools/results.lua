@@ -172,6 +172,13 @@ return function(D)
 		end
 		display = truncate_result(display)
 		display.terminate = program.terminate
+		if
+			type(raw) == "table"
+			and type(raw._mare_changes) == "table"
+			and display.error_code ~= "tool_result_failed"
+		then
+			display._mare_changes = clone_json(raw._mare_changes)
+		end
 		return display, program
 	end
 	local function coded_failure(err)
