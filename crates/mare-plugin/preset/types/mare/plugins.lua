@@ -178,6 +178,12 @@ function mare.plugins.set_enabled(name, on, source) end
 function mare.plugins.fetch_catalog() end
 ---@return string text mare's NEWS.md
 function mare.plugins.mare_news() end
+--- Ensure mare's bundled runtime assets (`mare.paths.runtime`, including `skills/`, `types/`, and
+--- `plugins/`) are extracted and up to date for this binary, waiting on the cross-process runtime
+--- lock if a background refresh is already in progress.
+---@async
+---@return string dir normalized path to the ready runtime directory
+function mare.plugins.ensure_runtime() end
 --- Format version for `state/news.json`.
 ---@type integer
 mare.plugins.news_version = 1

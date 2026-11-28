@@ -11,6 +11,7 @@ mod blocking;
 mod console;
 mod extras;
 mod install;
+mod local_plugin_tool_skill;
 mod rewind;
 mod rpc;
 mod startup;

@@ -463,6 +463,22 @@ pub fn install(lua: &Lua, mare: &Table) -> mlua::Result<()> {
         })?,
     )?;
     t.set("default_source", mare_plugin_manager::DEFAULT_SOURCE)?;
+    // Ensure the read-only bundled runtime directory (plugins, types, skills, NEWS.md) is
+    // extracted for this binary's version and asset fingerprint, coordinating on the cross-process
+    // runtime lock when a background refresh is in flight.
+    t.set(
+        "ensure_runtime",
+        lua.create_async_function(|lua, ()| async move {
+            let dir = if crate::runtime::is_up_to_date() {
+                crate::runtime::dir()
+            } else {
+                run_blocking(&lua, crate::runtime::ensure)
+                    .await?
+                    .map_err(|e| rt_err(format!("mare.plugins.ensure_runtime: {e:#}")))?
+            };
+            Ok(dir.to_string_lossy().replace('\\', "/"))
+        })?,
+    )?;
     // mare's own NEWS.md (the copy in the runtime directory is the same text)
     t.set("mare_news", lua.create_function(|_, ()| Ok(crate::news_text().into_owned()))?)?;
     t.set("news_version", crate::NEWS_VERSION)?;

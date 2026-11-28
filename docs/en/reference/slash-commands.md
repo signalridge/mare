@@ -51,6 +51,7 @@ Slash commands registered by the built-in plugins. Packages and your own plugins
 | `/session` | Show session info (/session id copies the id) |  |
 | `/show-reasoning` | Toggle showing full reasoning instead of “Thought for N s” |  |
 | `/side` | Open or control an ephemeral side conversation (/side [&lt;question&gt; \| back \| close]) |  |
+| `/skill:plugin-authoring` | Write a local Lua plugin tool for mare, register it in an a… |  |
 | `/skills` | Browse skills; Enter loads one |  |
 | `/status` | Show version, model, session and working directory |  |
 | `/statusline` | Choose the status bar's segments (saved) |  |

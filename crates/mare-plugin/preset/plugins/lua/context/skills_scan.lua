@@ -11,9 +11,29 @@ return function(D)
 
 	-- installed packages' `skills/`, read by the plugin's apply
 	local pkg_skill_dirs = D.pkg_skill_dirs
+	local runtime_ready_dir = nil
+	local function ensure_runtime_ready()
+		local runtime_dir = mare.paths and mare.paths.runtime
+		if type(runtime_dir) ~= "string" or runtime_dir == "" then
+			return true
+		end
+		if runtime_ready_dir == runtime_dir then
+			return true
+		end
+		if mare.plugins and mare.plugins.ensure_runtime then
+			local ok, err = pcall(mare.plugins.ensure_runtime)
+			if ok then
+				runtime_ready_dir = runtime_dir
+				return true
+			end
+			mare.log("warn", "bundled runtime assets unavailable: " .. tostring(err))
+			return false
+		end
+		return true
+	end
 	--- every skill directory as {root, project}: the configured ones (project-level =
-	--- relative, loaded only in trusted projects), then the packages' (first name wins, so
-	--- the user's own skills shadow a package's)
+	--- relative, loaded only in trusted projects), then installed packages', then bundled runtime
+	--- skills (first name wins, so user/project/package skills always shadow bundled ones)
 	local function skill_roots()
 		local out = {}
 		for _, dir in ipairs(cfg.skill_dirs or {}) do
@@ -25,6 +45,10 @@ return function(D)
 		end
 		for _, dir in ipairs(pkg_skill_dirs) do
 			out[#out + 1] = { root = dir, project = false }
+		end
+		local runtime_dir = mare.paths and mare.paths.runtime
+		if type(runtime_dir) == "string" and runtime_dir ~= "" then
+			out[#out + 1] = { root = runtime_dir .. "/skills", project = false }
 		end
 		return out
 	end
@@ -54,9 +78,10 @@ return function(D)
 	end
 
 	local function observe_skills()
+		local runtime_ready = ensure_runtime_ready()
 		local roots, scope, trusted = cache_scope()
 		local files, stamps, candidates = {}, mare.json.array({}), {}
-		local cacheable = true
+		local cacheable = runtime_ready
 		for _, root in ipairs(roots) do
 			if not root.project or trusted then
 				local entries, _, list_code = mare.fs.list(root.root, { strict = true })

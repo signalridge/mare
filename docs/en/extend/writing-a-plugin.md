@@ -171,6 +171,24 @@ Add `ctx.ui:invalidate("tally")` after each change to `calls`. `ctx.ui:widget(id
 
 The snippets above all go inside `apply`, in order, with `local calls = 0` at the top. Keep `inject` and `config_schema` beside `apply` in the returned table. The result is one file of about 55 lines.
 
+### Subagent child VMs (`mare.mode == "child"`)
+
+Subagents running in the same trusted workspace inherit the project's trust state, so project plugins execute `apply(ctx)` again inside each child VM (a different workspace still evaluates its own trust). Register tools and permission hooks before checking `mare.mode`, and guard startup actions that should run only in the parent session:
+
+```lua
+apply = function(ctx)
+  register_tools(ctx)
+
+  if mare.mode == "child" then
+    return
+  end
+
+  ctx:on("app/ready", start_parent_workflow)
+end
+```
+
+That way parent-session automation runs once without recursing into subagents, while subagents still receive the project's tools and permission hooks.
+
 ## Test it
 
 - **Reload.** Edit the file, then run `/reload tally` for this plugin or `/reload` for everything. A plugin that fails to load keeps its previous version running.
@@ -231,6 +249,46 @@ mare test -f "text_stats"         # filter cases by substring
 `expect.snapshot(value, name?)` writes `<spec_dir>/snapshots/<spec_stem>__<name>.snap`. Without `-u` (`--update-snapshots`), a mismatch fails the case and writes a `.snap.new` file for inspection. Exit codes are `0` (all passed), `1` (test failures), and `2` (usage, discovery, or syntax/load errors).
 
 If you work on a built-in plugin in a checkout of the mare repository, `just run` starts a debug build that reads `crates/mare-plugin/preset/plugins/*.lua` from disk on every start. Edit the file and `/reload`; nothing is recompiled.
+
+## Local dev package workflow (bundled `plugin-authoring` skill)
+
+mare ships a bundled `plugin-authoring` skill (extracted to `~/.local/share/mare/runtime/skills/plugin-authoring/SKILL.md` and listed in `/skills` and `<available_skills>`) that guides the agent through writing, loading, and reloading a local Lua plugin tool using only public entry points:
+
+1. **Declare an approved local dev package** in `~/.config/mare/init.lua` (or trusted `.mare/init.lua`):
+
+   ```lua
+   mare.plugins.add {
+     { dir = "~/code/my-tools" },
+   }
+   ```
+
+2. **Write the plugin and register the tool** in `~/code/my-tools/plugins/local_tagger.lua`:
+
+   ```lua
+   return {
+     name = "local_tagger",
+     inject = { "tools" },
+     apply = function(ctx)
+       ctx.tools:register("tag_text", {
+         snippet = "Tag text with a versioned prefix",
+         description = "Return the input text prefixed with a tag.",
+         parameters = {
+           type = "object",
+           properties = { text = { type = "string", description = "Text to tag" } },
+           required = { "text" },
+         },
+         side_effect = "read",
+         execute = function(args)
+           return { content = "v1:" .. tostring(args.text or "") }
+         end,
+       })
+     end,
+   }
+   ```
+
+3. **Load and call it on the next request:** run `/reload` so mare discovers the new plugin, then call `tag_text` on the next model turn (`"v1:hello"`).
+4. **Edit and reload:** change `"v1:"` to `"v2:"` and run `/reload local_tagger`. (`/reload <name>` re-reads the plugin entry file; cached `require(...)` submodules stay in `package.loaded` until a full `/reload`.) Call `tag_text` again and observe `"v2:hello"`.
+5. **Verify failed-reload rollback:** introduce a deliberate syntax error in `local_tagger.lua` and run `/reload local_tagger`. mare reports the load error in the notice and `/plugins`, keeps the previous working `v2` tool active, and lets subsequent requests keep calling `tag_text` until you fix the file and reload again.
 
 ## Publish it as a package
 

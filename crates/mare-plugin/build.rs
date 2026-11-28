@@ -64,6 +64,10 @@ fn main() {
     // host VM. Release builds also emit `service_contracts.luac` bytecode.
     compile_service_contracts(&lua, &preset_dir, &out_dir, !is_debug);
 
+    // Content fingerprint covering every bundled runtime asset (plugins, lua modules, UI scripts,
+    // NEWS.md, types, skills) so same-version upgrades refresh stale runtime directories.
+    println!("cargo:rustc-env=MARE_RUNTIME_FINGERPRINT={}", compute_runtime_fingerprint(&preset_dir));
+
     // debug builds read the preset live from the source tree (no embedded bytecode or archive),
     // while sharing the exact same `BUILTIN_CONFIG_META` and pre-evaluated contract paths as release.
     if is_debug {
@@ -109,6 +113,19 @@ fn main() {
         println!("cargo:rerun-if-changed={}", p.display());
         let src = std::fs::read_to_string(&p).unwrap();
         archive_entries.push((format!("types/{rel}"), src));
+    }
+
+    // Collect `preset/skills/**/*` (bundled skills) into the compressed runtime archive.
+    let skills_dir = preset_dir.join("skills");
+    println!("cargo:rerun-if-changed={}", skills_dir.display());
+    let mut skill_files = Vec::new();
+    collect_all_files(&skills_dir, &skills_dir, &mut skill_files);
+    skill_files.sort();
+    for rel in skill_files {
+        let p = skills_dir.join(&rel);
+        println!("cargo:rerun-if-changed={}", p.display());
+        let src = std::fs::read_to_string(&p).unwrap();
+        archive_entries.push((format!("skills/{rel}"), src));
     }
 
     // implementation modules of the two-layer built-ins: preset/plugins/lua/
@@ -639,6 +656,20 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>) {
     }
 }
 
+fn collect_all_files(root: &Path, dir: &Path, out: &mut Vec<String>) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            println!("cargo:rerun-if-changed={}", p.display());
+            collect_all_files(root, &p, out);
+        } else if p.is_file() {
+            let rel = p.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
+            out.push(rel);
+        }
+    }
+}
+
 /// Extract a declared public module name from a `---@meta <name>` line (matching
 /// `^---@meta[ \t]+([\w.-]+)` in `scripts/lua_api_rules.py`, excluding `_`).
 fn parse_meta_module(line: &str) -> Option<&str> {
@@ -755,4 +786,69 @@ fn write_builtin_config_meta(out_dir: &Path, entries: &[String]) {
     }
     out.push(']');
     std::fs::write(out_dir.join("builtin_config_meta.rs"), out).unwrap();
+}
+
+fn fnv1a_update(mut h: u64, bytes: &[u8]) -> u64 {
+    for &b in bytes {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01B3);
+    }
+    h
+}
+
+fn compute_runtime_fingerprint(preset_dir: &Path) -> String {
+    let mut entries: Vec<(String, std::path::PathBuf)> = Vec::new();
+    let plugins_dir = preset_dir.join("plugins");
+    if let Ok(rd) = std::fs::read_dir(&plugins_dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().and_then(|s| s.to_str()) == Some("lua")
+                && let Some(name) = p.file_name().and_then(|s| s.to_str())
+            {
+                entries.push((format!("plugins/{name}"), p));
+            }
+        }
+    }
+    let lua_dir = plugins_dir.join("lua");
+    println!("cargo:rerun-if-changed={}", lua_dir.display());
+    let mut mods = Vec::new();
+    collect(&lua_dir, &lua_dir, &mut mods);
+    for (_, rel) in mods {
+        let p = lua_dir.join(&rel);
+        println!("cargo:rerun-if-changed={}", p.display());
+        entries.push((format!("plugins/lua/{rel}"), p));
+    }
+    for file in ["ui_prelude.lua", "ui_components.lua", "ui_shell.lua", "keymap.lua", "test.lua", "NEWS.md"] {
+        let p = preset_dir.join(file);
+        println!("cargo:rerun-if-changed={}", p.display());
+        entries.push((file.to_string(), p));
+    }
+    let types_dir = preset_dir.join("types");
+    let mut type_files = Vec::new();
+    collect_files(&types_dir, &types_dir, &mut type_files);
+    for rel in type_files {
+        let p = types_dir.join(&rel);
+        entries.push((format!("types/{rel}"), p));
+    }
+    let skills_dir = preset_dir.join("skills");
+    println!("cargo:rerun-if-changed={}", skills_dir.display());
+    let mut skill_files = Vec::new();
+    collect_all_files(&skills_dir, &skills_dir, &mut skill_files);
+    for rel in skill_files {
+        let p = skills_dir.join(&rel);
+        println!("cargo:rerun-if-changed={}", p.display());
+        entries.push((format!("skills/{rel}"), p));
+    }
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut h1: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut h2: u64 = 0xaf63_dc4c_8601_ec8c;
+    for (key, path) in entries {
+        let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+        for part in [key.as_bytes(), b"\0", &bytes, b"\xff"] {
+            h1 = fnv1a_update(h1, part);
+            h2 = fnv1a_update(h2.rotate_left(7), part);
+        }
+    }
+    format!("{h1:016x}{h2:016x}")
 }
