@@ -860,17 +860,17 @@ return function(D)
 		return params.clamp(d, effort)
 	end
 
-	--- effort_options(model?) -> every effort value defined for the model (the built-in levels
-	--- plus options a rule adds), lowest first; nil when it has no effort parameter
+	--- effort_options(model?) -> the effort values offered for `model` on its active route
+	--- (same source as `param_list`), lowest first; nil when it has no effort parameter
 	function llm.effort_options(self, caller, model)
 		model = model or self:current(caller)
 		local d = model and params.defs(model).effort
-		if not d then
+		if not d or not d.list then
 			return nil
 		end
 		local out = {}
-		for _, o in ipairs(d.options) do
-			out[#out + 1] = o.value
+		for i, v in ipairs(d.list) do
+			out[i] = v
 		end
 		return out
 	end
@@ -918,12 +918,8 @@ return function(D)
 		state.scoped_params = {}
 		state.scoped_cleared = {}
 		state.model = state.default_model
+		local has_default = type(state.default_model) == "string" and state.default_model ~= ""
 		local m = self:current(caller)
-		if not m and type(state.default_model) == "string" and state.default_model ~= "" then
-			-- Explicit default_model did not resolve: keep state.model = state.default_model
-			-- so session lifecycle warns and readiness reports the exact unresolved reason.
-			return nil
-		end
 		local p = m and providers[m.provider]
 		if
 			not m
@@ -932,6 +928,12 @@ return function(D)
 			or lacks_credentials(p, m.provider)
 			or (p.unavailable_for and p.unavailable_for(m))
 		then
+			if has_default then
+				-- Explicit default_model is unresolvable, unavailable, or lacks credentials:
+				-- keep state.model = state.default_model so session lifecycle warns and readiness
+				-- reports the exact reason instead of silently falling back to another provider.
+				return nil
+			end
 			state.model = nil
 			m = self:current(caller)
 			p = m and providers[m.provider]
@@ -969,9 +971,18 @@ return function(D)
 		if not d then
 			lib.fail("llm.no_effort", m.ref .. " has no effort parameter")
 		end
-		local valid = EFFORT_INDEX[e] or params.known_option("effort", e) or d.index[e] ~= nil
+		local offered = d.list or {}
+		local valid = table.find(offered, e) ~= nil
+			or (
+				opts
+				and opts.restoring == true
+				and (EFFORT_INDEX[e] or params.known_option("effort", e) or d.index[e] ~= nil)
+			)
 		if not valid then
-			lib.fail("llm.unknown_effort", "unknown effort: " .. tostring(e))
+			lib.fail(
+				"llm.unknown_effort",
+				("unknown effort: %s (supported for %s: %s)"):format(tostring(e), m.ref, table.concat(offered, ", "))
+			)
 		end
 		local scope = opts and opts.scope_name
 		if scope ~= nil then
@@ -1020,7 +1031,7 @@ return function(D)
 			select_model(self, caller, selection.model, { save = false, restoring = true, checked = true })
 		end
 		if selection.effort ~= nil then
-			select_effort(self, caller, selection.effort, { save = false, checked = true })
+			select_effort(self, caller, selection.effort, { save = false, restoring = true, checked = true })
 		end
 		return {}
 	end

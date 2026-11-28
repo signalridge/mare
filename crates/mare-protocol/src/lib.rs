@@ -955,6 +955,10 @@ pub struct UiSelectResult {
     /// Dismissal reason when cancelled (`"cancelled"` | `"interrupted"`)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// `item_id` of the chosen item as rendered by the client, so callers using `ui/select/update`
+    /// resolve by identity even when a reply races with a live update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]

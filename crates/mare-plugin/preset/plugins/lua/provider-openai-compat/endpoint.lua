@@ -142,7 +142,7 @@ local function build_param_rules(name, entry, live_entry, live_base_url)
 									-- Moonshot Kimi K3 OpenAI-compat API takes top-level reasoning_effort
 									-- (low | high | max; always-on thinking). Leave kimi-k2-thinking and
 									-- kimi-for-coding untouched.
-									if on and is_kimi_k3(req.body and req.body.model) then
+									if on and is_kimi_k3(c.model and c.model.id) then
 										req.body.reasoning_effort = c.value
 									end
 								elseif cur_tf == "zai" then
