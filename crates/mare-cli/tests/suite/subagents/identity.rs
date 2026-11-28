@@ -427,8 +427,8 @@ async fn child_vm_adopts_host_assigned_session_identity_and_ignores_forged_spec(
               and seen.arg_trust == nil and seen.arg_approve_mcps == nil and seen.arg_permission == nil,
               "spawn metadata must not leak into child startup args")
             assert(seen.arg_agent_label == "child-display-name" and seen.cfg_preset == "read-only"
-              and seen.arg_permission_ceiling == "full-access",
-              "child agent label, permission config, and ceiling must remain available")
+              and seen.arg_permission_ceiling == "read-only",
+              "child agent label, permission config, and pinned read-only ceiling must remain available")
             assert(seen.session_name == nil, "agent name must not become the child session name")
             return child_id, seen.session_id, seen.activity_session_id, seen.start_id
         "#,
