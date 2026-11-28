@@ -1,12 +1,44 @@
 -- /reload: implementation of the command registered by plugins/commands.lua (the entry
 -- layer); loaded on the first /reload. Runs in the commands plugin's env.
+local function busy_notice(cmd_label, err)
+	local msg = type(err) == "table" and err.code == "busy" and tostring(err.message or "") or nil
+	if not msg then
+		return nil
+	end
+	if msg:find("model request is active", 1, true) then
+		return ("%s isn't available while a model request is active (Esc stops it)"):format(cmd_label)
+	end
+	if msg:find("reload already in progress", 1, true) then
+		return ("%s isn't available while a reload is already in progress; retry afterwards"):format(cmd_label)
+	end
+	return ("%s isn't available right now: %s"):format(cmd_label, msg)
+end
+
+local function clean_error(err)
+	local msg = require("mare_lib").error_message(err) or "unknown error"
+	msg = msg:match("^(.-)%s*stack traceback:") or msg
+	while msg:find("^runtime error: ") do
+		msg = msg:sub(16)
+	end
+	return (msg:gsub("%s+$", ""))
+end
+
+local function notify_failure(cmd_label, fail_prefix, err)
+	local busy = busy_notice(cmd_label, err)
+	if busy then
+		ui.notify(busy, "warning")
+		return
+	end
+	ui.notify(fail_prefix .. clean_error(err), "error")
+end
+
 return function(ctx, args)
 	if args == "config" and mare.reload_config then
 		-- re-run init.lua, diff, reload only the affected plugins
 		ctx:spawn(function()
 			local ok, res = pcall(mare.reload_config)
 			if not ok then
-				ui.notify("Config reload failed: " .. tostring(res), "error")
+				notify_failure("/reload config", "Config reload failed: ", res)
 				return
 			end
 			local changed = res.changed or {}
@@ -41,7 +73,7 @@ return function(ctx, args)
 		ctx:spawn(function()
 			local ok, err = pcall(mare.reload)
 			if not ok then
-				ui.notify("Reload failed: " .. tostring(err), "error")
+				notify_failure("/reload", "Reload failed: ", err)
 			end
 		end)
 		return
@@ -53,7 +85,7 @@ return function(ctx, args)
 		if ok then
 			ui.notify(("Reloaded %d plugin(s)"):format(#res))
 		else
-			ui.notify("Reload failed: " .. tostring(res), "error")
+			notify_failure(name and ("/reload " .. name) or "/reload", "Reload failed: ", res)
 		end
 		for _, p in ipairs(ctx.kernel:problems()) do
 			ui.notify(p, "warning")

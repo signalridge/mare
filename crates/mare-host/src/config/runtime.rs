@@ -89,36 +89,92 @@ impl Host {
         )?;
         let weak = Arc::downgrade(self);
         let weak_all = Arc::downgrade(self);
-        mare.set(
-            "reload",
-            lua.create_async_function(move |lua, ()| {
-                let weak = weak_all.clone();
-                async move {
-                    let Some(h) = weak.upgrade() else { return Ok(Value::Nil) };
-                    let gate = h.try_lock_reload_gate().map_err(|e| mlua::Error::runtime(format!("{e:#}")))?;
-                    let _allow = mare_kernel::allow_provider_reload();
-                    // detached: the reload disposes the plugin that asked for it (and its task)
-                    let job = tokio::task::spawn_local(async move { h.reload_all_with_gate(gate).await });
-                    let r = job.await.map_err(|e| mlua::Error::runtime(e.to_string()))?;
-                    drop(_allow);
-                    let r = r.map_err(|e| mlua::Error::runtime(format!("{e:#}")))?;
-                    mare_shared::lua::json_to_lua(&lua, &r)
+        let reload_fn = lua.create_async_function(move |lua, ()| {
+            let weak = weak_all.clone();
+            async move {
+                let Some(h) = weak.upgrade() else { return Ok((true, Value::Nil)) };
+                let gate = match h.try_lock_reload_gate() {
+                    Ok(gate) => gate,
+                    Err(err) => return reload_error_outcome(&lua, err),
+                };
+                let _allow = mare_kernel::allow_provider_reload();
+                // detached: the reload disposes the plugin that asked for it (and its task)
+                let job = tokio::task::spawn_local(async move { h.reload_all_with_gate(gate).await });
+                let r = match job.await {
+                    Ok(res) => res,
+                    Err(err) => return reload_error_outcome(&lua, anyhow::Error::new(err)),
+                };
+                drop(_allow);
+                match r {
+                    Ok(r) => Ok((true, mare_shared::lua::json_to_lua(&lua, &r)?)),
+                    Err(err) => reload_error_outcome(&lua, err),
                 }
-            })?,
-        )?;
-        mare.set(
-            "reload_config",
-            lua.create_async_function(move |lua, ()| {
-                let weak = weak.clone();
-                async move {
-                    let Some(h) = weak.upgrade() else { return Ok(Value::Nil) };
-                    let r = h.reload_config().await.map_err(|e| mlua::Error::runtime(e.to_string()))?;
-                    mare_shared::lua::json_to_lua(&lua, &r)
+            }
+        })?;
+        mare.set("reload", wrap_coded_async(&lua, reload_fn)?)?;
+        let reload_config_fn = lua.create_async_function(move |lua, ()| {
+            let weak = weak.clone();
+            async move {
+                let Some(h) = weak.upgrade() else { return Ok((true, Value::Nil)) };
+                match h.reload_config().await {
+                    Ok(r) => Ok((true, mare_shared::lua::json_to_lua(&lua, &r)?)),
+                    Err(err) => reload_error_outcome(&lua, err),
                 }
-            })?,
-        )?;
+            }
+        })?;
+        mare.set("reload_config", wrap_coded_async(&lua, reload_config_fn)?)?;
         Ok(())
     }
+}
+
+fn wrap_coded_async(lua: &mlua::Lua, inner: Function) -> mlua::Result<Function> {
+    lua.load("local f = ... return function(...) local ok, v = f(...) if not ok then error(v, 0) end return v end")
+        .set_name("@config/reload_wrap")
+        .call(inner)
+}
+
+fn strip_lua_traceback(text: &str) -> String {
+    let head = text.split("\nstack traceback:").next().unwrap_or(text);
+    let mut cleaned = Vec::new();
+    for (i, line) in head.lines().enumerate() {
+        let mut s = line;
+        if i == 0 {
+            while let Some(rest) = s.strip_prefix("runtime error: ") {
+                s = rest;
+            }
+        }
+        cleaned.push(s);
+    }
+    mare_shared::errors::bounded(cleaned.join("\n").trim())
+}
+
+fn reload_error_outcome(lua: &mlua::Lua, err: anyhow::Error) -> mlua::Result<(bool, Value)> {
+    if let Some(coded) = err.chain().find_map(|c| c.downcast_ref::<mare_shared::errors::Coded>()) {
+        let tbl = mare_shared::lua_error::error_value(
+            lua,
+            coded.code,
+            &mare_shared::errors::bounded(&coded.message),
+            Value::Nil,
+        )?;
+        return Ok((false, Value::Table(tbl)));
+    }
+    if let Some(known) = err.chain().find_map(|c| c.downcast_ref::<mare_kernel::ServiceCallError>()) {
+        let tbl = mare_shared::lua_error::error_value(
+            lua,
+            known.code(),
+            &mare_shared::errors::bounded(&known.message()),
+            Value::Nil,
+        )?;
+        return Ok((false, Value::Table(tbl)));
+    }
+    let text = format!("{err:#}");
+    if let Some(tbl) = mare_shared::lua_error::recall_error(lua, &text) {
+        return Ok((false, Value::Table(tbl)));
+    }
+    let clean = strip_lua_traceback(&text);
+    let code = if clean.starts_with("config reload is unavailable") { "unavailable" } else { "internal" };
+    let tbl = mare_shared::lua_error::error_value(lua, code, &clean, Value::Nil)?;
+    Ok((false, Value::Table(tbl)))
 }
 
 #[cfg(test)]

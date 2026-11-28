@@ -127,7 +127,9 @@ return {
 						local ok, err = pcall(mare.reload)
 						if not ok then
 							mare.ui.notify(
-								"New plugins not loaded yet (" .. tostring(err) .. ") — run /reload when ready",
+								"New plugins not loaded yet ("
+									.. (require("mare_lib").error_message(err) or "reload failed")
+									.. ") — run /reload when ready",
 								"warning"
 							)
 						end

@@ -143,10 +143,14 @@ impl Host {
     /// `reload/completed {added, removed, reloaded, notices}`.
     pub(crate) fn try_lock_reload_gate(&self) -> Result<tokio::sync::OwnedMutexGuard<()>> {
         crate::startup::request_gate::purge_cancelled_leases(self.lua());
-        self.reload_gate
-            .clone()
-            .try_lock_owned()
-            .map_err(|_| anyhow::anyhow!("reload already in progress or a model request is active; retry afterwards"))
+        self.reload_gate.clone().try_lock_owned().map_err(|_| {
+            let message = if self.reload_active.get() || self.kernel.is_reloading() {
+                "reload already in progress; retry afterwards"
+            } else {
+                "a model request is active; retry afterwards"
+            };
+            anyhow::Error::new(mare_shared::errors::Coded { code: "busy", message: message.to_owned() })
+        })
     }
 
     pub async fn reload_all(self: &Arc<Self>) -> Result<serde_json::Value> {

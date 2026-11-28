@@ -104,11 +104,14 @@ impl Kernel {
         if let Ok(purge) = self.lua().named_registry_value::<mlua::Function>("mare.purge_cancelled_leases") {
             let _ = purge.call::<()>(());
         }
-        let _gate = self
-            .0
-            .reload_gate
-            .try_lock()
-            .map_err(|_| anyhow::anyhow!("reload or model request already in progress; retry afterwards"))?;
+        let busy_message = if self.is_reloading() {
+            "reload already in progress; retry afterwards"
+        } else {
+            "a model request is active; retry afterwards"
+        };
+        let _gate = self.0.reload_gate.try_lock().map_err(|_| {
+            anyhow::Error::new(mare_shared::errors::Coded { code: "busy", message: busy_message.to_owned() })
+        })?;
         let report = self.reload_report_in_host_transaction(name).await?;
         if let Ok(after) = self.lua().named_registry_value::<mlua::Function>("mare.after_kernel_reload") {
             let _hold = self.reload_hold();
