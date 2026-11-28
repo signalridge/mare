@@ -868,3 +868,45 @@ async fn enter_does_not_accept_stale_completion_popup_after_typing() {
     })
     .await
 }
+
+#[tokio::test]
+async fn repro_248_file_completion_stays_active_after_accepting_quoted_dir() {
+    local(async {
+        let mut t = Term::build(json!([]), json!({}), json!({}), 80, 24, |env| {
+            let dir = env.cwd.join("my dir");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("child.txt"), "hello").unwrap();
+        })
+        .await;
+        t.until_vt("startup", |t| !t.vt.starting()).await;
+        t.vt.dismiss_notices();
+
+        t.vt.type_str("@my");
+        t.until("quoted dir completion", |s| s.contains("@\"my dir/\"")).await;
+        // Accept the quoted directory completion.
+        t.key(KeyCode::Tab, Modifiers::NONE);
+        t.step().await;
+        let after_accept = t.vt.editor_text();
+        // Continue typing `ch` to complete `child.txt` inside `my dir/`.
+        t.vt.type_str("ch");
+        for _ in 0..8 {
+            t.step().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            t.screen().contains("child.txt"),
+            "file completion lost quoted directory context after accepting {after_accept:?}; editor={:?}, screen:\n{}",
+            t.vt.editor_text(),
+            t.screen()
+        );
+        // Accepting the child completion replaces the quoted token cleanly without leaving a stray quote.
+        t.key(KeyCode::Tab, Modifiers::NONE);
+        t.step().await;
+        assert_eq!(
+            t.vt.editor_text(),
+            "@\"my dir/child.txt\" ",
+            "accepting child inside quoted directory must consume the closing quote cleanly"
+        );
+    })
+    .await
+}

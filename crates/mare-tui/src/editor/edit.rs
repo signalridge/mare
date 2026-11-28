@@ -451,10 +451,26 @@ impl Editor {
 
     /// Replace the token before the cursor with `s` (cursor ends after it).
     pub fn replace_current_token(&mut self, s: &str) {
-        let start = self.current_token().map(|(st, _)| st).unwrap_or(self.col);
+        let tok = self.current_token();
+        let start = tok.as_ref().map(|(st, _)| *st).unwrap_or(self.col);
+        let mut end = self.col;
+        // When replacing an unclosed quoted `@"..."` token whose closing `"` sits right after
+        // the cursor (placed there on a quoted directory accept), consume that closing quote so
+        // the replacement does not leave a stray `"`.
+        if tok.as_ref().is_some_and(|(_, t)| t.starts_with("@\"") && !t[2..].contains('"'))
+            && self.lines[self.row].get(end..).is_some_and(|rest| rest.starts_with('"'))
+        {
+            end += 1;
+        }
         self.begin(LastOp::Other);
         self.selection_anchor = None;
-        self.delete_range(self.row, start..self.col);
+        self.delete_range(self.row, start..end);
         self.insert_str(s);
+        // When accepting a quoted directory (`@"my dir/"`), keep the cursor inside the closing
+        // quote so continued typing stays within the `@"..."` token while the buffer stays a valid
+        // closed reference if submitted as-is.
+        if s.starts_with("@\"") && s.ends_with("/\"") && self.col > 0 {
+            self.col -= 1;
+        }
     }
 }
