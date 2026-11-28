@@ -33,12 +33,36 @@ pub(crate) fn extract_csi_u_base_layout_key(seq: &[u8]) -> Option<char> {
 pub(crate) struct LiveDecoder {
     parser: termina::Parser,
     pending_csi: Vec<u8>,
+    pending_esc: Option<std::time::Instant>,
     in_paste: bool,
 }
 
 impl LiveDecoder {
     pub(crate) fn reset(&mut self) {
         *self = Self::default();
+    }
+
+    pub(crate) fn esc_deadline(&self) -> Option<std::time::Instant> {
+        self.pending_esc.map(|at| at + crate::term_input::EscJoin::ESC_TIMEOUT)
+    }
+
+    pub(crate) fn flush_esc(&mut self, out: &mut Vec<Event>) -> Option<std::time::Instant> {
+        let at = self.pending_esc.take()?;
+        self.parser.parse(b"\x1b", false);
+        self.drain_parser(None, out);
+        Some(at)
+    }
+
+    pub(crate) fn flush_expired_esc(
+        &mut self,
+        now: std::time::Instant,
+        out: &mut Vec<Event>,
+    ) -> Option<std::time::Instant> {
+        if self.pending_esc.is_some_and(|at| now >= at + crate::term_input::EscJoin::ESC_TIMEOUT) {
+            self.flush_esc(out)
+        } else {
+            None
+        }
     }
 
     fn drain_parser(&mut self, base_key: Option<char>, out: &mut Vec<Event>) {
@@ -54,8 +78,29 @@ impl LiveDecoder {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn feed(&mut self, bytes: &[u8], more: bool, out: &mut Vec<Event>) {
+        self.feed_at(bytes, more, std::time::Instant::now(), out);
+    }
+
+    pub(crate) fn feed_at(&mut self, bytes: &[u8], more: bool, now: std::time::Instant, out: &mut Vec<Event>) {
         let mut i = 0;
+        if !bytes.is_empty() && self.pending_esc.take().is_some() {
+            match bytes[0] {
+                b'[' => {
+                    self.pending_csi.extend_from_slice(b"\x1b[");
+                    i = 1;
+                }
+                b'\x1b' => {
+                    self.parser.parse(b"\x1b", false);
+                    self.drain_parser(None, out);
+                }
+                _ => {
+                    self.parser.parse(b"\x1b", true);
+                }
+            }
+        }
+
         while i < bytes.len() {
             if self.in_paste {
                 if let Some(rel) = find_subslice(&bytes[i..], b"\x1b[201~") {
@@ -103,7 +148,8 @@ impl LiveDecoder {
 
             if let Some(rel) = find_subslice(&bytes[i..], b"\x1b[") {
                 if rel > 0 {
-                    self.parser.parse(&bytes[i..i + rel], true);
+                    // Precedes `\x1b[`, so any trailing `\x1b` here is a standalone Escape, not CSI.
+                    self.parser.parse(&bytes[i..i + rel], false);
                     self.drain_parser(None, out);
                 }
                 self.pending_csi.extend_from_slice(b"\x1b[");
@@ -111,7 +157,18 @@ impl LiveDecoder {
                 continue;
             }
 
-            self.parser.parse(&bytes[i..], more);
+            let tail = &bytes[i..];
+            if tail.ends_with(b"\x1b") {
+                let prefix = &tail[..tail.len() - 1];
+                if !prefix.is_empty() {
+                    self.parser.parse(prefix, false);
+                    self.drain_parser(None, out);
+                }
+                self.pending_esc = Some(now);
+                break;
+            }
+
+            self.parser.parse(tail, more);
             self.drain_parser(None, out);
             break;
         }
@@ -162,5 +219,88 @@ mod tests {
         let Event::Key(k) = out[1] else { panic!("expected trailing key event, got {:?}", out[1]) };
         assert_eq!(k.base_layout_key, Some('c'));
         assert!(crate::keys::is_ctrl_c(&k));
+    }
+
+    #[test]
+    fn split_esc_before_bracketed_paste_start_decodes_as_paste() {
+        let mut dec = LiveDecoder::default();
+        let mut out = Vec::new();
+        let t0 = std::time::Instant::now();
+        dec.feed_at(b"abc\x1b", false, t0, &mut out);
+        assert_eq!(out.len(), 3, "trailing lone ESC must wait for follow-up bytes: {out:?}");
+        assert!(dec.esc_deadline().is_some());
+
+        dec.feed_at(b"[200~text\x1b[201~", false, t0 + std::time::Duration::from_millis(2), &mut out);
+        assert_eq!(out.len(), 4, "expected 3 chars + 1 paste event, got {out:?}");
+        assert!(matches!(&out[3], Event::Paste(p) if p == "text"), "expected Paste(\"text\"), got {:?}", out[3]);
+        assert!(dec.esc_deadline().is_none());
+
+        // Split right after ESC before CSI-u still preserves base_layout_key, and double ESC does
+        // not swallow or corrupt the following bracketed paste.
+        out.clear();
+        dec.feed_at(b"\x1b", false, t0, &mut out);
+        dec.feed_at(b"[1089::99;5u", false, t0 + std::time::Duration::from_millis(1), &mut out);
+        assert_eq!(out.len(), 1);
+        let Event::Key(k) = out[0] else { panic!("expected key event, got {:?}", out[0]) };
+        assert_eq!(k.base_layout_key, Some('c'));
+
+        out.clear();
+        dec.feed_at(b"\x1b", false, t0, &mut out);
+        dec.feed_at(b"\x1b[200~pasted\x1b[201~", false, t0 + std::time::Duration::from_millis(1), &mut out);
+        assert_eq!(out.len(), 2, "expected Esc + Paste, got {out:?}");
+        assert!(matches!(out[0], Event::Key(k) if k.code == KeyCode::Escape));
+        assert!(matches!(&out[1], Event::Paste(p) if p == "pasted"));
+    }
+
+    #[test]
+    fn lone_esc_flushes_after_timeout_and_before_late_followup() {
+        let mut dec = LiveDecoder::default();
+        let mut out = Vec::new();
+        let t0 = std::time::Instant::now();
+
+        dec.feed_at(b"\x1b", false, t0, &mut out);
+        assert!(out.is_empty());
+        assert!(dec.flush_expired_esc(t0 + std::time::Duration::from_millis(5), &mut out).is_none());
+        assert!(out.is_empty());
+        assert_eq!(dec.flush_expired_esc(t0 + crate::term_input::EscJoin::ESC_TIMEOUT, &mut out), Some(t0));
+        assert_eq!(out.len(), 1);
+        assert!(matches!(out[0], Event::Key(k) if k.code == KeyCode::Escape));
+
+        // Follow-up arriving after ESC_TIMEOUT flushes via `flush_expired_esc` with the original
+        // `ESC` arrival timestamp before decoding the subsequent bytes.
+        out.clear();
+        let late = t0 + crate::term_input::EscJoin::ESC_TIMEOUT + std::time::Duration::from_millis(1);
+        dec.feed_at(b"\x1b", false, t0, &mut out);
+        assert_eq!(dec.flush_expired_esc(late, &mut out), Some(t0));
+        dec.feed_at(b"[200~text\x1b[201~", false, late, &mut out);
+        assert!(matches!(out[0], Event::Key(k) if k.code == KeyCode::Escape));
+        assert!(!out.iter().any(|e| matches!(e, Event::Paste(_))), "late follow-up must not form paste: {out:?}");
+    }
+
+    #[test]
+    fn same_read_esc_before_bracketed_paste_start_decodes_esc_and_paste() {
+        let mut dec = LiveDecoder::default();
+        let mut out = Vec::new();
+        dec.feed_at(b"\x1b\x1b[200~x\x1b[201~", false, std::time::Instant::now(), &mut out);
+        assert_eq!(out.len(), 2, "expected Esc + Paste, got {out:?}");
+        assert!(matches!(out[0], Event::Key(k) if k.code == KeyCode::Escape));
+        assert!(matches!(&out[1], Event::Paste(p) if p == "x"));
+    }
+
+    #[test]
+    fn expired_esc_after_incomplete_osc_clears_deadline_without_emitting() {
+        let mut dec = LiveDecoder::default();
+        let mut out = Vec::new();
+        let t0 = std::time::Instant::now();
+        dec.feed_at(b"a\x1b]11;rgb:0/0/0\x1b", false, t0, &mut out);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(out[0], Event::Key(k) if k.code == KeyCode::Char('a')));
+        assert!(dec.esc_deadline().is_some());
+
+        out.clear();
+        let expired = t0 + crate::term_input::EscJoin::ESC_TIMEOUT;
+        assert_eq!(dec.flush_expired_esc(expired, &mut out), Some(t0));
+        assert!(out.is_empty(), "incomplete OSC trailing ESC must not emit key: {out:?}");
+        assert!(dec.esc_deadline().is_none());
     }
 }
