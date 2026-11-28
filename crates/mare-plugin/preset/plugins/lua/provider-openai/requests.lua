@@ -43,10 +43,14 @@ return function(D)
 				require("mare_lib").decode_models_envelope(raw, "data", "id", ("%s GET /models"):format(name))
 			local out = {}
 			for _, m in ipairs(lossless_data) do
+				local ctx_win = tonumber(m.context_length or m.context_window)
+				if ctx_win and ctx_win < 2048 then
+					ctx_win = nil
+				end
 				out[#out + 1] = {
 					id = m.id,
 					name = type(m.name) == "string" and m.name or nil,
-					context_window = tonumber(m.context_length or m.context_window),
+					context_window = ctx_win,
 					max_output = tonumber(m.max_output_tokens or m.max_completion_tokens),
 				}
 			end
@@ -1292,88 +1296,57 @@ return function(D)
 				end
 			end,
 		},
-		-- Offline fallback seeds; live GET /models (or /codex/models) is authoritative once signed in.
-		-- Source: https://developers.openai.com/api/docs/models & /pricing (verified 2026-11-28;
-		-- cross-checked with openai/codex models.json, pi-mono, and magpie).
-		-- Standard <=272k input tier rates (prompts >272k bill 2x input / 1.5x output).
-		-- context_window = measured input limit, not the spec-sheet total window.
+		-- Offline fallback seeds keep only fields absent from the bundled models.dev snapshot
+		-- (measured input windows, verbosity, truncation, reasoning_summary, efforts, default_effort,
+		-- tool_update); names, limits, modalities, reasoning flags and pricing come from
+		-- preset/models_dev.json.gz (MIT).
 		models = {
 			{
 				model_id = "gpt-6.2-sol",
-				name = "GPT-6.2 Sol",
-				context_window = 922000,
-				max_output = 128000,
-				reasoning = true,
 				reasoning_summary = true,
 				verbosity = "low",
 				truncation = { mode = "tokens", limit = 10000 },
 				efforts = { "low", "medium", "high", "xhigh", "max" },
-				input = { "text", "image" },
 				tool_update = "addition_only",
-				cost = { input = 2, output = 10, cache_read = 0.1, cache_write = 2.5 },
 			},
 			{
 				model_id = "gpt-6.2-astra",
-				name = "GPT-6.2 Astra",
-				context_window = 922000,
-				max_output = 128000,
-				reasoning = true,
 				reasoning_summary = true,
 				verbosity = "low",
 				truncation = { mode = "tokens", limit = 10000 },
 				efforts = { "low", "medium", "high", "xhigh", "max" },
-				input = { "text", "image" },
 				tool_update = "addition_only",
-				cost = { input = 8, output = 40, cache_read = 0.4, cache_write = 10 },
 			},
 			{
 				model_id = "gpt-6.1-terra",
-				name = "GPT-6.1 Terra",
 				context_window = 921000,
 				context_window_measured = true,
-				max_output = 128000,
-				reasoning = true,
-				-- summaries + verbosity supported, token-based output truncation
 				reasoning_summary = true,
 				verbosity = "low",
 				truncation = { mode = "tokens", limit = 10000 },
 				efforts = { "off", "low", "medium", "high", "xhigh", "max" },
-				input = { "text", "image" },
 				tool_update = "addition_only",
-				cost = { input = 1, output = 5, cache_read = 0.05, cache_write = 1.25 },
 			},
 			{
 				model_id = "gpt-6.1-sol",
-				name = "GPT-6.1 Sol",
 				context_window = 500000,
 				context_window_measured = true,
-				max_output = 128000,
-				reasoning = true,
-				-- summaries + verbosity supported, token-based output truncation
 				reasoning_summary = true,
 				verbosity = "low",
 				truncation = { mode = "tokens", limit = 10000 },
 				efforts = { "low", "medium", "high", "xhigh", "max" },
-				input = { "text", "image" },
 				tool_update = "addition_only",
-				cost = { input = 2, output = 10, cache_read = 0.1, cache_write = 2.5 },
 			},
 			{
 				model_id = "gpt-6-luna",
-				name = "GPT-6 Luna",
 				context_window = 272000,
 				context_window_measured = true,
-				max_output = 128000,
-				reasoning = true,
-				-- summaries + verbosity supported, token-based output truncation
 				reasoning_summary = true,
 				verbosity = "low",
 				truncation = { mode = "tokens", limit = 10000 },
 				efforts = { "off", "low", "medium", "high", "xhigh", "max" },
 				default_effort = "max",
-				input = { "text", "image" },
 				tool_update = "addition_only",
-				cost = { input = 0.1, output = 0.5, cache_read = 0.01, cache_write = 0.125 },
 			},
 		},
 	})

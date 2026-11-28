@@ -231,9 +231,9 @@ async fn openrouter_reported_cost_overrides_catalog_estimate() {
 
         let m_ds = ask(&h, "deepseek/deepseek-flash").await;
         assert!(m_ds["usage"]["cost"].is_null(), "non-OpenRouter ignores OpenRouter accounting: {m_ds}");
-        // DeepSeek falls back to catalog pricing (1M * $0.30/M = $0.30).
+        // DeepSeek falls back to models.dev off-peak catalog pricing (1M * $0.15/M = $0.15).
         let total_cost: f64 = eval(&h, "return USAGE:totals().cost").await;
-        assert!((total_cost - 4.3123).abs() < 1e-6, "expected 4.3123, got {total_cost}");
+        assert!((total_cost - 4.1623).abs() < 1e-6, "expected 4.1623, got {total_cost}");
         h.shutdown().await;
     })
     .await

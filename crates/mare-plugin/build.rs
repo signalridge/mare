@@ -91,6 +91,7 @@ fn main() {
 
     let news_path = preset_dir.join("NEWS.md");
     println!("cargo:rerun-if-changed={}", news_path.display());
+    println!("cargo:rerun-if-changed={}", preset_dir.join("models_dev.json.gz").display());
     // Compress NEWS.md into its own tiny standalone blob so reading news never decompresses
     // the full ~3.85 MB runtime preset source archive.
     let news_src = std::fs::read_to_string(&news_path).unwrap();

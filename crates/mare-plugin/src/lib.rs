@@ -99,6 +99,23 @@ pub fn news_text() -> std::borrow::Cow<'static, str> {
         std::borrow::Cow::Owned(out)
     }
 }
+
+/// Bundled trimmed `models.dev` snapshot (`preset/models_dev.json.gz`, MIT License),
+/// decompressed on demand for offline catalog fallback.
+pub fn bundled_models_dev_json() -> std::borrow::Cow<'static, str> {
+    use std::io::Read as _;
+    #[cfg(debug_assertions)]
+    let bytes = {
+        let p = std::path::Path::new(mare_macro::preset_dir!()).join("models_dev.json.gz");
+        std::fs::read(&p).unwrap_or_else(|e| panic!("reading preset/models_dev.json.gz: {e}"))
+    };
+    #[cfg(not(debug_assertions))]
+    let bytes: &[u8] = include_bytes!("../preset/models_dev.json.gz");
+    let mut decoder = flate2::read::GzDecoder::new(std::io::Cursor::new(bytes));
+    let mut out = String::new();
+    decoder.read_to_string(&mut out).expect("invalid embedded models_dev.json.gz");
+    std::borrow::Cow::Owned(out)
+}
 /// LuaLS definitions, `(path under types/, text)`: the entry `mare.lua` (`---@class mare` and
 /// its scalar fields) and one `mare/<namespace>.lua` per namespace. A test keeps the list
 /// equal to `preset/types/` (`tests::types_list_matches_the_directory`).
@@ -1146,6 +1163,23 @@ mod tests {
         }
         // Verify runtime extraction sources (deflate-archived in release builds) also match disk.
         let preset_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("preset");
+        let bundled_mdev: serde_json::Value =
+            serde_json::from_str(super::bundled_models_dev_json().as_ref()).expect("valid bundled models_dev JSON");
+        assert_eq!(bundled_mdev["source"], "https://models.dev/api.json");
+        assert!(bundled_mdev["license"].as_str().unwrap_or("").contains("MIT"));
+        let providers = bundled_mdev["providers"].as_object().expect("providers map");
+        for pid in [
+            "anthropic",
+            "deepseek",
+            "google",
+            "kimi-code-plan-cn",
+            "moonshotai",
+            "openai",
+            "opencode-go",
+            "openrouter",
+        ] {
+            assert!(providers.contains_key(pid), "bundled models.dev snapshot missing `{pid}`");
+        }
         assert_eq!(
             super::loader::builtin_text("agent").unwrap().as_ref(),
             std::fs::read_to_string(preset_root.join("plugins/agent.lua")).unwrap()

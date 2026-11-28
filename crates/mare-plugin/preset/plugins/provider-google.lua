@@ -75,10 +75,14 @@ return {
 						end
 					end
 					if gen then
+						local ctx_win = tonumber(m.inputTokenLimit)
+						if ctx_win and ctx_win < 2048 then
+							ctx_win = nil
+						end
 						out[#out + 1] = {
 							id = id,
 							name = type(m.displayName) == "string" and m.displayName or nil,
-							context_window = tonumber(m.inputTokenLimit),
+							context_window = ctx_win,
 							max_output = tonumber(m.outputTokenLimit),
 							reasoning = m.thinking == true or nil,
 						}
@@ -335,70 +339,37 @@ return {
 			end,
 			route = "google",
 			stream = stream,
-			-- Offline fallback seeds; live GET /models is authoritative once signed in.
-			-- Source: https://ai.google.dev/gemini-api/docs/models & /pricing (verified 2026-11-28;
-			-- gemini-2.5-pro / gemini-2.5-flash deprecated & rerouted; cross-checked with magpie).
+			-- Offline fallback seeds keep only fields absent from the bundled models.dev snapshot
+			-- (thinkingLevel vs thinkingBudget mode, effort lists, default_effort); names, limits,
+			-- modalities, reasoning flags and pricing come from preset/models_dev.json.gz (MIT).
 			models = {
 				{
 					model_id = "gemini-4-argon",
-					-- Intro rate $2/$10/$0.10 thru 2026-11-30; $4/$20/$0.20 starting 2026-12-01.
-					name = "Gemini 4 Argon",
-					context_window = 1048576,
-					max_output = 65536,
-					reasoning = true,
 					reasoning_level = true,
 					efforts = { "low", "medium", "high" },
 					default_effort = "medium",
-					input = { "text", "image" },
-					cost = { input = 2, output = 10, cache_read = 0.1 },
 				},
 				{
 					model_id = "gemini-4-carbon",
-					-- Intro rate $2/$10/$0.10 thru 2026-11-30; $4/$20/$0.20 starting 2026-12-01.
-					name = "Gemini 4 Carbon",
-					context_window = 1048576,
-					max_output = 65536,
-					reasoning = true,
 					reasoning_level = true,
 					efforts = { "low", "medium", "high" },
 					default_effort = "medium",
-					input = { "text", "image" },
-					cost = { input = 2, output = 10, cache_read = 0.1 },
 				},
 				{
 					model_id = "gemini-4-hydrogen",
-					name = "Gemini 4 Hydrogen",
-					context_window = 1048576,
-					max_output = 65536,
-					reasoning = true,
 					reasoning_level = true,
 					efforts = { "low", "medium", "high", "xhigh" },
 					default_effort = "high",
-					input = { "text", "image" },
-					cost = { input = 1.5, output = 7.5, cache_read = 0.075 },
 				},
 				{
 					model_id = "gemini-3.8-flash",
-					-- Intro rate $0.75/$3.75/$0.075 thru 2026-12-31; $1.50/$7.50/$0.15 starting 2027-01-01.
-					name = "Gemini 3.8 Flash",
-					context_window = 1048576,
-					max_output = 65536,
-					reasoning = true,
 					reasoning_level = true,
 					efforts = { "low", "medium", "high" },
 					default_effort = "medium",
-					input = { "text", "image" },
-					cost = { input = 0.75, output = 3.75, cache_read = 0.075 },
 				},
 				{
 					model_id = "gemini-3.5-flash-lite",
-					name = "Gemini 3.5 Flash-Lite",
-					context_window = 1048576,
-					max_output = 65536,
-					reasoning = true,
 					efforts = efforts,
-					input = { "text", "image" },
-					cost = { input = 0.3, output = 2.5, cache_read = 0.03 },
 				},
 			},
 		})

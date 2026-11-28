@@ -93,8 +93,8 @@ async fn model_catalogue_reads_the_disk_cache_and_refreshes_in_the_background() 
         assert_eq!(ctx_listed, 65536);
         assert_eq!(
             (ctx_static, name_static.as_str()),
-            (1, "DeepSeek V4.1 Flash"),
-            "server context_window overrides unmeasured static entry"
+            (1_048_576, "DeepSeek V4.1 Flash 1017"),
+            "sub-2048 server context_length is treated as unknown and does not overwrite valid catalog window"
         );
         let req = server.requests().into_iter().find(|r| r.path.starts_with("/compat/models")).unwrap();
         assert_eq!(req.header("authorization"), Some("Bearer test-deepseek"));
@@ -1430,12 +1430,15 @@ async fn live_models_endpoint_is_authoritative_over_static_seeds_with_offline_fa
             json!(["deepseek-flash", "deepseek-v4-pro"]),
             "empty 200 GET /models must restore built-in seeds as fallback: {v}"
         );
-        assert_eq!(v["flash_name"], "DeepSeek V4.1 Flash", "curated static metadata must merge: {v}");
-        assert_eq!(v["flash_ctx"], 1_000_000, "{v}");
+        assert_eq!(
+            v["flash_name"], "DeepSeek V4.1 Flash 1017",
+            "curated static + bundled models.dev metadata must merge: {v}"
+        );
+        assert_eq!(v["flash_ctx"], 1_048_576, "{v}");
         assert_eq!(v["only_ids"], json!(["deepseek-v5-only"]), "{v}");
         assert_eq!(
-            v["current_ref"], "deepseek/deepseek-v5-only",
-            "LLM:current() must prefer live model when static default_model was omitted: {v}"
+            v["current_ref"], "deepseek/deepseek-flash",
+            "LLM:current() must keep provider default_model rather than falling back alphabetically (P7): {v}"
         );
         assert_eq!(
             v["after_logout_ids"],
@@ -1454,5 +1457,227 @@ async fn live_models_endpoint_is_authoritative_over_static_seeds_with_offline_fa
 
         h.shutdown().await;
     })
-    .await
+    .await;
+}
+
+/// P3: generic Kimi `/models` listing parser (ported from magpie `TestFetchKimiCodeFacts`, MIT)
+/// parses both flat (`supports_dynamic_tools`, `supports_thinking_type`, `think_efforts`) and
+/// nested (`tools.dynamic_load`, `reasoning.type`, `reasoning.effort`, `modalities.input`) forms
+/// and tolerates malformed field types without failing.
+#[tokio::test]
+async fn fetch_kimi_code_facts_parses_dynamic_tools_efforts_and_modalities() {
+    local(async {
+        let fixture_body = fixture("kimi-code-cn-models-2026-10-31.json");
+        let nested_body = r#"{"data":[
+            {"id":"nested","reasoning":{"type":"only","effort":{"valid":["off","low","high"],"default":"low"}},"tools":{"dynamic_load":true},"modalities":{"input":["text","image"]}},
+            {"id":"both","supports_thinking_type":"both","supports_dynamic_tools":false,"reasoning":{"type":"both"},"tools":{"dynamic_load":false}},
+            {"id":"odd","supports_thinking_type":7,"supports_dynamic_tools":"yes","think_efforts":"max","reasoning":"only","tools":[1]},
+            {"id":"glm-5","context_length":200000}
+        ]}"#;
+
+        let mut env = TestEnv::new().await;
+        env.set_var("KIMI_API_KEY", "test-kimi-code");
+        let server = MockServer::start().await;
+        server.route(
+            "/kimi-code/models",
+            vec![Resp::status(200, fixture_body), Resp::status(200, nested_body)],
+        );
+        let h = provider_host(
+            &mut env,
+            &server,
+            json!({
+                "providers": {
+                    "kimi-code": { "base_url": format!("{}/kimi-code", server.base) }
+                },
+                "plugins": { "llm": { "catalog_refresh_ms": 0 } }
+            }),
+        )
+        .await;
+
+        // 1. Real 2026-10-31 Kimi Code CN /models fixture (6 models).
+        let snap1: String = eval(
+            &h,
+            r#"
+            LLM:refresh_catalog({ name = "kimi-code", force = true })
+            local out = {}
+            for _, m in ipairs(LLM:models()) do
+              if m.provider == "kimi-code" then
+                out[m.id] = {
+                  name = m.name,
+                  context_window = m.context_window,
+                  reasoning = m.reasoning == true,
+                  tool_update = m.tool_update or mare.json.null,
+                  efforts = m.efforts and mare.json.array(m.efforts) or mare.json.null,
+                  default_effort = m.default_effort or mare.json.null,
+                  images = m.images == true,
+                }
+              end
+            end
+            return mare.json.encode(out)
+            "#,
+        )
+        .await;
+        let m1: Value = serde_json::from_str(&snap1).unwrap();
+        assert_eq!(m1.as_object().unwrap().len(), 6, "all 6 Kimi Code fixture models must load: {m1}");
+        for (id, want_dyn, want_def, want_ctx) in [
+            ("kimi-for-coding", Some("addition_only"), Some("max"), 1_048_576),
+            ("kimi-for-coding-highspeed", None, None, 262_144),
+            ("k3", Some("addition_only"), Some("high"), 1_048_576),
+            ("k3-256k", Some("addition_only"), Some("high"), 262_144),
+            ("k3.1-pro", Some("addition_only"), Some("high"), 1_048_576),
+            ("k3.1-pro-highspeed", Some("addition_only"), Some("high"), 1_048_576),
+        ] {
+            let row = &m1[id];
+            assert_eq!(row["reasoning"], true, "{id}: {row}");
+            assert_eq!(row["context_window"], want_ctx, "{id}: {row}");
+            assert_eq!(row["images"], true, "{id}: {row}");
+            assert_eq!(row["tool_update"].as_str(), want_dyn, "{id}: {row}");
+            assert_eq!(row["default_effort"].as_str(), want_def, "{id}: {row}");
+            if want_def.is_some() {
+                assert_eq!(row["efforts"], json!(["low", "high", "max"]), "{id}: {row}");
+            } else {
+                assert!(row["efforts"].is_null(), "{id} has no think_efforts: {row}");
+            }
+        }
+
+        // 2. Nested / both / malformed-odd / plain glm-5 fixture.
+        let snap2: String = eval(
+            &h,
+            r#"
+            LLM:refresh_catalog({ name = "kimi-code", force = true })
+            local out = {}
+            for _, m in ipairs(LLM:models()) do
+              if m.provider == "kimi-code" then
+                out[m.id] = {
+                  context_window = m.context_window,
+                  reasoning = m.reasoning == true,
+                  tool_update = m.tool_update or mare.json.null,
+                  efforts = m.efforts and mare.json.array(m.efforts) or mare.json.null,
+                  default_effort = m.default_effort or mare.json.null,
+                  images = m.images == true,
+                }
+              end
+            end
+            return mare.json.encode(out)
+            "#,
+        )
+        .await;
+        let m2: Value = serde_json::from_str(&snap2).unwrap();
+        assert_eq!(m2["nested"]["tool_update"], "addition_only", "{m2}");
+        assert_eq!(m2["nested"]["default_effort"], "low", "{m2}");
+        assert_eq!(
+            m2["nested"]["efforts"],
+            json!(["low", "high"]),
+            "reasoning.type=only must strip 'off' from efforts: {m2}"
+        );
+        assert_eq!(m2["nested"]["images"], true, "{m2}");
+        assert_eq!(m2["both"]["tool_update"], Value::Null, "{m2}");
+        assert_eq!(m2["both"]["reasoning"], true, "{m2}");
+        assert_eq!(m2["odd"]["tool_update"], Value::Null, "malformed types must be ignored: {m2}");
+        assert_eq!(m2["odd"]["default_effort"], Value::Null, "malformed types must be ignored: {m2}");
+        assert_eq!(m2["glm-5"]["context_window"], 200_000, "{m2}");
+        assert_eq!(m2["glm-5"]["tool_update"], Value::Null, "{m2}");
+        h.shutdown().await;
+    })
+    .await;
+}
+
+/// F3 + P1 + P2: bundled trimmed `models.dev` snapshot hydrates slim seeds offline (preferring
+/// `limit.input` over `limit.context` when `<= limit.context` and ignoring windows `< 2048`),
+/// user disk `models.dev.json` takes precedence when valid, and corrupt disk cache falls back
+/// cleanly to the bundled snapshot.
+#[tokio::test]
+async fn bundled_models_dev_snapshot_hydrates_seeds_prefers_limit_input_and_respects_disk_cache() {
+    local(async {
+        let server = MockServer::start().await;
+
+        // 1. Offline bundled snapshot hydrates slim seeds (`gpt-6.2-sol` gets 922000 from limit.input).
+        let mut env1 = TestEnv::new().await;
+        let h1 = provider_host(&mut env1, &server, json!({})).await;
+        let (sol_ctx, sol_out, sol_name, sol_src_ctx, terra_ctx, terra_src_ctx): (
+            i64,
+            i64,
+            String,
+            String,
+            i64,
+            String,
+        ) = eval(
+            &h1,
+            r#"
+            local sol = assert(LLM:resolve("openai/gpt-6.2-sol"))
+            local sol_src = assert(LLM:model_sources("openai/gpt-6.2-sol"))
+            local terra = assert(LLM:resolve("openai/gpt-6.1-terra"))
+            local terra_src = assert(LLM:model_sources("openai/gpt-6.1-terra"))
+            return sol.context_window, sol.max_output, sol.name, tostring(sol_src.context_window),
+              terra.context_window, tostring(terra_src.context_window)
+            "#,
+        )
+        .await;
+        assert_eq!(sol_ctx, 922_000, "P1: gpt-6.2-sol must prefer limit.input (922000) over limit.context (1050000)");
+        assert_eq!(sol_out, 128_000);
+        assert_eq!(sol_name, "GPT-6.2 Sol");
+        assert_eq!(sol_src_ctx, "models_dev");
+        assert_eq!(terra_ctx, 921_000, "measured seed context_window must win over bundled snapshot");
+        assert_eq!(terra_src_ctx, "measured");
+        h1.shutdown().await;
+        drop(env1);
+
+        // 2. Valid disk models.dev.json overrides bundled snapshot; sub-2048 limit.input is ignored.
+        let mut env2 = TestEnv::new().await;
+        let cache_dir = env2.home.path().join("state/models-cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::fs::write(
+            cache_dir.join("models.dev.json"),
+            json!({
+                "fetched_at": 9999999999_i64,
+                "providers": {
+                    "openai": {
+                        "gpt-6.2-sol": {
+                            "name": "Disk Override Sol",
+                            "reasoning": true,
+                            "limit": { "context": 600000, "input": 550000, "output": 64000 }
+                        },
+                        "gpt-6.2-astra": {
+                            "name": "Disk Tiny Input Astra",
+                            "reasoning": true,
+                            "limit": { "context": 400000, "input": 512, "output": 32000 }
+                        }
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let h2 = provider_host(&mut env2, &server, json!({})).await;
+        let (disk_sol_name, disk_sol_ctx, disk_astra_ctx): (String, i64, i64) = eval(
+            &h2,
+            r#"
+            -- Trigger lazy disk hydration (apply() never reads models-cache/models.dev.json).
+            LLM:prepare_request({ model = assert(LLM:resolve("openai/gpt-6.2-sol")) })
+            local sol = assert(LLM:resolve("openai/gpt-6.2-sol"))
+            local astra = assert(LLM:resolve("openai/gpt-6.2-astra"))
+            return sol.name, sol.context_window, astra.context_window
+            "#,
+        )
+        .await;
+        assert_eq!(disk_sol_name, "Disk Override Sol");
+        assert_eq!(disk_sol_ctx, 550_000, "disk models.dev.json must override bundled snapshot and prefer limit.input");
+        assert_eq!(disk_astra_ctx, 400_000, "sub-2048 limit.input must be ignored and fall back to limit.context");
+        h2.shutdown().await;
+        drop(env2);
+
+        // 3. Corrupt disk models.dev.json falls back cleanly to the bundled snapshot.
+        let mut env3 = TestEnv::new().await;
+        let cache_dir3 = env3.home.path().join("state/models-cache");
+        std::fs::create_dir_all(&cache_dir3).unwrap();
+        std::fs::write(cache_dir3.join("models.dev.json"), "{corrupt json").unwrap();
+        let h3 = provider_host(&mut env3, &server, json!({})).await;
+        let (fb_name, fb_ctx): (String, i64) =
+            eval(&h3, r#"local sol = assert(LLM:resolve("openai/gpt-6.2-sol")); return sol.name, sol.context_window"#)
+                .await;
+        assert_eq!(fb_name, "GPT-6.2 Sol");
+        assert_eq!(fb_ctx, 922_000, "corrupt disk models.dev.json must fall back to bundled snapshot");
+        h3.shutdown().await;
+    })
+    .await;
 }

@@ -236,100 +236,51 @@ return function(D)
 				end
 			end,
 		},
-		-- Offline fallback seeds; live GET /models is authoritative once signed in.
-		-- Source: opencode.ai/inference/go /models snapshot (yetone/magpie opencode-go-models-2026-11-26.json)
-		-- & oh-my-pi opencode-go.kdl (verified 2026-11-28). No `route`: built-in seeds stay on the
-		-- default (responses) route unless routed via `model_routes` or `mare.model{ route = }`.
+		-- Offline fallback seeds keep only fields absent from the bundled models.dev snapshot
+		-- (params, effort lists, effort_map); names, limits, modalities, reasoning flags and
+		-- pricing are hydrated from preset/models_dev.json.gz (MIT). No `route`: built-in seeds
+		-- stay on the default (responses) route unless routed via `model_routes` or `mare.model`.
 		models = {
 			{
 				model_id = "glm-5.3-flash",
-				name = "GLM 5.3 Flash",
-				context_window = 1000000,
-				max_output = 131072,
-				reasoning = true,
 				-- the model layer's default effort: medium, chosen by the
 				-- glm A/B — high wins on quality, but with the default prompt it multiplies
 				-- thinking and cost (~4-5x, one 19-minute runaway); `/effort high` when wanted
 				params = { effort = "medium" },
-				input = { "text", "image" },
-				cost = { input = 0.15, output = 0.50, cache_read = 0.03, cache_write = 0 },
+				-- opencode Go's Responses route does not require a placeholder reasoning item on
+				-- cross-route history (unlike Chat Completions interleaved reasoning_content).
+				needs_reasoning_placeholder = false,
 			},
 			{
 				model_id = "glm-5.3",
-				name = "GLM 5.3",
-				context_window = 1000000,
-				max_output = 131072,
-				reasoning = true,
 				efforts = { "off", "low", "high", "max" },
-				input = { "text" },
-				cost = { input = 1.40, output = 4.40, cache_read = 0.26, cache_write = 0 },
 			},
 			{
 				model_id = "deepseek-v4.1-flash",
-				name = "DeepSeek V4.1 Flash",
-				context_window = 1000000,
-				max_output = 384000,
-				reasoning = true,
 				-- DeepSeek V4's levels are low|high|max (off → "none"); max is sent as max, never
-				-- collapsed to high, and xhigh maps to max as DeepSeek's own API reads it. The
-				-- reasoning comes back as a summary-only reasoning item, which the gateway turns
-				-- back into `reasoning_content` when it is replayed (interleaved thinking).
+				-- collapsed to high, and xhigh maps to max as DeepSeek's own API reads it.
 				efforts = { "off", "low", "high", "max" },
 				effort_map = { xhigh = "max" },
-				input = { "text", "image" },
-				-- Off-peak base rate; peak UTC hours are 2x.
-				cost = { input = 0.15, output = 0.60, cache_read = 0.003, cache_write = 0 },
 			},
 			{
 				model_id = "deepseek-v4-pro",
-				name = "DeepSeek V4 Pro",
-				context_window = 1000000,
-				max_output = 384000,
-				reasoning = true,
 				efforts = { "off", "high", "max" },
 				effort_map = { xhigh = "max" },
-				input = { "text" },
-				-- Off-peak base rate; peak UTC hours are 2x.
-				cost = { input = 0.66, output = 1.98, cache_read = 0.022, cache_write = 0 },
 			},
 			{
 				model_id = "gpt-6-luna",
-				name = "GPT-6 Luna",
-				context_window = 922000,
-				max_output = 128000,
-				reasoning = true,
 				efforts = { "off", "low", "medium", "high", "xhigh", "max" },
-				input = { "text", "image" },
-				cost = { input = 0.10, output = 0.50, cache_read = 0.01, cache_write = 0.125 },
 			},
 			{
 				model_id = "claude-haiku-5-5",
-				name = "Claude Haiku 5.5",
-				context_window = 1000000,
-				max_output = 128000,
-				reasoning = true,
 				efforts = { "off", "low", "medium", "high", "xhigh", "max" },
-				input = { "text", "image" },
-				cost = { input = 0.10, output = 0.50, cache_read = 0.01, cache_write = 0.125 },
 			},
 			{
 				model_id = "muse-spark-1.3-contributor",
-				name = "Muse Spark 1.3 Contributor",
-				context_window = 1048576,
-				max_output = 131072,
-				reasoning = true,
 				efforts = { "off", "minimal", "low", "medium", "high", "xhigh" },
-				input = { "text", "image" },
-				cost = { input = 0.10, output = 0.20, cache_read = 0.002, cache_write = 0 },
 			},
 			{
 				model_id = "mimo-v2.6-flash",
-				name = "MiMo V2.6 Flash",
-				context_window = 1048576,
-				max_output = 131072,
-				reasoning = true,
-				input = { "text", "image" },
-				cost = { input = 0.14, output = 0.28, cache_read = 0.0028, cache_write = 0 },
 			},
 		},
 	})

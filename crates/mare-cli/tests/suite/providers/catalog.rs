@@ -533,7 +533,7 @@ return {
             reload_reads.is_empty(),
             "full reload apply (llm + provider-* + statusline render) must not read auth.json or models-cache: {reload_reads:?}"
         );
-        assert_eq!(seed_before, 1_000_000, "resolve must not block on disk I/O");
+        assert_eq!(seed_before, 1_048_576, "resolve must not block on disk I/O");
         assert_eq!(
             seed_after_prepare, 42000,
             "headless request/prepare barrier must hydrate seed model's cached context_window"

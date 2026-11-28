@@ -134,7 +134,7 @@ async fn model_command_rejects_unknown_id_on_catalogued_provider() {
             local ok_wrong, err_wrong = pcall(LLM.set_model, LLM, "openai/claude-sonnet-5-5", { save = false })
 
             -- Completely unrelated id is rejected without bogus provider-only matches.
-            local ok_none, err_none = pcall(LLM.set_model, LLM, "anthropic/zzzz-totally-new-model", { save = false })
+            local ok_none, err_none = pcall(LLM.set_model, LLM, "anthropic/zzzz-totally-nonexistent-xyzzy", { save = false })
 
             -- Catalog-less gateway continues accepting explicit provider/id.
             LLM:register_provider({
@@ -180,7 +180,7 @@ async fn model_command_rejects_unknown_id_on_catalogued_provider() {
         );
         assert!(
             !no_hit_ok
-                && no_hit_err.contains("anthropic/zzzz-totally-new-model")
+                && no_hit_err.contains("anthropic/zzzz-totally-nonexistent-xyzzy")
                 && !no_hit_err.contains("closest:"),
             "zero-overlap id must be rejected without provider-only noise: {no_hit_err}"
         );
@@ -573,12 +573,14 @@ async fn effort_sent_for_kimi_hidden_for_unmapped_provider_and_invalid_format_re
             .find(|r| r.path == "/kimi-code/chat/completions")
             .expect("kimi-code request sent")
             .json();
-        assert!(
-            kc_req.get("thinking").is_none() && kc_req.get("reasoning_effort").is_none(),
-            "kimi-code/kimi-for-coding must not receive K3 reasoning fields: {kc_req}"
+        assert_eq!(
+            kc_req["reasoning_effort"], "max",
+            "kimi-code/kimi-for-coding declares efforts + default_effort=max and sends reasoning_effort=max: {kc_req}"
         );
+        assert!(kc_req.get("thinking").is_none(), "kimi-code must not send thinking object: {kc_req}");
 
-        // 2. Unmapped custom provider (groq) and non-K3 kimi models offer NO effort parameter;
+        // 2. Unmapped custom provider (groq) and effort-less kimi models offer NO effort parameter;
+        //    kimi-code/kimi-for-coding (with declared efforts) offers effort;
         //    invalid reasoning_format / effort_param are rejected at load time.
         let (groq_has_effort, k2_has_effort, kc_has_effort, badfmt_state, badparam_state): (
             bool,
@@ -609,8 +611,8 @@ async fn effort_sent_for_kimi_hidden_for_unmapped_provider_and_invalid_format_re
         )
         .await;
         assert!(!groq_has_effort, "unmapped openai-chat provider must not offer effort parameter");
-        assert!(!k2_has_effort, "kimi-k2-thinking must not offer unmapped effort parameter");
-        assert!(!kc_has_effort, "kimi-code/kimi-for-coding must not offer unmapped effort parameter");
+        assert!(!k2_has_effort, "effort-less kimi model must not offer unmapped effort parameter");
+        assert!(kc_has_effort, "kimi-code/kimi-for-coding with declared efforts must offer effort parameter");
         assert!(
             badfmt_state.starts_with("unresolved:") && badfmt_state.contains("reasoning_format"),
             "invalid reasoning_format must be rejected at load time: {badfmt_state}"
@@ -640,16 +642,13 @@ async fn open_model_picker_updates_live_and_next_request_uses_newly_selected_mod
             )],
         );
         server.set_hold("/compat/models", 0, release.clone());
-        server.route(
-            "/compat/chat/completions",
-            vec![Resp::sse(compat_events(&[compat_text("ok"), compat_stop()]))],
-        );
+        server.route("/compat/responses", vec![Resp::sse(responses_text("ok"))]);
 
         let h = provider_host(
             &mut env,
             &server,
             json!({
-                "model": "deepseek/deepseek-chat",
+                "model": "deepseek/deepseek-flash",
                 "plugins": { "llm": { "catalog_open_refresh_ms": 0 } }
             }),
         )
@@ -718,12 +717,12 @@ async fn open_model_picker_updates_live_and_next_request_uses_newly_selected_mod
         )
         .await;
         assert_eq!(cur, "deepseek/deepseek-live-picked");
-        let chat_req = server
+        let resp_req = server
             .requests()
             .into_iter()
-            .find(|r| r.path == "/compat/chat/completions")
-            .expect("chat request sent");
-        assert_eq!(chat_req.json()["model"], "deepseek-live-picked");
+            .find(|r| r.path == "/compat/responses")
+            .expect("responses request sent");
+        assert_eq!(resp_req.json()["model"], "deepseek-live-picked");
         h.shutdown().await;
     })
     .await;
@@ -739,12 +738,12 @@ async fn stale_picker_reply_after_live_update_resolves_by_item_id() {
         let mut env = TestEnv::new().await;
         let server = MockServer::start().await;
         let release = Arc::new(tokio::sync::Notify::new());
-        // `deepseek-000-inserted` sorts before `deepseek-chat`, shifting `deepseek-chat`'s index.
+        // `deepseek-000-inserted` sorts before `deepseek-flash`, shifting `deepseek-flash`'s index.
         server.route(
             "/compat/models",
             vec![Resp::status(
                 200,
-                r#"{"object":"list","data":[{"id":"deepseek-000-inserted","name":"Inserted First"}]}"#,
+                r#"{"object":"list","data":[{"id":"deepseek-000-inserted","name":"Inserted First"},{"id":"deepseek-flash"}]}"#,
             )],
         );
         server.set_hold("/compat/models", 0, release.clone());
@@ -772,12 +771,12 @@ async fn stale_picker_reply_after_live_update_resolves_by_item_id() {
                   local orig_items = opts.items
                   local orig_idx
                   for idx, it in ipairs(orig_items) do
-                    if it.item_id == "deepseek/deepseek-chat" then
+                    if it.item_id == "deepseek/deepseek-flash" then
                       orig_idx = idx
                       break
                     end
                   end
-                  assert(orig_idx, "expected deepseek/deepseek-chat in initial items")
+                  assert(orig_idx, "expected deepseek/deepseek-flash in initial items")
                   local open = true
                   local handle = {
                     is_open = function() return open end,
@@ -818,8 +817,8 @@ async fn stale_picker_reply_after_live_update_resolves_by_item_id() {
 
         let cur: String = eval(&h, "return assert(LLM:current()).ref").await;
         assert_eq!(
-            cur, "deepseek/deepseek-chat",
-            "stale index must resolve via item_id to deepseek/deepseek-chat, not deepseek-000-inserted"
+            cur, "deepseek/deepseek-flash",
+            "stale index must resolve via item_id to deepseek/deepseek-flash, not deepseek-000-inserted"
         );
 
         // Missing item_id must warn and leave current selection untouched.
@@ -838,7 +837,7 @@ async fn stale_picker_reply_after_live_update_resolves_by_item_id() {
             "#,
         )
         .await;
-        assert_eq!(after, "deepseek/deepseek-chat");
+        assert_eq!(after, "deepseek/deepseek-flash");
         assert!(notes.contains("no-longer-present"), "missing item_id must warn: {notes}");
         h.shutdown().await;
         drop(env);
@@ -851,10 +850,10 @@ async fn stale_picker_reply_after_live_update_resolves_by_item_id() {
         server2.route(
             "/compat/models",
             vec![
-                Resp::status(200, r#"{"object":"list","data":[{"id":"deepseek-chat"}]}"#),
+                Resp::status(200, r#"{"object":"list","data":[{"id":"deepseek-flash"}]}"#),
                 Resp::status(
                     200,
-                    r#"{"object":"list","data":[{"id":"deepseek-000-pre-open","name":"Pre-Open Model"}]}"#,
+                    r#"{"object":"list","data":[{"id":"deepseek-000-pre-open","name":"Pre-Open Model"},{"id":"deepseek-flash"}]}"#,
                 ),
             ],
         );
@@ -862,7 +861,7 @@ async fn stale_picker_reply_after_live_update_resolves_by_item_id() {
             &mut env2,
             &server2,
             json!({
-                "model": "deepseek/deepseek-chat",
+                "model": "deepseek/deepseek-flash",
                 "plugins": { "llm": { "catalog_open_refresh_ms": 600000 } }
             }),
         )
@@ -905,7 +904,7 @@ async fn stale_picker_reply_after_live_update_resolves_by_item_id() {
         .await;
         assert!(reconciled, "on_open must reconcile models refreshed before subscription");
         assert_eq!(
-            no_id_after, "deepseek/deepseek-chat",
+            no_id_after, "deepseek/deepseek-flash",
             "reply without item_id after live update must not pick shifted models[1]"
         );
         assert!(
@@ -1436,7 +1435,7 @@ async fn earlier_suspended_sync_picker_rebuild_does_not_overwrite_newer_list() {
         server.route(
             "/compat/models",
             vec![
-                Resp::status(200, r#"{"object":"list","data":[{"id":"deepseek-chat"}]}"#),
+                Resp::status(200, r#"{"object":"list","data":[{"id":"deepseek-flash"}]}"#),
                 Resp::status(
                     200,
                     r#"{"object":"list","data":[{"id":"deepseek-000-newer","name":"Newer Live Model"}]}"#,

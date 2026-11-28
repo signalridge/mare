@@ -474,7 +474,7 @@ async fn providers_login_logout_and_usage_through_contracts() {
             P:logout("fakeauth")
 
             local mismatch_hints = {}
-            local wrong_secret = "sk-ant-wrong-provider-9876543210"
+            local wrong_secret = "sk-ant-api03-wrong-provider-9876543210"
             P:login("fakeauth", { method = "api_key", say = function(t) mismatch_hints[#mismatch_hints + 1] = t end,
                 ask = function(_, opts) assert(opts.secret == true); return wrong_secret end })
             local mismatch = table.concat(mismatch_hints, " ")

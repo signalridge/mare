@@ -327,7 +327,7 @@ async fn wire_bodies_for_kimi_code_and_lmstudio_presets() {
             "#,
         )
         .await;
-        assert_eq!(kc_mdev, "kimi-code-plan-global");
+        assert_eq!(kc_mdev, "kimi-code-plan-cn");
         assert_eq!(kc_def, "kimi-for-coding");
         assert!(lm_no_key, "lmstudio must be keyless");
 

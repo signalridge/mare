@@ -5,8 +5,9 @@
 local EFFORTS = { "low", "medium", "high" }
 
 local PRESETS = {
-	-- Offline fallback seeds: when a provider supports live `GET /models`, the live listing is
-	-- authoritative and these entries provide offline fallback + curated metadata.
+	-- Offline fallback seeds keep only fields absent from the bundled models.dev snapshot
+	-- (effort lists, default_effort, effort_map, tool_update); names, limits, modalities,
+	-- reasoning flags and pricing are hydrated from preset/models_dev.json.gz (MIT).
 	deepseek = {
 		label = "DeepSeek",
 		wire = "openai-responses",
@@ -16,35 +17,21 @@ local PRESETS = {
 		api_key_env = "DEEPSEEK_API_KEY",
 		needs_reasoning_placeholder = true,
 		default_model = "deepseek-flash",
-		-- Source: https://api-docs.deepseek.com/updates, /quick_start/pricing, /guides/thinking_mode,
-		-- /guides/responses_api (verified 2026-11-28; deepseek-chat / deepseek-reasoner retired 2026-07-24).
-		-- Pricing below is peak USD / 1M tokens (updated 2026-09-10; off-peak UTC hours are 50% off).
+		-- Pricing, limits, modalities and names come from models.dev (off-peak base rates).
 		-- Only deepseek-flash supports Responses API native deferred tool loading (`tool_update = "addition_only"`).
 		models = {
 			{
 				model_id = "deepseek-flash",
-				name = "DeepSeek V4.1 Flash",
-				context_window = 1000000,
-				max_output = 384000,
-				reasoning = true,
 				efforts = { "off", "low", "high", "max" },
 				default_effort = "high",
 				effort_map = { xhigh = "max" },
-				input = { "text", "image" },
 				tool_update = "addition_only",
-				cost = { input = 0.30, output = 1.20, cache_read = 0.006 },
 			},
 			{
 				model_id = "deepseek-v4-pro",
-				name = "DeepSeek V4 Pro",
-				context_window = 1000000,
-				max_output = 384000,
-				reasoning = true,
 				efforts = { "off", "low", "high", "max" },
 				default_effort = "high",
 				effort_map = { xhigh = "max" },
-				input = { "text" },
-				cost = { input = 1.32, output = 3.96, cache_read = 0.044 },
 			},
 		},
 	},
@@ -56,31 +43,20 @@ local PRESETS = {
 		base_url = "https://api.moonshot.ai/v1",
 		api_key_env = "MOONSHOT_API_KEY",
 		default_model = "kimi-k3.1-pro",
-		-- Source: https://platform.kimi.ai/docs/guide/kimi-k3-1-pro-quickstart &
-		-- https://platform.moonshot.ai/docs/pricing/chat (verified 2026-11-28; K2 previews retired).
-		-- max_output kept at 131072 per K3.1 quickstart ceiling (models.dev mirrors full 1 MiB context).
+		-- max_output kept at 131072 per Kimi K3 docs (models.dev mirrors full 1 MiB context,
+		-- which would leave 0 message budget for compaction).
 		models = {
 			{
 				model_id = "kimi-k3.1-pro",
-				name = "Kimi K3.1 Pro",
-				context_window = 1048576,
 				max_output = 131072,
-				reasoning = true,
 				efforts = { "low", "high", "max" },
-				input = { "text", "image" },
 				tool_update = "addition_only",
-				cost = { input = 2.0, output = 10.0, cache_read = 0.2, cache_write = 2.0 },
 			},
 			{
 				model_id = "kimi-k3",
-				name = "Kimi K3",
-				context_window = 1048576,
 				max_output = 131072,
-				reasoning = true,
 				efforts = { "low", "high", "max" },
-				input = { "text", "image" },
 				tool_update = "addition_only",
-				cost = { input = 3.0, output = 15.0, cache_read = 0.3, cache_write = 3.0 },
 			},
 		},
 	},
@@ -88,43 +64,29 @@ local PRESETS = {
 		label = "Kimi Code",
 		wire = "openai-chat",
 		dialect = "kimi",
-		models_dev = "kimi-code-plan-global",
+		models_dev = "kimi-code-plan-cn",
 		base_url = "https://api.kimi.com/coding/v1",
 		api_key_env = "KIMI_API_KEY",
 		default_model = "kimi-for-coding",
-		-- Source: https://www.kimi.com/code & magpie kimi-code-cn-models-2026-10-31.json
-		-- (verified 2026-11-28); live GET /models returns the account's active tier SKUs.
 		models = {
 			{
 				model_id = "kimi-for-coding",
-				name = "Kimi for Coding",
-				context_window = 1048576,
-				max_output = 32768,
-				reasoning = true,
 				efforts = { "low", "high", "max" },
 				default_effort = "max",
-				input = { "text", "image" },
+				tool_update = "addition_only",
 			},
 			{
 				model_id = "k3.1-pro",
-				name = "Kimi K3.1 Pro (Code)",
-				context_window = 1048576,
 				max_output = 131072,
-				reasoning = true,
 				efforts = { "low", "high", "max" },
 				default_effort = "high",
-				input = { "text", "image" },
 				tool_update = "addition_only",
 			},
 			{
 				model_id = "k3",
-				name = "Kimi K3 (Code)",
-				context_window = 1048576,
 				max_output = 131072,
-				reasoning = true,
 				efforts = { "low", "high", "max" },
 				default_effort = "high",
-				input = { "text", "image" },
 				tool_update = "addition_only",
 			},
 		},
@@ -139,40 +101,20 @@ local PRESETS = {
 		key_prefixes = { "sk-or-" },
 		effort_param = "openrouter",
 		default_model = "anthropic/claude-sonnet-5.5",
-		-- Source: https://openrouter.ai/models (verified 2026-11-28); live GET /models is
-		-- authoritative once signed in.
 		models = {
 			{
 				model_id = "anthropic/claude-sonnet-5.5",
-				name = "Claude Sonnet 5.5 (OpenRouter)",
-				context_window = 1000000,
-				max_output = 128000,
-				reasoning = true,
 				efforts = EFFORTS,
-				input = { "text", "image" },
-				cost = { input = 2, output = 10, cache_read = 0.1, cache_write = 2.5 },
 			},
 			{
 				model_id = "google/gemini-4-argon",
-				name = "Gemini 4 Argon (OpenRouter)",
-				context_window = 1048576,
-				max_output = 65536,
-				reasoning = true,
 				efforts = EFFORTS,
-				input = { "text", "image" },
-				cost = { input = 2, output = 10 },
 			},
 			{
 				model_id = "deepseek/deepseek-v4.1-flash",
-				name = "DeepSeek V4.1 Flash (OpenRouter)",
-				context_window = 1000000,
-				max_output = 384000,
-				reasoning = true,
 				efforts = { "off", "low", "high", "max" },
 				default_effort = "high",
 				effort_map = { xhigh = "max" },
-				input = { "text", "image" },
-				cost = { input = 0.30, output = 1.20 },
 			},
 		},
 	},

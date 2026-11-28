@@ -178,6 +178,8 @@ function mare.plugins.set_enabled(name, on, source) end
 function mare.plugins.fetch_catalog() end
 ---@return string text mare's NEWS.md
 function mare.plugins.mare_news() end
+---@return string json bundled trimmed models.dev catalog snapshot JSON
+function mare.plugins.bundled_models_dev() end
 --- Format version for `state/news.json`.
 ---@type integer
 mare.plugins.news_version = 1

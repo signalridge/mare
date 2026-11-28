@@ -465,6 +465,8 @@ pub fn install(lua: &Lua, mare: &Table) -> mlua::Result<()> {
     t.set("default_source", mare_plugin_manager::DEFAULT_SOURCE)?;
     // mare's own NEWS.md (the copy in the runtime directory is the same text)
     t.set("mare_news", lua.create_function(|_, ()| Ok(crate::news_text().into_owned()))?)?;
+    // Bundled trimmed models.dev snapshot (preset/models_dev.json.gz, MIT License)
+    t.set("bundled_models_dev", lua.create_function(|_, ()| Ok(crate::bundled_models_dev_json().into_owned()))?)?;
     t.set("news_version", crate::NEWS_VERSION)?;
     mare.set("plugins", t)
 }

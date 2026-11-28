@@ -1258,18 +1258,28 @@ async fn login_api_key_avoids_ambiguous_prefix_scrollback_and_onboarding_refresh
             })
             LLM:logout("deepseek")
 
-            -- 2. Anthropic (key_prefixes = { "sk-ant-" }): placeholder is set; matching key emits no warning;
-            -- non-matching key emits a clear warning.
+            -- 2. Anthropic (key_prefixes = { "sk-ant-api" }): placeholder is set; matching key emits no warning;
+            -- non-matching key emits a clear warning; setup-token (`sk-ant-oat...`) is rejected without saving.
             local ant_ok_said, ant_placeholder = {}, nil
             LLM:login("anthropic", {
                 method = "api_key",
                 say = function(t) ant_ok_said[#ant_ok_said + 1] = t end,
                 ask = function(_, opts)
                     ant_placeholder = opts.placeholder
-                    return "sk-ant-valid-123456"
+                    return "sk-ant-api03-valid-123456"
                 end,
             })
             LLM:logout("anthropic")
+
+            local oat_secret = "sk-ant-oat01-setup-token-999999"
+            local oat_ok, oat_err = pcall(function()
+                LLM:login("anthropic", {
+                    method = "api_key",
+                    say = function() end,
+                    ask = function() return oat_secret end,
+                })
+            end)
+            local oat_saved = LLM:has_api_key("anthropic", {})
 
             local ant_bad_said = {}
             LLM:login("anthropic", {
@@ -1281,7 +1291,7 @@ async fn login_api_key_avoids_ambiguous_prefix_scrollback_and_onboarding_refresh
 
             -- 3. Pasting an Anthropic key into DeepSeek emits a clear mismatch warning without leaking the key.
             local cross_said = {}
-            local cross_secret = "sk-ant-cross-provider-999999"
+            local cross_secret = "sk-ant-api03-cross-provider-999999"
             LLM:login("deepseek", {
                 method = "api_key",
                 say = function(t) cross_said[#cross_said + 1] = t end,
@@ -1289,12 +1299,17 @@ async fn login_api_key_avoids_ambiguous_prefix_scrollback_and_onboarding_refresh
             })
             LLM:logout("deepseek")
 
+            local oat_err_str = tostring(type(oat_err) == "table" and oat_err.message or oat_err)
             return mare.json.encode({
                 ds_said = mare.json.array(ds_said),
                 ds_secret = ds_secret,
                 ds_placeholder = ds_placeholder or mare.json.null,
                 ant_placeholder = ant_placeholder or mare.json.null,
                 ant_ok_said = mare.json.array(ant_ok_said),
+                oat_ok = oat_ok,
+                oat_err = oat_err_str,
+                oat_saved = oat_saved,
+                oat_leaked = oat_err_str:find(oat_secret, 1, true) ~= nil,
                 ant_bad_said = mare.json.array(ant_bad_said),
                 cross_said = mare.json.array(cross_said),
                 cross_leaked = table.concat(cross_said, " "):find(cross_secret, 1, true) ~= nil,
@@ -1306,10 +1321,17 @@ async fn login_api_key_avoids_ambiguous_prefix_scrollback_and_onboarding_refresh
         assert_eq!(v["ds_secret"], true, "{v}");
         assert_eq!(v["ds_placeholder"], Value::Null, "{v}");
         assert_eq!(v["ds_said"], json!([]), "normal deepseek login must not emit scrollback prefix text: {v}");
-        assert_eq!(v["ant_placeholder"], "sk-ant-...", "{v}");
+        assert_eq!(v["ant_placeholder"], "sk-ant-api...", "{v}");
         assert_eq!(v["ant_ok_said"], json!([]), "matching prefix must not emit scrollback warning: {v}");
+        assert_eq!(v["oat_ok"], false, "setup-token sk-ant-oat must be rejected: {v}");
+        assert_eq!(v["oat_saved"], false, "rejected setup-token must not be saved: {v}");
+        assert_eq!(v["oat_leaked"], false, "setup-token error must not leak token: {v}");
         assert!(
-            v["ant_bad_said"].as_array().unwrap().iter().any(|s| s.as_str().unwrap_or("").contains("sk-ant-")),
+            v["oat_err"].as_str().unwrap_or("").contains("setup-token"),
+            "setup-token rejection must explain why: {v}"
+        );
+        assert!(
+            v["ant_bad_said"].as_array().unwrap().iter().any(|s| s.as_str().unwrap_or("").contains("sk-ant-api")),
             "non-matching prefix must warn about expected prefix: {v}"
         );
         assert!(
@@ -1479,7 +1501,7 @@ async fn model_picker_updates_in_place_when_catalog_refreshes() {
                     end
                 end
                 open = false
-                return pick_idx
+                return pick_idx, 1, nil, "", pick_idx and cur_items[pick_idx].item_id or nil
             end
             CM:run("/model")
             local cur = LLM:current()

@@ -28,7 +28,7 @@ POST /anthropic/v1/messages
 
 # google/gemini-4-argon default
 POST /google/models/gemini-4-argon:streamGenerateContent?alt=sse
-{"contents":[{"parts":[{"text":"hi"}],"role":"user"}],"generationConfig":{"maxOutputTokens":65536,"thinkingConfig":{"includeThoughts":true,"thinkingLevel":"medium"}},"systemInstruction":{"parts":[{"text":"S"}]}}
+{"contents":[{"parts":[{"text":"hi"}],"role":"user"}],"generationConfig":{"maxOutputTokens":32768,"thinkingConfig":{"includeThoughts":true,"thinkingLevel":"medium"}},"systemInstruction":{"parts":[{"text":"S"}]}}
 
 # google/gemini-3.5-flash-lite default
 POST /google/models/gemini-3.5-flash-lite:streamGenerateContent?alt=sse
@@ -36,7 +36,7 @@ POST /google/models/gemini-3.5-flash-lite:streamGenerateContent?alt=sse
 
 # deepseek/deepseek-flash default
 POST /compat/responses
-{"include":["reasoning.encrypted_content"],"input":[{"content":[{"text":"hi","type":"input_text"}],"role":"user"}],"instructions":"S","max_output_tokens":384000,"model":"deepseek-flash","parallel_tool_calls":true,"prompt_cache_key":"sess-golden","reasoning":{"effort":"high"},"store":false,"stream":true,"tool_choice":"auto"}
+{"include":["reasoning.encrypted_content"],"input":[{"content":[{"text":"hi","type":"input_text"}],"role":"user"}],"instructions":"S","max_output_tokens":393216,"model":"deepseek-flash","parallel_tool_calls":true,"prompt_cache_key":"sess-golden","reasoning":{"effort":"high"},"store":false,"stream":true,"tool_choice":"auto"}
 
 # openrouter/anthropic/claude-sonnet-5.5 default
 POST /openrouter/chat/completions
@@ -72,7 +72,7 @@ POST /anthropic/v1/messages
 
 # google/gemini-4-argon request off
 POST /google/models/gemini-4-argon:streamGenerateContent?alt=sse
-{"contents":[{"parts":[{"text":"hi"}],"role":"user"}],"generationConfig":{"maxOutputTokens":65536},"systemInstruction":{"parts":[{"text":"S"}]}}
+{"contents":[{"parts":[{"text":"hi"}],"role":"user"}],"generationConfig":{"maxOutputTokens":32768},"systemInstruction":{"parts":[{"text":"S"}]}}
 
 # google/gemini-3.5-flash-lite request off
 POST /google/models/gemini-3.5-flash-lite:streamGenerateContent?alt=sse
@@ -80,7 +80,7 @@ POST /google/models/gemini-3.5-flash-lite:streamGenerateContent?alt=sse
 
 # deepseek/deepseek-flash request off
 POST /compat/responses
-{"include":["reasoning.encrypted_content"],"input":[{"content":[{"text":"hi","type":"input_text"}],"role":"user"}],"instructions":"S","max_output_tokens":384000,"model":"deepseek-flash","parallel_tool_calls":true,"prompt_cache_key":"sess-golden","reasoning":{"effort":"none"},"store":false,"stream":true,"tool_choice":"auto"}
+{"include":["reasoning.encrypted_content"],"input":[{"content":[{"text":"hi","type":"input_text"}],"role":"user"}],"instructions":"S","max_output_tokens":393216,"model":"deepseek-flash","parallel_tool_calls":true,"prompt_cache_key":"sess-golden","reasoning":{"effort":"none"},"store":false,"stream":true,"tool_choice":"auto"}
 
 # openrouter/anthropic/claude-sonnet-5.5 request off
 POST /openrouter/chat/completions
@@ -100,7 +100,7 @@ POST /anthropic/v1/messages
 
 # google/gemini-4-argon request high
 POST /google/models/gemini-4-argon:streamGenerateContent?alt=sse
-{"contents":[{"parts":[{"text":"hi"}],"role":"user"}],"generationConfig":{"maxOutputTokens":65536,"thinkingConfig":{"includeThoughts":true,"thinkingLevel":"high"}},"systemInstruction":{"parts":[{"text":"S"}]}}
+{"contents":[{"parts":[{"text":"hi"}],"role":"user"}],"generationConfig":{"maxOutputTokens":32768,"thinkingConfig":{"includeThoughts":true,"thinkingLevel":"high"}},"systemInstruction":{"parts":[{"text":"S"}]}}
 
 # openrouter/anthropic/claude-sonnet-5.5 request high
 POST /openrouter/chat/completions
@@ -128,11 +128,11 @@ POST /openai/responses
 
 # google/gemini-4-argon session xhigh
 POST /google/models/gemini-4-argon:streamGenerateContent?alt=sse
-{"contents":[{"parts":[{"text":"hi"}],"role":"user"}],"generationConfig":{"maxOutputTokens":65536,"thinkingConfig":{"includeThoughts":true,"thinkingLevel":"high"}},"systemInstruction":{"parts":[{"text":"S"}]}}
+{"contents":[{"parts":[{"text":"hi"}],"role":"user"}],"generationConfig":{"maxOutputTokens":32768,"thinkingConfig":{"includeThoughts":true,"thinkingLevel":"high"}},"systemInstruction":{"parts":[{"text":"S"}]}}
 
 # deepseek/deepseek-flash session xhigh
 POST /compat/responses
-{"include":["reasoning.encrypted_content"],"input":[{"content":[{"text":"hi","type":"input_text"}],"role":"user"}],"instructions":"S","max_output_tokens":384000,"model":"deepseek-flash","parallel_tool_calls":true,"prompt_cache_key":"sess-golden","reasoning":{"effort":"max"},"store":false,"stream":true,"tool_choice":"auto"}
+{"include":["reasoning.encrypted_content"],"input":[{"content":[{"text":"hi","type":"input_text"}],"role":"user"}],"instructions":"S","max_output_tokens":393216,"model":"deepseek-flash","parallel_tool_calls":true,"prompt_cache_key":"sess-golden","reasoning":{"effort":"max"},"store":false,"stream":true,"tool_choice":"auto"}
 
 # opencode-go/deepseek-v4.1-flash session xhigh
 POST /og/responses
