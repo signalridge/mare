@@ -1,0 +1,678 @@
+name: PR CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      full_matrix: ${{ steps.plan.outputs.full_matrix }}
+      reason: ${{ steps.plan.outputs.reason }}
+      pkg_args: ${{ steps.plan.outputs.pkg_args }}
+      macos_lib_pkg_args: ${{ steps.plan.outputs.macos_lib_pkg_args }}
+      windows_lib_pkg_args: ${{ steps.plan.outputs.windows_lib_pkg_args }}
+      linux: ${{ steps.plan.outputs.linux }}
+      macos: ${{ steps.plan.outputs.macos }}
+      windows: ${{ steps.plan.outputs.windows }}
+      linux_filter: ${{ steps.plan.outputs.linux_filter }}
+      macos_cli_filter: ${{ steps.plan.outputs.macos_cli_filter }}
+      windows_cli_filter: ${{ steps.plan.outputs.windows_cli_filter }}
+      build_mare_bin_linux: ${{ steps.plan.outputs.build_mare_bin_linux }}
+      build_mare_bin_macos: ${{ steps.plan.outputs.build_mare_bin_macos }}
+      build_mare_bin_windows: ${{ steps.plan.outputs.build_mare_bin_windows }}
+      run_doc_tests_linux: ${{ steps.plan.outputs.run_doc_tests_linux }}
+      run_rust_lint_on: ${{ steps.plan.outputs.run_rust_lint_on }}
+      windows_sandbox: ${{ steps.plan.outputs.windows_sandbox }}
+      installer_ps1: ${{ steps.plan.outputs.installer_ps1 }}
+      yaml: ${{ steps.plan.outputs.yaml }}
+      workflows: ${{ steps.plan.outputs.workflows }}
+      scripts: ${{ steps.plan.outputs.scripts }}
+      script_commands: ${{ steps.plan.outputs.script_commands }}
+      deny: ${{ steps.plan.outputs.deny }}
+      lua: ${{ steps.plan.outputs.lua }}
+      docs_site: ${{ steps.plan.outputs.docs_site }}
+      docs_gen: ${{ steps.plan.outputs.docs_gen }}
+      trivy: ${{ steps.plan.outputs.trivy }}
+      nix: ${{ steps.plan.outputs.nix }}
+      release_dry_run: ${{ steps.plan.outputs.release_dry_run }}
+      expected_jobs: ${{ steps.plan.outputs.expected_jobs }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - uses: ./.github/actions/setup-rust
+      - name: Plan PR CI jobs
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_REF: ${{ github.head_ref }}
+        run: python3 scripts/ci_plan.py --github-output "$GITHUB_OUTPUT"
+
+  yamllint:
+    name: yamllint
+    needs: [changes]
+    if: ${{ (failure() && needs.changes.result == 'failure') || (success() && needs.changes.outputs.yaml == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - name: Install yamllint
+        run: pip install yamllint
+      - name: Run yamllint
+        run: yamllint -c .yamllint.yaml .
+
+  actionlint:
+    name: actionlint
+    needs: [changes]
+    if: >-
+      (failure() && needs.changes.result == 'failure') ||
+      (success() && needs.changes.outputs.workflows == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Run actionlint
+        uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2
+
+  scripts:
+    name: scripts
+    needs: [changes]
+    if: >-
+      (failure() && needs.changes.result == 'failure') ||
+      (success() && needs.changes.outputs.scripts == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - name: Run selected script checks
+        env:
+          PLAN_RESULT: ${{ needs.changes.result }}
+          SCRIPT_COMMANDS: ${{ needs.changes.outputs.script_commands }}
+        run: |
+          python3 - <<'PY'
+          import json, os, shlex, subprocess, sys
+
+          default_cmds = [
+              "python3 scripts/ci_plan.py --self-test",
+              "python3 scripts/check_release_gate.py --self-test",
+              "python3 scripts/release_manifests.py --self-test",
+              "python3 scripts/check_release_policy.py --self-test",
+              "python3 scripts/check_release_policy.py",
+              "python3 scripts/verify_release_archive.py --self-test",
+              "python3 scripts/check_notices.py --self-test",
+              "python3 scripts/test_nextest_test_home.py",
+              "python3 -m unittest scripts/test_gen_docs.py",
+              "python3 -m unittest scripts/test_docs_keymaps.py",
+              "sh -n install.sh",
+          ]
+          raw = os.environ.get("SCRIPT_COMMANDS", "")
+          if os.environ.get("PLAN_RESULT") != "success" or not raw:
+              cmds = default_cmds
+          else:
+              cmds = json.loads(raw)
+          for cmd in cmds:
+              print(f"::group::{cmd}", flush=True)
+              rc = subprocess.run(shlex.split(cmd), check=False).returncode
+              print("::endgroup::", flush=True)
+              if rc != 0:
+                  sys.exit(rc)
+          PY
+
+  deny:
+    name: cargo-deny
+    needs: [changes]
+    if: ${{ (failure() && needs.changes.result == 'failure') || (success() && needs.changes.outputs.deny == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2
+        with:
+          tool: cargo-deny
+      - run: cargo deny check
+
+  lua:
+    name: stylua · public-api-lint
+    needs: [changes]
+    if: ${{ (failure() && needs.changes.result == 'failure') || (success() && needs.changes.outputs.lua == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - name: Load pinned CI tool versions
+        id: tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          stylua_ver="$(jq -er '.stylua | strings' .github/ci-tools.json)"
+          luals_ver="$(jq -er '.luals | strings' .github/ci-tools.json)"
+          ast_grep_ver="$(jq -er '.ast_grep | strings' .github/ci-tools.json)"
+          {
+            echo "stylua=${stylua_ver}"
+            echo "luals=${luals_ver}"
+            echo "ast_grep=${ast_grep_ver}"
+          } >> "$GITHUB_OUTPUT"
+      - uses: JohnnyMorganz/stylua-action@76fd70c03e6340ceaf673366712db9b20560b402 # v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          version: ${{ steps.tools.outputs.stylua }}
+          args: --check crates/mare-plugin/preset
+      - name: Install lua-language-server and ast-grep
+        shell: bash
+        env:
+          LUALS_VER: ${{ steps.tools.outputs.luals }}
+          AST_GREP_VER: ${{ steps.tools.outputs.ast_grep }}
+        run: |
+          set -euo pipefail
+          tools_dir="${RUNNER_TEMP}/lua-lint-tools"
+          mkdir -p "${tools_dir}/luals" "${tools_dir}/bin"
+          luals_url="https://github.com/LuaLS/lua-language-server/releases/download"
+          curl -fsSL "${luals_url}/${LUALS_VER}/lua-language-server-${LUALS_VER}-linux-x64.tar.gz" \
+            | tar -xz -C "${tools_dir}/luals"
+          curl -fsSL -o "${tools_dir}/ast-grep.zip" \
+            "https://github.com/ast-grep/ast-grep/releases/download/${AST_GREP_VER}/app-x86_64-unknown-linux-gnu.zip"
+          unzip -q "${tools_dir}/ast-grep.zip" -d "${tools_dir}/bin"
+          rm -f "${tools_dir}/ast-grep.zip"
+          {
+            echo "${tools_dir}/luals/bin"
+            echo "${tools_dir}/bin"
+          } >> "$GITHUB_PATH"
+      - name: Check Lua public API
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          base=""
+          if [ -n "${PR_BASE_SHA:-}" ]; then
+            base=$(git merge-base "$PR_BASE_SHA" HEAD 2>/dev/null || printf '%s' "$PR_BASE_SHA")
+          elif mb=$(git merge-base origin/main HEAD 2>/dev/null || true) \
+            && [ -n "$mb" ] && [ "$mb" != "$(git rev-parse HEAD)" ]; then
+            base="$mb"
+          elif prev=$(git rev-parse --verify HEAD~1 2>/dev/null); then
+            base="$prev"
+          else
+            base=$(git rev-parse HEAD)
+          fi
+          python3 scripts/check_lua_public_api.py --self-test
+          python3 scripts/check_lua_public_api.py --base "$base"
+
+  test-linux:
+    name: test (ubuntu-latest)
+    needs: [changes]
+    if: ${{ (failure() && needs.changes.result == 'failure') || (success() && needs.changes.outputs.linux == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: ./.github/actions/setup-rust
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: mare-${{ runner.os }}-${{ runner.arch }}-dev
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2
+        with:
+          tool: nextest
+      - name: Verify NEWS.md section on release PR
+        if: github.event_name == 'pull_request' && github.head_ref == 'release-please--branches--main'
+        run: |
+          python3 - <<'PY'
+          import json, pathlib, re, sys
+          ver = json.loads(pathlib.Path(".release-please-manifest.json").read_text("utf-8"))["."]
+          news = pathlib.Path("crates/mare-plugin/preset/NEWS.md").read_text("utf-8")
+          if not re.search(rf"(?m)^##\s+{re.escape(ver)}\s*$", news):
+              sys.exit(f"crates/mare-plugin/preset/NEWS.md is missing '## {ver}' section for release PR")
+          print(f"Verified NEWS.md contains ## {ver}")
+          PY
+      - name: Rust lint (fmt and scoped clippy)
+        if: needs.changes.result != 'success' || needs.changes.outputs.run_rust_lint_on == 'linux'
+        shell: bash
+        env:
+          PLAN_RESULT: ${{ needs.changes.result }}
+          PKG_ARGS: ${{ needs.changes.outputs.pkg_args }}
+        run: |
+          set -euo pipefail
+          cargo metadata --locked --format-version 1 >/dev/null
+          cargo fmt --check
+          if [ "$PLAN_RESULT" != "success" ] || [ -z "$PKG_ARGS" ]; then
+            cargo clippy --workspace --all-targets -- -D warnings
+          else
+            read -r -a pkgs <<< "$PKG_ARGS"
+            cargo clippy "${pkgs[@]}" --all-targets -- -D warnings
+          fi
+      - name: Create a private test parent (Unix)
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, tempfile
+          p = tempfile.mkdtemp(prefix="mare-tests-", dir=os.environ["RUNNER_TEMP"])
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as fh:
+              fh.write("MARE_TMPDIR=" + p + "\n")
+          PY
+      - name: Build mare runtime binaries
+        if: needs.changes.result != 'success' || needs.changes.outputs.build_mare_bin_linux == 'true'
+        run: cargo build -p mare-cli --bins
+      - name: Run Linux nextest
+        shell: bash
+        env:
+          PLAN_RESULT: ${{ needs.changes.result }}
+          PKG_ARGS: ${{ needs.changes.outputs.pkg_args }}
+          LINUX_FILTER: ${{ needs.changes.outputs.linux_filter }}
+          NEXTEST_TEST_THREADS: '4'
+        run: |
+          set -euo pipefail
+          if [ "$PLAN_RESULT" != "success" ] || [ -z "$PKG_ARGS" ]; then
+            cargo nextest run --workspace --profile ci
+          elif [ -n "$LINUX_FILTER" ]; then
+            read -r -a pkgs <<< "$PKG_ARGS"
+            cargo nextest run "${pkgs[@]}" --profile ci -E "$LINUX_FILTER"
+          else
+            read -r -a pkgs <<< "$PKG_ARGS"
+            cargo nextest run "${pkgs[@]}" --profile ci
+          fi
+      - name: Run doc tests
+        if: needs.changes.result != 'success' || needs.changes.outputs.run_doc_tests_linux == 'true'
+        run: python3 scripts/nextest_test_home.py --doc
+      - name: Remove the private test parent
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, shutil, stat, sys
+          raw = os.environ.get("MARE_TMPDIR")
+          if not raw:
+              sys.exit(0)
+          p = pathlib.Path(raw)
+          parent = pathlib.Path(os.environ["RUNNER_TEMP"]).resolve()
+          s = p.lstat()
+          assert (
+              p.parent.resolve() == parent
+              and p.name.startswith(("mare-tests-", "mt-"))
+              and not stat.S_ISLNK(s.st_mode)
+              and not (getattr(s, "st_file_attributes", 0) & 0x400)
+          )
+          shutil.rmtree(p)
+          PY
+
+  test-macos:
+    name: test (macos-latest)
+    needs: [changes]
+    if: ${{ (failure() && needs.changes.result == 'failure') || (success() && needs.changes.outputs.macos == 'true') }}
+    runs-on: macos-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: ./.github/actions/setup-rust
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: mare-${{ runner.os }}-${{ runner.arch }}-dev
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2
+        with:
+          tool: nextest
+      - name: Rust lint (fmt and scoped clippy)
+        if: needs.changes.outputs.run_rust_lint_on == 'macos'
+        shell: bash
+        env:
+          PKG_ARGS: ${{ needs.changes.outputs.pkg_args }}
+        run: |
+          set -euo pipefail
+          cargo metadata --locked --format-version 1 >/dev/null
+          cargo fmt --check
+          read -r -a pkgs <<< "$PKG_ARGS"
+          cargo clippy "${pkgs[@]}" --all-targets -- -D warnings
+      - name: Create a private test parent (Unix)
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, tempfile
+          p = tempfile.mkdtemp(prefix="mare-tests-", dir=os.environ["RUNNER_TEMP"])
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as fh:
+              fh.write("MARE_TMPDIR=" + p + "\n")
+          PY
+      - name: Build mare binary
+        if: needs.changes.result != 'success' || needs.changes.outputs.build_mare_bin_macos == 'true'
+        run: cargo build -p mare-cli --bin mare
+      - name: Run macOS lib tests
+        if: needs.changes.result != 'success' || needs.changes.outputs.macos_lib_pkg_args != ''
+        shell: bash
+        env:
+          PLAN_RESULT: ${{ needs.changes.result }}
+          LIB_PKG_ARGS: ${{ needs.changes.outputs.macos_lib_pkg_args }}
+          NEXTEST_TEST_THREADS: '3'
+        run: |
+          set -euo pipefail
+          if [ "$PLAN_RESULT" != "success" ] || [ -z "$LIB_PKG_ARGS" ]; then
+            cargo nextest run --workspace --lib --profile ci
+          else
+            read -r -a pkgs <<< "$LIB_PKG_ARGS"
+            cargo nextest run "${pkgs[@]}" --lib --profile ci
+          fi
+      - name: Run macOS CLI integration suites
+        if: needs.changes.result != 'success' || needs.changes.outputs.macos_cli_filter != ''
+        shell: bash
+        env:
+          PLAN_RESULT: ${{ needs.changes.result }}
+          CLI_FILTER: ${{ needs.changes.outputs.macos_cli_filter }}
+          NEXTEST_TEST_THREADS: '3'
+        run: |
+          set -euo pipefail
+          if [ "$PLAN_RESULT" != "success" ] || [ -z "$CLI_FILTER" ]; then
+            expr="test(/^suite::tui::/) | test(/^suite::tui_followups::/)"
+            expr="${expr} | test(/^suite::tui_pty::/) | test(/^suite::lua_specs::/)"
+          else
+            expr="$CLI_FILTER"
+          fi
+          cargo nextest run -p mare-cli --test all --profile ci -E "$expr"
+      - name: Remove the private test parent
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, shutil, stat, sys
+          raw = os.environ.get("MARE_TMPDIR")
+          if not raw:
+              sys.exit(0)
+          p = pathlib.Path(raw)
+          parent = pathlib.Path(os.environ["RUNNER_TEMP"]).resolve()
+          s = p.lstat()
+          assert (
+              p.parent.resolve() == parent
+              and p.name.startswith(("mare-tests-", "mt-"))
+              and not stat.S_ISLNK(s.st_mode)
+              and not (getattr(s, "st_file_attributes", 0) & 0x400)
+          )
+          shutil.rmtree(p)
+          PY
+
+  test-windows:
+    name: test (windows-latest)
+    needs: [changes]
+    if: >-
+      (failure() && needs.changes.result == 'failure') ||
+      (success() && needs.changes.outputs.windows == 'true')
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: ./.github/actions/setup-rust
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: mare-${{ runner.os }}-${{ runner.arch }}-dev
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2
+        with:
+          tool: nextest
+      - name: Rust lint (fmt and scoped clippy)
+        if: needs.changes.outputs.run_rust_lint_on == 'windows'
+        shell: bash
+        env:
+          PKG_ARGS: ${{ needs.changes.outputs.pkg_args }}
+        run: |
+          set -euo pipefail
+          cargo metadata --locked --format-version 1 >/dev/null
+          cargo fmt --check
+          read -r -a pkgs <<< "$PKG_ARGS"
+          cargo clippy "${pkgs[@]}" --all-targets -- -D warnings
+      - name: Create a private test parent (Windows)
+        shell: pwsh
+        run: |
+          git config --global core.longpaths true
+          $path = Join-Path $env:RUNNER_TEMP ("mt-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+          $null = New-Item -ItemType Directory -Path $path
+          $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+          $acl = [System.Security.AccessControl.DirectorySecurity]::new()
+          $acl.SetAccessRuleProtection($true, $false)
+          $acl.SetOwner($user)
+          $sids = @(
+            $user,
+            [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18'),
+            [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+          )
+          foreach ($sid in $sids) {
+            $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+              $sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'
+            )
+            $null = $acl.AddAccessRule($rule)
+          }
+          Set-Acl -Path $path -AclObject $acl
+          "MARE_TMPDIR=$path" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Build mare binary
+        if: needs.changes.result != 'success' || needs.changes.outputs.build_mare_bin_windows == 'true'
+        run: cargo build -p mare-cli --bin mare
+      - name: Run Windows lib tests
+        if: needs.changes.result != 'success' || needs.changes.outputs.windows_lib_pkg_args != ''
+        shell: bash
+        env:
+          PLAN_RESULT: ${{ needs.changes.result }}
+          LIB_PKG_ARGS: ${{ needs.changes.outputs.windows_lib_pkg_args }}
+          NEXTEST_TEST_THREADS: '3'
+        run: |
+          set -euo pipefail
+          if [ "$PLAN_RESULT" != "success" ] || [ -z "$LIB_PKG_ARGS" ]; then
+            cargo nextest run --workspace --lib --profile ci
+          else
+            read -r -a pkgs <<< "$LIB_PKG_ARGS"
+            cargo nextest run "${pkgs[@]}" --lib --profile ci
+          fi
+      - name: Run Windows CLI integration suites
+        if: needs.changes.result != 'success' || needs.changes.outputs.windows_cli_filter != ''
+        shell: bash
+        env:
+          PLAN_RESULT: ${{ needs.changes.result }}
+          CLI_FILTER: ${{ needs.changes.outputs.windows_cli_filter }}
+          NEXTEST_TEST_THREADS: '3'
+        run: |
+          set -euo pipefail
+          if [ "$PLAN_RESULT" != "success" ] || [ -z "$CLI_FILTER" ]; then
+            expr="test(/^suite::tui::/) | test(/^suite::tui_followups::/)"
+            expr="${expr} | test(/^suite::tui_pty::/) | test(/^suite::lua_specs::/)"
+            expr="${expr} | test(/^suite::win_process::/)"
+          else
+            expr="$CLI_FILTER"
+          fi
+          cargo nextest run -p mare-cli --test all --profile ci -E "$expr"
+      - name: Windows sandbox (default tier)
+        if: needs.changes.result != 'success' || needs.changes.outputs.windows_sandbox == 'true'
+        run: cargo nextest run -p mare-cli --test all --profile ci --no-capture -E 'test(/suite::win_sandbox::/)'
+      - name: Windows sandbox (enhanced tier or unsupported-station diagnosis)
+        if: needs.changes.result != 'success' || needs.changes.outputs.windows_sandbox == 'true'
+        shell: pwsh
+        run: ./scripts/windows_sandbox_ci.ps1
+      - name: Remove the private test parent
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os, pathlib, shutil, stat, sys
+          raw = os.environ.get("MARE_TMPDIR")
+          if not raw:
+              sys.exit(0)
+          p = pathlib.Path(raw)
+          parent = pathlib.Path(os.environ["RUNNER_TEMP"]).resolve()
+          s = p.lstat()
+          assert (
+              p.parent.resolve() == parent
+              and p.name.startswith(("mare-tests-", "mt-"))
+              and not stat.S_ISLNK(s.st_mode)
+              and not (getattr(s, "st_file_attributes", 0) & 0x400)
+          )
+          def ro(fn, path, exc):
+              if not isinstance(exc, PermissionError):
+                  raise exc
+              st = os.lstat(path)
+              if stat.S_ISLNK(st.st_mode) or (getattr(st, "st_file_attributes", 0) & 0x400):
+                  raise exc
+              os.chmod(path, stat.S_IWRITE | stat.S_IREAD | (stat.S_IEXEC if stat.S_ISDIR(st.st_mode) else 0))
+              fn(path)
+          shutil.rmtree(p, onexc=ro)
+          PY
+
+  installer-ps1:
+    name: installer (windows-latest)
+    needs: [changes]
+    if: >-
+      (failure() && needs.changes.result == 'failure') ||
+      (success() && needs.changes.outputs.installer_ps1 == 'true')
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Verify install.ps1 parity and run PowerShell tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (Test-Path docs-site/public/install.ps1) {
+            $a = Get-FileHash install.ps1 -Algorithm SHA256
+            $b = Get-FileHash docs-site/public/install.ps1 -Algorithm SHA256
+            if ($a.Hash -ne $b.Hash) {
+              throw 'docs-site/public/install.ps1 does not match install.ps1'
+            }
+          }
+          ./scripts/test_install_ps1.ps1
+
+  docs-site:
+    name: docs site
+    needs: [changes]
+    if: >-
+      (failure() && needs.changes.result == 'failure') ||
+      (success() && needs.changes.outputs.docs_site == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: docs-site/package-lock.json
+      - name: Build the site
+        working-directory: docs-site
+        run: |
+          npm ci
+          npm run build
+
+  docs-gen:
+    name: docs generated pages
+    needs: [changes]
+    if: >-
+      (failure() && needs.changes.result == 'failure') ||
+      (success() && needs.changes.outputs.docs_gen == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: mare-${{ runner.os }}-${{ runner.arch }}-dev
+      - name: Build mare (the generated pages read its --help and command registry)
+        run: cargo build -p mare-cli
+      - name: Load pinned CI tool versions
+        id: tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          lua_ver="$(jq -er '.lua | strings' .github/ci-tools.json)"
+          echo "lua=${lua_ver}" >> "$GITHUB_OUTPUT"
+      - uses: leafo/gh-actions-lua@8aace3457a2fcf3f3c4e9007ecc6b869ff6d74d6 # v11
+        with:
+          luaVersion: ${{ steps.tools.outputs.lua }}
+      - name: Generated reference pages are up to date
+        run: python3 scripts/gen_docs.py --mare "$GITHUB_WORKSPACE/target/debug/mare" --check
+
+  trivy:
+    name: Trivy
+    needs: [changes]
+    if: ${{ (failure() && needs.changes.result == 'failure') || (success() && needs.changes.outputs.trivy == 'true') }}
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    uses: ./.github/workflows/security.yaml
+    with:
+      run_codeql: false
+
+  nix:
+    name: Nix
+    needs: [changes]
+    if: ${{ (failure() && needs.changes.result == 'failure') || (success() && needs.changes.outputs.nix == 'true') }}
+    uses: ./.github/workflows/nix.yaml
+
+  release-dry-run:
+    name: Release Dry Run
+    needs: [changes]
+    if: >-
+      (failure() && needs.changes.result == 'failure') ||
+      (success() && needs.changes.outputs.release_dry_run == 'true')
+    uses: ./.github/workflows/release-dry-run.yaml
+
+  pr-checks:
+    name: PR checks
+    if: always()
+    needs:
+      - changes
+      - yamllint
+      - actionlint
+      - scripts
+      - deny
+      - lua
+      - test-linux
+      - test-macos
+      - test-windows
+      - installer-ps1
+      - docs-site
+      - docs-gen
+      - trivy
+      - nix
+      - release-dry-run
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - name: Evaluate PR checks gate
+        env:
+          PLAN_RESULT: ${{ needs.changes.result }}
+          EXPECTED_JOBS: ${{ needs.changes.outputs.expected_jobs }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: python3 scripts/ci_plan.py --gate

@@ -11,17 +11,6 @@ on:
       - "rust-toolchain.toml"
       - ".github/ci-tools.json"
       - ".github/workflows/docs.yml"
-  pull_request:
-    branches: [main]
-    paths:
-      - "docs/**"
-      - "docs-site/**"
-      - "scripts/gen_docs.py"
-      - "crates/**"
-      - ".nvmrc"
-      - "rust-toolchain.toml"
-      - ".github/ci-tools.json"
-      - ".github/workflows/docs.yml"
   workflow_dispatch:
 permissions:
   contents: read
@@ -39,6 +28,8 @@ jobs:
           fetch-depth: 0
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: mare-${{ runner.os }}-${{ runner.arch }}-dev
       - name: Build mare (the generated pages read its --help and command registry)
         run: cargo build -p mare-cli
       - name: Load pinned CI tool versions

@@ -2,13 +2,12 @@ name: CI
 on:
   push:
     branches: [main]
-  pull_request:
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: false
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
@@ -254,6 +253,8 @@ jobs:
           python-version-file: .python-version
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         if: needs.changes.outputs.rust == 'true'
+        with:
+          shared-key: mare-${{ runner.os }}-${{ runner.arch }}-dev
       - if: needs.changes.outputs.rust == 'true'
         run: cargo metadata --locked --format-version 1 >/dev/null
       - name: Verify NEWS.md section on release PR
@@ -374,6 +375,8 @@ jobs:
         with:
           python-version-file: .python-version
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: mare-${{ runner.os }}-${{ runner.arch }}-dev
       - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2
         with:
           tool: nextest
@@ -505,6 +508,8 @@ jobs:
         with:
           python-version-file: .python-version
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: mare-${{ runner.os }}-${{ runner.arch }}-dev
       - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2
         with:
           tool: nextest
