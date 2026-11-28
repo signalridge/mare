@@ -205,6 +205,47 @@ local function classify_transport_error(err, cancel)
 	return "WEB_FETCH_NETWORK_ERROR: the network request failed: " .. detail
 end
 
+local SUPPORTED_APP_MIMES = {
+	"application/json",
+	"application/xml",
+	"application/javascript",
+	"application/x-javascript",
+	"application/ecmascript",
+}
+
+local SUPPORTED_APP_MIME_SET = {}
+for _, mime in ipairs(SUPPORTED_APP_MIMES) do
+	SUPPORTED_APP_MIME_SET[mime] = true
+end
+
+local ACCEPT_MIMES = {
+	"text/html",
+	"application/xhtml+xml",
+	"text/plain",
+	"text/markdown",
+	"text/javascript",
+}
+for _, mime in ipairs(SUPPORTED_APP_MIMES) do
+	ACCEPT_MIMES[#ACCEPT_MIMES + 1] = mime
+end
+local ACCEPT_HEADER = table.concat(ACCEPT_MIMES, ", ")
+
+local SUPPORTED_FORMAT_LABELS = { "text/*", "*+json", "*+xml" }
+for _, mime in ipairs(SUPPORTED_APP_MIMES) do
+	SUPPORTED_FORMAT_LABELS[#SUPPORTED_FORMAT_LABELS + 1] = mime
+end
+local SUPPORTED_FORMATS = table.concat(SUPPORTED_FORMAT_LABELS, ", ")
+
+local function is_supported_mime(mime)
+	return mime ~= nil
+		and (
+			mime:match("^text/") ~= nil
+			or SUPPORTED_APP_MIME_SET[mime] == true
+			or mime:match("%+json$") ~= nil
+			or mime:match("%+xml$") ~= nil
+		)
+end
+
 -- Bounded HTTP retrieval with text/plain and text/markdown passthrough.
 return function(request, call, config)
 	local cfg = config or {}
@@ -218,7 +259,7 @@ return function(request, call, config)
 			url = url,
 			method = "GET",
 			headers = {
-				accept = "text/html, application/xhtml+xml, text/plain, text/markdown, application/json, application/xml",
+				accept = ACCEPT_HEADER,
 				["user-agent"] = cfg.user_agent or "mare-web-fetch/1",
 			},
 			timeout_ms = cfg.timeout_ms or 30000,
@@ -236,15 +277,12 @@ return function(request, call, config)
 		local mime = content_type:match("^%s*([^;]+)")
 		mime = mime and mime:lower():match("^%s*(.-)%s*$")
 		fail(
-			mime
-				and (
-					mime:match("^text/")
-					or mime == "application/json"
-					or mime == "application/xml"
-					or mime:match("%+json$")
-					or mime:match("%+xml$")
-				),
-			"WEB_UNSUPPORTED_CONTENT_TYPE: unsupported content type: " .. content_type
+			is_supported_mime(mime),
+			"WEB_UNSUPPORTED_CONTENT_TYPE: unsupported content type: "
+				.. content_type
+				.. " (supported: "
+				.. SUPPORTED_FORMATS
+				.. ")"
 		)
 		local charset = parse_charset(content_type)
 		if charset then
