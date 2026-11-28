@@ -10,6 +10,27 @@
 mare = {}
 ---@type string
 mare.version = ""
+---@class mare.semver
+mare.semver = {}
+--- Pure SemVer 2.0.0 precedence comparison (`-1`, `0`, `1`), ignoring build metadata;
+--- returns `nil` when either version string is malformed.
+---@param a string
+---@param b string
+---@return integer?
+function mare.semver.compare(a, b) end
+--- Pure SemVer 2.0.0 precedence check: whether `candidate` has strictly greater
+--- precedence than `current` (e.g. `1.0.1-rc.1` > `1.0.0`).
+---@param candidate string
+---@param current string
+---@return boolean
+function mare.semver.is_newer(candidate, current) end
+--- Release-channel update policy: whether `candidate` should be offered as an update
+--- over `current` under SemVer 2.0.0 precedence (prerelease → stable notifies; stable
+--- never upgrades to a prerelease).
+---@param candidate string
+---@param current string
+---@return boolean
+function mare.semver.is_newer_release(candidate, current) end
 --- Protocol and Lua API compatibility version (matches `mare_protocol::PROTOCOL_VERSION`).
 ---@type string
 mare.api_version = ""
@@ -44,6 +65,32 @@ mare.config = {}
 mare.args = {}
 ---@type {config: string, state: string, data: string, auth: string, sessions: string, packages: string, runtime: string, log: string, crashes: string}
 mare.paths = {}
+---@class mare.InstallInfo
+---@field channel "brew"|"scoop"|"aur"|"nix"|"standalone"|"other"
+---@field managed boolean
+---@field command string|nil
+---@field argv string[]
+---@field steps string[][]
+---@field manual_hint string|nil
+---@field release_url string
+---@class mare.install
+mare.install = {}
+---@return "brew"|"scoop"|"aur"|"nix"|"standalone"|"other"
+function mare.install.channel() end
+---@param method? "brew"|"scoop"|"aur"|"nix"|"standalone"|"other"
+---@return mare.InstallInfo
+function mare.install.info(method) end
+---@return string|nil
+function mare.install.update_command() end
+---@return boolean
+function mare.install.is_managed() end
+---@return boolean
+function mare.install.update_check_disabled() end
+--- Effective update-check policy resolved from `mare.o.update_check`, plugin `enabled`, and env opt-outs.
+---@param config_update_check? boolean|"notify"|"auto"|string
+---@param plugin_enabled? boolean
+---@return "notify"|"auto"|"disabled"
+function mare.install.policy(config_update_check, plugin_enabled) end
 ---@class mare.Project
 ---@field root string|nil
 ---@field start string

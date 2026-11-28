@@ -281,7 +281,7 @@ mare completion fish > ~/.config/fish/completions/mare.fish
 
 mare 不会替换自己的二进制文件。要更新时：
 
-- 如果你通过包管理器安装，请直接使用对应包管理器更新（例如 `brew upgrade mare`、`scoop update mare`、`yay -Syu mare-bin`、`nix profile upgrade mare`）。
+- 如果你通过包管理器安装，请直接使用对应包管理器更新（例如 `brew upgrade mare`、`scoop update mare`、`yay -S mare-bin`、`nix profile upgrade mare`）。
 - 否则，重新运行一键安装脚本（`install.sh` / `install.ps1`），或按上文方式下载新压缩包校验后覆盖旧的 `mare` 二进制文件。
 
 发布构建的 TUI 默认每 24 小时检查一次 GitHub 发布版本（`update-check.interval_hours` 可调整间隔；调试构建跳过自动检查），如有新版本就打印一行提示。请求中除 `mare/<version>` 外不带任何标识。可以在 `init.lua` 中关闭检查：
