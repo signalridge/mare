@@ -551,6 +551,7 @@ pub(super) struct PersistedSession {
     pub(super) path: PathBuf,
 }
 
+#[cfg_attr(test, derive(Clone))]
 struct SessionMeta {
     id: String,
     cwd: PathBuf,
@@ -623,6 +624,54 @@ pub(super) fn find_session(session_id: &str) -> Option<PersistedSession> {
     Some(PersistedSession { cwd: meta.cwd, path: meta.path })
 }
 
+fn parse_list_cursor(cursor: Option<&str>) -> Result<Option<(u128, &str)>, String> {
+    let Some(c) = cursor else {
+        return Ok(None);
+    };
+    let (ms_str, id) = c.split_once(':').ok_or_else(|| "session/list cursor is invalid".to_string())?;
+    if id.is_empty() {
+        return Err("session/list cursor is invalid".to_string());
+    }
+    let ms = ms_str.parse::<u128>().map_err(|_| "session/list cursor is invalid".to_string())?;
+    Ok(Some((ms, id)))
+}
+
+fn paginate_sessions(
+    metas: Vec<SessionMeta>,
+    cwd_filter: Option<&Path>,
+    after: Option<(u128, &str)>,
+    active_ids: &HashSet<String>,
+    page_size: usize,
+) -> ListSessionsResponse {
+    let mut entries: Vec<SessionMeta> = metas
+        .into_iter()
+        .filter(|s| !active_ids.contains(&s.id))
+        .filter(|s| cwd_filter.is_none_or(|c| same_directory(&s.cwd, c)))
+        .filter(|s| match after {
+            None => true,
+            Some((ms, id)) => s.modified_ms < ms || (s.modified_ms == ms && s.id.as_str() > id),
+        })
+        .collect();
+    let has_more = entries.len() > page_size;
+    entries.truncate(page_size);
+    let next_cursor = has_more.then(|| entries.last().map(|s| format!("{}:{}", s.modified_ms, s.id))).flatten();
+    let infos = entries
+        .into_iter()
+        .map(|s| {
+            let mut si = SessionInfo::new(s.id, s.cwd);
+            if let Some(t) = s.title {
+                si = si.title(t);
+            }
+            si
+        })
+        .collect();
+    let mut resp = ListSessionsResponse::new(infos);
+    if let Some(next) = next_cursor {
+        resp = resp.next_cursor(next);
+    }
+    resp
+}
+
 /// List persisted non-subagent sessions (excluding `active_ids`), with optional `cwd` filter and cursor.
 pub(super) fn list_sessions(
     cwd_filter: Option<&Path>,
@@ -634,33 +683,8 @@ pub(super) fn list_sessions(
     {
         return Err(format!("cwd must be an absolute path: {}", c.display()));
     }
-    let offset = match cursor {
-        None => 0usize,
-        Some(c) => c.parse::<usize>().map_err(|_| "session/list cursor is invalid".to_string())?,
-    };
-    let entries: Vec<SessionMeta> = collect_session_metas()
-        .into_iter()
-        .filter(|s| !active_ids.contains(&s.id))
-        .filter(|s| cwd_filter.is_none_or(|c| same_directory(&s.cwd, c)))
-        .collect();
-    let end = (offset.saturating_add(DEFAULT_PAGE_SIZE)).min(entries.len());
-    let page = if offset >= entries.len() { &[] } else { &entries[offset..end] };
-    let next_cursor = (end < entries.len()).then(|| end.to_string());
-    let infos = page
-        .iter()
-        .map(|s| {
-            let mut si = SessionInfo::new(s.id.clone(), s.cwd.clone());
-            if let Some(t) = s.title.as_ref() {
-                si = si.title(t.clone());
-            }
-            si
-        })
-        .collect();
-    let mut resp = ListSessionsResponse::new(infos);
-    if let Some(next) = next_cursor {
-        resp = resp.next_cursor(next);
-    }
-    Ok(resp)
+    let after = parse_list_cursor(cursor)?;
+    Ok(paginate_sessions(collect_session_metas(), cwd_filter, after, active_ids, DEFAULT_PAGE_SIZE))
 }
 
 #[cfg(test)]
@@ -815,5 +839,44 @@ mod tests {
         assert_eq!(replay[3]["kind"], "execute");
         assert_eq!(replay[4]["kind"], "read");
         assert_eq!(replay[5]["kind"], "edit");
+    }
+
+    #[test]
+    fn list_sessions_keyset_cursor_survives_removals_and_equal_mtime_ties() {
+        let cwd = PathBuf::from("/tmp/ws");
+        let make = |id: &str, modified_ms: u128| SessionMeta {
+            id: id.to_string(),
+            cwd: cwd.clone(),
+            title: None,
+            path: PathBuf::from(format!("/tmp/ws/{id}.jsonl")),
+            modified_ms,
+        };
+        let mut metas = vec![make("s-a", 200), make("s-b", 100), make("s-c", 100), make("s-d", 100), make("s-e", 50)];
+        metas.sort_by(|a, b| b.modified_ms.cmp(&a.modified_ms).then_with(|| a.id.cmp(&b.id)));
+
+        let mut active = HashSet::new();
+        let page1 = paginate_sessions(metas.clone(), Some(&cwd), None, &active, 2);
+        let ids1: Vec<_> = page1.sessions.iter().map(|s| s.session_id.0.as_ref()).collect();
+        assert_eq!(ids1, vec!["s-a", "s-b"]);
+        let cursor = page1.next_cursor.as_deref().expect("page 1 cursor");
+        assert_eq!(cursor, "100:s-b");
+
+        // Opening an item from page 1 must not skip `s-c` on page 2.
+        active.insert("s-a".to_string());
+        let after1 = parse_list_cursor(Some(cursor)).unwrap();
+        let page2 = paginate_sessions(metas.clone(), Some(&cwd), after1, &active, 2);
+        let ids2: Vec<_> = page2.sessions.iter().map(|s| s.session_id.0.as_ref()).collect();
+        assert_eq!(ids2, vec!["s-c", "s-d"]);
+        let cursor2 = page2.next_cursor.as_deref().expect("page 2 cursor");
+
+        let after2 = parse_list_cursor(Some(cursor2)).unwrap();
+        let page3 = paginate_sessions(metas, Some(&cwd), after2, &active, 2);
+        let ids3: Vec<_> = page3.sessions.iter().map(|s| s.session_id.0.as_ref()).collect();
+        assert_eq!(ids3, vec!["s-e"]);
+        assert!(page3.next_cursor.is_none());
+
+        assert!(parse_list_cursor(Some("100")).is_err());
+        assert!(parse_list_cursor(Some("100:")).is_err());
+        assert!(parse_list_cursor(Some("abc:id")).is_err());
     }
 }

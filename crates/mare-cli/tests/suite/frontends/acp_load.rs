@@ -178,7 +178,7 @@ fn acp_load_session_rejects_invalid_targets_without_replaying_updates() {
     assert_eq!(cwd_err["error"]["code"], -32602, "{cwd_err}");
     assert!(cwd_updates.is_empty(), "{cwd_updates:?}");
 
-    // `session/resume` and `session/load` reject non-empty `additionalDirectories` without replaying updates.
+    // `session/resume` and `session/load` reject unrecorded `additionalDirectories` without replaying updates.
     let bad_resume_dirs = rpc.call_raw(
         "session/resume",
         json!({ "sessionId": sid, "cwd": cwd, "additionalDirectories": [other_cwd], "mcpServers": [] }),
@@ -235,7 +235,16 @@ fn acp_session_list_paginates_with_cursor() {
     let items1 = page1["result"]["sessions"].as_array().unwrap_or_else(|| panic!("{page1}"));
     assert_eq!(items1.len(), 100, "{page1}");
     let cursor = page1["result"]["nextCursor"].as_str().unwrap_or_else(|| panic!("{page1}"));
-    assert_eq!(cursor, "100", "{page1}");
+    assert!(!cursor.is_empty(), "{page1}");
+
+    // Open an item from page 1 before requesting page 2: the former item 101 must still appear
+    // on page 2, and no item may repeat or be skipped.
+    let opened_id = items1[0]["sessionId"].as_str().unwrap().to_string();
+    let resumed =
+        rpc.call_raw("session/resume", json!({ "sessionId": opened_id, "cwd": cwd, "mcpServers": [] }), |_| {
+            json!(null)
+        });
+    assert!(resumed.get("error").is_none(), "{resumed}");
 
     let page2 = rpc.call_raw("session/list", json!({ "cwd": cwd, "cursor": cursor }), |_| json!(null));
     let items2 = page2["result"]["sessions"].as_array().unwrap_or_else(|| panic!("{page2}"));
@@ -247,6 +256,10 @@ fn acp_session_list_paginates_with_cursor() {
     assert_eq!(seen1.len(), 100);
     assert_eq!(seen2.len(), 5);
     assert!(seen1.is_disjoint(&seen2), "pages must not overlap");
+    let mut total: std::collections::HashSet<&str> = seen1.union(&seen2).copied().collect();
+    assert_eq!(total.len(), 105, "every session must appear across pages without skipping item 101");
+    assert!(total.remove(opened_id.as_str()));
+    assert_eq!(total.len(), 104);
 
     rpc.kill_and_wait();
 }

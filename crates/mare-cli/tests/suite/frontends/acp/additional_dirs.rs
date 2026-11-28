@@ -194,7 +194,7 @@ fn acp_new_session_additional_directories_rejects_invalid_and_atomic_no_session(
 
 #[cfg(unix)]
 #[test]
-fn acp_restore_rejects_additional_directories_and_revalidates_recorded_roots() {
+fn acp_restore_accepts_recorded_additional_directories_and_rejects_unrecorded() {
     use std::os::unix::fs::symlink;
 
     let base = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
@@ -243,10 +243,12 @@ fn acp_restore_rejects_additional_directories_and_revalidates_recorded_roots() {
     std::fs::remove_dir_all(&will_swap).unwrap();
     symlink(&swap_target, &will_swap).unwrap();
 
-    // Phase 2: `session/load` & `session/resume` reject non-empty `additionalDirectories`,
-    // and valid `session/load` revalidates recorded roots (`keep` stays writable, `will_swap` dropped).
+    // Phase 2: `session/load` & `session/resume` accept valid recorded `additionalDirectories`,
+    // reject invalid/unrecorded ones, and revalidates recorded roots (`keep` stays writable, `will_swap` dropped).
     let keep_file = keep.join("after-resume.txt");
     let swap_escape = will_swap.join("escaped.txt");
+    let unrecorded = root.join("unrecorded");
+    std::fs::create_dir_all(&unrecorded).unwrap();
     let mut rpc = acp_in_home(
         &home,
         json!([
@@ -259,23 +261,33 @@ fn acp_restore_rejects_additional_directories_and_revalidates_recorded_roots() {
     );
     let _ = rpc.call_raw("initialize", json!({ "protocolVersion": 1, "clientCapabilities": {} }), |_| json!(null));
 
-    let bad_load = rpc.call_raw(
+    let bad_load_unrecorded = rpc.call_raw(
+        "session/load",
+        json!({ "sessionId": sid, "cwd": cwd, "mcpServers": [], "additionalDirectories": [&unrecorded] }),
+        |_| json!(null),
+    );
+    assert_eq!(bad_load_unrecorded["error"]["code"], -32602, "{bad_load_unrecorded}");
+
+    let bad_resume_unrecorded = rpc.call_raw(
+        "session/resume",
+        json!({ "sessionId": sid, "cwd": cwd, "mcpServers": [], "additionalDirectories": [&unrecorded] }),
+        |_| json!(null),
+    );
+    assert_eq!(bad_resume_unrecorded["error"]["code"], -32602, "{bad_resume_unrecorded}");
+
+    let bad_resume_swapped = rpc.call_raw(
+        "session/resume",
+        json!({ "sessionId": sid, "cwd": cwd, "mcpServers": [], "additionalDirectories": [&will_swap] }),
+        |_| json!(null),
+    );
+    assert_eq!(bad_resume_swapped["error"]["code"], -32602, "{bad_resume_swapped}");
+
+    let loaded_with_keep = rpc.call_raw(
         "session/load",
         json!({ "sessionId": sid, "cwd": cwd, "mcpServers": [], "additionalDirectories": [&keep] }),
         |_| json!(null),
     );
-    assert_eq!(bad_load["error"]["code"], -32602, "{bad_load}");
-
-    let bad_resume = rpc.call_raw(
-        "session/resume",
-        json!({ "sessionId": sid, "cwd": cwd, "mcpServers": [], "additionalDirectories": [&keep] }),
-        |_| json!(null),
-    );
-    assert_eq!(bad_resume["error"]["code"], -32602, "{bad_resume}");
-
-    let loaded =
-        rpc.call_raw("session/load", json!({ "sessionId": sid, "cwd": cwd, "mcpServers": [] }), |_| json!(null));
-    assert!(loaded.get("result").is_some(), "valid resume should drop invalid roots and succeed: {loaded}");
+    assert!(loaded_with_keep.get("result").is_some(), "recorded valid root must load cleanly: {loaded_with_keep}");
 
     let pid = rpc.request(
         "session/prompt",
@@ -286,6 +298,106 @@ fn acp_restore_rejects_additional_directories_and_revalidates_recorded_roots() {
 
     assert_eq!(std::fs::read_to_string(&keep_file).unwrap(), "kept-ok");
     assert!(!swap_target.join("escaped.txt").exists(), "symlink-swapped root must be dropped on resume");
+
+    rpc.kill_and_wait();
+}
+
+#[test]
+fn acp_load_and_resume_restore_recorded_additional_dirs_and_respect_readonly() {
+    let base = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let root = dunce::canonicalize(base.path()).unwrap();
+    let home = root.join("home");
+    let cwd = root.join("cwd");
+    let extra = root.join("extra");
+    let unauthorised = root.join("unauthorised");
+    for d in [&home, &cwd, &extra, &unauthorised] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let extra_file = extra.join("hello.txt");
+    std::fs::write(&extra_file, "from-extra-dir").unwrap();
+    let blocked_write = extra.join("ro-blocked.txt");
+
+    // Create and persist session with `extra`.
+    let sid = {
+        let mut rpc = acp_in_home(
+            &home,
+            json!([{ "text": "seed" }]),
+            &["-C", cwd.to_str().unwrap(), "--permission", "read-only", "--approval-policy", "never"],
+            &[],
+        );
+        let _ = rpc.call_raw("initialize", json!({ "protocolVersion": 1, "clientCapabilities": {} }), |_| json!(null));
+        let s = rpc.call_raw(
+            "session/new",
+            json!({ "cwd": cwd, "mcpServers": [], "additionalDirectories": [&extra] }),
+            |_| json!(null),
+        );
+        let sid = s["result"]["sessionId"].as_str().unwrap().to_string();
+        let p =
+            rpc.request("session/prompt", json!({ "sessionId": sid, "prompt": [{ "type": "text", "text": "hi" }] }));
+        let (r, _) = read_until(&mut rpc, p, Some(&sid));
+        assert_eq!(r["result"]["stopReason"], "end_turn", "{r}");
+        let closed = rpc.call_raw("session/close", json!({ "sessionId": sid }), |_| json!(null));
+        assert!(closed.get("result").is_some(), "{closed}");
+        rpc.kill_and_wait();
+        sid
+    };
+
+    // Restart ACP process: load with `additionalDirectories: [extra]` runs steps 1-3 (read succeeds,
+    // write fails in read-only), then close, then resume starts a fresh host and replays steps 1-3.
+    let mut rpc = acp_in_home(
+        &home,
+        json!([
+            { "tool_calls": [{ "name": "read", "arguments": { "path": extra_file } }] },
+            { "tool_calls": [{ "name": "write", "arguments": { "path": blocked_write, "content": "nope" } }] },
+            { "text": "after-restore" }
+        ]),
+        &["-C", cwd.to_str().unwrap(), "--permission", "read-only", "--approval-policy", "never"],
+        &[],
+    );
+    let _ = rpc.call_raw("initialize", json!({ "protocolVersion": 1, "clientCapabilities": {} }), |_| json!(null));
+
+    let bad_load = rpc.call_raw(
+        "session/load",
+        json!({ "sessionId": sid, "cwd": cwd, "mcpServers": [], "additionalDirectories": [&unauthorised] }),
+        |_| json!(null),
+    );
+    assert_eq!(bad_load["error"]["code"], -32602, "{bad_load}");
+
+    let loaded = rpc.call_raw(
+        "session/load",
+        json!({ "sessionId": sid, "cwd": cwd, "mcpServers": [], "additionalDirectories": [&extra] }),
+        |_| json!(null),
+    );
+    assert!(loaded.get("result").is_some(), "{loaded}");
+
+    let p1 = rpc.request("session/prompt", json!({ "sessionId": sid, "prompt": [{ "type": "text", "text": "read" }] }));
+    let (r1, u1) = read_until(&mut rpc, p1, Some(&sid));
+    assert_eq!(r1["result"]["stopReason"], "end_turn", "{r1}");
+    assert!(u1.iter().any(|u| format!("{u}").contains("from-extra-dir")), "expected read from extra dir: {u1:?}");
+    assert!(!blocked_write.exists(), "read-only session must still forbid writing to extra dir");
+
+    let closed = rpc.call_raw("session/close", json!({ "sessionId": sid }), |_| json!(null));
+    assert!(closed.get("result").is_some(), "{closed}");
+
+    let bad_resume = rpc.call_raw(
+        "session/resume",
+        json!({ "sessionId": sid, "cwd": cwd, "mcpServers": [], "additionalDirectories": [&unauthorised] }),
+        |_| json!(null),
+    );
+    assert_eq!(bad_resume["error"]["code"], -32602, "{bad_resume}");
+
+    let resumed = rpc.call_raw(
+        "session/resume",
+        json!({ "sessionId": sid, "cwd": cwd, "mcpServers": [], "additionalDirectories": [&extra] }),
+        |_| json!(null),
+    );
+    assert!(resumed.get("result").is_some(), "{resumed}");
+
+    let p2 =
+        rpc.request("session/prompt", json!({ "sessionId": sid, "prompt": [{ "type": "text", "text": "read2" }] }));
+    let (r2, u2) = read_until(&mut rpc, p2, Some(&sid));
+    assert_eq!(r2["result"]["stopReason"], "end_turn", "{r2}");
+    assert!(u2.iter().any(|u| format!("{u}").contains("from-extra-dir")), "expected read after resume: {u2:?}");
 
     rpc.kill_and_wait();
 }

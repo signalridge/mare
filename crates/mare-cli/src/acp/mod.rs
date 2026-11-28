@@ -950,10 +950,6 @@ pub async fn run(opts: HostOptions, strict_config: bool) -> Result<i32> {
             }
             Req::RestoreSession { session_id, cwd, additional_directories, mcp_servers, replay, conn, reply } => {
                 *active_conn.borrow_mut() = Some(conn.clone());
-                if !additional_directories.is_empty() {
-                    let _ = reply.send(Err(AcpErr::InvalidParams("additionalDirectories is not supported".into())));
-                    continue;
-                }
                 let cwd = match resolve_cwd(&cwd, &opts.cwd) {
                     Ok(c) => c,
                     Err(e) => {
@@ -961,6 +957,14 @@ pub async fn run(opts: HostOptions, strict_config: bool) -> Result<i32> {
                         continue;
                     }
                 };
+                let validated_dirs =
+                    match mare_binding::workspace::validate_additional_dirs(&cwd, &additional_directories) {
+                        Ok(dirs) => dirs,
+                        Err(e) => {
+                            let _ = reply.send(Err(AcpErr::InvalidParams(e)));
+                            continue;
+                        }
+                    };
                 let lookup_sid = aliases.borrow().resolve_internal(&session_id);
                 match manager.session(&lookup_sid) {
                     Ok(entry) => {
@@ -1004,6 +1008,21 @@ pub async fn run(opts: HostOptions, strict_config: bool) -> Result<i32> {
                         if reply.is_closed() {
                             host.shutdown().await;
                             continue;
+                        }
+                        if !validated_dirs.is_empty() {
+                            let restored_dirs = mare_binding::workspace::dirs(host.lua());
+                            let all_recorded =
+                                validated_dirs.iter().all(|req| restored_dirs.iter().any(|r| same_directory(r, req)));
+                            if !all_recorded {
+                                let err = AcpErr::InvalidParams(
+                                    "additionalDirectories does not match the session's recorded workspace directories"
+                                        .into(),
+                                )
+                                .with_projector(&host);
+                                host.shutdown().await;
+                                let _ = reply.send(Err(err));
+                                continue;
+                            }
                         }
                         let projector = mare_shared::wire_projection::hook(host.lua());
                         let rt = match manager.register_host(host, Some(&session_id), false).await {
