@@ -533,7 +533,7 @@
 ---@field request_id? string
 ---@field session_id? string
 ---@field subscription? table<string, any>
----@field usage table<string, any>
+---@field usage {cache_read?: integer, cache_write?: integer, cache_write_1h?: integer, cost?: number, cost_unknown?: boolean, input?: integer, output?: integer, reasoning?: integer, [string]: any}
 
 --- CLI subcommand request for interactive login.
 --- `login/cli` (`mode = emit`, `delivery = required`, `scope = session`, `ignorable = false`, `retain = false`, `on_error = continue`)

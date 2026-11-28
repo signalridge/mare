@@ -515,3 +515,68 @@ async fn responses_output_index_present_absent_transitions_do_not_split_text() {
     })
     .await
 }
+
+/// Issue #88: Alibaba's `prompt_tokens_details.cache_creation_input_tokens` is parsed into
+/// `usage.cache_write` and subtracted from uncached `usage.input` (clamped at 0).
+#[tokio::test]
+async fn compat_usage_reads_alibaba_prompt_tokens_details_cache_creation_input_tokens() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let server = MockServer::start().await;
+        server.route(
+            "/compat",
+            vec![Resp::sse(compat_events(&[
+                compat_text("ok"),
+                json!({
+                    "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }],
+                    "usage": {
+                        "prompt_tokens": 100,
+                        "completion_tokens": 25,
+                        "prompt_tokens_details": {
+                            "cached_tokens": 30,
+                            "cache_creation_input_tokens": 45
+                        }
+                    }
+                }),
+            ]))],
+        );
+        let h = provider_host(&mut env, &server, json!({ "plugins": { "llm": { "retries": 0 } } })).await;
+
+        let msg = stream(&h, "deepseek/deepseek-chat").await;
+        assert_eq!(msg["stop_reason"], "stop", "{msg}");
+        assert_eq!(msg["usage"]["input"], 25, "100 - 30 cached - 45 cache_write = 25: {msg}");
+        assert_eq!(msg["usage"]["output"], 25, "{msg}");
+        assert_eq!(msg["usage"]["cache_read"], 30, "{msg}");
+        assert_eq!(msg["usage"]["cache_write"], 45, "{msg}");
+
+        // Direct parse_usage edge check: cache_write_tokens takes precedence over cache_creation_input_tokens,
+        // and uncached input clamps at 0 when cached + written > prompt_tokens.
+        let direct: String = eval(
+            &h,
+            r#"
+            local w = require("provider-openai-compat.wire")
+            local a = w.parse_usage({
+              prompt_tokens = 20,
+              completion_tokens = 5,
+              prompt_tokens_details = { cached_tokens = 15, cache_creation_input_tokens = 10 },
+            })
+            local b = w.parse_usage({
+              prompt_tokens = 50,
+              completion_tokens = 5,
+              prompt_tokens_details = { cache_write_tokens = 12, cache_creation_input_tokens = 99 },
+            })
+            return mare.json.encode({ a = a, b = b })
+            "#,
+        )
+        .await;
+        let v: Value = serde_json::from_str(&direct).unwrap();
+        assert_eq!(v["a"]["input"], 0, "uncached input must clamp at 0: {v}");
+        assert_eq!(v["a"]["cache_read"], 15, "{v}");
+        assert_eq!(v["a"]["cache_write"], 10, "{v}");
+        assert_eq!(v["b"]["cache_write"], 12, "cache_write_tokens takes precedence: {v}");
+        assert_eq!(v["b"]["input"], 38, "{v}");
+
+        h.shutdown().await;
+    })
+    .await
+}

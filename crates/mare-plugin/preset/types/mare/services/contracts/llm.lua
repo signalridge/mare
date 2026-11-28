@@ -7,6 +7,16 @@ local native_map = {
 	type = "object",
 	additionalProperties = { type = "object", additionalProperties = true },
 }
+local usage_obj = object({
+	input = integer,
+	output = integer,
+	cache_read = integer,
+	cache_write = integer,
+	cache_write_1h = integer,
+	reasoning = integer,
+	cost = S.number,
+	cost_unknown = boolean,
+}, nil, true)
 return {
 	["llm"] = {
 		essential = true,
@@ -249,7 +259,7 @@ return {
 						result = object({
 							role = { type = "string", enum = { "assistant" } },
 							content = { type = "array", items = { type = "object", additionalProperties = true } },
-							usage = { type = "object", additionalProperties = true },
+							usage = usage_obj,
 							stop_reason = {
 								type = "string",
 								enum = {
@@ -263,6 +273,7 @@ return {
 									"other",
 								},
 							},
+							raw_stop_reason = string,
 							error_kind = string,
 							error_code = string,
 							error_data = { type = "object", additionalProperties = true },
@@ -1283,7 +1294,7 @@ return {
 				mode = "emit",
 				expose = "lua",
 				data = object({
-					usage = { type = "object", additionalProperties = true },
+					usage = usage_obj,
 					model_ref = string,
 					provider_id = string,
 					subscription = { type = "object", additionalProperties = true },

@@ -49,6 +49,7 @@
 ---@field content table[]
 ---@field usage? {input?: integer, output?: integer, cache_read?: integer, cache_write?: integer, cache_write_1h?: integer, reasoning?: integer, cost?: number, cost_unknown?: boolean}
 ---@field stop_reason? "stop"|"tool_use"|"length"|"error"|"aborted"|"paused"|"filtered"|"other"
+---@field raw_stop_reason? string
 ---@field error_kind? string
 ---@field error_code? string
 ---@field error_data? {kind?: string, error_code?: string, original_error_kind?: string, raw_code?: string, raw_type?: string, status?: integer, provider?: string, request_id?: string, source?: string}
