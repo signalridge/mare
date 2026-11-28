@@ -20,6 +20,55 @@ function Add-MarePathEntry {
   return $null
 }
 
+function Install-MareExecutable {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$SourcePath,
+    [Parameter(Mandatory = $true)]
+    [string]$InstallDir,
+    [string]$FileName = "mare.exe"
+  )
+  New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+  $ResolvedInstallDir = (Resolve-Path -LiteralPath $InstallDir).ProviderPath
+
+  # Best-effort sweep of backups left behind when an earlier upgrade replaced a running binary.
+  foreach ($Stale in @(Get-ChildItem -LiteralPath $ResolvedInstallDir -Filter "$FileName.*.bak" -File -ErrorAction SilentlyContinue)) {
+    Remove-Item -LiteralPath $Stale.FullName -Force -ErrorAction SilentlyContinue
+  }
+
+  $TargetPath = Join-Path $ResolvedInstallDir $FileName
+  $Nonce = "$PID." + [guid]::NewGuid().ToString("N").Substring(0, 8)
+  $StagedPath = Join-Path $ResolvedInstallDir "$FileName.$Nonce.new"
+  $BackupPath = Join-Path $ResolvedInstallDir "$FileName.$Nonce.bak"
+
+  # Stage inside the install directory so all renames stay on the same volume.
+  Copy-Item -LiteralPath $SourcePath -Destination $StagedPath -Force
+
+  $MovedOld = $false
+  try {
+    if (Test-Path -LiteralPath $TargetPath) {
+      # Windows refuses overwriting a running executable, but allows renaming it on the same volume.
+      [System.IO.File]::Move($TargetPath, $BackupPath)
+      $MovedOld = $true
+    }
+    [System.IO.File]::Move($StagedPath, $TargetPath)
+  } catch {
+    Remove-Item -LiteralPath $StagedPath -Force -ErrorAction SilentlyContinue
+    if ($MovedOld -and (Test-Path -LiteralPath $BackupPath) -and -not (Test-Path -LiteralPath $TargetPath)) {
+      try {
+        [System.IO.File]::Move($BackupPath, $TargetPath)
+      } catch {
+      }
+    }
+    throw
+  }
+
+  # Remove backup immediately when unlocked; otherwise a later install sweeps it after running sessions exit.
+  if ($MovedOld) {
+    Remove-Item -LiteralPath $BackupPath -Force -ErrorAction SilentlyContinue
+  }
+}
+
 $Repo = "signalridge/mare"
 $InstallDir = if ($env:MARE_INSTALL_DIR) { $env:MARE_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA "mare\bin" }
 
@@ -97,8 +146,7 @@ try {
   }
 
   Expand-Archive -Path $ArchivePath -DestinationPath $TempDir -Force
-  New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-  Copy-Item -Path (Join-Path $TempDir "mare-$Tag-$Target\mare.exe") -Destination (Join-Path $InstallDir "mare.exe") -Force
+  Install-MareExecutable -SourcePath (Join-Path $TempDir "mare-$Tag-$Target\mare.exe") -InstallDir $InstallDir
 
   $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
   $NewPath = Add-MarePathEntry -CurrentPath $UserPath -Entry $InstallDir
