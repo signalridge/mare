@@ -148,6 +148,141 @@ pub fn write_own(bytes: Vec<u8>) {
     send(bytes, Origin::Own);
 }
 
+/// Temporarily puts a Unix fd into `O_NONBLOCK` mode and restores its original flags on drop so
+/// `libc::write` can never block past the caller's deadline even if another thread fills the
+/// tty/pipe buffer between `poll` and `write`.
+#[cfg(unix)]
+struct NonblockGuard {
+    fd: libc::c_int,
+    orig_flags: libc::c_int,
+    changed: bool,
+}
+
+#[cfg(unix)]
+impl NonblockGuard {
+    fn enter(fd: libc::c_int) -> Option<Self> {
+        // SAFETY: `F_GETFL` takes no extra arguments and returns the current file status flags.
+        let orig_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if orig_flags < 0 {
+            return None;
+        }
+        let changed = (orig_flags & libc::O_NONBLOCK) == 0;
+        if changed {
+            // SAFETY: setting `O_NONBLOCK` on the fd ensures writes return `EAGAIN` instead of
+            // blocking unboundedly.
+            if unsafe { libc::fcntl(fd, libc::F_SETFL, orig_flags | libc::O_NONBLOCK) } < 0 {
+                return None;
+            }
+        }
+        Some(Self { fd, orig_flags, changed })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for NonblockGuard {
+    fn drop(&mut self) {
+        if self.changed {
+            // SAFETY: restores the original file status flags captured in `enter`.
+            let _ = unsafe { libc::fcntl(self.fd, libc::F_SETFL, self.orig_flags) };
+        }
+    }
+}
+
+#[cfg(unix)]
+fn write_fd_bounded(fd: libc::c_int, bytes: &[u8], timeout: Duration) -> bool {
+    if bytes.is_empty() {
+        return true;
+    }
+    if timeout.is_zero() {
+        return false;
+    }
+    let Some(_nonblock) = NonblockGuard::enter(fd) else {
+        return false;
+    };
+    let deadline = Instant::now() + timeout;
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        if deadline.saturating_duration_since(Instant::now()).is_zero() {
+            return false;
+        }
+        // SAFETY: `rest` is valid for `rest.len()` bytes and `fd` is currently `O_NONBLOCK`.
+        let written = unsafe { libc::write(fd, rest.as_ptr().cast(), rest.len()) };
+        if written > 0 {
+            rest = &rest[written as usize..];
+            continue;
+        }
+        if written == 0 {
+            return false;
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
+        if err.kind() != std::io::ErrorKind::WouldBlock {
+            return false;
+        }
+        loop {
+            let rem = deadline.saturating_duration_since(Instant::now());
+            if rem.is_zero() {
+                return false;
+            }
+            let ms = rem.as_millis().min(i32::MAX as u128).max(1) as libc::c_int;
+            let mut pfd = libc::pollfd { fd, events: libc::POLLOUT, revents: 0 };
+            // SAFETY: `pfd` points to one valid `pollfd` entry.
+            let rc = unsafe { libc::poll(&mut pfd, 1, ms) };
+            if rc < 0 {
+                if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return false;
+            }
+            if rc == 0 || (pfd.revents & libc::POLLOUT) == 0 {
+                return false;
+            }
+            break;
+        }
+    }
+    true
+}
+
+/// Write `bytes` directly to the terminal fd with a short bounded wait, bypassing the async
+/// writer thread (used by watchdog force-exit cleanup so a wedged writer or full pipe cannot
+/// block forced exit). Returns `true` when every byte was written.
+pub fn write_direct_bounded(bytes: &[u8], timeout: Duration) -> bool {
+    if bytes.is_empty() {
+        return true;
+    }
+    let (bytes, n) = guard(bytes, Origin::Own);
+    note_dropped(n);
+    if let Ok(mut c) = CAPTURE.try_lock()
+        && let Some(buf) = c.as_mut()
+    {
+        buf.extend_from_slice(&bytes);
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        let fd = crate::capture::tty_fd().unwrap_or(libc::STDOUT_FILENO);
+        write_fd_bounded(fd, &bytes, timeout)
+    }
+    #[cfg(not(unix))]
+    {
+        if timeout.is_zero() {
+            return false;
+        }
+        let (tx, rx) = std::sync::mpsc::sync_channel::<bool>(1);
+        let spawned = std::thread::Builder::new().name("mare-force-leave".into()).spawn(move || {
+            let mut stdout = std::io::stdout();
+            let ok = stdout.write_all(&bytes).is_ok() && stdout.flush().is_ok();
+            let _ = tx.send(ok);
+        });
+        if spawned.is_err() {
+            return false;
+        }
+        rx.recv_timeout(timeout).unwrap_or(false)
+    }
+}
+
 fn send(bytes: Vec<u8>, origin: Origin) {
     if bytes.is_empty() {
         return;
@@ -772,5 +907,61 @@ mod tests {
         assert!(after_resume.contains("\x1b]52;c;"), "osc52 must work after resume: {after_resume:?}");
         crate::modes::leave();
         capture(false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_fd_bounded_times_out_on_full_blocking_pipe_and_restores_flags() {
+        let mut fds = [-1; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let (rfd, wfd) = (fds[0], fds[1]);
+
+        // Fill the pipe buffer completely using temporary O_NONBLOCK, then restore blocking mode.
+        let orig_flags = unsafe { libc::fcntl(wfd, libc::F_GETFL) };
+        assert!(orig_flags >= 0 && (orig_flags & libc::O_NONBLOCK) == 0);
+        assert_eq!(unsafe { libc::fcntl(wfd, libc::F_SETFL, orig_flags | libc::O_NONBLOCK) }, 0);
+        let chunk = [b'x'; 4096];
+        let mut filled = 0usize;
+        loop {
+            let n = unsafe { libc::write(wfd, chunk.as_ptr().cast(), chunk.len()) };
+            if n > 0 {
+                filled += n as usize;
+            } else {
+                assert_eq!(std::io::Error::last_os_error().kind(), std::io::ErrorKind::WouldBlock);
+                break;
+            }
+        }
+        assert!(filled > 0);
+        // Put the write fd back into blocking mode before calling write_fd_bounded.
+        assert_eq!(unsafe { libc::fcntl(wfd, libc::F_SETFL, orig_flags) }, 0);
+
+        let started = Instant::now();
+        let wrote = write_fd_bounded(wfd, b"\x1b[<1u\x1b[?2004l", Duration::from_millis(40));
+        let elapsed = started.elapsed();
+        assert!(!wrote, "full blocking pipe must time out without blocking indefinitely");
+        assert!(elapsed < Duration::from_millis(500), "timeout bound exceeded: {elapsed:?}");
+
+        let flags_after = unsafe { libc::fcntl(wfd, libc::F_GETFL) };
+        assert_eq!(flags_after & libc::O_NONBLOCK, 0, "original blocking fd flags must be restored");
+
+        // Drain the pipe and verify a subsequent bounded write delivers every byte intact.
+        let mut drain = vec![0u8; filled];
+        let mut drained = 0usize;
+        while drained < filled {
+            let n = unsafe { libc::read(rfd, drain[drained..].as_mut_ptr().cast(), filled - drained) };
+            assert!(n > 0);
+            drained += n as usize;
+        }
+        let payload = b"\x1b[<1u\x1b[?2004l";
+        assert!(write_fd_bounded(wfd, payload, Duration::from_millis(100)));
+        let mut got = vec![0u8; payload.len()];
+        let n = unsafe { libc::read(rfd, got.as_mut_ptr().cast(), got.len()) };
+        assert_eq!(n as usize, payload.len());
+        assert_eq!(got, payload);
+
+        unsafe {
+            libc::close(rfd);
+            libc::close(wfd);
+        }
     }
 }

@@ -350,6 +350,140 @@ mod tests {
     }
 
     #[test]
+    fn repro_215_watchdog_force_exit_restores_mare_owned_terminal_modes() {
+        const CHILD: &str = "MARE_REPRO_215_FORCE_EXIT_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let guard = TermGuard::enter().unwrap();
+            guard.enable_kitty();
+            mare_tui::out::wait_idle(Duration::from_millis(200));
+            // Simulate watchdog / second-signal forced exit while Mare owns the terminal.
+            crate::signals::force_exit_now(143);
+        }
+        let (mut master, mut slave) = (-1, -1);
+        assert_eq!(
+            unsafe {
+                libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut())
+            },
+            0
+        );
+        let master = unsafe { std::fs::File::from_raw_fd(master) };
+        let slave = unsafe { std::fs::File::from_raw_fd(slave) };
+        let original = attrs_for(master.as_raw_fd());
+        let state = tempfile::tempdir().unwrap();
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "app::term::term_guard::tests::repro_215_watchdog_force_exit_restores_mare_owned_terminal_modes",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("XDG_STATE_HOME", state.path())
+            .stdin(Stdio::from(slave.try_clone().unwrap()))
+            .stdout(Stdio::from(slave.try_clone().unwrap()))
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(slave);
+        let mut master_reader = master.try_clone().unwrap();
+        let reader = std::thread::spawn(move || {
+            let mut terminal = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                match master_reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => terminal.extend_from_slice(&buf[..n]),
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
+            }
+            terminal
+        });
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(143), "expected forced exit 143: {:?}", output.status);
+        let after = attrs_for(master.as_raw_fd());
+        drop(master);
+        let terminal = String::from_utf8_lossy(&reader.join().unwrap()).into_owned();
+
+        assert_eq!(
+            persistent_lflag(after.c_lflag),
+            persistent_lflag(original.c_lflag),
+            "watchdog force_exit_now left terminal in raw mode (before={:#x}, after={:#x}); terminal bytes: {terminal:?}",
+            persistent_lflag(original.c_lflag),
+            persistent_lflag(after.c_lflag),
+        );
+        assert!(
+            terminal.contains("\x1b[<1u") && terminal.contains("\x1b[?2004l"),
+            "watchdog force_exit_now did not restore Kitty/paste modes; terminal bytes: {terminal:?}"
+        );
+    }
+
+    #[test]
+    fn watchdog_force_exit_while_handed_off_does_not_overwrite_editor_terminal() {
+        const CHILD: &str = "MARE_REPRO_215_HANDOFF_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let guard = TermGuard::enter().unwrap();
+            guard.enable_kitty();
+            mare_tui::out::wait_idle(Duration::from_millis(200));
+            // Hand off to an external editor and simulate the editor putting the tty in its own raw mode.
+            guard.leave();
+            let mut editor = attrs();
+            editor.c_lflag &= !(libc::ECHO | libc::ICANON);
+            set_attrs(&editor);
+            crate::signals::force_exit_now(143);
+        }
+        let (mut master, mut slave) = (-1, -1);
+        assert_eq!(
+            unsafe {
+                libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut())
+            },
+            0
+        );
+        let master = unsafe { std::fs::File::from_raw_fd(master) };
+        let slave = unsafe { std::fs::File::from_raw_fd(slave) };
+        let state = tempfile::tempdir().unwrap();
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "app::term::term_guard::tests::watchdog_force_exit_while_handed_off_does_not_overwrite_editor_terminal",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("XDG_STATE_HOME", state.path())
+            .stdin(Stdio::from(slave.try_clone().unwrap()))
+            .stdout(Stdio::from(slave.try_clone().unwrap()))
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(slave);
+        let mut master_reader = master.try_clone().unwrap();
+        let reader = std::thread::spawn(move || {
+            let mut terminal = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                match master_reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => terminal.extend_from_slice(&buf[..n]),
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
+            }
+            terminal
+        });
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(143));
+        let after = attrs_for(master.as_raw_fd());
+        drop(master);
+        let terminal = String::from_utf8_lossy(&reader.join().unwrap()).into_owned();
+        // Only the handoff pop happened (count == 1); force_exit_now did not pop a second time or reset editor termios.
+        assert_eq!(terminal.matches("\x1b[<1u").count(), 1, "must not pop editor Kitty entry: {terminal:?}");
+        assert_eq!(
+            after.c_lflag & (libc::ECHO | libc::ICANON),
+            0,
+            "must not overwrite editor termios while handed off"
+        );
+    }
+
+    #[test]
     fn dropping_handed_off_guard_does_not_restore_over_the_editor() {
         if in_pty("app::term::term_guard::tests::dropping_handed_off_guard_does_not_restore_over_the_editor", false)
             .is_some()
