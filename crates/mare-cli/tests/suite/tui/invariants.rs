@@ -15,7 +15,7 @@ pub(super) struct CellInfo {
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct ScreenObservation {
+pub(in crate::suite) struct ScreenObservation {
     pub(super) screen: String,
     pub(super) history: String,
     pub(super) cols: u16,
@@ -27,7 +27,7 @@ pub(super) struct ScreenObservation {
     pub(super) in_alt_screen: bool,
 }
 
-pub(super) fn has_welcome_banner(text: &str) -> bool {
+pub(in crate::suite) fn has_welcome_banner(text: &str) -> bool {
     text.contains("/model · /help · @ file · ! bash")
         || text.lines().any(|l| {
             let t = l.trim_start();
@@ -56,7 +56,7 @@ fn extract_grid_and_wraps(vt_screen: &vt100::Screen) -> (Vec<Vec<CellInfo>>, Vec
     (grid, wrapped_rows)
 }
 
-pub(super) fn observe_term(t: &mut Term, saw_welcome_banner: bool) -> ScreenObservation {
+pub(in crate::suite) fn observe_term(t: &mut Term, saw_welcome_banner: bool) -> ScreenObservation {
     let history = t.history();
     let vt_screen = t.parser.screen();
     let (rows, cols) = (vt_screen.size().0.get(), vt_screen.size().1.get());
@@ -76,7 +76,7 @@ pub(super) fn observe_term(t: &mut Term, saw_welcome_banner: bool) -> ScreenObse
     }
 }
 
-pub(super) fn check_global_invariants(obs: &ScreenObservation) -> Result<(), String> {
+pub(in crate::suite) fn check_global_invariants(obs: &ScreenObservation) -> Result<(), String> {
     let mut violations = Vec::new();
     if let Err(e) = check_no_duplicate_answer_blocks(&obs.history) {
         violations.push(e);
@@ -562,7 +562,7 @@ pub(super) fn check_boxes_and_truncation(obs: &ScreenObservation) -> Result<(), 
 }
 
 /// Check for vertically duplicated input prompt boxes (used by matrix `Ctrl+T` check for #13).
-pub(super) fn check_no_duplicated_prompt_box(obs: &ScreenObservation) -> Result<(), String> {
+pub(in crate::suite) fn check_no_duplicated_prompt_box(obs: &ScreenObservation) -> Result<(), String> {
     if !obs.in_alt_screen {
         let prompt_rows = obs
             .screen
