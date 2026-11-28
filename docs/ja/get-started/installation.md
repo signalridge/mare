@@ -189,7 +189,7 @@ Windows には、オプションの拡張サンドボックス層もあります
 
 ## コンテナ (Docker / GHCR)
 
-Ubuntu 24.04 ベースで `git` と `bubblewrap` を同梱したマルチアーキテクチャ (`linux/amd64`、`linux/arm64`) イメージを GitHub Container Registry へ公開し、Cosign で署名しています:
+Ubuntu 24.04 ベースで、PID 1 init としてゾンビプロセスを回収する `tini` と `git`、`bubblewrap` を同梱したマルチアーキテクチャ (`linux/amd64`、`linux/arm64`) イメージを GitHub Container Registry へ公開し、Cosign で署名しています:
 
 ```sh
 docker pull ghcr.io/signalridge/mare:latest

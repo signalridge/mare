@@ -189,7 +189,7 @@ Windows 还有一个可选的增强沙箱层级。`mare sandbox status` 会显�
 
 ## 容器镜像（Docker / GHCR）
 
-基于 Ubuntu 24.04 构建（内置 `git` 与 `bubblewrap`）、支持 `linux/amd64` 与 `linux/arm64` 多架构的容器镜像已发布至 GitHub Container Registry 并使用 Cosign 签名：
+基于 Ubuntu 24.04 构建（内置作为 PID 1 init 回收僵尸进程的 `tini`、`git` 与 `bubblewrap`）、支持 `linux/amd64` 与 `linux/arm64` 多架构的容器镜像已发布至 GitHub Container Registry 并使用 Cosign 签名：
 
 ```sh
 docker pull ghcr.io/signalridge/mare:latest

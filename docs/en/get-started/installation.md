@@ -189,7 +189,7 @@ Windows also provides an optional enhanced sandbox tier. `mare sandbox status` s
 
 ## Container (Docker / GHCR)
 
-Multi-architecture (`linux/amd64`, `linux/arm64`) images based on Ubuntu 24.04 (including `git` and `bubblewrap`) are published to GitHub Container Registry and signed with Cosign:
+Multi-architecture (`linux/amd64`, `linux/arm64`) images based on Ubuntu 24.04 (including `tini` as PID 1 init for zombie reaping, `git`, and `bubblewrap`) are published to GitHub Container Registry and signed with Cosign:
 
 ```sh
 docker pull ghcr.io/signalridge/mare:latest

@@ -991,6 +991,23 @@ jobs:
           docker run --rm "$IMAGE" --version | tee version.txt
           grep -F "mare ${EXPECTED_VERSION}" version.txt
           docker run --rm "$IMAGE" --help >/dev/null
+      - name: Verify tini init reaps orphaned descendants
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint /usr/bin/tini "$IMAGE" -- sh -eu -c '
+            pid1="$(cat /proc/1/comm)"
+            echo "PID 1: $pid1"
+            test "$pid1" = "tini"
+            sh -c "sh -c \"exit 0\" &"
+            sleep 0.3
+            zombies="$(awk "\$3 == \"Z\" { print \$1 }" /proc/[0-9]*/stat 2>/dev/null || true)"
+            if [ -n "$zombies" ]; then
+              echo "Unreaped zombie PIDs: $zombies" >&2
+              exit 1
+            fi
+          '
       - name: Scan container image with Trivy
         # v0.36.0, pinned by commit SHA after GHSA-69fq-xp46-6x23.
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
