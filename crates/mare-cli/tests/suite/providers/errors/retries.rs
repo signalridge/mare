@@ -734,3 +734,196 @@ async fn request_rate_increased_too_quickly_retries_unless_quota_limit() {
     })
     .await
 }
+
+/// Issue #92: generic body error class labels (`api_error`, `server_error`,
+/// `invalid_request_error`, `authentication_error`) must never override an HTTP 4xx/5xx error
+/// status, while specific condition codes (`rate_limit_error`, `insufficient_quota`,
+/// `x-should-retry`) keep deciding at any status and HTTP 200 in-stream errors still use the body
+/// label.
+#[tokio::test]
+async fn generic_body_error_type_never_overrides_http_status_but_decides_in_stream() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let server = MockServer::start().await;
+        let anthropic_ok = || Resp::sse(fixture("anthropic.sse"));
+        let responses_ok = || Resp::sse(fixture("openai-responses.sse"));
+
+        server.route(
+            "/anthropic",
+            vec![
+                // 1) HTTP 400 + api_error -> fatal invalid, NOT retried
+                Resp::status(
+                    400,
+                    json!({"type": "error", "error": {"type": "api_error", "message": "bad param"}}).to_string(),
+                ),
+                // 2) HTTP 400 + authentication_error -> invalid (400), NOT auth
+                Resp::status(
+                    400,
+                    json!({"type": "error", "error": {"type": "authentication_error", "message": "bad param"}})
+                        .to_string(),
+                ),
+                // 3) HTTP 401 + api_error -> auth (401), NOT retried
+                Resp::status(
+                    401,
+                    json!({"type": "error", "error": {"type": "api_error", "message": "unauthorized"}}).to_string(),
+                ),
+                // 4) HTTP 503 + invalid_request_error -> retried as server and recovers
+                Resp::status(
+                    503,
+                    json!({"type": "error", "error": {"type": "invalid_request_error", "message": "upstream down"}})
+                        .to_string(),
+                ),
+                anthropic_ok(),
+                // 5) HTTP 503 + authentication_error -> retried as server and recovers
+                Resp::status(
+                    503,
+                    json!({"type": "error", "error": {"type": "authentication_error", "message": "proxy 503"}})
+                        .to_string(),
+                ),
+                anthropic_ok(),
+                // 6) Specific condition code: HTTP 400 + rate_limit_error -> retried as rate_limit
+                Resp::status(
+                    400,
+                    json!({"type": "error", "error": {"type": "rate_limit_error", "message": "slow down"}}).to_string(),
+                )
+                .header("retry-after", "0"),
+                anthropic_ok(),
+                // 7) Explicit header: HTTP 400 + api_error + x-should-retry: true -> retried
+                Resp::status(
+                    400,
+                    json!({"type": "error", "error": {"type": "api_error", "message": "retry me"}}).to_string(),
+                )
+                .header("x-should-retry", "true"),
+                anthropic_ok(),
+                // 8) Mid-stream HTTP 200 + api_error -> body label decides: retried as server
+                Resp::sse(
+                    "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"mid-stream fail\"}}\n\n",
+                ),
+                anthropic_ok(),
+                // 9) Mid-stream HTTP 200 + invalid_request_error -> body label decides: fatal invalid
+                Resp::sse(
+                    "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"bad stream arg\"}}\n\n",
+                ),
+                // 10) Mid-stream HTTP 200 + authentication_error -> body label decides: fatal auth
+                Resp::sse(
+                    "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"expired token\"}}\n\n",
+                ),
+            ],
+        );
+
+        server.route(
+            "/openai",
+            vec![
+                // 11) OpenAI HTTP 400 + server_error -> fatal invalid, NOT retried
+                Resp::status(
+                    400,
+                    json!({"error": {"type": "server_error", "code": "server_error", "message": "bad param"}})
+                        .to_string(),
+                ),
+                // 12) OpenAI HTTP 503 + insufficient_quota (specific condition) -> fatal quota, NOT retried
+                Resp::status(
+                    503,
+                    json!({"error": {"code": "insufficient_quota", "message": "no credits"}}).to_string(),
+                ),
+                // 13) OpenAI mid-stream HTTP 200 + server_error -> body label decides: retried as server
+                Resp::sse(responses_event(json!({
+                    "type": "response.failed",
+                    "response": { "error": { "code": "server_error", "message": "mid-stream backend fail" } }
+                }))),
+                responses_ok(),
+            ],
+        );
+
+        let h = provider_host(
+            &mut env,
+            &server,
+            json!({ "plugins": { "llm": { "retries": 1, "retry_base_ms": 1, "retry_max_ms": 2 } } }),
+        )
+        .await;
+
+        let a1 = stream(&h, "anthropic/claude-sonnet-5-5").await;
+        assert_eq!((a1["stop_reason"].as_str(), a1["error_kind"].as_str()), (Some("error"), Some("invalid")), "400 + api_error must be fatal invalid: {a1}");
+
+        let a2 = stream(&h, "anthropic/claude-sonnet-5-5").await;
+        assert_eq!((a2["stop_reason"].as_str(), a2["error_kind"].as_str()), (Some("error"), Some("invalid")), "400 + authentication_error must be invalid: {a2}");
+
+        let a3 = stream(&h, "anthropic/claude-sonnet-5-5").await;
+        assert_eq!((a3["stop_reason"].as_str(), a3["error_kind"].as_str()), (Some("error"), Some("auth")), "401 + api_error must be auth: {a3}");
+
+        let a4 = stream(&h, "anthropic/claude-sonnet-5-5").await;
+        assert_ne!(a4["stop_reason"], "error", "503 + invalid_request_error must retry and recover: {a4}");
+
+        let a5 = stream(&h, "anthropic/claude-sonnet-5-5").await;
+        assert_ne!(a5["stop_reason"], "error", "503 + authentication_error must retry and recover: {a5}");
+
+        let a6 = stream(&h, "anthropic/claude-sonnet-5-5").await;
+        assert_ne!(a6["stop_reason"], "error", "400 + rate_limit_error (specific condition) must retry: {a6}");
+
+        let a7 = stream(&h, "anthropic/claude-sonnet-5-5").await;
+        assert_ne!(a7["stop_reason"], "error", "400 + api_error + x-should-retry: true must retry: {a7}");
+
+        let a8 = stream(&h, "anthropic/claude-sonnet-5-5").await;
+        assert_ne!(a8["stop_reason"], "error", "HTTP 200 mid-stream api_error must retry: {a8}");
+
+        let a9 = stream(&h, "anthropic/claude-sonnet-5-5").await;
+        assert_eq!((a9["stop_reason"].as_str(), a9["error_kind"].as_str()), (Some("error"), Some("invalid")), "HTTP 200 mid-stream invalid_request_error must be invalid: {a9}");
+
+        let a10 = stream(&h, "anthropic/claude-sonnet-5-5").await;
+        assert_eq!((a10["stop_reason"].as_str(), a10["error_kind"].as_str()), (Some("error"), Some("auth")), "HTTP 200 mid-stream authentication_error must be auth: {a10}");
+
+        // 5 fatal (1 each) + 5 retried (2 each) = 15 Anthropic requests.
+        assert_eq!(server.count("/anthropic"), 15, "unexpected Anthropic retry count");
+
+        let o1 = stream(&h, "openai/gpt-6.1-terra").await;
+        assert_eq!((o1["stop_reason"].as_str(), o1["error_kind"].as_str()), (Some("error"), Some("invalid")), "OpenAI 400 + server_error must be fatal invalid: {o1}");
+
+        let o2 = stream(&h, "openai/gpt-6.1-terra").await;
+        assert_eq!((o2["stop_reason"].as_str(), o2["error_kind"].as_str()), (Some("error"), Some("quota")), "OpenAI 503 + insufficient_quota must be fatal quota: {o2}");
+
+        let o3 = stream(&h, "openai/gpt-6.1-terra").await;
+        assert_ne!(o3["stop_reason"], "error", "OpenAI HTTP 200 mid-stream server_error must retry: {o3}");
+
+        // 2 fatal (1 each) + 1 retried (2) = 4 OpenAI requests.
+        assert_eq!(server.count("/openai"), 4, "unexpected OpenAI retry count");
+
+        // 14) Custom wire declaring `generic = true` on its own class label (`bad_request`) gets
+        // identical HTTP-status precedence: 503 retries as server, HTTP 200 mid-stream stays invalid,
+        // while a non-generic custom code (`specific_invalid`) overrides HTTP 503 as fatal invalid.
+        let (k503_gen, r503_gen, k200_gen, r200_gen, k503_spec, r503_spec): (String, bool, String, bool, String, bool) =
+            eval(
+                &h,
+                r#"
+                local custom_codes = {
+                    bad_request = { kind = "invalid", generic = true },
+                    specific_invalid = { kind = "invalid" },
+                }
+                local e1 = LLM:http_error(
+                    "CustomWire",
+                    { status = 503, headers = {}, text = function() return '{"error":{"code":"bad_request","message":"upstream down"}}' end },
+                    { codes = custom_codes }
+                )
+                local k1, r1 = LLM:classify(e1)
+                local e2 = LLM:stream_error(
+                    "CustomWire",
+                    { code = "bad_request", message = "bad stream arg" },
+                    { codes = custom_codes }
+                )
+                local k2, r2 = LLM:classify(e2)
+                local e3 = LLM:http_error(
+                    "CustomWire",
+                    { status = 503, headers = {}, text = function() return '{"error":{"code":"specific_invalid","message":"hard schema error"}}' end },
+                    { codes = custom_codes }
+                )
+                local k3, r3 = LLM:classify(e3)
+                return k1, r1, k2, r2, k3, r3
+                "#,
+            )
+            .await;
+        assert_eq!((k503_gen.as_str(), r503_gen), ("server", true), "custom generic code must yield to HTTP 503");
+        assert_eq!((k200_gen.as_str(), r200_gen), ("invalid", false), "custom generic code must decide on HTTP 200");
+        assert_eq!((k503_spec.as_str(), r503_spec), ("invalid", false), "non-generic custom code must still override HTTP 503");
+
+        h.shutdown().await;
+    })
+    .await
+}

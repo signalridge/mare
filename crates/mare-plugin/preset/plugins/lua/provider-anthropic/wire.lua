@@ -374,14 +374,15 @@ local function malformed(what)
 	error({ message = "Anthropic: malformed stream: " .. what, kind = "malformed_response" })
 end
 
--- Anthropic error types → the shared kinds (HTTP errors and mid-stream `error` events alike)
+-- Anthropic error types → the shared kinds (HTTP errors and mid-stream `error` events alike).
+-- Generic HTTP class labels yield to HTTP 4xx/5xx status codes and decide on HTTP 200 SSE errors.
 local ERROR_KINDS = {
 	overloaded_error = "overloaded",
 	rate_limit_error = "rate_limit",
-	api_error = "server",
-	authentication_error = "auth",
-	permission_error = "auth",
-	invalid_request_error = "invalid",
+	api_error = { kind = "server", generic = true },
+	authentication_error = { kind = "auth", generic = true },
+	permission_error = { kind = "auth", generic = true },
+	invalid_request_error = { kind = "invalid", generic = true },
 }
 
 --- new_parser(sink, on_error?, opts?) — `on_error(api_err)` turns a mid-stream `error` event into the
@@ -709,9 +710,10 @@ function M.new_parser(sink, on_error, opts)
 				error(on_error(P.error))
 			end
 			local et = P.error.type
+			local entry = ERROR_KINDS[et]
 			error({
 				message = "Anthropic: " .. tostring(P.error.message or mare.json.encode(P.error)),
-				kind = ERROR_KINDS[et],
+				kind = type(entry) == "table" and entry.kind or entry,
 				type = et,
 			})
 		end

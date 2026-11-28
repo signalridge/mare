@@ -382,7 +382,7 @@ local function classify(err, cancelled)
 	end
 	-- the server says so
 	if t.should_retry == false then
-		return t.kind or "fatal", false
+		return t.kind or status_kind(t.status) or "fatal", false
 	end
 	if t.should_retry == true then
 		return t.kind or status_kind(t.status) or "server", true
@@ -501,20 +501,53 @@ local function append_hint(msg, hint)
 	return s
 end
 
-local function lookup_code(codes, code_val, code_str, type_str)
+-- Wire/provider `errors.codes` entries marked `{ kind = ..., generic = true }` only restate
+-- an HTTP status class. Beside an HTTP error status (4xx/5xx), the status decides instead of
+-- these entries; without an HTTP error status (e.g. mid-stream errors on HTTP 200), they still decide.
+local function is_generic_code_entry(entry)
+	return type(entry) == "table" and entry.generic == true
+end
+
+local function lookup_code_in(codes, code_val, code_str, type_str)
 	if type(codes) ~= "table" then
-		return nil
+		return nil, false
 	end
-	if code_val ~= nil and codes[code_val] ~= nil then
-		return codes[code_val]
+	local keys = { [1] = code_val, [2] = code_str, [3] = type_str }
+	local generic_entry
+	for i = 1, 3 do
+		local key = keys[i]
+		if key ~= nil and codes[key] ~= nil then
+			local entry = codes[key]
+			if not is_generic_code_entry(entry) then
+				return entry, false
+			elseif generic_entry == nil then
+				generic_entry = entry
+			end
+		end
 	end
-	if code_str ~= nil and codes[code_str] ~= nil then
-		return codes[code_str]
+	if generic_entry ~= nil then
+		return generic_entry, true
 	end
-	if type_str ~= nil and codes[type_str] ~= nil then
-		return codes[type_str]
+	return nil, false
+end
+
+local function find_code_entry(prov_codes, wire_codes, opt_codes, code_val, code_str, type_str)
+	local tables = { [1] = prov_codes, [2] = wire_codes, [3] = opt_codes }
+	local generic_entry
+	for i = 1, 3 do
+		local entry, is_generic = lookup_code_in(tables[i], code_val, code_str, type_str)
+		if entry ~= nil then
+			if not is_generic then
+				return entry, false
+			elseif generic_entry == nil then
+				generic_entry = entry
+			end
+		end
 	end
-	return nil
+	if generic_entry ~= nil then
+		return generic_entry, true
+	end
+	return nil, false
 end
 
 local function apply_code_entry(entry, err, allow_weak_invalid)
@@ -706,19 +739,23 @@ local function classify_raw(raw, opts, providers)
 	end
 
 	-- 3. Provider `errors.codes` -> Wire `errors.codes`.
+	-- Specific condition codes decide at any status; generic HTTP class labels never override an
+	-- HTTP 4xx/5xx error status and only decide when no HTTP error status is present (HTTP 200 SSE).
+	local has_http_error_status = type(err.status) == "number" and err.status >= 400 and err.status <= 599
 	local code_val = err.api_code ~= nil and err.api_code or err.code
 	local code_str = code_val ~= nil and tostring(code_val) or nil
 	local type_str = err.api_type ~= nil and tostring(err.api_type) or (err.type ~= nil and tostring(err.type) or nil)
 	local matched_code
 	if not mapped_kind then
-		local entry = lookup_code(prov_errors and prov_errors.codes, code_val, code_str, type_str)
-		if entry == nil then
-			entry = lookup_code(wire_errors and wire_errors.codes, code_val, code_str, type_str)
-		end
-		if entry == nil then
-			entry = lookup_code(opts.codes, code_val, code_str, type_str)
-		end
-		if entry ~= nil then
+		local entry, is_generic = find_code_entry(
+			prov_errors and prov_errors.codes,
+			wire_errors and wire_errors.codes,
+			opts.codes,
+			code_val,
+			code_str,
+			type_str
+		)
+		if entry ~= nil and not (is_generic and has_http_error_status) then
 			matched_code = apply_code_entry(entry, err, false)
 		end
 	end
