@@ -317,6 +317,26 @@ return function(D)
 		return approval_rank_of(name) > approval_rank_of(ceiling)
 	end
 
+	local function effective_preset_for_sandbox(name)
+		local pol = sandbox_current()
+		local level = pol and pol.level or "danger-full-access"
+		if LEVEL[name] == level then
+			return name
+		end
+		if level == "read-only" then
+			return "read-only"
+		elseif level == "workspace-write" and RANK[name] and RANK[name] > RANK["auto"] then
+			-- Keep the original preset name when its approval behavior is stricter than `auto`
+			-- (e.g. `like = "read-only"`): `base_spec()` still enforces the clamped sandbox while
+			-- `LIKE[P.preset]` preserves the stricter approval rule.
+			if approval_rank_of(name) < approval_rank_of("auto") then
+				return name
+			end
+			return "auto"
+		end
+		return "custom"
+	end
+
 	--- switch preset. opts: {source = "user"|"cli"|"rpc"|"resume"|"init", confirm = bool,
 	--- session = the session service to apply the sandbox through (restore: the active one)}
 	local function set_preset(name, opts)
@@ -378,13 +398,17 @@ return function(D)
 		P.sandbox_ready = true
 		P.sandbox_error = nil
 		local prev = P.preset
-		P.preset = name
+		-- If the host's inherited sandbox ceiling clamped the applied policy below `name`
+		-- (for example when a parent tightened mid-startup), keep `P.preset` synchronized
+		-- with the enforced sandbox level without relaxing the preset's approval semantics.
+		local effective = effective_preset_for_sandbox(name)
+		P.preset = effective
 		D.reset_session_grants()
 		if opts.source ~= "resume" then
-			record("preset", { preset = name, from = prev, source = opts.source })
+			record("preset", { preset = effective, from = prev, source = opts.source })
 		end
 		emit()
-		return name
+		return effective
 	end
 
 	local function validate_preset(name, label)
@@ -450,6 +474,7 @@ return function(D)
 		is_partial = is_partial,
 		is_network_partial = is_network_partial,
 		emit = emit,
+		effective_preset_for_sandbox = effective_preset_for_sandbox,
 		set_preset = set_preset,
 		explicit_cli_preset = explicit_cli_preset,
 		initial_preset = initial_preset,

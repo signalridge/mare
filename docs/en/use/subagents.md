@@ -75,6 +75,15 @@ mare.setup {
 
 When a subagent requests an approval that leaves its sandbox, the `agent-approvals` plugin forwards the request to the parent session's UI (`agent/approval-dialog`). A queue line below the input shows pending child approvals in arrival order, and the dialog names the requesting child.
 
+#### Permission inheritance and parent changes
+
+- **Spawn-time inheritance**: a subagent inherits the parent's live effective permission preset, sandbox policy, and approval policy at the moment it starts. A `general` subagent started after the parent switches to `full-access` (`FULL`) inherits `full-access` with no sandbox ceiling; explicit read-only agents (`explore`, `plan`, `/review`, or `permission = "read-only"`) stay pinned to `read-only` regardless of the parent's preset.
+- **Parent narrows while running**: switching the parent to a stricter sandbox policy (e.g. `full-access` → `auto` or `read-only`, or revoking project trust) immediately tightens the sandbox ceiling of every attached descendant VM and applies to already-reserved descendants on attach, affecting their subsequent tool calls and clearing stale grants. Tool calls already in flight keep their frozen execution policy until they finish; preset switches that keep the same sandbox policy and tighten only approval behavior (such as custom `danger-full-access` presets with `like = "read-only"`) take effect on new spawns or continuation (`subagent_steer`).
+- **Parent elevates while running**:
+  - For unpinned inheriting subagents (such as `general`), continuing the subagent (`subagent_steer` / `mare.subagent.steer`) resynchronizes its permission preset and sandbox ceiling to the parent's current preset, so writes and `request_permissions` within the wider preset succeed without prompting.
+  - If an already-running unpinned subagent sends a sandbox approval request after the parent has switched to a wider preset (such as `full-access`), the parent evaluates the request against its current preset and auto-allows sandbox access already permitted by that preset (while still prompting for dangerous commands and explicit `prompt` rules, and denying `forbidden` rules, consistent with the main session's `full-access` behavior).
+  - Explicitly pinned read-only subagents (`explore`, `plan`, `/review`, or explicit `permission = "read-only"` / `permission_ceiling`) are never widened on continuation or auto-allowed by a looser parent preset.
+
 ### Inspecting subagents with `/agents`
 
 Run `/agents` (or press `Left` on an empty input) to open the agent list. It shows active subagents, workflow members, background jobs, and (in the Peers tab) other running `mare` sessions on the machine.

@@ -12,12 +12,14 @@ use tokio::sync::{Mutex as AsyncMutex, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::Host;
-use crate::agent_registry::{AgentEntry, AgentInfo, AgentRegistry, AgentStatus, now_ms, try_send_steer};
+use crate::agent_registry::{AgentEntry, AgentInfo, AgentRegistry, AgentStatus, SteerMessage, now_ms, try_send_steer};
 use mare_kernel::TapEvent;
 use mare_shared::lua::{HISTORY_LOSSLESS_MAX_NODES, json_to_lua, json_to_lua_lossless_bounded, lua_to_json, rt_err};
 
 use approvals::origin_of;
-use inheritance::{apply_inheritance, validate_and_resolve_history_model};
+use inheritance::{
+    apply_inheritance, inherits_parent_preset, parent_permission_sync, validate_and_resolve_history_model,
+};
 use runtime::{ChildEndMeta, ChildRuntimeArgs, current_session_scope, parent_session_identity, spawn_child_thread};
 
 pub use crate::approvals::child_events::{ChildApproval, ChildEvent, ChildEventsRx};
@@ -151,7 +153,8 @@ pub struct AgentHandle {
     result: watch::Receiver<Option<Result<serde_json::Value, ChildError>>>,
     cancel: CancellationToken,
     cancel_scope: Option<crate::agent_tree::Scope>,
-    steer: mpsc::Sender<(String, Option<String>)>,
+    inherits_parent_preset: bool,
+    steer: mpsc::Sender<SteerMessage>,
 }
 
 impl UserData for AgentHandle {
@@ -201,7 +204,11 @@ impl UserData for AgentHandle {
             Ok(())
         });
         m.add_method("steer", |lua, this, text: String| {
-            try_send_steer(&this.steer, text, peer_caller_source(lua)).map_err(rt_err)
+            let sync = match (this.inherits_parent_preset, this.cancel_scope.as_ref()) {
+                (true, Some(scope)) => Some(parent_permission_sync(lua, scope)?),
+                _ => None,
+            };
+            try_send_steer(&this.steer, text, peer_caller_source(lua), sync).map_err(rt_err)
         });
     }
 }
@@ -363,6 +370,7 @@ fn start_with_spec(lua: &Lua, mut spec: serde_json::Value) -> Result<(AgentHandl
         other => StartError::Other(rt_err(other)),
     })?;
     let cwd = resolve_cwd(lua, &spec);
+    let inherits_preset = inherits_parent_preset(&spec);
     let (parent_policy, config, carried) = apply_inheritance(lua, &mut spec)?;
     let history_model = validate_and_resolve_history_model(lua, &spec)?;
 
@@ -420,7 +428,7 @@ fn start_with_spec(lua: &Lua, mut spec: serde_json::Value) -> Result<(AgentHandl
         spec["agent_label"] = l;
     }
 
-    let (steer_tx, steer_rx) = mpsc::channel::<(String, Option<String>)>(crate::agent_registry::STEER_QUEUE_CAPACITY);
+    let (steer_tx, steer_rx) = mpsc::channel::<SteerMessage>(crate::agent_registry::STEER_QUEUE_CAPACITY);
     let cancel = scope.cancel.clone();
     let entry_info = AgentInfo {
         subagent_id: session_id.clone(),
@@ -444,6 +452,7 @@ fn start_with_spec(lua: &Lua, mut spec: serde_json::Value) -> Result<(AgentHandl
             result_rx: res_rx.clone(),
             cancel: cancel.clone(),
             cancel_scope: Some(scope.clone()),
+            inherits_parent_preset: inherits_preset,
             steer: steer_tx.clone(),
             collected: false,
         },
@@ -464,6 +473,7 @@ fn start_with_spec(lua: &Lua, mut spec: serde_json::Value) -> Result<(AgentHandl
         transcript,
         origin,
         shares_rules,
+        inherits_parent_preset: inherits_preset,
         cancel: cancel.clone(),
         ev_tx,
         steer_rx,
@@ -490,6 +500,7 @@ fn start_with_spec(lua: &Lua, mut spec: serde_json::Value) -> Result<(AgentHandl
             result: res_rx,
             cancel,
             cancel_scope: Some(scope),
+            inherits_parent_preset: inherits_preset,
             steer: steer_tx,
         },
         entry_info,
@@ -686,7 +697,11 @@ pub fn install(lua: &Lua, mare: &Table) -> mlua::Result<()> {
     t.set(
         "steer",
         lua.create_function(|lua, (id, text): (String, String)| {
-            registry(lua)?.steer_with(&id, text, peer_caller_source(lua)).map_err(rt_err)
+            registry(lua)?
+                .steer_with_sync(&id, text, peer_caller_source(lua), |scope| {
+                    parent_permission_sync(lua, scope).map(Some).map_err(|e| e.to_string())
+                })
+                .map_err(rt_err)
         })?,
     )?;
     t.set("cancel", lua.create_function(|lua, id: String| registry(lua)?.cancel(&id).map_err(rt_err))?)?;
@@ -762,6 +777,7 @@ mod tests {
                 result: rx,
                 cancel: cancel.clone(),
                 cancel_scope: None,
+                inherits_parent_preset: false,
                 steer,
             })
             .unwrap();
@@ -839,6 +855,7 @@ mod tests {
                 result_rx: res_rx,
                 cancel: CancellationToken::new(),
                 cancel_scope: None,
+                inherits_parent_preset: false,
                 steer,
                 collected: false,
             },
@@ -886,6 +903,7 @@ mod tests {
                 result_rx: run_rx,
                 cancel: CancellationToken::new(),
                 cancel_scope: None,
+                inherits_parent_preset: false,
                 steer: run_steer,
                 collected: false,
             },

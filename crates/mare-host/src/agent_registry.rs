@@ -100,13 +100,28 @@ pub(crate) fn parse_event_error(
     })
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct PermissionSync {
+    pub preset: String,
+    pub policy: Option<mare_binding::ossandbox::Policy>,
+    pub expected_tighten_seq: u64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SteerMessage {
+    pub text: String,
+    pub source: Option<String>,
+    pub permission_sync: Option<PermissionSync>,
+}
+
 pub(crate) struct AgentEntry {
     pub info: AgentInfo,
     pub parent_session_epoch: Option<String>,
     pub result_rx: watch::Receiver<Option<Result<serde_json::Value, crate::agent::ChildError>>>,
     pub cancel: CancellationToken,
     pub cancel_scope: Option<crate::agent_tree::Scope>,
-    pub steer: mpsc::Sender<(String, Option<String>)>,
+    pub inherits_parent_preset: bool,
+    pub steer: mpsc::Sender<SteerMessage>,
     pub collected: bool,
 }
 
@@ -148,11 +163,12 @@ pub(crate) fn now_ms() -> i64 {
 const MAX_ENTRIES: usize = 64;
 
 pub(crate) fn try_send_steer(
-    tx: &mpsc::Sender<(String, Option<String>)>,
+    tx: &mpsc::Sender<SteerMessage>,
     text: String,
     source: Option<String>,
+    permission_sync: Option<PermissionSync>,
 ) -> Result<bool, String> {
-    match tx.try_send((text, source)) {
+    match tx.try_send(SteerMessage { text, source, permission_sync }) {
         Ok(()) => Ok(true),
         Err(mpsc::error::TrySendError::Closed(_)) => Ok(false),
         Err(mpsc::error::TrySendError::Full(_)) => {
@@ -314,7 +330,17 @@ impl AgentRegistry {
     }
 
     pub fn steer_with(&self, id_or_name: &str, text: String, source: Option<String>) -> Result<bool, String> {
-        let sender = {
+        self.steer_with_sync(id_or_name, text, source, |_| Ok(None))
+    }
+
+    pub(crate) fn steer_with_sync(
+        &self,
+        id_or_name: &str,
+        text: String,
+        source: Option<String>,
+        build_sync: impl FnOnce(&crate::agent_tree::Scope) -> Result<Option<PermissionSync>, String>,
+    ) -> Result<bool, String> {
+        let (sender, sync_scope) = {
             let inner = self.inner.lock().unwrap();
             let id =
                 self.resolve_id_locked(&inner, id_or_name).ok_or_else(|| format!("unknown subagent: {id_or_name}"))?;
@@ -322,9 +348,14 @@ impl AgentRegistry {
             if entry.info.status != AgentStatus::Running {
                 return Ok(false);
             }
-            entry.steer.clone()
+            let sync_scope = entry.inherits_parent_preset.then(|| entry.cancel_scope.clone()).flatten();
+            (entry.steer.clone(), sync_scope)
         };
-        try_send_steer(&sender, text, source)
+        let permission_sync = match sync_scope.as_ref() {
+            Some(scope) => build_sync(scope)?,
+            None => None,
+        };
+        try_send_steer(&sender, text, source, permission_sync)
     }
 
     pub fn cancel(&self, id_or_name: &str) -> Result<bool, String> {
@@ -512,7 +543,7 @@ mod tests {
     type DummyEntry = (
         AgentEntry,
         watch::Sender<Option<Result<serde_json::Value, crate::agent::ChildError>>>,
-        mpsc::Receiver<(String, Option<String>)>,
+        mpsc::Receiver<SteerMessage>,
     );
 
     fn dummy_entry(id_num: u64, name: Option<&str>) -> DummyEntry {
@@ -538,6 +569,7 @@ mod tests {
             result_rx: res_rx,
             cancel: CancellationToken::new(),
             cancel_scope: None,
+            inherits_parent_preset: false,
             steer: steer_tx,
             collected: false,
         };
@@ -589,7 +621,8 @@ mod tests {
 
         // Steer delivers
         assert!(reg.steer("alpha", "focus on tests".into()).unwrap());
-        assert_eq!(steer_rx.recv().await, Some(("focus on tests".into(), None)));
+        let delivered = steer_rx.recv().await.unwrap();
+        assert_eq!((delivered.text.as_str(), delivered.source.as_deref()), ("focus on tests", None));
 
         // Completion delivers to wait
         res_tx.send(Some(Ok(serde_json::json!({"text": "done!", "usage": {"input": 10}})))).unwrap();
@@ -677,7 +710,8 @@ mod tests {
         assert!(full_err.contains("full"), "expected full-queue error, got: {full_err}");
 
         // Draining one message frees capacity for a subsequent steer.
-        assert_eq!(steer_rx.recv().await, Some(("msg-0".into(), None)));
+        let drained = steer_rx.recv().await.unwrap();
+        assert_eq!((drained.text.as_str(), drained.source.as_deref()), ("msg-0", None));
         assert!(reg.steer("worker", "recovered".into()).unwrap());
 
         // Dropping receiver (or cancelling/finishing) stops delivery without panicking or blocking.

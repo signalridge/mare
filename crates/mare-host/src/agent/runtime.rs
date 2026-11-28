@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::approvals::bridge_approvals;
 use super::{ChildEvent, ParentHost};
-use crate::agent_registry::{AgentRegistry, AgentStatus};
+use crate::agent_registry::{AgentRegistry, AgentStatus, PermissionSync, SteerMessage};
 use crate::child_transcript::Transcript;
 use crate::{Host, HostOptions};
 use mare_kernel::TapEvent;
@@ -79,9 +79,10 @@ pub(super) struct ChildRuntimeArgs {
     pub(super) transcript: Option<Transcript>,
     pub(super) origin: serde_json::Value,
     pub(super) shares_rules: bool,
+    pub(super) inherits_parent_preset: bool,
     pub(super) cancel: CancellationToken,
     pub(super) ev_tx: mpsc::Sender<TapEvent>,
-    pub(super) steer_rx: mpsc::Receiver<(String, Option<String>)>,
+    pub(super) steer_rx: mpsc::Receiver<SteerMessage>,
     pub(super) res_tx: watch::Sender<Option<Result<serde_json::Value, super::ChildError>>>,
     pub(super) lifecycle: Option<mpsc::UnboundedSender<ChildEvent>>,
     pub(super) registry: AgentRegistry,
@@ -246,6 +247,7 @@ fn run_child_thread(mut args: ChildRuntimeArgs) {
             transcript,
             origin: args.origin,
             shares_rules: args.shares_rules,
+            inherits_parent_preset: args.inherits_parent_preset,
             cancel: args.cancel,
             ev_tx: args.ev_tx,
             steer_rx: args.steer_rx,
@@ -313,9 +315,10 @@ struct ChildHostArgs {
     transcript: Option<std::rc::Rc<std::cell::RefCell<Transcript>>>,
     origin: serde_json::Value,
     shares_rules: bool,
+    inherits_parent_preset: bool,
     cancel: CancellationToken,
     ev_tx: mpsc::Sender<TapEvent>,
-    steer_rx: mpsc::Receiver<(String, Option<String>)>,
+    steer_rx: mpsc::Receiver<SteerMessage>,
     approvals: Option<mpsc::UnboundedSender<ChildEvent>>,
     child_id: u64,
     session_id: String,
@@ -386,7 +389,7 @@ async fn run_child_host(mut args: ChildHostArgs) -> Result<serde_json::Value, su
     // approvals bubble up to the parent
     if let Some(tx) = args.approvals {
         // without the bridge nobody can answer: approvals stay `unavailable` (denied)
-        if let Err(e) = bridge_approvals(&host, tx, args.origin, args.shares_rules) {
+        if let Err(e) = bridge_approvals(&host, tx, args.origin, args.shares_rules, args.inherits_parent_preset) {
             tracing::warn!("sub-agent approvals: {e}");
         }
     }
@@ -395,12 +398,16 @@ async fn run_child_host(mut args: ChildHostArgs) -> Result<serde_json::Value, su
     let ev_task =
         tokio::task::spawn_local(forward_child_events(ev_cursor, ev_tx, progress_tx, progress_id, progress_parent));
     let h2 = host.clone();
+    let steer_scope = cancel_scope.clone();
     let steer_task = tokio::task::spawn_local(async move {
-        while let Some((s, source)) = args.steer_rx.recv().await {
-            if let Some(src) = source {
-                let _ = h2.steer_with(&s, serde_json::json!({ "source": src })).await;
+        while let Some(msg) = args.steer_rx.recv().await {
+            if let Some(sync) = msg.permission_sync {
+                apply_child_permission_sync(&h2, &steer_scope, sync).await;
+            }
+            if let Some(src) = msg.source {
+                let _ = h2.steer_with(&msg.text, serde_json::json!({ "source": src })).await;
             } else {
-                let _ = h2.steer(&s).await;
+                let _ = h2.steer(&msg.text).await;
             }
         }
     });
@@ -443,6 +450,46 @@ async fn run_child_host(mut args: ChildHostArgs) -> Result<serde_json::Value, su
         return Err(super::ChildError::Failed(format!("child transcript persistence failed: {error}")));
     }
     r
+}
+
+/// Resynchronize an unpinned child VM's sandbox ceiling and permissions preset when continued via
+/// `steer` after the parent changed presets. Skips no-op updates so an ordinary steer without a
+/// parent preset change preserves existing session grants, and aborts if an ancestor tightened
+/// concurrently after the steer snapshot was captured.
+async fn apply_child_permission_sync(host: &Host, scope: &crate::agent_tree::Scope, sync: PermissionSync) {
+    let lua = host.lua();
+    let current_ceiling = mare_binding::ossandbox::ceiling(lua);
+    let current_arg_ceiling = lua
+        .globals()
+        .get::<Table>("mare")
+        .ok()
+        .and_then(|m| m.get::<Table>("args").ok())
+        .and_then(|args| args.get::<Option<String>>("permission_ceiling").ok())
+        .flatten();
+    let live_preset = host.service_table(mare_shared::PERMISSIONS_SERVICE_NAME).and_then(|svc| {
+        let f: Function = svc.get("preset").ok()?;
+        f.call::<String>(svc).ok()
+    });
+    let same_policy = format!("{:?}", current_ceiling) == format!("{:?}", sync.policy);
+    let same_arg = current_arg_ceiling.as_deref() == Some(sync.preset.as_str());
+    let same_live = live_preset.as_deref().is_none_or(|p| p == sync.preset);
+    if same_policy && same_arg && same_live {
+        return;
+    }
+    if !scope.resync_policy(sync.policy.as_ref(), sync.expected_tighten_seq) {
+        return;
+    }
+    if let Ok(mare) = lua.globals().get::<Table>("mare")
+        && let Ok(args) = mare.get::<Table>("args")
+    {
+        let _ = args.set("permission_ceiling", sync.preset.as_str());
+    }
+    if let Some(svc) = host.service_table(mare_shared::PERMISSIONS_SERVICE_NAME)
+        && let Ok(set_fn) = svc.get::<Function>("set")
+        && let Err(e) = set_fn.call_async::<mlua::Value>((svc, sync.preset.as_str())).await
+    {
+        tracing::warn!("sub-agent permission resync to {} failed: {e}", sync.preset);
+    }
 }
 
 async fn forward_child_events(
@@ -536,6 +583,7 @@ mod tests {
                 result_rx: res_rx,
                 cancel: CancellationToken::new(),
                 cancel_scope: None,
+                inherits_parent_preset: false,
                 steer: steer_tx,
                 collected: false,
             },
@@ -606,6 +654,7 @@ mod tests {
                 result_rx: res_rx,
                 cancel: CancellationToken::new(),
                 cancel_scope: None,
+                inherits_parent_preset: false,
                 steer: steer_tx,
                 collected: false,
             },

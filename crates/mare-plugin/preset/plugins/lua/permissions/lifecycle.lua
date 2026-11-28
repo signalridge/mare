@@ -74,17 +74,12 @@ return function(D)
 		end
 		P.sandbox_gen = gen
 		D.reset_session_grants()
-		local pol = mare.proc.sandbox.current()
-		local level = pol and pol.level or "danger-full-access"
-		if P.preset ~= "custom" and LEVEL[P.preset] ~= level then
-			if level == "read-only" then
-				P.preset = "read-only"
-			elseif level == "workspace-write" and RANK[P.preset] and RANK[P.preset] > RANK["auto"] then
-				P.preset = "auto"
-			else
-				P.preset = "custom"
+		if P.preset ~= "custom" then
+			local next_preset = Pr.effective_preset_for_sandbox(P.preset)
+			if next_preset ~= P.preset then
+				P.preset = next_preset
+				emit()
 			end
-			emit()
 		end
 	end
 	ctx:on("sandbox/changed", function(ev)

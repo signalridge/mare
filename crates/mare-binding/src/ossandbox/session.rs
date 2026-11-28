@@ -36,20 +36,14 @@ impl PolicyHandle {
             Some(cur) => Some(new_ceiling.intersect(cur)),
             None => Some(new_ceiling.clone()),
         };
-        let changed = format!("{:?}", g.ceiling) != format!("{:?}", Some(&new_ceiling))
-            || format!("{:?}", g.current) != format!("{:?}", new_current)
-            || !g.lifts.is_empty()
-            || !g.permission_reads.is_empty()
-            || !g.read_receipts.is_empty();
-        if changed {
-            g.ceiling = Some(new_ceiling);
-            g.current = new_current;
-            g.lifts.clear();
-            g.permission_reads.clear();
-            g.read_receipts.clear();
-            g.generation = g.generation.wrapping_add(1);
-        }
-        changed
+        g.replace_policy(Some(new_ceiling), new_current)
+    }
+
+    /// Replace this VM's inherited ceiling and effective current policy with `parent_policy`
+    /// when resynchronizing an unpinned child to its parent's current preset.
+    pub fn resync_ceiling(&self, parent_policy: Option<Policy>) -> bool {
+        let mut g = self.0.write().unwrap_or_else(|e| e.into_inner());
+        g.replace_policy(parent_policy.clone(), parent_policy)
     }
 }
 
@@ -83,6 +77,25 @@ struct PolicySnapshot {
     lifts: Vec<Lift>,
     permission_reads: Vec<PathBuf>,
     read_receipts: Vec<(String, String, Vec<PathBuf>)>,
+}
+
+impl PolicySnapshot {
+    fn replace_policy(&mut self, ceiling: Option<Policy>, current: Option<Policy>) -> bool {
+        let changed = format!("{:?}", self.ceiling) != format!("{:?}", ceiling)
+            || format!("{:?}", self.current) != format!("{:?}", current)
+            || !self.lifts.is_empty()
+            || !self.permission_reads.is_empty()
+            || !self.read_receipts.is_empty();
+        if changed {
+            self.ceiling = ceiling;
+            self.current = current;
+            self.lifts.clear();
+            self.permission_reads.clear();
+            self.read_receipts.clear();
+            self.generation = self.generation.wrapping_add(1);
+        }
+        changed
+    }
 }
 
 /// it was approved under, not clipped to the inherited ceiling — the same escalation the main
@@ -207,18 +220,28 @@ pub fn lifted(lua: &Lua, call_id: Option<&str>, key: &str) -> Option<Option<Poli
     Some(g.lifts[index].policy.clone())
 }
 
-pub fn enforce_ceiling(lua: &Lua, policy: Option<Policy>) -> Option<Policy> {
-    let mut effective = match (policy, ceiling(lua)) {
+fn enforce_ceiling_with(
+    policy: Option<Policy>,
+    limit: Option<&Policy>,
+    fake_ip: crate::netauth::FakeIpMode,
+) -> Option<Policy> {
+    let mut effective = match (policy, limit) {
         (Some(p), Some(limit)) => Some(limit.intersect(&p)),
-        (None, Some(limit)) => Some(limit),
+        (None, Some(limit)) => Some(limit.clone()),
         (p, None) => p,
     };
     if let Some(p) = &mut effective
         && let super::Network::Proxy(np) = &mut p.network
     {
-        np.tighten_fake_ip(crate::netauth::fake_ip_mode_from_lua(lua));
+        np.tighten_fake_ip(fake_ip);
     }
     effective
+}
+
+pub fn enforce_ceiling(lua: &Lua, policy: Option<Policy>) -> Option<Policy> {
+    let limit = ceiling(lua);
+    let fake_ip = crate::netauth::fake_ip_mode_from_lua(lua);
+    enforce_ceiling_with(policy, limit.as_ref(), fake_ip)
 }
 
 /// Validate `p` against active policy ceiling and persistent PTY fence without mutating state.
@@ -231,18 +254,26 @@ pub fn check_set_current(lua: &Lua, p: Option<Policy>) -> mlua::Result<Option<Po
 }
 
 pub fn set_current(lua: &Lua, p: Option<Policy>) -> mlua::Result<Option<Policy>> {
-    let p = check_set_current(lua, p)?;
-    if format!("{:?}", current(lua)) == format!("{:?}", p) {
-        return Ok(p);
-    }
-    if let Some(state) = lua.app_data_ref::<PolicyState>() {
+    let checked = check_set_current(lua, p.clone())?;
+    let fake_ip = crate::netauth::fake_ip_mode_from_lua(lua);
+    let (committed, changed) = if let Some(state) = lua.app_data_ref::<PolicyState>() {
         let mut g = state.0.write().unwrap_or_else(|e| e.into_inner());
-        g.current = p.clone();
-        g.generation = g.generation.wrapping_add(1);
+        let effective = enforce_ceiling_with(p, g.ceiling.as_ref(), fake_ip);
+        if format!("{:?}", g.current) == format!("{:?}", effective) {
+            (effective, false)
+        } else {
+            g.current = effective.clone();
+            g.generation = g.generation.wrapping_add(1);
+            (effective, true)
+        }
+    } else {
+        (checked, false)
+    };
+    if changed {
+        notify_policy_change(lua, committed.as_ref());
+        crate::pty::lease::stop_auto_on_policy_change(lua);
     }
-    notify_policy_change(lua, p.as_ref());
-    crate::pty::lease::stop_auto_on_policy_change(lua);
-    Ok(p)
+    Ok(committed)
 }
 
 /// Check against the current policy (always allowed when unconfined).

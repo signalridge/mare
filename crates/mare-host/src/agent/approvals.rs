@@ -33,12 +33,14 @@ pub(super) fn bridge_approvals(
     tx: mpsc::UnboundedSender<ChildEvent>,
     origin: serde_json::Value,
     shares_rules: bool,
+    inherits_parent_preset: bool,
 ) -> mlua::Result<()> {
     let lua = host.lua();
-    let host_review_required = host
-        .service_table(mare_shared::APPROVALS_SERVICE_NAME)
+    let child_approvals = host.service_table(mare_shared::APPROVALS_SERVICE_NAME);
+    let host_review_required = child_approvals
+        .as_ref()
         .map(|approvals| {
-            approvals.get::<Function>("review_required").and_then(|f| f.call::<bool>(approvals)).unwrap_or(true)
+            approvals.get::<Function>("review_required").and_then(|f| f.call::<bool>(approvals.clone())).unwrap_or(true)
         })
         .unwrap_or(false);
     let permission_grants = crate::approvals::permission_grants::install(lua, &host.kernel)?;
@@ -49,6 +51,7 @@ pub(super) fn bridge_approvals(
         let tx = tx.clone();
         let origin = origin.clone();
         let permission_grants = permission_grants.clone();
+        let child_approvals = child_approvals.clone();
         async move {
             let deny_reason = |reason: String| async {
                 let t = lua.create_table()?;
@@ -71,6 +74,10 @@ pub(super) fn bridge_approvals(
             let info = a.pop().unwrap_or_default();
             let call = a.pop().unwrap_or_default();
             let forwarded_review_required = verdict.get("review_required").and_then(|v| v.as_bool()).unwrap_or(false);
+            let forwarded_preset_pinned = verdict.get("preset_pinned").and_then(|v| v.as_bool()).unwrap_or(false);
+            let child_untrusted = child_approvals
+                .as_ref()
+                .is_some_and(|svc| crate::approvals::shared_rule::untrusted_requires_review(svc, &info));
             let (rtx, rrx) = oneshot::channel();
             let req = ChildApproval {
                 origin,
@@ -78,6 +85,7 @@ pub(super) fn bridge_approvals(
                 info,
                 call,
                 shares_rules,
+                inherits_parent_preset: inherits_parent_preset && !forwarded_preset_pinned && !child_untrusted,
                 review_required: host_review_required || forwarded_review_required,
                 reply: rtx,
             };

@@ -70,6 +70,10 @@ pub struct ChildApproval {
     /// the child runs with the parent's permission configuration (no spawn-time
     /// `config.plugins.permissions`): the parent's rules may resolve the request
     pub shares_rules: bool,
+    /// the child inherits the parent's live preset (no explicit spawn-time `permission` /
+    /// `permission_ceiling` / `config.plugins.permissions` override): the parent's current preset
+    /// may auto-allow sandbox requests it already permits
+    pub inherits_parent_preset: bool,
     /// whether the child's approval policy requires per-call review (`review_all`)
     pub review_required: bool,
     /// the policy vote the child's `tool/approval` dispatch receives:
