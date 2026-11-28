@@ -1036,16 +1036,19 @@ mare.provider("beta", {{
             .await;
         global(&h, "LLM", h.service_table("llm").unwrap());
 
-        let (bare_ok, bare_err, typo_ok, typo_err): (bool, String, bool, String) = eval(
+        let (resolved_nil, bare_ok, bare_err, typo_ok, typo_err): (bool, bool, String, bool, String) = eval(
             &h,
             r#"
+            -- Cold-cache Lua LLM:resolve must hydrate pending disk caches and return nil on ambiguity.
+            local res = LLM:resolve("shared-cached")
             local ok1, e1 = pcall(function() return LLM:set_model("shared-cached", { save = false }) end)
             local ok2, e2 = pcall(function() return LLM:set_model("beta/typo", { save = false }) end)
-            return ok1, tostring(type(e1) == "table" and e1.message or e1),
+            return res == nil, ok1, tostring(type(e1) == "table" and e1.message or e1),
               ok2, tostring(type(e2) == "table" and e2.message or e2)
             "#,
         )
         .await;
+        assert!(resolved_nil, "cold-cache LLM:resolve must return nil for ambiguous bare id");
         assert!(!bare_ok, "bare id across static + pending disk cache must be rejected as ambiguous");
         assert!(
             bare_err.contains("alpha/shared-cached, beta/shared-cached"),
@@ -1155,7 +1158,8 @@ async fn custom_moonshot_kimi_without_efforts_uses_low_high_max_and_never_sends_
         let mut env = TestEnv::new().await;
         let server = MockServer::start().await;
         let ok_sse = compat_events(&[compat_text("ok"), compat_stop()]);
-        server.route("/moonshot-custom/chat/completions", vec![Resp::sse(ok_sse)]);
+        server.route("/moonshot-custom/chat/completions", vec![Resp::sse(ok_sse.clone())]);
+        server.route("/moonshot-budget/chat/completions", vec![Resp::sse(ok_sse)]);
 
         let h = provider_host(
             &mut env,
@@ -1176,28 +1180,48 @@ async fn custom_moonshot_kimi_without_efforts_uses_low_high_max_and_never_sends_
                         "api_key": "k-mock",
                         "list_models": false,
                         "models": [{ "model_id": "kimi-k3", "reasoning": true, "context_window": 262144, "max_output": 131072 }]
+                    },
+                    "moonshot-budget": {
+                        "wire": "openai-chat",
+                        "dialect": "kimi",
+                        "reasoning_budget_field": "thinking_budget",
+                        "base_url": format!("{}/moonshot-budget", server.base),
+                        "api_key": "k-budget",
+                        "list_models": false,
+                        "models": [{ "model_id": "kimi-budget-custom", "reasoning": true, "context_window": 128000, "max_output": 16384 }]
                     }
                 }
             }),
         )
         .await;
 
-        let (host_opts, mock_opts, med_ok): (String, String, bool) = eval(
+        let (host_opts, mock_opts, med_ok, budget_opts, budget_med_ok): (String, String, bool, String, bool) = eval(
             &h,
             r#"
             local mh = assert(LLM:resolve("moonshot-host/kimi-k3"))
             local mm = assert(LLM:resolve("moonshot-mock/kimi-k3"))
+            local mb = assert(LLM:resolve("moonshot-budget/kimi-budget-custom"))
             LLM:set_model("moonshot-mock/kimi-k3", { save = false })
             local ok_med = pcall(LLM.set_effort, LLM, "medium", { save = false })
+            LLM:set_model("moonshot-budget/kimi-budget-custom", { save = false })
+            local ok_budget_med = pcall(LLM.set_effort, LLM, "medium", { save = false })
+            LLM:set_model("moonshot-mock/kimi-k3", { save = false })
             return table.concat(LLM:effort_options(mh) or {}, ","),
               table.concat(LLM:effort_options(mm) or {}, ","),
-              ok_med
+              ok_med,
+              table.concat(LLM:effort_options(mb) or {}, ","),
+              ok_budget_med
             "#,
         )
         .await;
         assert_eq!(host_opts, "low,high,max", "host-detected moonshot kimi-k3 must offer low,high,max");
         assert_eq!(mock_opts, "low,high,max", "custom kimi dialect kimi-k3 must offer low,high,max");
         assert!(!med_ok, "custom kimi-k3 without efforts must reject 'medium'");
+        assert_eq!(
+            budget_opts, "low,medium,high",
+            "non-K3 kimi budget model without efforts must keep default low,medium,high"
+        );
+        assert!(budget_med_ok, "non-K3 kimi budget model must allow selecting 'medium'");
 
         let res = h.prompt("hi", json!({})).await.unwrap();
         assert!(res["error"].is_null(), "default prompt on custom kimi-k3 must succeed: {res}");
@@ -1212,6 +1236,26 @@ async fn custom_moonshot_kimi_without_efforts_uses_low_high_max_and_never_sends_
         assert!(
             matches!(eff, "low" | "high" | "max"),
             "custom kimi-k3 must emit a valid K3 reasoning_effort: {req}"
+        );
+
+        // Non-K3 kimi model with reasoning_budget_field must keep default medium budget (8192)
+        // and not send K3's reasoning_effort.
+        exec(&h, r#"LLM:set_model("moonshot-budget/kimi-budget-custom", { save = false })"#).await;
+        let res_b = h.prompt("hi budget", json!({})).await.unwrap();
+        assert!(res_b["error"].is_null(), "default prompt on non-K3 kimi budget model must succeed: {res_b}");
+        let req_b = server
+            .requests()
+            .into_iter()
+            .find(|r| r.path == "/moonshot-budget/chat/completions")
+            .expect("moonshot-budget request sent")
+            .json();
+        assert_eq!(
+            req_b["thinking_budget"], 8192,
+            "non-K3 kimi budget model default medium must send 8192 budget: {req_b}"
+        );
+        assert!(
+            req_b.get("reasoning_effort").is_none() && req_b.get("thinking").is_none(),
+            "non-K3 kimi budget model must not send reasoning_effort or thinking: {req_b}"
         );
         h.shutdown().await;
     })

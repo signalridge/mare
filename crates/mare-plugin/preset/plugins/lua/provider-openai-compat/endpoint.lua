@@ -113,55 +113,80 @@ local function build_param_rules(name, entry, live_entry, live_base_url)
 			},
 		}
 	elseif tf or budget_field then
+		local function wire_chat(req, c)
+			local cur = live_entry()
+			local cur_tf = resolve_reasoning_format(cur, live_base_url(cur))
+			local on = c.value ~= "off"
+			if cur_tf == "deepseek" then
+				req.body.thinking = { type = on and "enabled" or "disabled" }
+				if on and cur.supports_reasoning_effort then
+					req.body.reasoning_effort = c.value
+				end
+			elseif cur_tf == "kimi" then
+				-- Moonshot Kimi K3 OpenAI-compat API takes top-level reasoning_effort
+				-- (low | high | max; always-on thinking). Leave kimi-k2-thinking and
+				-- kimi-for-coding untouched.
+				if on and is_kimi_k3(c.model and c.model.id) then
+					req.body.reasoning_effort = c.value
+				end
+			elseif cur_tf == "zai" then
+				req.body.thinking = on and { type = "enabled", clear_thinking = false } or { type = "disabled" }
+			elseif cur_tf == "qwen" then
+				req.body.enable_thinking = on
+			elseif cur_tf == "qwen-chat-template" or cur_tf == "chat-template" then
+				req.body.chat_template_kwargs = {
+					enable_thinking = on,
+					preserve_thinking = true,
+				}
+			elseif cur_tf == "together" then
+				req.body.reasoning = { enabled = on }
+			end
+			apply_budget(cur, req, c.value)
+		end
+
+		if tf == "kimi" then
+			local rules = {
+				{
+					provider = name,
+					route = "chat",
+					when = function(m)
+						return m.reasoning == true and is_kimi_k3(m.id)
+					end,
+					define = {
+						effort = {
+							only = { "low", "high", "max" },
+							wire = { chat = wire_chat },
+						},
+					},
+				},
+			}
+			if budget_field then
+				rules[#rules + 1] = {
+					provider = name,
+					route = "chat",
+					when = function(m)
+						return m.reasoning == true and not is_kimi_k3(m.id)
+					end,
+					define = {
+						effort = {
+							wire = { chat = wire_chat },
+						},
+					},
+				}
+			end
+			return rules
+		end
+
 		return {
 			{
 				provider = name,
 				route = "chat",
 				when = function(m)
-					if m.reasoning ~= true then
-						return false
-					end
-					if tf == "kimi" and not budget_field then
-						return is_kimi_k3(m.id)
-					end
-					return true
+					return m.reasoning == true
 				end,
 				define = {
 					effort = {
-						only = tf == "kimi" and { "low", "high", "max" } or nil,
-						wire = {
-							chat = function(req, c)
-								local cur = live_entry()
-								local cur_tf = resolve_reasoning_format(cur, live_base_url(cur))
-								local on = c.value ~= "off"
-								if cur_tf == "deepseek" then
-									req.body.thinking = { type = on and "enabled" or "disabled" }
-									if on and cur.supports_reasoning_effort then
-										req.body.reasoning_effort = c.value
-									end
-								elseif cur_tf == "kimi" then
-									-- Moonshot Kimi K3 OpenAI-compat API takes top-level reasoning_effort
-									-- (low | high | max; always-on thinking). Leave kimi-k2-thinking and
-									-- kimi-for-coding untouched.
-									if on and is_kimi_k3(c.model and c.model.id) then
-										req.body.reasoning_effort = c.value
-									end
-								elseif cur_tf == "zai" then
-									req.body.thinking = on and { type = "enabled", clear_thinking = false }
-										or { type = "disabled" }
-								elseif cur_tf == "qwen" then
-									req.body.enable_thinking = on
-								elseif cur_tf == "qwen-chat-template" or cur_tf == "chat-template" then
-									req.body.chat_template_kwargs = {
-										enable_thinking = on,
-										preserve_thinking = true,
-									}
-								elseif cur_tf == "together" then
-									req.body.reasoning = { enabled = on }
-								end
-								apply_budget(cur, req, c.value)
-							end,
-						},
+						wire = { chat = wire_chat },
 					},
 				},
 			},
