@@ -137,7 +137,10 @@ impl App {
                             return true;
                         }
                     } else {
+                        // A visible popup is still refreshing for the edited token: dismiss it
+                        // without accepting a stale candidate and without submitting the draft.
                         self.completion.invalidate();
+                        return true;
                     }
                 }
                 let act = self.ed().enter();

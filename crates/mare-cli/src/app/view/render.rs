@@ -517,6 +517,9 @@ impl App {
                 hints.push(format!("{key} {label}"));
             }
         }
+        if self.completion.is_pending() {
+            hints.push("updating…".to_string());
+        }
         hints.push(format!("{}/{}", c.selected + 1, c.items.len()));
         let footer = hints.join(" · ");
         if let Some(boxed) = self.completion_popup_lines(
