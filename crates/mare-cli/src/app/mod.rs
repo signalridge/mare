@@ -421,7 +421,13 @@ impl App {
         self.height = rows as usize;
         self.ui.width.store(lw, std::sync::atomic::Ordering::Relaxed);
         self.ui.height.store(rows, std::sync::atomic::Ordering::Relaxed);
-        self.renderer.resize(cols as usize, rows as usize);
+        if self.transcript.is_open() {
+            self.renderer.width = cols as usize;
+            self.renderer.height = (rows as usize).max(1);
+            self.renderer.invalidate();
+        } else {
+            self.renderer.resize(cols as usize, rows as usize);
+        }
         self.invalidate_cpr();
         self.sync_position_known();
         self.reflow.resized(lw as usize, now);
