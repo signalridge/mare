@@ -159,20 +159,20 @@ async fn non_native_vendors_keep_tools_and_system_byte_stable_across_three_searc
         env.set_var("OPENAI_API_KEY", "test-oai");
 
         let server = MockServer::start().await;
-        // 1. DeepSeek chat (openai-chat)
+        // 1. DeepSeek V4 Pro (non-native, on openai-chat)
         server.route(
             "/deepseek/chat/completions",
             vec![
-                chat_tool_call_sse("deepseek-chat", "c1", "tool_search", r#"{"query":"alpha"}"#),
-                chat_tool_call_sse("deepseek-chat", "c2", "tool_search", r#"{"query":"beta"}"#),
-                chat_tool_call_sse("deepseek-chat", "c3", "tool_search", r#"{"query":"select:gamma_fetch"}"#),
+                chat_tool_call_sse("deepseek-v4-pro", "c1", "tool_search", r#"{"query":"alpha"}"#),
+                chat_tool_call_sse("deepseek-v4-pro", "c2", "tool_search", r#"{"query":"beta"}"#),
+                chat_tool_call_sse("deepseek-v4-pro", "c3", "tool_search", r#"{"query":"select:gamma_fetch"}"#),
                 chat_tool_call_sse(
-                    "deepseek-chat",
+                    "deepseek-v4-pro",
                     "c4",
                     "call_tool",
                     r#"{"name":"gamma_fetch","arguments":{"id":"g42"}}"#,
                 ),
-                chat_text_sse("deepseek-chat", "ds done"),
+                chat_text_sse("deepseek-v4-pro", "ds done"),
             ],
         );
         // 2. GLM (openai-chat)
@@ -203,8 +203,9 @@ async fn non_native_vendors_keep_tools_and_system_byte_stable_across_three_searc
             .host()
             .user_plugins()
             .config(json!({
+                "models": { "openai/gpt-5.3": {} },
                 "providers": {
-                    "deepseek": { "base_url": format!("{base}/deepseek") },
+                    "deepseek": { "wire": "openai-chat", "base_url": format!("{base}/deepseek") },
                     "glm-test": {
                         "wire": "openai-chat",
                         "base_url": format!("{base}/glm"),
@@ -223,7 +224,7 @@ async fn non_native_vendors_keep_tools_and_system_byte_stable_across_three_searc
         global(&h, "LLM", h.service_table("llm").unwrap());
 
         for (model_ref, expected_text, expected_tool_out, path, is_responses) in [
-            ("deepseek/deepseek-chat", "ds done", "gamma_fetch:g42", "/deepseek/chat/completions", false),
+            ("deepseek/deepseek-v4-pro", "ds done", "gamma_fetch:g42", "/deepseek/chat/completions", false),
             ("glm-test/glm-5", "glm done", "alpha_lookup:k1", "/glm/chat/completions", false),
             ("openai/gpt-5.3", "oai53 done", "beta_query:f9", "/openai/responses", true),
         ] {
@@ -301,28 +302,28 @@ async fn resume_preserves_non_native_tools_and_native_activation_records() {
         server.route(
             "/deepseek/chat/completions",
             vec![
-                chat_tool_call_sse("deepseek-chat", "ds_s1", "tool_search", r#"{"query":"select:alpha_lookup"}"#),
+                chat_tool_call_sse("deepseek-v4-pro", "ds_s1", "tool_search", r#"{"query":"select:alpha_lookup"}"#),
                 chat_tool_call_sse(
-                    "deepseek-chat",
+                    "deepseek-v4-pro",
                     "ds_c1",
                     "call_tool",
                     r#"{"name":"alpha_lookup","arguments":{"key":"before"}}"#,
                 ),
-                chat_text_sse("deepseek-chat", "session1 done"),
+                chat_text_sse("deepseek-v4-pro", "session1 done"),
                 chat_tool_call_sse(
-                    "deepseek-chat",
+                    "deepseek-v4-pro",
                     "ds_c2",
                     "call_tool",
                     r#"{"name":"alpha_lookup","arguments":{"key":"resumed"}}"#,
                 ),
-                chat_text_sse("deepseek-chat", "resumed done"),
+                chat_text_sse("deepseek-v4-pro", "resumed done"),
             ],
         );
 
         let base = server.base.clone();
         let ds_cfg = json!({
-            "model": "deepseek/deepseek-chat",
-            "providers": { "deepseek": { "base_url": format!("{base}/deepseek") } },
+            "model": "deepseek/deepseek-v4-pro",
+            "providers": { "deepseek": { "wire": "openai-chat", "base_url": format!("{base}/deepseek") } },
             "plugins": { "llm": { "retry_base_ms": 1 } },
         });
         let h1 = env.host().user_plugins().config(ds_cfg.clone()).build().await;
@@ -441,21 +442,21 @@ async fn mid_session_model_switch_and_all_four_wires_tolerate_undeclared_histori
         server.route(
             "/compat/chat/completions",
             vec![
-                chat_tool_call_sse("deepseek-chat", "c_s1", "tool_search", r#"{"query":"select:alpha_lookup"}"#),
+                chat_tool_call_sse("deepseek-v4-pro", "c_s1", "tool_search", r#"{"query":"select:alpha_lookup"}"#),
                 chat_tool_call_sse(
-                    "deepseek-chat",
+                    "deepseek-v4-pro",
                     "c_p1",
                     "call_tool",
                     r#"{"name":"alpha_lookup","arguments":{"key":"prev"}}"#,
                 ),
-                chat_text_sse("deepseek-chat", "ds turn 1"),
+                chat_text_sse("deepseek-v4-pro", "ds turn 1"),
                 chat_tool_call_sse(
-                    "deepseek-chat",
+                    "deepseek-v4-pro",
                     "ds_proxy",
                     "call_tool",
                     r#"{"name":"alpha_lookup","arguments":{"key":"back"}}"#,
                 ),
-                chat_text_sse("deepseek-chat", "back ok"),
+                chat_text_sse("deepseek-v4-pro", "back ok"),
                 Resp::sse(compat_ok),
             ],
         );
@@ -486,8 +487,8 @@ async fn mid_session_model_switch_and_all_four_wires_tolerate_undeclared_histori
             .builtins(&["tools-apply-patch", "mcp", "usage", "compact", "user-config", "jobs"])
             .user_plugins()
             .config(json!({
-                "model": "deepseek/deepseek-chat",
-                "providers": { "deepseek": { "base_url": format!("{base}/compat") } },
+                "model": "deepseek/deepseek-v4-pro",
+                "providers": { "deepseek": { "wire": "openai-chat", "base_url": format!("{base}/compat") } },
                 "plugins": {
                     "provider-openai": { "base_url": format!("{base}/openai") },
                     "provider-anthropic": { "base_url": format!("{base}/anthropic") },
@@ -515,7 +516,7 @@ async fn mid_session_model_switch_and_all_four_wires_tolerate_undeclared_histori
 
         // C) Switch Anthropic -> Non-native: history now contains direct `alpha_lookup` call;
         // switching back to DeepSeek replays that direct call cleanly and declares `call_tool`.
-        exec(&h, r#"assert(LLM:set_model("deepseek/deepseek-chat", { save = false }))"#).await;
+        exec(&h, r#"assert(LLM:set_model("deepseek/deepseek-v4-pro", { save = false }))"#).await;
         let res_ds2 = h.prompt("now call alpha via proxy", json!({})).await.unwrap();
         assert_eq!(res_ds2["text"], "back ok", "{res_ds2}");
         assert!(res_ds2["messages"].to_string().contains("alpha_lookup:back"), "{res_ds2}");
@@ -539,7 +540,7 @@ async fn mid_session_model_switch_and_all_four_wires_tolerate_undeclared_histori
             for _, ref in ipairs({
               "anthropic/claude-sonnet-5-5",
               "openai/gpt-6.1-terra",
-              "deepseek/deepseek-chat",
+              "deepseek/deepseek-v4-pro",
               "google/gemini-3-pro-preview",
             }) do
               local m = assert(LLM:resolve(ref), "missing " .. ref)

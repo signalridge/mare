@@ -8,7 +8,7 @@ async fn auth_error_is_surfaced_without_retry() {
         server.route("/compat", vec![Resp::status(401, r#"{"error":{"message":"bad key"}}"#)]);
         let h = provider_host(&mut env, &server, json!({})).await;
         let f = h.lua().load(STREAM).into_function().unwrap();
-        let err = f.call_async::<mlua::Value>("deepseek/deepseek-reasoner").await;
+        let err = f.call_async::<mlua::Value>("compat/reasoner-model").await;
         let text = match err {
             Err(e) => e.to_string(),
             Ok(v) => mare_shared::lua::lua_to_json(h.lua(), v).unwrap().to_string(),
@@ -40,7 +40,7 @@ async fn too_many_images_is_an_image_limit_in_every_provider() {
             ("anthropic/claude-sonnet-5-5", "/anthropic"),
             ("openai/gpt-6.1-terra", "/openai"),
             ("google/gemini-2.5-pro", "/google"),
-            ("deepseek/deepseek-reasoner", "/compat"),
+            ("compat/reasoner-model", "/compat"),
         ] {
             let msg = stream(&h, model).await;
             assert_eq!(msg["error_kind"], "image_limit", "{model}: {msg}");
@@ -58,7 +58,7 @@ async fn a_too_large_request_body_is_not_a_context_overflow() {
         let server = MockServer::start().await;
         server.route("/compat", vec![Resp::status(413, r#"{"error":{"message":"Request Entity Too Large"}}"#)]);
         let h = provider_host(&mut env, &server, json!({})).await;
-        let msg = stream(&h, "deepseek/deepseek-reasoner").await;
+        let msg = stream(&h, "compat/reasoner-model").await;
         assert_eq!(msg["error_kind"], "payload_too_large", "{msg}");
         assert!(msg["error"].as_str().unwrap().contains("remove large images"), "{msg}");
         assert_eq!(server.count("/compat"), 1);
@@ -262,9 +262,9 @@ async fn mid_stream_error_events_are_classified_by_their_code() {
         server.route("/openai", vec![Resp::sse(failed)]);
         let h = provider_host(&mut env, &server, json!({})).await;
 
-        assert_fixture_message("compat", &stream(&h, "deepseek/deepseek-reasoner").await, 0);
+        assert_fixture_message("compat", &stream(&h, "compat/reasoner-model").await, 0);
         assert_eq!(server.count("/compat"), 2, "a mid-stream 429 is retried");
-        let msg = ask(&h, "deepseek/deepseek-chat").await;
+        let msg = ask(&h, "compat/chat-model").await;
         assert_eq!(msg["error_kind"], "quota", "{msg}");
         assert_eq!(server.count("/compat"), 3, "an exhausted quota is not retried");
 
@@ -360,7 +360,7 @@ async fn streamed_function_calls_handle_empty_and_missing_json_arguments() {
         let groups: [Group<'_>; 3] = [
             ("openai/gpt-6.1-terra", "/openai", &[("missing", false), ("empty", false), ("object", true)]),
             (
-                "deepseek/deepseek-chat",
+                "compat/chat-model",
                 "/compat",
                 &[
                     ("missing", false),
@@ -517,7 +517,7 @@ async fn exceeded_current_quota_error_is_non_retryable_quota() {
         let body = r#"{"error":{"code":"exceeded_current_quota_error","message":"monthly spend cap reached"}}"#;
         server.route("/compat", vec![Resp::status(429, body)]);
         let h = provider_host(&mut env, &server, json!({})).await;
-        let msg = stream(&h, "deepseek/deepseek-reasoner").await;
+        let msg = stream(&h, "compat/reasoner-model").await;
         assert_eq!(msg["error_kind"], "quota", "{msg}");
         assert_eq!(server.count("/compat"), 1, "quota error must not be retried");
         h.shutdown().await;

@@ -29,6 +29,18 @@ async fn openai_compat_thinking_formats_and_budget_fields() {
             &server,
             json!({
                 "providers": {
+                    "ds_chat": {
+                        "wire": "openai-chat",
+                        "dialect": "deepseek",
+                        "supports_reasoning_effort": true,
+                        "base_url": format!("{}/compat", server.base),
+                        "api_key": "k",
+                        "models": [
+                            { "model_id": "deepseek-flash", "reasoning": true, "efforts": ["off", "low", "high", "max"] },
+                            { "model_id": "deepseek-plain", "reasoning": false },
+                            { "model_id": "deepseek-always-think", "reasoning": true, "efforts": ["high"] }
+                        ]
+                    },
                     "zai": {
                         "base_url": format!("{}/compat", server.base),
                         "dialect": "zai",
@@ -71,16 +83,24 @@ local msg = LLM:stream({
 assert(msg and not msg.error, tostring(msg and msg.error))
 "#;
 
-        // 1. DeepSeek reasoning model: enabled on high, disabled on off; non-reasoning chat sends none.
-        lua_call(&h, probe, json!(["deepseek/deepseek-reasoner", "high"])).await;
+        // 1. DeepSeek chat dialect reasoning model: enabled + reasoning_effort on low/high/max,
+        // disabled on off; non-reasoning model sends none.
+        lua_call(&h, probe, json!(["ds_chat/deepseek-flash", "high"])).await;
         let b: Value = serde_json::from_str(&server.requests().pop().unwrap().body).unwrap();
         assert_eq!(b["thinking"], json!({ "type": "enabled" }));
+        assert_eq!(b["reasoning_effort"], json!("high"));
 
-        lua_call(&h, probe, json!(["deepseek/deepseek-reasoner", "off"])).await;
+        lua_call(&h, probe, json!(["ds_chat/deepseek-flash", "max"])).await;
+        let b: Value = serde_json::from_str(&server.requests().pop().unwrap().body).unwrap();
+        assert_eq!(b["thinking"], json!({ "type": "enabled" }));
+        assert_eq!(b["reasoning_effort"], json!("max"));
+
+        lua_call(&h, probe, json!(["ds_chat/deepseek-flash", "off"])).await;
         let b: Value = serde_json::from_str(&server.requests().pop().unwrap().body).unwrap();
         assert_eq!(b["thinking"], json!({ "type": "disabled" }));
+        assert!(b.get("reasoning_effort").is_none());
 
-        lua_call(&h, probe, json!(["deepseek/deepseek-chat", "high"])).await;
+        lua_call(&h, probe, json!(["ds_chat/deepseek-plain", "high"])).await;
         let b: Value = serde_json::from_str(&server.requests().pop().unwrap().body).unwrap();
         assert!(b.get("thinking").is_none());
 
@@ -129,13 +149,13 @@ assert(msg and not msg.error, tostring(msg and msg.error))
         assert_eq!(b["reasoning"], json!({ "enabled": false }));
 
         // 6. Session-level effort selection (LLM:set_model + LLM:set_effort):
-        //    - deepseek-reasoner only declares efforts={"high"} (always-on thinking per DeepSeek docs),
+        //    - deepseek-always-think only declares efforts={"high"} (always-on thinking),
         //      so session effort="off" clamps to "high" -> thinking.type="enabled".
         //    - zai/glm-5 declares "off", so session effort="off" sends thinking.type="disabled".
         let session_probe = r#"
 local model_ref, effort = ...
 LLM:set_model(model_ref, { save = false })
-LLM:set_effort(effort, { save = false })
+LLM:restore_selection({ effort = effort })
 local m = assert(LLM:resolve(model_ref))
 local msg = LLM:stream({
     model = m,
@@ -144,7 +164,7 @@ local msg = LLM:stream({
 }, function() end)
 assert(msg and not msg.error, tostring(msg and msg.error))
 "#;
-        lua_call(&h, session_probe, json!(["deepseek/deepseek-reasoner", "off"])).await;
+        lua_call(&h, session_probe, json!(["ds_chat/deepseek-always-think", "off"])).await;
         let b: Value = serde_json::from_str(&server.requests().pop().unwrap().body).unwrap();
         assert_eq!(b["thinking"], json!({ "type": "enabled" }));
 

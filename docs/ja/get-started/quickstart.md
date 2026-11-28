@@ -141,7 +141,7 @@ Explain the retry logic in @src/client.rs
 `/model` でピッカーが開きます。認証情報のないプロバイダーは、ログインが必要なものとしてまとめて表示されます。モデル参照を直接指定して切り替えることもできます。
 
 ```text
-/model openai/gpt-6.1-terra
+/model openai/gpt-6-luna
 ```
 
 `/effort` は現在のモデルの推論強度を設定します。起動時に `-m/--model` や `-e/--effort` (`MARE_EFFORT`) を渡すこともできます。グローバル設定としての `effort` は起動単位の上書き専用であり、`init.lua` のグローバル `effort` は無視されます。一方、`init.lua` の `model` は `~/.local/state/mare/state.json` の記憶より優先されます。
@@ -169,7 +169,7 @@ mare -c --fork-session   # continue in a copy and leave the original alone
 ```lua
 -- ~/.config/mare/init.lua
 mare.setup {
-  model = "openai/gpt-6.1-terra",
+  model = "openai/gpt-6-luna",
 }
 
 -- give long shell commands more time

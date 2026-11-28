@@ -225,25 +225,8 @@ return function(D)
 					effort_opts[#effort_opts + 1] = { value = v }
 				end
 			end
-			local fallback_only = { "low", "medium", "high" }
-			if
-				type(model.efforts) ~= "table"
-				and type(model.default_effort) == "string"
-				and model.default_effort ~= ""
-			then
-				local seen = false
-				for _, v in ipairs(fallback_only) do
-					if v == model.default_effort then
-						seen = true
-						break
-					end
-				end
-				if not seen then
-					fallback_only[#fallback_only + 1] = model.default_effort
-				end
-			end
 			derived.define.effort = {
-				only = model.efforts or fallback_only,
+				only = model.efforts,
 				options = effort_opts,
 				default = model.default_effort,
 				aliases = model.effort_map,
@@ -442,6 +425,18 @@ return function(D)
 		return list
 	end
 
+	local function has_wire_mapping(d, route)
+		if d.wire[route] ~= nil then
+			return true
+		end
+		for _, o in ipairs(d.options) do
+			if o.wire and o.wire[route] ~= nil then
+				return true
+			end
+		end
+		return false
+	end
+
 	--- the merged parameter definitions for `model` on `route` (cached per model table)
 	function P.defs(model, route)
 		route = route or route_of(model)
@@ -470,7 +465,7 @@ return function(D)
 			apply_rule(defs, r, counter)
 		end
 		for name, d in pairs(defs) do
-			if not d.type then
+			if not d.type or (name == "effort" and route ~= nil and not has_wire_mapping(d, route)) then
 				defs[name] = nil
 			else
 				-- rank: the position in the full option list (the nearest-level rule); `only` keeps
@@ -481,17 +476,32 @@ return function(D)
 				end
 				if d.type == "bool" then
 					d.list = { true, false }
-				elseif d.only then
-					d.list = {}
-					for _, v in ipairs(d.only) do
-						if not d.gone[v] then
-							d.list[#d.list + 1] = v
+				else
+					local only = d.only
+					if not only and name == "effort" and model.reasoning then
+						only = { "low", "medium", "high" }
+						if
+							type(model.default_effort) == "string"
+							and model.default_effort ~= ""
+							and not table.find(only, model.default_effort)
+						then
+							only[#only + 1] = model.default_effort
 						end
 					end
-				else
-					d.list = {}
-					for _, o in ipairs(d.options) do
-						d.list[#d.list + 1] = o.value
+					if only then
+						local out = {}
+						for _, v in ipairs(only) do
+							if not d.gone[v] then
+								out[#out + 1] = v
+							end
+						end
+						d.list = out
+					else
+						local out = {}
+						for _, o in ipairs(d.options) do
+							out[#out + 1] = o.value
+						end
+						d.list = out
 					end
 				end
 			end
@@ -523,26 +533,64 @@ return function(D)
 	end
 	P.offers = offers
 
-	--- nearest offered option (lower on a tie); an alias (a model's effort_map) wins first. The
-	--- ranks come from the full option list: an option no layer defines ranks as the middle (4)
-	--- for the distance and lowest for the tie, the long-standing effort rule.
+	-- Canonical effort aliases and nearest-effort rules adapted from magpie
+	-- (`https://github.com/yetone/magpie`, `internal/catalog/catalog.go`, MIT License,
+	-- Copyright (c) 2026 yetone).
+	local EFFORT_ALIASES = {
+		none = "off",
+		light = "low",
+		extra_high = "xhigh",
+	}
+
+	local function is_off_effort(v)
+		return v == "off" or v == "none"
+	end
+
+	local function option_rank(d, v)
+		local r = d.rank
+		if d.id == "effort" and type(v) == "string" then
+			local c = EFFORT_ALIASES[v]
+			if c and r[c] ~= nil then
+				return r[c]
+			end
+			if v == "ultra" then
+				return (r.max or 7) + 1
+			end
+		end
+		return r[v]
+	end
+
+	--- nearest offered option (higher on a tie; non-off effort requests never clamp to off/none);
+	--- an explicit alias (a model's effort_map) wins first, then an exact offered option.
+	--- For effort parameters, vendor words (`light`, `extra_high`, `none`) map to canonical ranks.
+	--- An option no layer defines ranks as the middle (`medium` / 4) so clamping always lands on an
+	--- offered value.
 	function P.clamp(d, want)
 		if d.type == "bool" then
 			return want
 		end
 		local mapped = d.aliases[want]
-		if mapped then
+		if mapped ~= nil then
 			return mapped
 		end
-		local r = d.rank
-		local mid = r.medium or 4
-		local w = r[want] or mid
-		local best, bestd = nil, math.huge
+		if offers(d, want) then
+			return want
+		end
+		local mid = d.rank.medium or 4
+		local w = option_rank(d, want) or mid
+		local skip_off = d.id == "effort" and not is_off_effort(want)
+		local best, bestd, bestr = nil, math.huge, -math.huge
 		for _, e in ipairs(d.list) do
-			local dist = math.abs((r[e] or mid) - w)
-			if dist < bestd or (dist == bestd and (r[e] or 0) < (r[best] or 0)) then
-				best, bestd = e, dist
+			if not (skip_off and is_off_effort(e)) then
+				local re = option_rank(d, e) or mid
+				local dist = math.abs(re - w)
+				if dist < bestd or (dist == bestd and re > bestr) then
+					best, bestd, bestr = e, dist, re
+				end
 			end
+		end
+		if best == nil and #d.list > 0 then
+			best = d.list[1]
 		end
 		return best
 	end

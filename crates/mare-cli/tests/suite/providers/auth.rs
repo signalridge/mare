@@ -15,12 +15,12 @@ async fn a_key_helper_runs_once_per_interval_and_again_after_a_401() {
         let h = provider_host(
             &mut env,
             &server,
-            json!({ "providers": { "deepseek": { "api_key": { "cmd": ["sh", "-c", cmd], "refresh_interval_ms": 600000 } } } }),
+            json!({ "providers": { "compat": { "api_key": { "cmd": ["sh", "-c", cmd], "refresh_interval_ms": 600000 } } } }),
         )
         .await;
-        assert_fixture_message("compat", &stream(&h, "deepseek/deepseek-reasoner").await, 0);
+        assert_fixture_message("compat", &stream(&h, "compat/reasoner-model").await, 0);
         // the cached key is rejected: the helper runs again and the request is retried once
-        assert_fixture_message("compat", &stream(&h, "deepseek/deepseek-reasoner").await, 0);
+        assert_fixture_message("compat", &stream(&h, "compat/reasoner-model").await, 0);
         let auth: Vec<String> = server.requests().iter().filter_map(|r| r.header("authorization").map(str::to_string)).collect();
         assert_eq!(auth, ["Bearer key-1", "Bearer key-1", "Bearer key-2"], "cached within the interval, refreshed on 401");
         h.shutdown().await;

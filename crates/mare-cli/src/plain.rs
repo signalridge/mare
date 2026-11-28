@@ -71,6 +71,7 @@ enum Pending {
     Select {
         modal_id: u64,
         choices: Vec<usize>,
+        item_ids: Vec<Option<String>>,
         default: usize,
         checked: Vec<usize>,
         multi: bool,
@@ -219,6 +220,7 @@ impl<W: Write> Plain<'_, W> {
                 } else {
                     items
                 };
+                let item_ids: Vec<Option<String>> = items.iter().map(|it| it.item_id.clone()).collect();
                 let confirm = kind == "confirm";
                 if !title.is_empty() {
                     self.say(&title);
@@ -275,14 +277,24 @@ impl<W: Write> Plain<'_, W> {
                         let _ = write!(self.out, "choose 1-{} (Enter: {}, q: cancel)> ", choices.len(), default + 1);
                     }
                     let _ = self.out.flush();
-                    self.pending =
-                        Some(Pending::Select { modal_id, choices, default, checked, multi, tab, confirm, reply });
+                    self.pending = Some(Pending::Select {
+                        modal_id,
+                        choices,
+                        item_ids,
+                        default,
+                        checked,
+                        multi,
+                        tab,
+                        confirm,
+                        reply,
+                    });
                     return;
                 }
                 let _ = self.out.flush();
                 self.pending = Some(Pending::Select {
                     modal_id,
                     choices: vec![],
+                    item_ids,
                     default: selected,
                     checked: vec![],
                     multi: false,
@@ -371,17 +383,23 @@ impl<W: Write> Plain<'_, W> {
                 let out = if line.is_empty() && !default.is_empty() { default } else { line.to_string() };
                 let _ = reply.send(Ok(out));
             }
-            Pending::Select { confirm: true, reply, default, .. } => {
+            Pending::Select { confirm: true, reply, default, item_ids, .. } => {
                 let pick = match t.to_ascii_lowercase().as_str() {
                     "y" | "yes" => Some(0),
                     "n" | "no" => Some(1),
                     "" => Some(default),
                     _ => None,
                 };
-                let _ = reply
-                    .send(pick.map(|index| SelectReply { index, ..Default::default() }).ok_or(Dismissed::Cancelled));
+                let _ = reply.send(
+                    pick.map(|index| SelectReply {
+                        index,
+                        item_id: item_ids.get(index).cloned().flatten(),
+                        ..Default::default()
+                    })
+                    .ok_or(Dismissed::Cancelled),
+                );
             }
-            Pending::Select { choices, default, checked, multi: true, tab, reply, .. } => {
+            Pending::Select { choices, item_ids, default, checked, multi: true, tab, reply, .. } => {
                 let selected = if matches!(t, "q" | "Q") {
                     None
                 } else if t.is_empty() {
@@ -400,10 +418,13 @@ impl<W: Write> Plain<'_, W> {
                 let answer = selected.map(|mut selected_indices| {
                     selected_indices.sort_unstable();
                     selected_indices.dedup();
+                    let index =
+                        selected_indices.first().copied().or_else(|| choices.get(default).copied()).unwrap_or(0);
                     SelectReply {
-                        index: selected_indices.first().copied().or_else(|| choices.get(default).copied()).unwrap_or(0),
+                        index,
                         selected_indices,
                         tab,
+                        item_id: item_ids.get(index).cloned().flatten(),
                         ..Default::default()
                     }
                 });
@@ -412,7 +433,7 @@ impl<W: Write> Plain<'_, W> {
                 }
                 let _ = reply.send(answer.ok_or(Dismissed::Cancelled));
             }
-            Pending::Select { choices, default, tab, reply, .. } => {
+            Pending::Select { choices, item_ids, default, tab, reply, .. } => {
                 let pick = if t.is_empty() {
                     choices.get(default).copied()
                 } else {
@@ -422,7 +443,13 @@ impl<W: Write> Plain<'_, W> {
                     let _ = writeln!(self.out, "(not a choice: cancelled)");
                 }
                 let _ = reply.send(
-                    pick.map(|index| SelectReply { index, tab, ..Default::default() }).ok_or(Dismissed::Cancelled),
+                    pick.map(|index| SelectReply {
+                        index,
+                        tab,
+                        item_id: item_ids.get(index).cloned().flatten(),
+                        ..Default::default()
+                    })
+                    .ok_or(Dismissed::Cancelled),
                 );
             }
         }
@@ -606,6 +633,61 @@ mod tests {
         assert!(p.answer("1,2"));
         let answer = rx.await.unwrap().unwrap();
         assert_eq!(answer.selected_indices, [0, 2]);
+    }
+
+    #[tokio::test]
+    async fn plain_select_preserves_original_item_id_when_select_update_is_ignored() {
+        let ui = UiShared::new();
+        let mut out = Vec::new();
+        let mut p = Plain { out: &mut out, ui, blocks: HashMap::new(), pending: None, working: None, quit: false };
+        let (tx, rx) = oneshot::channel();
+        p.handle(UiCmd::Select {
+            title: "Select model".into(),
+            title_right: vec![],
+            split: Default::default(),
+            items: vec![
+                SelectItem {
+                    label: "deepseek/deepseek-chat".into(),
+                    item_id: Some("deepseek/deepseek-chat".into()),
+                    ..Default::default()
+                },
+                SelectItem {
+                    label: "openai/gpt-6.1-terra".into(),
+                    item_id: Some("openai/gpt-6.1-terra".into()),
+                    ..Default::default()
+                },
+            ],
+            selected: 0,
+            multi: false,
+            accept_label: None,
+            allow_search: true,
+            filter: String::new(),
+            tabs: vec![],
+            tab: 0,
+            kind: "list".into(),
+            keys: vec![],
+            body: vec![],
+            vim: false,
+            highlight: None,
+            reply: tx,
+            token: 1,
+            modal_id: 1,
+            approval: false,
+        });
+        // Plain mode ignores SelectUpdate; typing "1" must still carry the original item's item_id.
+        p.handle(UiCmd::SelectUpdate {
+            token: 1,
+            items: vec![SelectItem {
+                label: "deepseek/deepseek-000-new".into(),
+                item_id: Some("deepseek/deepseek-000-new".into()),
+                ..Default::default()
+            }],
+            tabs: vec![],
+        });
+        assert!(p.answer("1"));
+        let answer = rx.await.unwrap().unwrap();
+        assert_eq!(answer.index, 0);
+        assert_eq!(answer.item_id.as_deref(), Some("deepseek/deepseek-chat"));
     }
 
     struct EofInput(Option<oneshot::Sender<()>>);

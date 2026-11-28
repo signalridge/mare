@@ -31,7 +31,7 @@ impl Wire {
         match self {
             Self::Responses => ("/openai", "openai/gpt-6.1-terra"),
             Self::Anthropic => ("/anthropic", "anthropic/claude-sonnet-5-5"),
-            Self::Chat => ("/compat", "deepseek/deepseek-chat"),
+            Self::Chat => ("/compat", "compat/chat-model"),
             Self::Gemini => ("/google", "google/gemini-2.5-pro"),
         }
     }
@@ -717,8 +717,8 @@ async fn venice_text_signature_only_returns_to_its_source() {
             &h,
             r#"
 local original = assert(LLM:resolve("openrouter/anthropic/claude-sonnet-5-5"))
-local other_model = assert(LLM:resolve("openrouter/deepseek/deepseek-chat"))
-local foreign = assert(LLM:resolve("deepseek/deepseek-chat"))
+local other_model = assert(LLM:resolve("openrouter/deepseek/deepseek-v4.1-flash"))
+local foreign = assert(LLM:resolve("compat/chat-model"))
 local user = { role = "user", content = { { type = "text", text = "go" } } }
 local function send(model, history)
   return LLM:stream({ model = model, messages = history }, function() end)

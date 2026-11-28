@@ -75,10 +75,14 @@ return {
 						end
 					end
 					if gen then
+						local ctx_win = tonumber(m.inputTokenLimit)
+						if ctx_win and ctx_win < 2048 then
+							ctx_win = nil
+						end
 						out[#out + 1] = {
 							id = id,
 							name = type(m.displayName) == "string" and m.displayName or nil,
-							context_window = tonumber(m.inputTokenLimit),
+							context_window = ctx_win,
 							max_output = tonumber(m.outputTokenLimit),
 							reasoning = m.thinking == true or nil,
 						}
@@ -326,7 +330,7 @@ return {
 				}
 			end,
 			login_label = "API key (aistudio.google.com)",
-			default_model = "gemini-2.5-pro",
+			default_model = "gemini-4-argon",
 			default_context = 1048576,
 			default_max_output = 65536,
 			default_reasoning = true,
@@ -335,34 +339,37 @@ return {
 			end,
 			route = "google",
 			stream = stream,
+			-- Offline fallback seeds keep only fields absent from the bundled models.dev snapshot
+			-- (thinkingLevel vs thinkingBudget mode, effort lists, default_effort); names, limits,
+			-- modalities, reasoning flags and pricing come from preset/resources/models_dev.json.gz (MIT).
 			models = {
 				{
-					model_id = "gemini-3-pro-preview",
-					name = "Gemini 3 Pro",
-					context_window = 1048576,
-					max_output = 65536,
-					reasoning = true,
+					model_id = "gemini-4-argon",
 					reasoning_level = true,
-					efforts = { "low", "high" },
-					cost = { input = 2, output = 12, cache_read = 0.2 },
+					efforts = { "low", "medium", "high" },
+					default_effort = "medium",
 				},
 				{
-					model_id = "gemini-2.5-pro",
-					name = "Gemini 2.5 Pro",
-					context_window = 1048576,
-					max_output = 65536,
-					reasoning = true,
-					efforts = { "minimal", "low", "medium", "high", "xhigh" },
-					cost = { input = 1.25, output = 10, cache_read = 0.125 },
+					model_id = "gemini-4-carbon",
+					reasoning_level = true,
+					efforts = { "low", "medium", "high" },
+					default_effort = "medium",
 				},
 				{
-					model_id = "gemini-2.5-flash",
-					name = "Gemini 2.5 Flash",
-					context_window = 1048576,
-					max_output = 65536,
-					reasoning = true,
+					model_id = "gemini-4-hydrogen",
+					reasoning_level = true,
+					efforts = { "low", "medium", "high", "xhigh" },
+					default_effort = "high",
+				},
+				{
+					model_id = "gemini-3.8-flash",
+					reasoning_level = true,
+					efforts = { "low", "medium", "high" },
+					default_effort = "medium",
+				},
+				{
+					model_id = "gemini-3.5-flash-lite",
 					efforts = efforts,
-					cost = { input = 0.3, output = 2.5, cache_read = 0.03 },
 				},
 			},
 		})

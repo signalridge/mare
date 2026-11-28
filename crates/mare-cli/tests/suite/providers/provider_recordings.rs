@@ -50,7 +50,7 @@ async fn recorded_gateway_provider_responses() {
         assert!(!text_of(&oai_reasoning).is_empty(), "{oai_reasoning}");
 
         // 3. Gemini parallel tool calls over OpenAI-compat Chat SSE
-        let parallel = ask(&h, "deepseek/deepseek-chat").await;
+        let parallel = ask(&h, "compat/chat-model").await;
         assert_eq!(parallel["stop_reason"], "tool_use", "{parallel}");
         let calls: Vec<&Value> =
             parallel["content"].as_array().unwrap().iter().filter(|b| b["type"] == "tool_call").collect();

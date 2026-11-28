@@ -116,7 +116,7 @@ async fn prepared_output_caps_match_openai_chat_responses_and_google() {
     local(async {
         let mut env = TestEnv::new().await;
         for (model, prefix, key) in [
-            ("deepseek/deepseek-chat", "/compat", "chat"),
+            ("compat/chat-model", "/compat", "chat"),
             ("openai/gpt-6.1-terra", "/openai", "responses"),
             ("google/gemini-2.5-pro", "/google", "google"),
         ] {
@@ -245,7 +245,7 @@ async fn prepared_lower_bound_is_sent_when_the_encoder_omits_the_cap() {
             &mut env,
             &server,
             json!({ "models": {
-            "deepseek/deepseek-reasoner": { "context_window": 60000, "max_output": 8000 }
+            "compat/reasoner-model": { "context_window": 60000, "max_output": 8000 }
         }, "plugins": { "compact": { "auto": false, "headroom_tokens": 0 } } }),
         )
         .await;
@@ -253,10 +253,10 @@ async fn prepared_lower_bound_is_sent_when_the_encoder_omits_the_cap() {
         exec(
             &h,
             r#"
-            mare.config.param_rules = { { match = "deepseek/deepseek-reasoner", define = { effort = {
+            mare.config.param_rules = { { match = "compat/reasoner-model", define = { effort = {
                 only = { "deep" }, options = { { value = "deep", wire = { chat = {
                     ["max_tokens"] = { at_least = 4000 } } } } } } } } }
-            LLM:set_model("deepseek/deepseek-reasoner", { save = false })
+            LLM:set_model("compat/reasoner-model", { save = false })
             C.cordis:on("request/build", function(req, next) req.effort = "deep" return next() end)
         "#,
         )
@@ -268,7 +268,7 @@ async fn prepared_lower_bound_is_sent_when_the_encoder_omits_the_cap() {
         exec(
             &h,
             r#"
-            mare.config.param_rules = { { match = "deepseek/deepseek-reasoner", define = { effort = {
+            mare.config.param_rules = { { match = "compat/reasoner-model", define = { effort = {
                 only = { "deep" }, options = { { value = "deep", wire = { chat = { ["max_tokens"] = 8000 } } } } } } } }
         "#,
         )
@@ -280,7 +280,7 @@ async fn prepared_lower_bound_is_sent_when_the_encoder_omits_the_cap() {
         exec(
             &h,
             r#"
-            mare.config.param_rules = { { match = "deepseek/deepseek-reasoner", define = { effort = {
+            mare.config.param_rules = { { match = "compat/reasoner-model", define = { effort = {
                 only = { "deep" }, options = { { value = "deep", wire = { chat = function(req)
                     req.body.max_tokens = req.body.max_tokens
                 end } } } } } } }
@@ -400,9 +400,9 @@ async fn custom_options_map_to_fields_and_functions_per_route() {
         assert_eq!(body["reasoning"]["effort"], "xhigh", "{body}");
         assert!(body.get("parallel_tool_calls").is_none(), "removed by `false`: {body}");
         assert_eq!(body["max_output_tokens"], 200000, "at_least raised the default cap (128000)");
-        // another Anthropic model doesn't define deep: a level it doesn't know clamps to the
-        // middle (medium), and the adjustment is recorded for /profile
-        exec(&h, r#"LLM:set_model("anthropic/claude-sonnet-5-5", { save = false }) LLM:set_effort("deep", { save = false })"#).await;
+        // another Anthropic model doesn't define deep: a restored level it doesn't know clamps
+        // to the middle (medium), and the adjustment is recorded for /profile
+        exec(&h, r#"LLM:set_model("anthropic/claude-sonnet-5-5", { save = false }) LLM:restore_selection({ effort = "deep" })"#).await;
         let body = send(&h, &server, "anthropic/claude-sonnet-5-5").await;
         assert_eq!(body["output_config"]["effort"], "medium", "{body}");
         let log: String = eval(
@@ -430,7 +430,7 @@ async fn unsupported_options_clamp_error_or_pass_as_is() {
               { match = "opencode-go/glm-*", remove = { effort = { "high" } }, on_unsupported = "error" },
             }
             LLM:set_model("opencode-go/glm-5.3-flash", { save = false })
-            LLM:set_effort("xhigh", { save = false })"#,
+            LLM:restore_selection({ effort = "xhigh" })"#,
         )
         .await;
         let levels: String =
@@ -454,11 +454,27 @@ async fn unsupported_options_clamp_error_or_pass_as_is() {
         exec(&h, r#"mare.config.param_rules = { { match = "opencode-go/glm-*", on_unsupported = "as_is" } }"#).await;
         let body = send(&h, &server, "opencode-go/glm-5.3-flash").await;
         assert_eq!(body["reasoning"]["effort"], "xhigh", "{body}");
-        // ... the Anthropic adaptive route has no "$value" mapping: clamped, and noted
-        exec(&h, r#"mare.config.param_rules = { { route = "anthropic", on_unsupported = "as_is" } } LLM:set_model("anthropic/claude-sonnet-5-5", { save = false }) LLM:set_effort("max", { save = false })"#)
+        // Claude 5.5 models support native `max` effort (sent as output_config.effort = "max");
+        // Opus 5.5 always thinks (no `off` option).
+        let opus_efforts: String = eval(
+            &h,
+            r#"return table.concat(LLM:param_list(LLM:resolve("anthropic/claude-opus-5-5"))[1].list, " ")"#,
+        )
+        .await;
+        assert_eq!(opus_efforts, "low medium high xhigh max", "Opus 5.5 omits off and includes max");
+        exec(&h, r#"mare.config.param_rules = {} LLM:set_model("anthropic/claude-sonnet-5-5", { save = false }) LLM:set_effort("max", { save = false })"#)
             .await;
         let body = send(&h, &server, "anthropic/claude-sonnet-5-5").await;
-        assert_eq!(body["output_config"]["effort"], "max", "max clamped to xhigh (sent as max): {body}");
+        assert_eq!(body["output_config"]["effort"], "max", "Claude 5.5 sends max natively: {body}");
+        exec(&h, r#"LLM:set_model("anthropic/claude-opus-5-5", { save = false }) LLM:set_effort("max", { save = false })"#)
+            .await;
+        let body = send(&h, &server, "anthropic/claude-opus-5-5").await;
+        assert_eq!(body["output_config"]["effort"], "max", "Claude Opus 5.5 sends max natively: {body}");
+        // ... the Anthropic adaptive route has no "$value" mapping: clamped, and noted
+        exec(&h, r#"mare.config.param_rules = { { route = "anthropic", on_unsupported = "as_is" } } LLM:set_model("anthropic/claude-opus-5-5", { save = false }) LLM:restore_selection({ effort = "minimal" })"#)
+            .await;
+        let body = send(&h, &server, "anthropic/claude-opus-5-5").await;
+        assert_eq!(body["output_config"]["effort"], "low", "minimal clamped to low (sent as low): {body}");
         let kinds: String = eval(
             &h,
             r#"local out = {} for _, r in ipairs(LLM:params_log()) do out[#out + 1] = r.kind end return table.concat(out, " ")"#,
@@ -596,7 +612,7 @@ async fn parameter_mapping_retained_headers_do_not_gain_provider_credentials() {
         for (model, header, expected) in [
             ("openai/gpt-6.1-terra", "authorization", "Bearer test-openai"),
             ("anthropic/claude-sonnet-5-5", "x-api-key", "test-anthropic"),
-            ("deepseek/deepseek-reasoner", "authorization", "Bearer test-deepseek"),
+            ("compat/reasoner-model", "authorization", "Bearer test-compat"),
             ("google/gemini-2.5-pro", "x-goog-api-key", "test-google"),
         ] {
             send(&h, &server, model).await;
@@ -1240,6 +1256,11 @@ async fn google_thinking_level_maps_minimal_medium_xhigh_and_clamps_to_model_eff
                         "reasoning": true,
                         "reasoning_level": true,
                         "efforts": ["minimal", "low", "medium", "high", "xhigh"]
+                    },
+                    "google/gemini-3-pro-preview": {
+                        "reasoning": true,
+                        "reasoning_level": true,
+                        "efforts": ["low", "high"]
                     }
                 }
             }),
@@ -1254,11 +1275,11 @@ async fn google_thinking_level_maps_minimal_medium_xhigh_and_clamps_to_model_eff
             for _, eff in ipairs({ "minimal", "low", "medium", "high", "xhigh" }) do
                 LLM:stream({ model = flash, system = "S", messages = msgs, effort = eff }, function() end)
             end
-            -- gemini-3-pro-preview only supports { "low", "high" }: session medium clamps to low, session xhigh clamps to high
+            -- gemini-3-pro-preview only supports { "low", "high" }: restored session medium ties up to high, xhigh clamps to high
             LLM:set_model("google/gemini-3-pro-preview", { save = false })
-            LLM:set_effort("medium", { save = false })
+            LLM:restore_selection({ effort = "medium" })
             LLM:stream({ model = pro, system = "S", messages = msgs }, function() end)
-            LLM:set_effort("xhigh", { save = false })
+            LLM:restore_selection({ effort = "xhigh" })
             LLM:stream({ model = pro, system = "S", messages = msgs }, function() end)
             "#,
         )
@@ -1277,7 +1298,7 @@ async fn google_thinking_level_maps_minimal_medium_xhigh_and_clamps_to_model_eff
             .collect();
         assert_eq!(
             levels,
-            vec!["minimal", "low", "medium", "high", "xhigh", "low", "high"],
+            vec!["minimal", "low", "medium", "high", "xhigh", "high", "high"],
             "google thinkingLevel must map minimal/low/medium/high/xhigh directly and clamp per model efforts: {levels:?}"
         );
         h.shutdown().await;

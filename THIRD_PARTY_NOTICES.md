@@ -19,6 +19,13 @@ Release archives, Linux packages, package-manager installs, and the container im
   - `crates/mare-binding/src/sse/tests.rs`: `[eventsource-parser]` test cases translated from `test/parse.test.ts` and `test/fixtures.ts`.
 - **Kimi Code (`MoonshotAI/kimi-code`)** — MIT License & Apache License 2.0:
   - `crates/mare-shared/src/redact.rs`: includes key-name and raw secret redaction patterns (MIT, Copyright (c) 2026 Moonshot AI) and token redaction patterns (Apache-2.0).
+- **magpie (`https://github.com/yetone/magpie`)** — MIT License (Copyright (c) 2026 yetone):
+  - `crates/mare-plugin/preset/plugins/lua/llm/closest.lua`: ported model-name word-scoring suggestion matcher from `internal/provider/closest.go`.
+  - `crates/mare-plugin/preset/plugins/lua/llm/params.lua`: adapted nearest-effort clamping rules (tie-break upward, non-off never clamping to off/none, vendor effort aliases) from `internal/catalog/catalog.go`.
+  - `crates/mare-cli/tests/suite/providers/model_resolve.rs`: ported effort clamping and vendor-alias test cases from `internal/catalog/nearest_effort_test.go` and `internal/catalog/effort_alias_test.go`.
+  - `crates/mare-cli/tests/fixtures/kimi-code-cn-models-2026-10-31.json` and `crates/mare-cli/tests/suite/providers/models/discovery.rs`: imported Kimi Code `/models` fixture and ported `TestFetchKimiCodeFacts` from `internal/catalog/testdata/kimi-code-cn-models-2026-10-31.json` and `internal/catalog/kimi_facts_test.go`.
+- **models.dev (`https://github.com/anomalyco/models.dev`)** — MIT License (Copyright (c) 2025 models.dev):
+  - `crates/mare-plugin/preset/resources/models_dev.json.gz`: bundled trimmed model catalog snapshot generated from `https://models.dev/api.json` by `scripts/presets_drift.py --update`.
 
 ## OpenAI Codex Derived Files (Apache-2.0)
 

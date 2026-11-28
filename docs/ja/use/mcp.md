@@ -93,14 +93,14 @@ mare -p --trust --approve-mcps "list my open issues"
 
 | 階層 | 動作 |
 | --- | --- |
-| `deferred` (既定) | 起動時にはサーバーに接続しません。モデルは `tool_search` でツールとそのスキーマを検索します。キャッシュがないサーバーには最初の検索時に接続してツールを取得します。`~/.local/state/mare/mcp-tools` の一覧があれば、初回使用まで接続しません。`tool_update = "addition_only"` に対応するモデル (Anthropic Claude、OpenAI Responses の `gpt-5.4` 以降、Kimi K3) は会話途中で遅延ツールを有効化して直接呼び出します。その他のモデルは固定の `call_tool` プロキシ経由で呼び出すため、トップレベルの `tools` 配列とプロンプトのプレフィックスキャッシュがターンをまたいで安定します。 |
+| `deferred` (既定) | 起動時にはサーバーに接続しません。モデルは `tool_search` でツールとそのスキーマを検索します。キャッシュがないサーバーには最初の検索時に接続してツールを取得します。`~/.local/state/mare/mcp-tools` の一覧があれば、初回使用まで接続しません。`tool_update = "addition_only"` に対応するモデル (Anthropic Claude、OpenAI Responses の `gpt-5.4` 以降、Responses API 上の DeepSeek V4.1 Flash、Kimi K3) は会話途中で遅延ツールを有効化して直接呼び出します。その他のモデルは固定の `call_tool` プロキシ経由で呼び出すため、トップレベルの `tools` 配列とプロンプトのプレフィックスキャッシュがターンをまたいで安定します。 |
 | `direct` | 起動時にバックグラウンドで接続し、ツールは組み込みのツールと同様に宣言されます。リクエストがこの接続を待つことはありません (`required` の場合を除く)。まだ接続中のツールは次のターンから加わります。 |
 | `hidden` | 利用できません。 |
 | `codemode` | コードモードのスクリプトからのみ呼び出せます。codemode プラグインが必要で、ない場合は `deferred` として扱われます。 |
 
 `tool_search` はキーワード (`github issues`) か完全な名前 (`select:mcp__github__create_issue`、1 回のクエリで最大 32 件) を受け取り、固定のトークン予算内で一致するツールのスキーマを返します。システムプロンプトには、サーバーごとに 1 行が入ります。
 
-> **全プロバイダーでのプロンプトキャッシュ:** 遅延ツールの探索では、どのプロバイダーでもシステムプロンプトとトップレベルの `tools` 配列がターンをまたいで固定されます。`tool_update = "addition_only"` に対応するモデル (Anthropic Claude、OpenAI Responses `gpt-5.4` 以降、Kimi K3) はネイティブにツールを追加し、その他のエンドポイント (DeepSeek、GLM、Google Gemini、旧 OpenAI モデル、Kimi K2 など) は `tools[]` を変更せず固定の `call_tool` プロキシ経由で呼び出すため、プレフィックスキャッシュが保たれます。少数のツールを最初から直接宣言したい場合は `tier = "direct"` (または `tools` で個別ツールを `"direct"`) に設定してください。
+> **全プロバイダーでのプロンプトキャッシュ:** 遅延ツールの探索では、どのプロバイダーでもシステムプロンプトとトップレベルの `tools` 配列がターンをまたいで固定されます。`tool_update = "addition_only"` に対応するモデル (Anthropic Claude、OpenAI Responses `gpt-5.4` 以降、Responses API 上の DeepSeek V4.1 Flash、Kimi K3) はネイティブにツールを追加し、その他のエンドポイント (DeepSeek V4 Pro、GLM、Google Gemini、旧 OpenAI モデル、Kimi K2 など) は `tools[]` を変更せず固定の `call_tool` プロキシ経由で呼び出すため、プレフィックスキャッシュが保たれます。少数のツールを最初から直接宣言したい場合は `tier = "direct"` (または `tools` で個別ツールを `"direct"`) に設定してください。
 
 サーバーがリソースを提供する場合、モデルにはそれを一覧表示して読み取るツールも提供されます。サーバーのプロンプトは `/mcp__<server>__<prompt>` という名前のスラッシュコマンドとして現れます (`name=value` 形式の引数か、位置引数の語を渡します)。サーバーからの elicitation リクエストは TUI ではフォームとして表示され、ヘッドレス実行では常に辞退されます。
 

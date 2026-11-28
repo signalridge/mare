@@ -2,7 +2,7 @@
 
 如何登录 provider、选择模型和推理强度、覆盖模型元数据，以及添加自定义 provider。
 
-模型以 `provider/id` 命名，例如 `openai/gpt-6.1-terra`。provider 是内置插件；每个 provider 注册自己的模型，有些在你登录后还会获取实时的模型列表。
+模型以 `provider/id` 命名，例如 `openai/gpt-6-luna`。provider 是内置插件；每个 provider 注册自己的模型，有些在你登录后还会获取实时的模型列表。
 
 ## Provider
 
@@ -67,7 +67,7 @@ mare.provider("anthropic", { api_key = { cmd = { "pass", "show", "anthropic/api-
 ## 选择模型
 
 ```sh
-mare -m openai/gpt-6.1-terra            # this run
+mare -m openai/gpt-6-luna               # this run
 mare -m sonnet                          # an alias
 ```
 
@@ -77,8 +77,8 @@ mare -m sonnet                          # an alias
 
 ```lua
 mare.setup {
-  model = "openai/gpt-6.1-terra",
-  favorite_models = { "openai/gpt-6.1-terra", "anthropic/claude-sonnet-5-5" },
+  model = "openai/gpt-6-luna",
+  favorite_models = { "openai/gpt-6-luna", "anthropic/claude-sonnet-5-5" },
   fallback_models = { "google/gemini-2.5-pro" },   -- tried when the current model is overloaded or out of quota
 }
 ```
@@ -86,7 +86,7 @@ mare.setup {
 你也可以设置 `MARE_MODEL`。`init.lua` 中显式指定的 `model`（或标志、变量）优先于你上次用 `/model` 选择的模型，后者由 mare 记在 `state.json` 中（见下文）。内置别名 `sonnet`、`opus` 和 `haiku` 选择该系列最新的 Anthropic 模型。可以用 `mare.model` 定义自己的别名：
 
 ```lua
-mare.model { provider = "openai", id = "gpt-6.1-terra", alias = "main" }
+mare.model { provider = "openai", id = "gpt-6-luna", alias = "main" }
 ```
 
 之后 `-m main`、`/model main` 和 `fallback_models` 都接受 `main`。

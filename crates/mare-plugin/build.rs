@@ -98,6 +98,22 @@ fn main() {
     news_enc.write_all(news_src.as_bytes()).unwrap();
     std::fs::write(out_dir.join("news.deflate"), news_enc.finish().unwrap()).unwrap();
 
+    // Embed any static read-only data assets placed under `preset/resources/` generically so
+    // built-in plugins read them via `mare.plugins.read_resource(path)` without per-asset APIs.
+    let resources_dir = preset_dir.join("resources");
+    println!("cargo:rerun-if-changed={}", resources_dir.display());
+    let mut resource_files = Vec::new();
+    collect_all_files(&resources_dir, &resources_dir, &mut resource_files);
+    resource_files.sort();
+    let mut res_list = String::from("&[\n");
+    for rel in resource_files {
+        let p = resources_dir.join(&rel);
+        println!("cargo:rerun-if-changed={}", p.display());
+        let _ = writeln!(res_list, "    ({rel:?}, include_bytes!({:?}) as &[u8]),", p.display().to_string());
+    }
+    res_list.push(']');
+    std::fs::write(out_dir.join("builtin_resources.rs"), res_list).unwrap();
+
     // Collect `preset/types/**/*.lua` into the compressed runtime archive.
     let types_dir = preset_dir.join("types");
     println!("cargo:rerun-if-changed={}", types_dir.display());
@@ -633,6 +649,21 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>) {
             println!("cargo:rerun-if-changed={}", p.display());
             collect_files(root, &p, out);
         } else if p.extension().and_then(|s| s.to_str()) == Some("lua") {
+            let rel = p.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
+            out.push(rel);
+        }
+    }
+}
+
+/// Relative paths of every regular file below `dir` (used for generic `preset/resources/` assets).
+fn collect_all_files(root: &Path, dir: &Path, out: &mut Vec<String>) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            println!("cargo:rerun-if-changed={}", p.display());
+            collect_all_files(root, &p, out);
+        } else if p.is_file() {
             let rel = p.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
             out.push(rel);
         }

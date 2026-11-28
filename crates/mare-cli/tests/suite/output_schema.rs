@@ -388,7 +388,14 @@ async fn lua_agent_prompt_and_llm_request_validate_and_forward_to_all_providers(
             .host()
             .config(json!({
                 "model": "openai/gpt-6.1-terra",
-                "providers": { "deepseek": { "base_url": format!("{base}/compat") } },
+                "providers": {
+                    "compat": {
+                        "wire": "openai-chat",
+                        "base_url": format!("{base}/compat"),
+                        "api_key": "test-compat",
+                        "models": [{ "model_id": "chat-model", "context_window": 128000, "max_output": 8192 }]
+                    }
+                },
                 "plugins": {
                     "provider-openai": { "base_url": format!("{base}/openai") },
                     "provider-anthropic": { "base_url": format!("{base}/anthropic") },
@@ -435,7 +442,7 @@ async fn lua_agent_prompt_and_llm_request_validate_and_forward_to_all_providers(
                     output_schema = schema,
                 }, function() end)
             end
-            local msg_compat = stream_one("deepseek/deepseek-chat")
+            local msg_compat = stream_one("compat/chat-model")
             local msg_anthropic = stream_one("anthropic/claude-sonnet-4-6")
             local msg_google = stream_one("google/gemini-2.5-flash")
             return {

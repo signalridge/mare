@@ -26,9 +26,9 @@ const WIRES: [WireTarget; 4] = [
     WireTarget {
         wire: "openai-chat",
         expected_route: "chat",
-        model_ref: "deepseek/deepseek-chat",
+        model_ref: "compat/chat-model",
         route: "/compat",
-        provider_label: "deepseek",
+        provider_label: "compat",
     },
     WireTarget {
         wire: "anthropic-messages",
@@ -629,7 +629,7 @@ async fn four_wire_coded_error_and_retry_contract_invariants() {
             assert!(g_msg["content"].as_array().is_some_and(|c| !c.is_empty()), "{g_msg}");
             assert!(g_msg["usage"].is_object(), "{g_msg}");
 
-            let c_msg = stream(&h, "deepseek/deepseek-chat").await;
+            let c_msg = stream(&h, "compat/chat-model").await;
             assert_eq!(c_msg["stop_reason"], "error");
             assert_eq!(c_msg["raw_stop_reason"], "weird_custom_stop");
             assert_eq!(c_msg["error_kind"], "malformed_response", "{c_msg}");

@@ -348,17 +348,17 @@ async fn anthropic_google_and_compat_share_the_request_and_event_hooks_and_heade
                C.cordis:on("provider/request", function(w, ev) w.headers["x-hooked"] = w.provider; return ev.next() end)
                C.cordis:on("provider/event", function(data, ev) seen[data.provider] = (seen[data.provider] or 0) + 1; return ev.next() end)
                local msgs = { { role = "user", content = { { type = "text", text = "hi" } } } }
-               for _, ref in ipairs({ "anthropic/claude-sonnet-5-5", "google/gemini-2.5-pro", "deepseek/deepseek-reasoner" }) do
+               for _, ref in ipairs({ "anthropic/claude-sonnet-5-5", "google/gemini-2.5-pro", "compat/reasoner-model" }) do
                  local m = assert(LLM:resolve(ref))
                  LLM:stream({ model = m, system = "S", messages = msgs }, function() end)
                end
-               return { seen.anthropic or 0, seen.google or 0, seen.deepseek or 0 }"#,
+               return { seen.anthropic or 0, seen.google or 0, seen.compat or 0 }"#,
         )
         .await;
         assert!(counts.iter().all(|n| *n > 0), "provider/event fired for every provider: {counts:?}");
         let reqs = server.requests();
         assert_eq!(reqs.len(), 3);
-        for (r, prov) in reqs.iter().zip(["anthropic", "google", "deepseek"]) {
+        for (r, prov) in reqs.iter().zip(["anthropic", "google", "compat"]) {
             assert_eq!(r.header("x-team"), Some("blue"), "{}: headers option", r.path);
             assert_eq!(r.header("x-hooked"), Some(prov), "{}: provider/request rewrote it", r.path);
         }
@@ -404,7 +404,7 @@ async fn a_transport_retry_uses_a_fresh_connection() {
 async fn provider_request_hooks_cannot_change_the_frozen_tool_declarations() {
     local(async {
         for model in
-            ["openai/gpt-6.1-terra", "anthropic/claude-sonnet-5-5", "deepseek/deepseek-chat", "google/gemini-2.5-pro"]
+            ["openai/gpt-6.1-terra", "anthropic/claude-sonnet-5-5", "compat/chat-model", "google/gemini-2.5-pro"]
         {
             let mut env = TestEnv::new().await;
             let server = MockServer::start().await;
@@ -515,7 +515,7 @@ async fn legacy_function_declarations_cannot_be_injected_by_a_request_hook() {
         end)"#,
         )
         .await;
-        let response = stream(&h, "deepseek/deepseek-chat").await;
+        let response = stream(&h, "compat/chat-model").await;
         assert_eq!(response["stop_reason"], "error", "{response}");
         assert!(response.to_string().contains("provider request changed frozen tool declarations"), "{response}");
         assert!(server.requests().is_empty());
@@ -915,7 +915,7 @@ LLM:auth_set("openai-codex", {
         eval::<()>(
             &h,
             r#"
-local m = LLM:resolve("openai/gpt-5.3-codex")
+local m = LLM:resolve("openai/gpt-6.1-terra")
 LLM:stream({ model = m, session_id = "same-sess", messages = { { role = "user", content = { { type = "text", text = "hi 1" } } } }, no_fallback = true }, function() end)
 "#,
         )
@@ -937,7 +937,7 @@ LLM:auth_set("openai-codex", {
         eval::<()>(
             &h,
             r#"
-local m = LLM:resolve("openai/gpt-5.3-codex")
+local m = LLM:resolve("openai/gpt-6.1-terra")
 LLM:stream({ model = m, session_id = "same-sess", messages = { { role = "user", content = { { type = "text", text = "hi 2" } } } }, no_fallback = true }, function() end)
 "#,
         )
@@ -1056,7 +1056,7 @@ LLM:auth_set("openai-codex", {
         let ok_res: bool = eval(
             &h2,
             r#"
-local m = LLM:resolve("openai/gpt-5.3-codex")
+local m = LLM:resolve("openai/gpt-6.1-terra")
 local res1 = LLM:stream({ model = m, session_id = "s-401", messages = { { role = "user", content = { { type = "text", text = "hi 1" } } } }, no_fallback = true }, function() end)
 local res2 = LLM:stream({ model = m, session_id = "s-401", messages = { { role = "user", content = { { type = "text", text = "hi 2" } } } }, no_fallback = true }, function() end)
 return tostring(res1.content[1].text) == "ws-recovered" and tostring(res2.content[1].text) == "ws-recovered"

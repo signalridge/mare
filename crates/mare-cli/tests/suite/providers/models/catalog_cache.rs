@@ -1177,7 +1177,7 @@ async fn child_vm_reads_cache_without_network_refresh_or_write() {
         let (has_cached, rc, rm): (bool, String, i64) = eval(
             &h_child,
             r#"
-local args = { model = LLM:resolve("anthropic/claude-from-parent") }
+local args = { model = LLM:resolve("anthropic/claude-sonnet-5-5") }
 LLM:prepare_request(args)
 local before = LLM:resolve("anthropic/claude-from-parent")
 local prev_mode = mare.mode

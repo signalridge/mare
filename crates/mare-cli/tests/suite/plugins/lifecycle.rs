@@ -608,7 +608,7 @@ async fn provider_anthropic_google_and_compat_apply_defer_wire_and_stream_until_
             r#"return L:describe_wire("anthropic-messages").route,
                       L:describe_wire("google-generate").route,
                       L:describe_wire("openai-chat").route,
-                      L:resolve("deepseek/deepseek-chat") ~= nil"#,
+                      L:resolve("deepseek/deepseek-flash") ~= nil"#,
         )
         .await;
         assert_eq!(a_route, "anthropic");
@@ -662,12 +662,12 @@ async fn provider_anthropic_google_and_compat_apply_defer_wire_and_stream_until_
         exec(
             &h,
             r#"pcall(L:wire("openai-chat"), {
-                   provider = "deepseek",
-                   label = "DeepSeek",
+                   provider = "kimi",
+                   label = "Kimi",
                    url = "http://127.0.0.1:1/chat/completions",
-                   key = "sk-ds-test",
+                   key = "sk-kimi-test",
                }, {
-                   model = L:resolve("deepseek/deepseek-chat"),
+                   model = L:resolve("kimi/kimi-k3.1-pro"),
                    system = "",
                    messages = {},
                }, function() end)"#,

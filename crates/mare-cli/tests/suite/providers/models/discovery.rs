@@ -65,7 +65,7 @@ async fn model_catalogue_reads_the_disk_cache_and_refreshes_in_the_background() 
             "/compat/models",
             vec![Resp::status(
                 200,
-                r#"{"object":"list","data":[{"id":"deepseek-chat","context_length":1},{"id":"listed-2","context_length":65536}]}"#,
+                r#"{"object":"list","data":[{"id":"deepseek-flash","context_length":1},{"id":"listed-2","context_length":65536}]}"#,
             )],
         );
         let h = provider_host(&mut env, &server, json!({ "plugins": { "llm": { "catalog_refresh_ms": 0 } } })).await;
@@ -74,27 +74,27 @@ async fn model_catalogue_reads_the_disk_cache_and_refreshes_in_the_background() 
         let _: bool = eval(&h, "return LLM:resolve('deepseek/cached-1') ~= nil").await;
         wait_until(10, "the cached list from disk", || {
             let h = h.clone();
-            async move { eval::<bool>(&h, "local m = LLM:resolve('deepseek/cached-1'); return m.listed == true").await }
+            async move { eval::<bool>(&h, "local m = LLM:resolve('deepseek/cached-1'); return m ~= nil and m.listed == true").await }
         })
         .await;
         assert_eq!(server.count("/compat/models"), 0, "no listing request on the startup path");
         exec(&h, "C.cordis:get('bus'):emit('ui/ready')").await;
         wait_until(10, "the refreshed model", || {
             let h = h.clone();
-            async move { eval::<bool>(&h, "local m = LLM:resolve('deepseek/listed-2'); return m.listed == true").await }
+            async move { eval::<bool>(&h, "local m = LLM:resolve('deepseek/listed-2'); return m ~= nil and m.listed == true").await }
         })
         .await;
         let (ctx_listed, ctx_static, name_static): (i64, i64, String) = eval(
             &h,
-            r#"local l, s = LLM:resolve('deepseek/listed-2'), LLM:resolve('deepseek/deepseek-chat')
+            r#"local l, s = LLM:resolve('deepseek/listed-2'), LLM:resolve('deepseek/deepseek-flash')
                return l.context_window, s.context_window, s.name"#,
         )
         .await;
         assert_eq!(ctx_listed, 65536);
         assert_eq!(
             (ctx_static, name_static.as_str()),
-            (1, "DeepSeek V3.2"),
-            "server context_window overrides unmeasured static entry"
+            (1_048_576, "DeepSeek V4.1 Flash 1017"),
+            "sub-2048 server context_length is treated as unknown and does not overwrite valid catalog window"
         );
         let req = server.requests().into_iter().find(|r| r.path.starts_with("/compat/models")).unwrap();
         assert_eq!(req.header("authorization"), Some("Bearer test-deepseek"));
@@ -219,7 +219,7 @@ assert(type(out.openai) == "number" and out.openai >= 2, "expected added models,
                    if m.id == "gpt-6-none" then none_picker = true end
                end
                local n = LLM:resolve("openai/gpt-6-none")
-               return h ~= nil, h and h.hidden == true, hidden_picker, none_picker, n ~= nil and n.listed == nil"#,
+               return h ~= nil, h and h.hidden == true, hidden_picker, none_picker, n == nil"#,
         )
         .await;
         assert!(hidden_ok && hidden_flag, "visibility=hide resolves as hidden");
@@ -275,14 +275,14 @@ async fn chatgpt_model_discovery_refreshes_oauth_degrades_gracefully_and_guards_
             )
             .await;
 
-            let (err_msg, has_cached, has_static): (String, bool, bool) = eval(
+            let (err_msg, has_cached, pruned_by_cache): (String, bool, bool) = eval(
                 &h,
                 r#"
 mare.fs.write(mare.paths.auth, mare.json.encode({ version = 1,
   ["openai-codex"] = { type = "oauth", access = "stale-secret-tok", refresh = "old-secret-ref", expires = 0, account_id = "acct-secret-1" }
 }), { mode = 384 })
 local out = LLM:refresh_catalog({ name = "openai", force = true })
-return tostring(out.openai), LLM:resolve("openai/cached-codex") ~= nil, LLM:resolve("openai/gpt-6.1-terra") ~= nil
+return tostring(out.openai), LLM:resolve("openai/cached-codex") ~= nil, LLM:resolve("openai/gpt-6.1-terra") == nil
 "#,
             )
             .await;
@@ -292,12 +292,16 @@ return tostring(out.openai), LLM:resolve("openai/cached-codex") ~= nil, LLM:reso
                 assert!(!err_msg.contains(secret), "error leaked credential {secret}: {err_msg}");
             }
             assert!(has_cached, "cached model must survive failed refresh");
-            assert!(has_static, "static model must survive failed refresh");
+            assert!(pruned_by_cache, "non-empty cached live listing must prune omitted built-in seed");
 
             let req = server.requests().into_iter().find(|r| r.path.starts_with("/codex/codex/models")).unwrap();
             assert_eq!(req.header("authorization"), Some("Bearer fresh-secret-tok"), "must refresh expired OAuth token");
             let cache = std::fs::read_to_string(dir.join("openai.json")).unwrap();
             assert!(cache.contains("cached-codex"), "cache must not be wiped on error: {cache}");
+            std::fs::remove_file(dir.join("openai.json")).unwrap();
+            let restored_after_clear: bool =
+                eval(&h, r#"LLM:invalidate_catalog("openai"); return LLM:resolve("openai/gpt-6.1-terra") ~= nil"#).await;
+            assert!(restored_after_clear, "static seed must be restored once cache is cleared");
             h.shutdown().await;
         }
 
@@ -1288,4 +1292,416 @@ return builtins_use_catalog, has_a, saw_a, has_b, a_gone
         h.shutdown().await;
     })
     .await
+}
+
+/// Live `GET /models` is authoritative over static preset seeds (which act as offline fallback):
+/// - HTTP failure keeps static seeds visible.
+/// - Non-empty live `/models` shows only live models (merging static metadata for matching IDs,
+///   pruning omitted static seeds unless pinned by user overrides).
+/// - When live `/models` omits `default_model`, `LLM:current()` picks a live model rather than
+///   synthesizing the omitted static default.
+/// - Logout restores offline static seeds.
+#[tokio::test]
+async fn live_models_endpoint_is_authoritative_over_static_seeds_with_offline_fallback() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        env.set_var("OPENAI_API_KEY", "");
+        env.set_var("ANTHROPIC_API_KEY", "");
+        env.set_var("GEMINI_API_KEY", "");
+        env.set_var("GOOGLE_API_KEY", "");
+        env.set_var("OPENCODE_API_KEY", "");
+        env.set_var("MOONSHOT_API_KEY", "");
+        env.set_var("KIMI_API_KEY", "");
+        env.set_var("OPENROUTER_API_KEY", "");
+        let server = MockServer::start().await;
+        server.route(
+            "/compat/models",
+            vec![
+                Resp::status(500, r#"{"error":"offline"}"#),
+                Resp::status(200, r#"{"object":"list","data":[{"id":"deepseek-flash"},{"id":"deepseek-v5-live"}]}"#),
+                Resp::status(200, r#"{"object":"list","data":[]}"#),
+                Resp::status(200, r#"{"object":"list","data":[{"id":"deepseek-v5-only"},{"id":"deepseek-a-second"}]}"#),
+            ],
+        );
+        server.route("/myproxy/models", vec![Resp::status(200, r#"{"object":"list","data":[{"id":"server-only"}]}"#)]);
+        let h = env
+            .host()
+            .no_session()
+            .config(json!({
+                "model": "",
+                "providers": {
+                    "deepseek": {
+                        "base_url": format!("{}/compat", server.base),
+                    },
+                    "myproxy": {
+                        "base_url": format!("{}/myproxy", server.base),
+                        "api_key": "sk-myproxy-1",
+                        "models": [{
+                            "model_id": "custom-pinned",
+                            "name": "Custom Pinned",
+                            "context_window": 64000,
+                            "max_output": 8192,
+                            "reasoning": true,
+                            "efforts": ["low", "high"],
+                            "cost": { "input": 1, "output": 2 }
+                        }]
+                    }
+                },
+                "plugins": {
+                    "provider-faux": { "enabled": false },
+                    "llm": { "catalog_refresh_ms": 0 }
+                }
+            }))
+            .build()
+            .await;
+        global(&h, "LLM", h.service_table("llm").unwrap());
+
+        let out_json: String = eval(
+            &h,
+            r#"
+            local function ids_of(prov)
+                local ids = {}
+                for _, m in ipairs(LLM:models()) do
+                    if m.provider == prov then ids[#ids + 1] = m.id end
+                end
+                table.sort(ids)
+                return ids
+            end
+
+            -- 1. Offline / HTTP 500: built-in seeds remain as offline fallback.
+            mare.fs.write(mare.paths.auth, mare.json.encode({ version = 1,
+                deepseek = { type = "api_key", key = "sk-ds-test-1" }
+            }), { mode = 384 })
+            LLM:refresh_catalog({ name = "deepseek", force = true })
+            local offline_ids = ids_of("deepseek")
+
+            -- 2. Live GET /models succeeds: live list is authoritative; omitted built-in seeds are
+            -- pruned while matching static entries retain curated metadata.
+            LLM:refresh_catalog({ name = "deepseek", force = true })
+            local live_ids = ids_of("deepseek")
+            local flash = assert(LLM:resolve("deepseek/deepseek-flash"))
+
+            -- 3. Empty 200 GET /models restores built-in seeds as offline fallback.
+            LLM:refresh_catalog({ name = "deepseek", force = true })
+            local empty_ids = ids_of("deepseek")
+
+            -- 4. Live GET /models omits static default_model: LLM:current() picks a live model.
+            mare.config.model = nil
+            LLM:refresh_catalog({ name = "deepseek", force = true })
+            local only_ids = ids_of("deepseek")
+            local cur = LLM:current()
+
+            -- 5. Logout clears live entries and restores built-in seeds as offline fallback.
+            LLM:logout("deepseek")
+            local after_logout_ids = ids_of("deepseek")
+
+            -- 6. User-declared `providers.<name>.models` entries are NEVER pruned by live /models.
+            LLM:refresh_catalog({ name = "myproxy", force = true })
+            local proxy_ids = ids_of("myproxy")
+            local pinned = assert(LLM:resolve("myproxy/custom-pinned"))
+
+            return mare.json.encode({
+                offline_ids = offline_ids,
+                live_ids = live_ids,
+                empty_ids = empty_ids,
+                flash_name = flash.name,
+                flash_ctx = flash.context_window,
+                only_ids = only_ids,
+                current_ref = cur and cur.ref or nil,
+                after_logout_ids = after_logout_ids,
+                proxy_ids = proxy_ids,
+                pinned_ctx = pinned.context_window,
+                pinned_out = pinned.max_output,
+                pinned_efforts = pinned.efforts,
+                pinned_cost = pinned.cost,
+            })
+            "#,
+        )
+        .await;
+        let v: Value = serde_json::from_str(&out_json).unwrap();
+        assert_eq!(
+            v["offline_ids"],
+            json!(["deepseek-flash", "deepseek-v4-pro"]),
+            "offline refresh must keep built-in seeds: {v}"
+        );
+        assert_eq!(
+            v["live_ids"],
+            json!(["deepseek-flash", "deepseek-v5-live"]),
+            "live GET /models must prune omitted built-in seeds: {v}"
+        );
+        assert_eq!(
+            v["empty_ids"],
+            json!(["deepseek-flash", "deepseek-v4-pro"]),
+            "empty 200 GET /models must restore built-in seeds as fallback: {v}"
+        );
+        assert_eq!(
+            v["flash_name"], "DeepSeek V4.1 Flash 1017",
+            "curated static + bundled models.dev metadata must merge: {v}"
+        );
+        assert_eq!(v["flash_ctx"], 1_048_576, "{v}");
+        assert_eq!(v["only_ids"], json!(["deepseek-a-second", "deepseek-v5-only"]), "{v}");
+        assert_eq!(
+            v["current_ref"], "deepseek/deepseek-v5-only",
+            "LLM:current() auto-default must fall back to the first live-listed model when static default_model was pruned: {v}"
+        );
+        assert_eq!(
+            v["after_logout_ids"],
+            json!(["deepseek-flash", "deepseek-v4-pro"]),
+            "logout must restore built-in seeds as offline fallback: {v}"
+        );
+        assert_eq!(
+            v["proxy_ids"],
+            json!(["custom-pinned", "server-only"]),
+            "user providers.<name>.models must not be pruned by live GET /models: {v}"
+        );
+        assert_eq!(v["pinned_ctx"], 64_000, "{v}");
+        assert_eq!(v["pinned_out"], 8192, "{v}");
+        assert_eq!(v["pinned_efforts"], json!(["low", "high"]), "{v}");
+        assert_eq!(v["pinned_cost"], json!({ "input": 1, "output": 2 }), "{v}");
+
+        h.shutdown().await;
+    })
+    .await;
+}
+
+/// P3: generic Kimi `/models` listing parser (ported from magpie `TestFetchKimiCodeFacts`, MIT)
+/// parses both flat (`supports_dynamic_tools`, `supports_thinking_type`, `think_efforts`) and
+/// nested (`tools.dynamic_load`, `reasoning.type`, `reasoning.effort`, `modalities.input`) forms
+/// and tolerates malformed field types without failing.
+#[tokio::test]
+async fn fetch_kimi_code_facts_parses_dynamic_tools_efforts_and_modalities() {
+    local(async {
+        let fixture_body = fixture("kimi-code-cn-models-2026-10-31.json");
+        let nested_body = r#"{"data":[
+            {"id":"nested","reasoning":{"type":"only","effort":{"valid":["off","low","high"],"default":"low"}},"tools":{"dynamic_load":true},"modalities":{"input":["text","image"]}},
+            {"id":"both","supports_thinking_type":"both","supports_dynamic_tools":false,"reasoning":{"type":"both"},"tools":{"dynamic_load":false}},
+            {"id":"odd","supports_thinking_type":7,"supports_dynamic_tools":"yes","think_efforts":"max","reasoning":"only","tools":[1]},
+            {"id":"glm-5","context_length":200000}
+        ]}"#;
+
+        let mut env = TestEnv::new().await;
+        env.set_var("KIMI_API_KEY", "test-kimi-code");
+        let server = MockServer::start().await;
+        server.route(
+            "/kimi-code/models",
+            vec![Resp::status(200, fixture_body), Resp::status(200, nested_body)],
+        );
+        let h = provider_host(
+            &mut env,
+            &server,
+            json!({
+                "providers": {
+                    "kimi-code": { "base_url": format!("{}/kimi-code", server.base) }
+                },
+                "plugins": { "llm": { "catalog_refresh_ms": 0 } }
+            }),
+        )
+        .await;
+
+        // 1. Real 2026-10-31 Kimi Code CN /models fixture (6 models).
+        let snap1: String = eval(
+            &h,
+            r#"
+            LLM:refresh_catalog({ name = "kimi-code", force = true })
+            local out = {}
+            for _, m in ipairs(LLM:models()) do
+              if m.provider == "kimi-code" then
+                out[m.id] = {
+                  name = m.name,
+                  context_window = m.context_window,
+                  reasoning = m.reasoning == true,
+                  tool_update = m.tool_update or mare.json.null,
+                  efforts = m.efforts and mare.json.array(m.efforts) or mare.json.null,
+                  default_effort = m.default_effort or mare.json.null,
+                  images = m.images == true,
+                }
+              end
+            end
+            return mare.json.encode(out)
+            "#,
+        )
+        .await;
+        let m1: Value = serde_json::from_str(&snap1).unwrap();
+        assert_eq!(m1.as_object().unwrap().len(), 6, "all 6 Kimi Code fixture models must load: {m1}");
+        for (id, want_dyn, want_def, want_ctx) in [
+            ("kimi-for-coding", Some("addition_only"), Some("max"), 1_048_576),
+            ("kimi-for-coding-highspeed", None, None, 262_144),
+            ("k3", Some("addition_only"), Some("high"), 1_048_576),
+            ("k3-256k", Some("addition_only"), Some("high"), 262_144),
+            ("k3.1-pro", Some("addition_only"), Some("high"), 1_048_576),
+            ("k3.1-pro-highspeed", Some("addition_only"), Some("high"), 1_048_576),
+        ] {
+            let row = &m1[id];
+            assert_eq!(row["reasoning"], true, "{id}: {row}");
+            assert_eq!(row["context_window"], want_ctx, "{id}: {row}");
+            assert_eq!(row["images"], true, "{id}: {row}");
+            assert_eq!(row["tool_update"].as_str(), want_dyn, "{id}: {row}");
+            assert_eq!(row["default_effort"].as_str(), want_def, "{id}: {row}");
+            if want_def.is_some() {
+                assert_eq!(row["efforts"], json!(["low", "high", "max"]), "{id}: {row}");
+            } else {
+                assert!(row["efforts"].is_null(), "{id} has no think_efforts: {row}");
+            }
+        }
+
+        // 2. Nested / both / malformed-odd / plain glm-5 fixture.
+        let snap2: String = eval(
+            &h,
+            r#"
+            LLM:refresh_catalog({ name = "kimi-code", force = true })
+            local out = {}
+            for _, m in ipairs(LLM:models()) do
+              if m.provider == "kimi-code" then
+                out[m.id] = {
+                  context_window = m.context_window,
+                  reasoning = m.reasoning == true,
+                  tool_update = m.tool_update or mare.json.null,
+                  efforts = m.efforts and mare.json.array(m.efforts) or mare.json.null,
+                  default_effort = m.default_effort or mare.json.null,
+                  images = m.images == true,
+                }
+              end
+            end
+            return mare.json.encode(out)
+            "#,
+        )
+        .await;
+        let m2: Value = serde_json::from_str(&snap2).unwrap();
+        assert_eq!(m2["nested"]["tool_update"], "addition_only", "{m2}");
+        assert_eq!(m2["nested"]["default_effort"], "low", "{m2}");
+        assert_eq!(
+            m2["nested"]["efforts"],
+            json!(["low", "high"]),
+            "reasoning.type=only must strip 'off' from efforts: {m2}"
+        );
+        assert_eq!(m2["nested"]["images"], true, "{m2}");
+        assert_eq!(m2["both"]["tool_update"], Value::Null, "{m2}");
+        assert_eq!(m2["both"]["reasoning"], true, "{m2}");
+        assert_eq!(m2["odd"]["tool_update"], Value::Null, "malformed types must be ignored: {m2}");
+        assert_eq!(m2["odd"]["default_effort"], Value::Null, "malformed types must be ignored: {m2}");
+        assert_eq!(m2["glm-5"]["context_window"], 200_000, "{m2}");
+        assert_eq!(m2["glm-5"]["tool_update"], Value::Null, "{m2}");
+        h.shutdown().await;
+    })
+    .await;
+}
+
+/// F3 + P1 + P2: bundled trimmed `models.dev` snapshot hydrates slim seeds offline (preferring
+/// `limit.input` over `limit.context` when `<= limit.context` and ignoring windows `< 2048`),
+/// user disk `models.dev.json` takes precedence when valid, and corrupt disk cache falls back
+/// cleanly to the bundled snapshot.
+#[tokio::test]
+async fn bundled_models_dev_snapshot_hydrates_seeds_prefers_limit_input_and_respects_disk_cache() {
+    local(async {
+        let server = MockServer::start().await;
+
+        // 1. Offline bundled snapshot hydrates slim seeds (`gpt-6.2-sol` gets 922000 from limit.input).
+        let mut env1 = TestEnv::new().await;
+        let h1 = provider_host(&mut env1, &server, json!({})).await;
+        let (sol_ctx, sol_out, sol_name, sol_src_ctx, terra_ctx, terra_src_ctx): (
+            i64,
+            i64,
+            String,
+            String,
+            i64,
+            String,
+        ) = eval(
+            &h1,
+            r#"
+            local sol = assert(LLM:resolve("openai/gpt-6.2-sol"))
+            local sol_src = assert(LLM:model_sources("openai/gpt-6.2-sol"))
+            local terra = assert(LLM:resolve("openai/gpt-6.1-terra"))
+            local terra_src = assert(LLM:model_sources("openai/gpt-6.1-terra"))
+            return sol.context_window, sol.max_output, sol.name, tostring(sol_src.context_window),
+              terra.context_window, tostring(terra_src.context_window)
+            "#,
+        )
+        .await;
+        assert_eq!(sol_ctx, 922_000, "P1: gpt-6.2-sol must prefer limit.input (922000) over limit.context (1050000)");
+        assert_eq!(sol_out, 128_000);
+        assert_eq!(sol_name, "GPT-6.2 Sol");
+        assert_eq!(sol_src_ctx, "models_dev");
+        assert_eq!(terra_ctx, 921_000, "measured seed context_window must win over bundled snapshot");
+        assert_eq!(terra_src_ctx, "measured");
+        h1.shutdown().await;
+        drop(env1);
+
+        // 2. Valid disk models.dev.json overrides bundled snapshot; sub-2048 limit.input is ignored.
+        let mut env2 = TestEnv::new().await;
+        let cache_dir = env2.home.path().join("state/models-cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::fs::write(
+            cache_dir.join("models.dev.json"),
+            json!({
+                "fetched_at": 9999999999_i64,
+                "providers": {
+                    "openai": {
+                        "gpt-6.2-sol": {
+                            "name": "Disk Override Sol",
+                            "reasoning": true,
+                            "limit": { "context": 600000, "input": 550000, "output": 64000 }
+                        },
+                        "gpt-6.2-astra": {
+                            "name": "Disk Tiny Input Astra",
+                            "reasoning": true,
+                            "limit": { "context": 400000, "input": 512, "output": 32000 }
+                        }
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let h2 = provider_host(&mut env2, &server, json!({})).await;
+        let (disk_sol_name, disk_sol_ctx, disk_astra_ctx): (String, i64, i64) = eval(
+            &h2,
+            r#"
+            -- Trigger lazy disk hydration (apply() never reads models-cache/models.dev.json).
+            LLM:prepare_request({ model = assert(LLM:resolve("openai/gpt-6.2-sol")) })
+            local sol = assert(LLM:resolve("openai/gpt-6.2-sol"))
+            local astra = assert(LLM:resolve("openai/gpt-6.2-astra"))
+            return sol.name, sol.context_window, astra.context_window
+            "#,
+        )
+        .await;
+        assert_eq!(disk_sol_name, "Disk Override Sol");
+        assert_eq!(disk_sol_ctx, 550_000, "disk models.dev.json must override bundled snapshot and prefer limit.input");
+        assert_eq!(disk_astra_ctx, 400_000, "sub-2048 limit.input must be ignored and fall back to limit.context");
+        h2.shutdown().await;
+        drop(env2);
+
+        // 3. Corrupt disk models.dev.json falls back cleanly to the bundled snapshot.
+        let mut env3 = TestEnv::new().await;
+        let cache_dir3 = env3.home.path().join("state/models-cache");
+        std::fs::create_dir_all(&cache_dir3).unwrap();
+        std::fs::write(cache_dir3.join("models.dev.json"), "{corrupt json").unwrap();
+        let h3 = provider_host(&mut env3, &server, json!({})).await;
+        let (fb_name, fb_ctx): (String, i64) =
+            eval(&h3, r#"local sol = assert(LLM:resolve("openai/gpt-6.2-sol")); return sol.name, sol.context_window"#)
+                .await;
+        assert_eq!(fb_name, "GPT-6.2 Sol");
+        assert_eq!(fb_ctx, 922_000, "corrupt disk models.dev.json must fall back to bundled snapshot");
+
+        // 4. Generic read_resource API reads built-in .gz assets, rejects path traversal, and returns nil when missing.
+        let (has_mdev, missing_nil, trav_ok, no_legacy): (bool, bool, bool, bool) = eval(
+            &h3,
+            r#"
+            local raw = mare.plugins.read_resource("models_dev.json.gz")
+            local dec = type(raw) == "string" and mare.json.decode(raw) or nil
+            local missing = mare.plugins.read_resource("no-such-asset.json")
+            local ok_trav = pcall(mare.plugins.read_resource, "../NEWS.md")
+            return type(dec) == "table" and type(dec.providers) == "table",
+                missing == nil,
+                ok_trav,
+                mare.plugins.bundled_models_dev == nil
+            "#,
+        )
+        .await;
+        assert!(has_mdev, "mare.plugins.read_resource must read built-in models_dev.json.gz");
+        assert!(missing_nil, "mare.plugins.read_resource must return nil for unknown resource");
+        assert!(!trav_ok, "mare.plugins.read_resource must reject path traversal");
+        assert!(no_legacy, "dedicated mare.plugins.bundled_models_dev binding must be removed");
+        h3.shutdown().await;
+    })
+    .await;
 }

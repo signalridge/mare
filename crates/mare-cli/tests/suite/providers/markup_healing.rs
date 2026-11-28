@@ -34,7 +34,7 @@ async fn deepseek_dsml_and_template_fixtures_heal_leaked_tool_calls_and_promote_
             &server,
             json!({
                 "providers": {
-                    "deepseek": { "base_url": format!("{}/compat", server.base) },
+                    "deepseek": { "wire": "openai-chat", "base_url": format!("{}/compat", server.base) },
                     "plain": {
                         "wire": "openai-chat",
                         "base_url": format!("{}/compat", server.base),
@@ -47,7 +47,7 @@ async fn deepseek_dsml_and_template_fixtures_heal_leaked_tool_calls_and_promote_
         .await;
 
         // 1. DeepSeek DSML XML split across chunks -> structured tool_call + stop_reason = "tool_use"
-        let dsml = stream(&h, "deepseek/deepseek-chat").await;
+        let dsml = stream(&h, "deepseek/deepseek-flash").await;
         assert_eq!(dsml["stop_reason"], "tool_use", "{dsml}");
         let dsml_content = dsml["content"].as_array().unwrap();
         let dsml_text = dsml_content.iter().find(|b| b["type"] == "text").expect("text block");
@@ -63,7 +63,7 @@ async fn deepseek_dsml_and_template_fixtures_heal_leaked_tool_calls_and_promote_
         assert!(dsml_events.contains(&"tool_call_delta"), "{dsml_events:?}");
 
         // 2. DeepSeek V3 template tokens (including re-spelled `_` variant) -> structured tool_call
-        let v3 = stream(&h, "deepseek/deepseek-chat").await;
+        let v3 = stream(&h, "deepseek/deepseek-flash").await;
         assert_eq!(v3["stop_reason"], "tool_use", "{v3}");
         let v3_content = v3["content"].as_array().unwrap();
         let v3_text = v3_content.iter().find(|b| b["type"] == "text").expect("text block");
@@ -74,7 +74,7 @@ async fn deepseek_dsml_and_template_fixtures_heal_leaked_tool_calls_and_promote_
         assert_eq!(v3_calls[0]["arguments"], json!({ "path": "src/main.rs" }));
 
         // 3. Quoted inline code spans with DSML / re-spelled template tokens stay prose
-        let quoted = stream(&h, "deepseek/deepseek-chat").await;
+        let quoted = stream(&h, "deepseek/deepseek-flash").await;
         assert_eq!(quoted["stop_reason"], "stop", "{quoted}");
         let quoted_content = quoted["content"].as_array().unwrap();
         assert!(quoted_content.iter().all(|b| b["type"] != "tool_call"), "{quoted}");
@@ -83,7 +83,7 @@ async fn deepseek_dsml_and_template_fixtures_heal_leaked_tool_calls_and_promote_
         assert!(qtext["text"].as_str().unwrap().contains("<｜tool_call_begin｜>"), "{quoted}");
 
         // 4. Truncated `finish_reason: "length"` never promotes to `"tool_use"`
-        let truncated = stream(&h, "deepseek/deepseek-chat").await;
+        let truncated = stream(&h, "deepseek/deepseek-flash").await;
         assert_eq!(truncated["stop_reason"], "length", "{truncated}");
 
         // 5. Generic non-DeepSeek model does NOT trigger DSML healing
@@ -218,7 +218,7 @@ async fn deepseek_strips_dsml_tails_from_structured_args_and_replayed_history_on
             &server,
             json!({
                 "providers": {
-                    "deepseek": { "base_url": format!("{}/compat", server.base) },
+                    "deepseek": { "wire": "openai-chat", "base_url": format!("{}/compat", server.base) },
                     "or-resp": {
                         "wire_api": "responses",
                         "dialect": "openrouter",
@@ -232,7 +232,7 @@ async fn deepseek_strips_dsml_tails_from_structured_args_and_replayed_history_on
         .await;
 
         // 1. Structured tool_calls with leaked DSML tail: tail cut, quoted literal preserved, no duplicate call from content
-        let mixed = stream(&h, "deepseek/deepseek-chat").await;
+        let mixed = stream(&h, "deepseek/deepseek-flash").await;
         assert_eq!(mixed["stop_reason"], "tool_use", "{mixed}");
         let m_content = mixed["content"].as_array().unwrap();
         let m_text = m_content.iter().find(|b| b["type"] == "text").expect("text block");
@@ -251,7 +251,7 @@ async fn deepseek_strips_dsml_tails_from_structured_args_and_replayed_history_on
                 {
                     role = "assistant",
                     provider_id = "deepseek",
-                    model_id = "deepseek-chat",
+                    model_id = "deepseek-flash",
                     content = {
                         { type = "reasoning", text = "Think first.\n<｜DSML｜invoke name=\"bash\">\n<｜DSML｜parameter name=\"cmd\">ls</｜DSML｜parameter>\n</｜DSML｜invoke>" },
                         { type = "text", text = "Before.\nbash\n<｜DSML｜parameter name=\"cmd\">ls</｜DSML｜parameter>\nKeep `</｜DSML｜parameter>` quoted." },
@@ -261,7 +261,7 @@ async fn deepseek_strips_dsml_tails_from_structured_args_and_replayed_history_on
                 { role = "tool_result", tool_call_id = "call_r1", tool_name = "bash", content = { { type = "text", text = "/tmp" } } },
                 { role = "user", content = { { type = "text", text = "next" } } },
             }
-            local ds = assert(LLM:resolve("deepseek/deepseek-chat"))
+            local ds = assert(LLM:resolve("deepseek/deepseek-flash"))
             LLM:stream({ model = ds, system = "S", messages = history }, function() end)
 
             local resp_history = {

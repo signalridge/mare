@@ -14,16 +14,16 @@ x-api-key: <absent>
 anthropic-version: 2023-06-01
 accept: text/event-stream
 x-opencode-session: sess-golden
-{"max_tokens":384000,"messages":[{"content":[{"cache_control":{"type":"ephemeral"},"text":"hi","type":"text"}],"role":"user"}],"model":"deepseek-v4.1-flash","output_config":{"effort":"low"},"stream":true,"system":[{"cache_control":{"type":"ephemeral"},"text":"S","type":"text"}],"thinking":{"type":"adaptive"}}
+{"max_tokens":384000,"messages":[{"content":[{"cache_control":{"type":"ephemeral"},"text":"hi","type":"text"}],"role":"user"}],"model":"deepseek-v4.1-flash","output_config":{"effort":"high"},"stream":true,"system":[{"cache_control":{"type":"ephemeral"},"text":"S","type":"text"}],"thinking":{"type":"adaptive"}}
 
-# opencode-go/crouton-alpha-free default
+# opencode-go/gpt-6-luna default
 POST /gw/openai/v1/responses
 authorization: Bearer ***
 x-api-key: <absent>
 anthropic-version: <absent>
 accept: text/event-stream
 x-opencode-session: sess-golden
-{"include":["reasoning.encrypted_content"],"input":[{"content":[{"text":"hi","type":"input_text"}],"role":"user"}],"instructions":"S","max_output_tokens":32000,"model":"crouton-alpha-free","parallel_tool_calls":true,"prompt_cache_key":"sess-golden","reasoning":{"effort":"medium"},"store":false,"stream":true,"tool_choice":"auto"}
+{"include":["reasoning.encrypted_content"],"input":[{"content":[{"text":"hi","type":"input_text"}],"role":"user"}],"instructions":"S","max_output_tokens":128000,"model":"gpt-6-luna","parallel_tool_calls":true,"prompt_cache_key":"sess-golden","reasoning":{"effort":"medium"},"store":false,"stream":true,"tool_choice":"auto"}
 
 # opencode-go/glm-5.3-flash request off
 POST /gw/anthropic/v1/messages

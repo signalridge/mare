@@ -93,14 +93,14 @@ mare -p --trust --approve-mcps "list my open issues"
 
 | 级别 | 行为 |
 | --- | --- |
-| `deferred`（默认） | 启动时不连接服务器。模型用 `tool_search` 查找工具及其参数 schema。没有缓存的服务器会在首次搜索时连接以发现工具；`~/.local/state/mare/mcp-tools` 中有缓存时则到首次使用才连接。支持 `tool_update = "addition_only"` 的模型（Anthropic Claude、OpenAI Responses `gpt-5.4` 及以上以及 Kimi K3）会在会话途中原生激活延迟工具并直接调用；其他模型则通过固定的 `call_tool` 代理工具调用，使顶层 `tools` 数组和提示词前缀缓存在各轮之间保持逐字节稳定。 |
+| `deferred`（默认） | 启动时不连接服务器。模型用 `tool_search` 查找工具及其参数 schema。没有缓存的服务器会在首次搜索时连接以发现工具；`~/.local/state/mare/mcp-tools` 中有缓存时则到首次使用才连接。支持 `tool_update = "addition_only"` 的模型（Anthropic Claude、OpenAI Responses `gpt-5.4` 及以上、Responses API 上的 DeepSeek V4.1 Flash 以及 Kimi K3）会在会话途中原生激活延迟工具并直接调用；其他模型则通过固定的 `call_tool` 代理工具调用，使顶层 `tools` 数组和提示词前缀缓存在各轮之间保持逐字节稳定。 |
 | `direct` | 启动时在后台连接，工具像内置工具一样被声明。请求从不等待它（除非设置了 `required`）：仍在连接的工具从下一轮起加入。 |
 | `hidden` | 不可用。 |
 | `codemode` | 只能从代码模式脚本中调用。需要 codemode 插件；否则按 `deferred` 处理。 |
 
 `tool_search` 接受关键词（`github issues`）或确切名称（`select:mcp__github__create_issue`，单次最多 32 个），并在固定结果预算内返回匹配工具的 schema。系统提示词中每个服务器占一行。
 
-> **全提供商的提示词缓存：** 延迟工具发现机制在所有提供商上都保持系统提示词和顶层 `tools` 数组跨轮次不变。支持 `tool_update = "addition_only"` 的模型（Anthropic Claude、OpenAI Responses `gpt-5.4`+、Kimi K3）使用原生会话中追加；其他端点（如 DeepSeek、GLM、Google Gemini、较早的 OpenAI 模型和 Kimi K2）通过固定的 `call_tool` 代理调用，不改动 `tools[]`，从而保全提示词前缀缓存。如果希望少量常用工具一开始就直接声明，可设置 `tier = "direct"`（或在 `tools` 中把个别工具设为 `"direct"`）。
+> **全提供商的提示词缓存：** 延迟工具发现机制在所有提供商上都保持系统提示词和顶层 `tools` 数组跨轮次不变。支持 `tool_update = "addition_only"` 的模型（Anthropic Claude、OpenAI Responses `gpt-5.4`+、DeepSeek V4.1 Flash、Kimi K3）使用原生会话中追加；其他端点（如 DeepSeek V4 Pro、GLM、Google Gemini、较早的 OpenAI 模型和 Kimi K2）通过固定的 `call_tool` 代理调用，不改动 `tools[]`，从而保全提示词前缀缓存。如果希望少量常用工具一开始就直接声明，可设置 `tier = "direct"`（或在 `tools` 中把个别工具设为 `"direct"`）。
 
 如果服务器提供资源，模型还会得到列出和读取它们的工具，服务器的提示会显示为名为 `/mcp__<server>__<prompt>` 的斜杠命令（传入 `name=value` 参数或位置参数）。服务器的 elicitation 请求在 TUI 中显示为表单；无界面运行总是拒绝它们。
 

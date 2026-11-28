@@ -55,11 +55,19 @@ function M.set(ctx, level, opts)
 	opts = opts or {}
 	level = string.lower(string.match(tostring(level or ""), "^%s*(.-)%s*$"))
 	local m = ctx:get("llm"):current()
-	local all = (m and ctx:get("llm").effort_options and ctx:get("llm"):effort_options(m)) or ctx:get("llm"):efforts()
+	local levels = M.levels(m, ctx:get("llm"))
+	local all = {}
+	for _, v in ipairs(ctx:get("llm"):efforts() or {}) do
+		all[#all + 1] = v
+	end
+	for _, v in ipairs(levels or {}) do
+		if not table.find(all, v) then
+			all[#all + 1] = v
+		end
+	end
 	if not table.find(all, level) then
 		return nil, ("unknown effort %q — one of %s"):format(level, table.concat(all, ", "))
 	end
-	local levels = M.levels(m, ctx:get("llm"))
 	if m and not levels then
 		local others = param_names(ctx, m)
 		if #others > 0 then
