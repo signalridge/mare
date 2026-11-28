@@ -258,3 +258,175 @@ async fn openai_responses_error_and_incomplete_fixtures() {
     })
     .await
 }
+
+/// Issue #185: a completed Responses `function_call` item with a missing/empty tool name and
+/// call_id must be rejected as malformed instead of being persisted into session history with a
+/// synthesized tool call ID.
+#[tokio::test]
+async fn responses_malformed_function_call_does_not_enter_history() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let server = MockServer::start().await;
+        let malformed_sse = concat!(
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"fc_bad\",\"type\":\"function_call\",\"call_id\":\"\",\"name\":\"\",\"arguments\":\"{}\"}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_bad\",\"status\":\"completed\",\"usage\":{\"input_tokens\":5,\"output_tokens\":2}}}\n\n",
+        );
+        let malformed_custom_sse = concat!(
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"ctc_bad\",\"type\":\"custom_tool_call\",\"call_id\":\"call_ok\",\"name\":\"\",\"input\":\"patch\"}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_bad2\",\"status\":\"completed\",\"usage\":{\"input_tokens\":5,\"output_tokens\":2}}}\n\n",
+        );
+        // Queue malformed function_call, malformed custom_tool_call, then a clean follow-up reply.
+        server.route(
+            "/openai",
+            vec![
+                Resp::sse(malformed_sse),
+                Resp::sse(malformed_custom_sse),
+                Resp::sse(responses_text("conversation still usable")),
+            ],
+        );
+        let h = provider_host(
+            &mut env,
+            &server,
+            json!({ "model": "openai/gpt-6.1-terra", "plugins": { "llm": { "retries": 0 } } }),
+        )
+        .await;
+        expose(&h);
+        global(&h, "AG", h.service_table("agent").unwrap());
+
+        let first = h.prompt("run tool", json!({})).await.unwrap();
+        assert_eq!(first["error_kind"], "malformed_response", "expected structured malformed_response: {first}");
+
+        let second = h.prompt("run custom tool", json!({})).await.unwrap();
+        assert_eq!(second["error_kind"], "malformed_response", "expected structured malformed_response: {second}");
+
+        let msgs_json: String = eval(&h, "return mare.json.encode(AG:list_messages().data)").await;
+        let msgs: Value = serde_json::from_str(&msgs_json).unwrap();
+        let bad_calls: Vec<&Value> = msgs
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|m| m["role"] == "assistant")
+            .flat_map(|m| m["content"].as_array().into_iter().flatten())
+            .filter(|b| b["type"] == "tool_call")
+            .collect();
+        assert!(
+            bad_calls.is_empty(),
+            "malformed empty-name Responses function_call reached session history (with synthesized id): {bad_calls:?}\nall messages: {msgs}"
+        );
+
+        // Next turn in the same conversation must succeed without replaying any invalid tool call.
+        let followup = h.prompt("continue", json!({})).await.unwrap();
+        assert_eq!(followup["text"], "conversation still usable", "{followup}");
+        let reqs = server.requests();
+        let last_input = reqs.last().unwrap().json()["input"].to_string();
+        assert!(
+            !last_input.contains("function_call") && !last_input.contains("custom_tool_call"),
+            "malformed tool call must not replay on follow-up turn: {last_input}"
+        );
+        h.shutdown().await;
+    })
+    .await
+}
+
+/// Review regression (#329): explicit `item.id` mismatch at the same `output_index` must NOT
+/// borrow another item's name/call_id, conflicting `added` vs `done` identities must fail as
+/// `malformed_response`, and index-only correlation succeeds only when no explicit ID is present
+/// and the index uniquely identifies an unfinished item.
+#[tokio::test]
+async fn responses_tool_call_identity_does_not_borrow_across_distinct_item_ids_or_conflicts() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        let server = MockServer::start().await;
+        // 1) output_index 0 has added item A (`fc_a`), then done arrives for distinct explicit id `fc_b`
+        //    at the same output_index 0 with empty name and call_id -> MUST reject as malformed_response.
+        let cross_id_borrow_sse = concat!(
+            "event: response.output_item.added\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"fc_a\",\"type\":\"function_call\",\"call_id\":\"call_a\",\"name\":\"probe_tool\",\"arguments\":\"\"}}\n\n",
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"fc_b\",\"type\":\"function_call\",\"call_id\":\"\",\"name\":\"\",\"arguments\":\"{}\"}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_cross\",\"status\":\"completed\",\"usage\":{\"input_tokens\":5,\"output_tokens\":2}}}\n\n",
+        );
+        // 2) Same item.id (`fc_a`) on added and done, but conflicting call_id / name -> MUST reject.
+        let conflicting_id_sse = concat!(
+            "event: response.output_item.added\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"fc_a\",\"type\":\"function_call\",\"call_id\":\"call_a\",\"name\":\"probe_tool\",\"arguments\":\"\"}}\n\n",
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"fc_a\",\"type\":\"function_call\",\"call_id\":\"call_other\",\"name\":\"other_tool\",\"arguments\":\"{}\"}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_conflict\",\"status\":\"completed\",\"usage\":{\"input_tokens\":5,\"output_tokens\":2}}}\n\n",
+        );
+        // 3) Ambiguous output_index (two added items share index 0), followed by ID-less done -> MUST reject.
+        let ambiguous_index_sse = concat!(
+            "event: response.output_item.added\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"probe_tool\",\"arguments\":\"\"}}\n\n",
+            "event: response.output_item.added\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"fc_2\",\"type\":\"function_call\",\"call_id\":\"call_2\",\"name\":\"probe_tool\",\"arguments\":\"\"}}\n\n",
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"arguments\":\"{}\"}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_ambig\",\"status\":\"completed\",\"usage\":{\"input_tokens\":5,\"output_tokens\":2}}}\n\n",
+        );
+        // 4) Valid correlation: added has id+call_id+name, done matches id and omits name/call_id -> succeeds.
+        let valid_correlated_sse = concat!(
+            "event: response.output_item.added\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"fc_ok\",\"type\":\"function_call\",\"call_id\":\"call_ok\",\"name\":\"probe_tool\",\"arguments\":\"\"}}\n\n",
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"fc_ok\",\"type\":\"function_call\",\"arguments\":\"{}\"}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_ok\",\"status\":\"completed\",\"usage\":{\"input_tokens\":5,\"output_tokens\":2}}}\n\n",
+        );
+        server.route(
+            "/openai",
+            vec![
+                Resp::sse(cross_id_borrow_sse),
+                Resp::sse(conflicting_id_sse),
+                Resp::sse(ambiguous_index_sse),
+                Resp::sse(valid_correlated_sse),
+                Resp::sse(responses_text("tool finished")),
+            ],
+        );
+        let h = provider_host(
+            &mut env,
+            &server,
+            json!({ "model": "openai/gpt-6.1-terra", "plugins": { "llm": { "retries": 0 } } }),
+        )
+        .await;
+        expose(&h);
+        exec(
+            &h,
+            r#"T:register("probe_tool", {
+                description = "probe",
+                side_effect = "read",
+                parameters = { type = "object", properties = {} },
+                execute = function()
+                    mare.g.PROBE_RAN = (mare.g.PROBE_RAN or 0) + 1
+                    return "probe_ok"
+                end,
+            })"#,
+        )
+        .await;
+
+        let r1 = h.prompt("cross id", json!({})).await.unwrap();
+        assert_eq!(r1["error_kind"], "malformed_response", "distinct item.id must not borrow index 0: {r1}");
+
+        let r2 = h.prompt("conflict id", json!({})).await.unwrap();
+        assert_eq!(r2["error_kind"], "malformed_response", "conflicting added/done identity must fail: {r2}");
+
+        let r3 = h.prompt("ambiguous index", json!({})).await.unwrap();
+        assert_eq!(r3["error_kind"], "malformed_response", "ambiguous output_index must fail: {r3}");
+
+        assert_eq!(eval::<i64>(&h, "return mare.g.PROBE_RAN or 0").await, 0, "malformed turns must not run tool");
+
+        let r4 = h.prompt("valid correlated", json!({})).await.unwrap();
+        assert_eq!(r4["text"], "tool finished", "{r4}");
+        assert_eq!(eval::<i64>(&h, "return mare.g.PROBE_RAN or 0").await, 1, "valid correlated turn must run tool");
+
+        h.shutdown().await;
+    })
+    .await
+}
