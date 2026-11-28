@@ -297,9 +297,9 @@ async fn oversized_modals_stay_within_terminal_height() {
             .await;
         t.key(KeyCode::Escape, Modifiers::NONE);
 
-        // Multiline input modal on 76x9 must keep borders & cursor line visible.
+        // Multiline input modal on 76x9 must keep both inner & outer borders and cursor line visible.
         t.until("multiline input modal fits with borders", |s| {
-            s.contains("─ Notes ─") && s.contains('╭') && s.contains('╰')
+            s.contains("─ Notes ─") && s.contains("R8") && s.matches('╭').count() >= 2 && s.matches('╰').count() >= 2
         })
         .await;
     })

@@ -717,7 +717,8 @@ impl App {
                 let iw = pop_w.saturating_sub(4).max(1);
                 let opts = EditorRenderOpts {
                     placeholder: placeholder.clone(),
-                    max_height: max_h.saturating_sub(2).max(1),
+                    // Editor::render adds 2 inner border rows and Modal::Input wraps it in 2 outer border rows.
+                    max_height: max_h.saturating_sub(4).max(1),
                     mask_char: secret.then_some(if theme.icons == "ascii" { '*' } else { '•' }),
                     ..Default::default()
                 };
