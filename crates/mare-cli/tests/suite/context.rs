@@ -1601,3 +1601,95 @@ async fn data_block_escapes_attributes_and_closing_tags_and_rules_cover_runtime_
     })
     .await
 }
+
+#[tokio::test]
+async fn repro_issue_205_trusted_skills_only_project_without_mare_marker_hides_agents_skills() {
+    local(async {
+        let env = TestEnv::new().await;
+        let repo = dunce::canonicalize(&env.cwd).unwrap();
+        // A git repo with ONLY `.agents/skills/` — no `.mare/` and no `.mcp.json`.
+        std::fs::create_dir_all(repo.join(".git/objects")).unwrap();
+        std::fs::create_dir_all(repo.join(".git/refs")).unwrap();
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        write(
+            &repo.join(".agents/skills/only-skill/SKILL.md"),
+            "---\nname: only-skill\ndescription: skill in a repo without .mare or .mcp.json\n---\nbody\n",
+        );
+
+        let mut b = env.host().faux(json!([])).no_session();
+        b.opts.cwd = repo;
+        b.opts.project_trusted = true;
+        let h = b.build().await;
+        expose(&h);
+        global(&h, "X", h.service_table("context").unwrap());
+
+        let (found, names): (bool, String) = eval(
+            &h,
+            r#"
+            local names = {}
+            local found = false
+            for _, s in ipairs(X:skills()) do
+                names[#names + 1] = s.name
+                if s.name == "only-skill" then found = true end
+            end
+            return found, table.concat(names, ",")
+            "#,
+        )
+        .await;
+        h.shutdown().await;
+        assert!(
+            found,
+            "trusted project with only .agents/skills (no .mare/ or .mcp.json) exposed no skills (got: [{names}])"
+        );
+    })
+    .await
+}
+
+#[tokio::test]
+async fn skills_only_project_respects_trust_and_ignores_unrelated_ancestor_mare() {
+    local(async {
+        let env = TestEnv::new().await;
+        let outer = dunce::canonicalize(&env.cwd).unwrap();
+        // Ancestor directory has unrelated `.mare/` config + skill.
+        write(
+            &outer.join(".mare/skills/ancestor-skill/SKILL.md"),
+            "---\nname: ancestor-skill\ndescription: unrelated ancestor skill\n---\nbody\n",
+        );
+        // Nested git repo has ONLY `.agents/skills/` (no `.mare/` or `.mcp.json`).
+        let child = outer.join("child-repo");
+        let sub = child.join("nested/work");
+        std::fs::create_dir_all(child.join(".git/objects")).unwrap();
+        std::fs::create_dir_all(child.join(".git/refs")).unwrap();
+        std::fs::write(child.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::create_dir_all(&sub).unwrap();
+        write(
+            &child.join(".agents/skills/child-only/SKILL.md"),
+            "---\nname: child-only\ndescription: child repo skill\n---\nbody\n",
+        );
+
+        for (trusted, expect_child) in [(true, true), (false, false)] {
+            let mut b = env.host().faux(json!([])).no_session();
+            b.opts.cwd = sub.clone();
+            b.opts.project_trusted = trusted;
+            let h = b.build().await;
+            expose(&h);
+            global(&h, "X", h.service_table("context").unwrap());
+            let (has_child, has_ancestor): (bool, bool) = eval(
+                &h,
+                r#"
+                local has_child, has_ancestor = false, false
+                for _, s in ipairs(X:skills()) do
+                    if s.name == "child-only" then has_child = true end
+                    if s.name == "ancestor-skill" then has_ancestor = true end
+                end
+                return has_child, has_ancestor
+                "#,
+            )
+            .await;
+            h.shutdown().await;
+            assert_eq!(has_child, expect_child, "trusted={trusted}: child-only skill mismatch");
+            assert!(!has_ancestor, "trusted={trusted}: unrelated ancestor .mare skill must not leak");
+        }
+    })
+    .await
+}
