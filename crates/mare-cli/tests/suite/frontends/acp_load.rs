@@ -47,13 +47,14 @@ fn acp_load_session_advertises_capability_replays_history_and_continues() {
     );
     assert_eq!(p1["result"]["stopReason"], "end_turn", "{p1}");
 
+    let png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg==";
     let p2 = rpc.call_raw(
         "session/prompt",
         json!({
             "sessionId": sid,
             "prompt": [
                 { "type": "text", "text": "before" },
-                { "type": "image", "data": "AQID", "mimeType": "image/png" },
+                { "type": "image", "data": png_b64, "mimeType": "image/png" },
                 { "type": "text", "text": "after" }
             ]
         }),
@@ -120,7 +121,7 @@ fn acp_load_session_advertises_capability_replays_history_and_continues() {
     );
     assert_eq!(updates[4]["content"], json!({ "type": "text", "text": "readme says hello" }));
     assert_eq!(updates[5]["content"], json!({ "type": "text", "text": "before" }));
-    assert_eq!(updates[6]["content"], json!({ "type": "image", "data": "AQID", "mimeType": "image/png" }));
+    assert_eq!(updates[6]["content"], json!({ "type": "image", "data": png_b64, "mimeType": "image/png" }));
     assert_eq!(updates[7]["content"], json!({ "type": "text", "text": "after" }));
     assert_eq!(updates[8]["content"], json!({ "type": "text", "text": "saw image and text" }));
 

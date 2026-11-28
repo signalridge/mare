@@ -238,13 +238,14 @@ fn acp_prompt_preserves_interleaved_text_and_image_order() {
     let s = rpc.call_raw("session/new", json!({ "cwd": cwd, "mcpServers": [] }), |_| json!(null));
     let sid = s["result"]["sessionId"].as_str().unwrap_or_else(|| panic!("{s}")).to_string();
 
+    let png_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, PNG_1X1);
     let res = rpc.call_raw(
         "session/prompt",
         json!({
             "sessionId": sid,
             "prompt": [
                 { "type": "text", "text": "before" },
-                { "type": "image", "data": "AQID", "mimeType": "image/png" },
+                { "type": "image", "data": png_b64, "mimeType": "image/png" },
                 { "type": "text", "text": "after" }
             ]
         }),
@@ -286,7 +287,7 @@ fn acp_prompt_preserves_interleaved_text_and_image_order() {
     assert_eq!(content[0], json!({ "type": "text", "text": "before" }), "{user_msg}");
     assert_eq!(content[1]["type"], "image", "{user_msg}");
     assert_eq!(content[1]["mime"], "image/png", "{user_msg}");
-    assert!(content[1]["attachment"].is_string() || content[1]["data"] == "AQID", "{user_msg}");
+    assert!(content[1]["attachment"].is_string() || content[1]["data"] == png_b64, "{user_msg}");
     assert_eq!(content[2], json!({ "type": "text", "text": "after" }), "{user_msg}");
 }
 
@@ -362,13 +363,14 @@ return {
     assert_eq!(session_files.len(), 1, "expected 1 session file, got {session_files:?}");
     let before = std::fs::read(&session_files[0]).unwrap();
 
+    let png_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, PNG_1X1);
     let rejected = rpc.call_raw(
         "session/prompt",
         json!({
             "sessionId": sid,
             "prompt": [
                 { "type": "text", "text": "must not be saved" },
-                { "type": "image", "data": "AQID", "mimeType": "image/png" }
+                { "type": "image", "data": png_b64, "mimeType": "image/png" }
             ]
         }),
         |_| json!(null),
@@ -473,11 +475,12 @@ fn acp_image_prompt_returns_internal_when_get_model_fails() {
     let session = rpc.call_raw("session/new", json!({ "cwd": cwd, "mcpServers": [] }), |_| json!(null));
     let sid = session["result"]["sessionId"].as_str().unwrap_or_else(|| panic!("{session}")).to_string();
 
+    let png_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, PNG_1X1);
     let rejected = rpc.call_raw(
         "session/prompt",
         json!({
             "sessionId": sid,
-            "prompt": [{ "type": "image", "data": "AQID", "mimeType": "image/png" }]
+            "prompt": [{ "type": "image", "data": png_b64, "mimeType": "image/png" }]
         }),
         |_| json!(null),
     );
@@ -614,7 +617,13 @@ return {{
     let req2: Value = serde_json::from_str(&std::fs::read_to_string(reqs_dir.join("req-2.json")).unwrap()).unwrap();
     let req3: Value = serde_json::from_str(&std::fs::read_to_string(reqs_dir.join("req-3.json")).unwrap()).unwrap();
     let img_block = |req: &Value| -> Value {
-        req["messages"].as_array().unwrap().last().unwrap()["content"]
+        req["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|m| m["source"] == "acp")
+            .unwrap_or_else(|| panic!("missing acp user message in {req}"))["content"]
             .as_array()
             .unwrap()
             .iter()
@@ -835,4 +844,173 @@ fn acp_tool_results_forward_large_truncated_images_live_and_on_replay() {
     let replay_bytes = extract_large_img(&replay_updates, "replay");
     assert_eq!(live_bytes, replay_bytes, "live and replayed >1 MiB PNG bytes must match");
     rpc2.kill_and_wait();
+}
+
+#[test]
+fn acp_validates_image_mime_types_for_mislabelled_corrupt_and_valid_images() {
+    use base64::Engine as _;
+
+    let png_b64 = base64::engine::general_purpose::STANDARD.encode(PNG_1X1);
+    let mut jpg_bytes = Vec::new();
+    image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(1, 1, image::Rgb([12, 34, 56])))
+        .write_to(&mut std::io::Cursor::new(&mut jpg_bytes), image::ImageFormat::Jpeg)
+        .unwrap();
+    let jpg_b64 = base64::engine::general_purpose::STANDARD.encode(&jpg_bytes);
+
+    let home = tempfile::tempdir().unwrap();
+    let reqs_dir = home.path().join("reqs");
+    std::fs::create_dir_all(&reqs_dir).unwrap();
+    let plugins_dir = home.path().join("config/plugins");
+    std::fs::create_dir_all(&plugins_dir).unwrap();
+    std::fs::write(
+        plugins_dir.join("record-mime93.lua"),
+        format!(
+            r#"local n = 0
+return {{
+    name = "record-mime93",
+    inject = {{ "llm" }},
+    apply = function(ctx)
+        ctx.llm:register_provider({{
+            provider = "rec93",
+            no_key = true,
+            models = {{
+                {{ model_id = "img", name = "Rec93 Img", images = true }},
+            }},
+            stream = function(req)
+                n = n + 1
+                local path = {:?} .. "/req-" .. tostring(n) .. ".json"
+                mare.fs.write(path, mare.json.encode({{ messages = req.messages }}))
+                return {{ role = "assistant", content = {{ {{ type = "text", text = "ok" }} }}, stop_reason = "stop" }}
+            end,
+        }})
+    end,
+}}"#,
+            reqs_dir.to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    let mut cmd = mare_cmd();
+    cmd.args(["--model", "rec93/img", "acp"]).env("MARE_HOME", home.path()).stderr(Stdio::piped());
+    let mut rpc = RpcClient::spawn_cmd(&mut cmd);
+    let _ = rpc.call_raw("initialize", json!({ "protocolVersion": 1, "clientCapabilities": {} }), |_| json!(null));
+    let cwd = dunce::canonicalize(home.path()).unwrap();
+    let s = rpc.call_raw("session/new", json!({ "cwd": cwd, "mcpServers": [] }), |_| json!(null));
+    let sid = s["result"]["sessionId"].as_str().unwrap().to_string();
+
+    let img_block = |req: &Value| -> Value {
+        req["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|m| m["source"] == "acp")
+            .unwrap_or_else(|| panic!("missing acp user message in {req}"))["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["type"] == "image")
+            .cloned()
+            .unwrap_or_else(|| panic!("missing image block in {req}"))
+    };
+
+    // 1. Mislabelled MIME (JPEG bytes declared as image/png) -> provider receives image/jpeg.
+    let r1 = rpc.call_raw(
+        "session/prompt",
+        json!({
+            "sessionId": sid,
+            "prompt": [
+                { "type": "text", "text": "mislabelled top" },
+                { "type": "image", "data": jpg_b64, "mimeType": "image/png" }
+            ]
+        }),
+        |_| json!(null),
+    );
+    assert_eq!(r1["result"]["stopReason"], "end_turn", "{r1}");
+    let req1: Value = serde_json::from_str(&std::fs::read_to_string(reqs_dir.join("req-1.json")).unwrap()).unwrap();
+    assert_eq!(img_block(&req1)["mime"], "image/jpeg", "{req1}");
+
+    // 2. Mislabelled embedded blob resource -> provider receives image/jpeg.
+    let r2 = rpc.call_raw(
+        "session/prompt",
+        json!({
+            "sessionId": sid,
+            "prompt": [
+                { "type": "text", "text": "mislabelled blob" },
+                { "type": "resource", "resource": { "uri": "file:///photo.png", "mimeType": "image/png; charset=binary", "blob": jpg_b64 } }
+            ]
+        }),
+        |_| json!(null),
+    );
+    assert_eq!(r2["result"]["stopReason"], "end_turn", "{r2}");
+    let req2: Value = serde_json::from_str(&std::fs::read_to_string(reqs_dir.join("req-2.json")).unwrap()).unwrap();
+    assert_eq!(img_block(&req2)["mime"], "image/jpeg", "{req2}");
+
+    // 2b. Embedded image blob declared with an unsupported image/* MIME (image/bmp) whose bytes
+    // are actually a valid PNG -> validated by magic bytes and corrected to image/png, matching
+    // direct ContentBlock::Image; genuine unsupported BMP bytes are rejected with -32602.
+    let r2b = rpc.call_raw(
+        "session/prompt",
+        json!({
+            "sessionId": sid,
+            "prompt": [
+                { "type": "text", "text": "mislabelled bmp blob" },
+                { "type": "resource", "resource": { "uri": "file:///photo.bmp", "mimeType": "image/bmp", "blob": png_b64 } }
+            ]
+        }),
+        |_| json!(null),
+    );
+    assert_eq!(r2b["result"]["stopReason"], "end_turn", "{r2b}");
+    let req2b: Value = serde_json::from_str(&std::fs::read_to_string(reqs_dir.join("req-3.json")).unwrap()).unwrap();
+    assert_eq!(img_block(&req2b)["mime"], "image/png", "{req2b}");
+
+    let bmp_rejected = rpc.call_raw(
+        "session/prompt",
+        json!({
+            "sessionId": sid,
+            "prompt": [
+                { "type": "text", "text": "real bmp blob" },
+                { "type": "resource", "resource": { "uri": "file:///real.bmp", "mimeType": "image/bmp", "blob": "Qk06AAAAAAAAADYAAAAoAAAAAQAAAAEAAAABABgAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" } }
+            ]
+        }),
+        |_| json!(null),
+    );
+    assert_eq!(bmp_rejected["error"]["code"], -32602, "unsupported BMP bytes must fail with -32602: {bmp_rejected}");
+
+    // 3. Corrupt image data -> rejected at entry point (-32602), never hits provider or poisons history.
+    for bad in ["AQID", "iVBORw0KGgo=", "!!!not-base64!!!"] {
+        let rejected = rpc.call_raw(
+            "session/prompt",
+            json!({
+                "sessionId": sid,
+                "prompt": [
+                    { "type": "text", "text": "corrupt prompt" },
+                    { "type": "image", "data": bad, "mimeType": "image/png" }
+                ]
+            }),
+            |_| json!(null),
+        );
+        assert_eq!(rejected["error"]["code"], -32602, "corrupt payload {bad:?} must fail with -32602: {rejected}");
+    }
+    assert!(!reqs_dir.join("req-4.json").exists(), "corrupt prompts must never invoke provider");
+
+    // 4. Correctly labelled PNG -> succeeds and provider sees image/png with clean history.
+    let r4 = rpc.call_raw(
+        "session/prompt",
+        json!({
+            "sessionId": sid,
+            "prompt": [
+                { "type": "text", "text": "valid png" },
+                { "type": "image", "data": png_b64, "mimeType": "image/png" }
+            ]
+        }),
+        |_| json!(null),
+    );
+    assert_eq!(r4["result"]["stopReason"], "end_turn", "{r4}");
+    let req4: Value = serde_json::from_str(&std::fs::read_to_string(reqs_dir.join("req-4.json")).unwrap()).unwrap();
+    assert_eq!(img_block(&req4)["mime"], "image/png", "{req4}");
+    assert!(!req4.to_string().contains("corrupt prompt"), "rejected corrupt prompt must not enter history: {req4}");
+    assert!(!req4.to_string().contains("real bmp blob"), "rejected BMP blob must not enter history: {req4}");
+
+    rpc.kill_and_wait();
 }

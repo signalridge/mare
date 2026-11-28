@@ -967,6 +967,7 @@
 | `mare.image.clipboard(opts)` |  |
 | `mare.image.is_image(path)` |  |
 | `mare.image.to_png(data)` | Decode base64-encoded image bytes within safety limits, downscale if oversized, and re-encode as PNG (or JPEG when large). |
+| `mare.image.validate(data)` | Validate base64-encoded image bytes by magic bytes and bounded decode, returning the detected MIME type (`image/png`, `image/jpeg`, `image/gif`, or `image/webp`) and normalized base64. |
 
 ## mare.json
 

@@ -41,7 +41,18 @@ return function(D)
 				parts[#parts + 1] = { type = "text", text = c.text or "" }
 			elseif c.type == "image" and c.data then
 				if images then
-					parts[#parts + 1] = { type = "image", data = c.data, mime = c.mimeType }
+					local validated, err = mare.image.validate(tostring(c.data))
+					if validated then
+						parts[#parts + 1] = { type = "image", data = validated.data, mime = validated.mime }
+					else
+						parts[#parts + 1] = {
+							type = "text",
+							text = ("[image (%s) omitted: %s]"):format(
+								tostring(c.mimeType or "image"),
+								tostring(err or "invalid or unsupported image data")
+							),
+						}
+					end
 				else
 					parts[#parts + 1] = {
 						type = "text",

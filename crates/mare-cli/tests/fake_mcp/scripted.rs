@@ -138,7 +138,11 @@ pub fn run(cfg_text: &str) {
                     Some(json!({
                         "messages": [{
                             "role": "user",
-                            "content": { "type": "image", "data": "iVBORw0KGgo=", "mimeType": "image/png" }
+                            "content": {
+                                "type": "image",
+                                "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg==",
+                                "mimeType": "image/png"
+                            }
                         }]
                     }))
                 } else {
@@ -250,8 +254,14 @@ pub fn run(cfg_text: &str) {
                                 { "type": "resource_link", "uri": "mem://a", "name": "a" },
                                 { "type": "audio", "data": "AAAA", "mimeType": "audio/wav" }],
                     "structuredContent": { "n": 1 } })),
-                "image" => Some(json!({
-                    "content": [{ "type": "image", "data": "iVBORw0KGgo=", "mimeType": "image/png" }] })),
+                "image" => {
+                    let args = p.get("arguments");
+                    let data = args.and_then(|a| a.get("data")).and_then(Value::as_str).unwrap_or(
+                        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg==",
+                    );
+                    let mime = args.and_then(|a| a.get("mimeType")).and_then(Value::as_str).unwrap_or("image/png");
+                    Some(json!({ "content": [{ "type": "image", "data": data, "mimeType": mime }] }))
+                }
                 _ => Some(
                     json!({ "content": [{ "type": "text", "text": format!("echo: {}", text_arg(&m, Some(""))) }] }),
                 ),
