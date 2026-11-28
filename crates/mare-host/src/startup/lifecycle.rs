@@ -494,6 +494,8 @@ impl Host {
             args_tbl.set("fork_images", tbl)?;
         }
         let mare: mlua::Table = kernel.lua().globals().get("mare")?;
+        let shutdown_cancel = cancel.clone();
+        mare.set("is_shutting_down", kernel.lua().create_function(move |_, ()| Ok(shutdown_cancel.is_cancelled()))?)?;
         crate::web_registry::install_lua(
             kernel.lua(),
             &mare,
