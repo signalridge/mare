@@ -42,6 +42,7 @@ use event_loop::handle_event;
 pub(crate) use event_loop::resume_hint;
 pub use event_loop::run;
 use input::completion::{CompletionItem, CompletionState};
+use input::paste::{ClipboardPaste, PasteTarget};
 use input::prompt_history::PromptHistory;
 use mare_shared::ui::EditorBridge;
 use startup::gate::StartupGate;
@@ -82,6 +83,12 @@ enum AppMsg {
         chars: usize,
         bytes: usize,
         result: std::result::Result<mare_binding::clipboard::Method, String>,
+    },
+    /// Clipboard image/text read completed on a blocking worker thread.
+    ClipboardPasteReady {
+        target: PasteTarget,
+        report_error: bool,
+        result: std::result::Result<Option<ClipboardPaste>, String>,
     },
 }
 

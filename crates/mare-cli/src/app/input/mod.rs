@@ -8,6 +8,6 @@ mod keymap;
 mod keys;
 mod modal_keys;
 pub(in crate::app) use modal_keys::select_chain;
-mod paste;
+pub(in crate::app) mod paste;
 pub(in crate::app) mod prompt_history;
 mod submit;
