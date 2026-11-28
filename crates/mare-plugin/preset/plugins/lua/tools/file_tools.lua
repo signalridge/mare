@@ -66,6 +66,29 @@ return function(D)
 		return ui.Diff(node)
 	end
 
+	local LIVE_CHANGE_MAX_BYTES = 512 * 1024
+
+	local function live_file_change(path, old, new, diff)
+		local project = mare.projection and mare.projection.project or function(s)
+			return s
+		end
+		local proj_new = project(new)
+		local proj_old = old and mare.text.is_utf8(old) and project(old) or nil
+		local kind = old and "update" or "add"
+		local change = { path = path, kind = kind }
+		if old then
+			if proj_old and (#proj_old + #proj_new) <= LIVE_CHANGE_MAX_BYTES then
+				change.old = proj_old
+				change.new = proj_new
+			elseif diff and diff ~= "" then
+				change.diff = diff
+			end
+		elseif #proj_new <= LIVE_CHANGE_MAX_BYTES then
+			change.new = proj_new
+		end
+		return { change }
+	end
+
 	-- edit / write results store the change, not both texts (one 8 MB edit wrote
 	-- 17 MB into the session). `details.version = 2`: `diff` = mare.text.diff of the old and new
 	-- text (3 lines of context — what the diff view shows), `lines` = the longer side's line
@@ -283,6 +306,7 @@ return function(D)
 						.. (" (%d line%s)"):format(lines, lines == 1 and "" or "s"),
 					details = details,
 					display = details.diff and stored_display(rel(path), details) or nil,
+					_mare_changes = live_file_change(path, old, a.content, details.diff),
 				}
 			end)
 		end,
@@ -394,7 +418,11 @@ return function(D)
 				end
 				local details, add, del = stored_change(path, old, new)
 				local out = ("Edited %s (+%d -%d)"):format(rel(path), add, del)
-				return { content = out, details = details }
+				return {
+					content = out,
+					details = details,
+					_mare_changes = live_file_change(path, old, new, details.diff),
+				}
 			end)
 		end,
 		-- the approval dialog's diff: the replacement applied in memory (nothing when it
