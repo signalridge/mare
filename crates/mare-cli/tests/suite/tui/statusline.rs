@@ -2170,6 +2170,113 @@ async fn statusline_git_pr_probe_recovers_after_failure_refreshes_same_branch_an
     .await
 }
 
+/// Repro #211: string-form external statusline commands always invoke `sh` even on Windows, and
+/// launch failures produce no diagnostic while leaving statusline output blank/stale.
+#[tokio::test]
+async fn repro_211_external_statusline_windows_string_and_launch_failure() {
+    local(async {
+        let env = TestEnv::new().await;
+        let mut b = env.host().faux(json!([])).no_session().config(json!({
+            "logo": false,
+            "plugins": { "permissions": { "enabled": true }, "onboarding": { "plugins": false } }
+        }));
+        b.opts.mode = Mode::Tui;
+        let mut vt = OwnedVt::new(env, b.opts, 100, 16).await;
+        vt.frame().await;
+        expose(&vt.host);
+
+        let (win_cmd, win_args, launch_diags, launch_diags_after_recovery): (String, Vec<String>, i64, i64) = eval(
+            &vt.host,
+            r#"
+            local orig_run = mare.proc.run
+            local orig_os = mare.os
+            local orig_notify = mare.notify
+            local _restore <close> = setmetatable({}, {
+                __close = function()
+                    mare.proc.run = orig_run
+                    mare.os = orig_os
+                    mare.notify = orig_notify
+                end,
+            })
+
+            local ext = require("statusline.external")
+            local captured_cmd = ""
+            local captured_args = {}
+            local done_tx, done_rx = mare.task.channel()
+            local S = {}
+            local diags = 0
+            local fake_ctx = {
+                llm = C.cordis:get("llm"),
+                get = function(_, name) return C.cordis:get(name) end,
+                spawn = function(_, fn) return mare.task.spawn(fn) end,
+                ui = { invalidate = function() end },
+                logger = {
+                    warn = function() diags = diags + 1 end,
+                    error = function() diags = diags + 1 end,
+                },
+            }
+            mare.notify = function() diags = diags + 1 end
+
+            -- 1) Under Windows, string-form command should use %COMSPEC%/cmd.exe with /C, not hardcoded `sh`.
+            mare.os = "windows"
+            mare.proc.run = function(opts)
+                captured_cmd = tostring(opts.cmd)
+                captured_args = opts.args or {}
+                done_tx:send(true)
+                return { code = 0, stdout = "ok\n", timed_out = false }
+            end
+            local run_win = ext.create(fake_ctx, { command = "echo ok", command_timeout_ms = 5000 }, S)
+            run_win()
+            done_rx:recv()
+
+            -- 2) Repeated identical launch failures emit one deduplicated diagnostic; a later success resets dedup.
+            local fail_tx, fail_rx = mare.task.channel()
+            local should_fail = true
+            mare.proc.run = function()
+                if should_fail then
+                    fail_tx:send(true)
+                    error("No such file or directory")
+                end
+                fail_tx:send(true)
+                return { code = 0, stdout = "recovered\n", timed_out = false }
+            end
+            local run_fail = ext.create(fake_ctx, { command = { "nonexistent-statusline-bin" }, command_timeout_ms = 5000 }, S)
+            run_fail()
+            fail_rx:recv()
+            mare.task.sleep(30)
+            run_fail()
+            fail_rx:recv()
+            mare.task.sleep(30)
+            local diags_dedup = diags
+
+            should_fail = false
+            run_fail()
+            fail_rx:recv()
+            mare.task.sleep(30)
+            should_fail = true
+            run_fail()
+            fail_rx:recv()
+            mare.task.sleep(30)
+            return captured_cmd, captured_args, diags_dedup, diags
+            "#,
+        )
+        .await;
+        vt.shutdown().await;
+        let expected_comspec = std::env::var("COMSPEC").ok().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "cmd.exe".into());
+        assert_eq!(
+            win_cmd, expected_comspec,
+            "Windows string-form statusline command must use COMSPEC/cmd.exe, not hardcoded `sh` (got `{win_cmd}`)"
+        );
+        assert_eq!(win_args, vec!["/C", "echo ok"], "Windows string-form statusline args mismatch");
+        assert_eq!(launch_diags, 1, "repeated identical launch failures must be deduplicated to one diagnostic");
+        assert_eq!(
+            launch_diags_after_recovery, 2,
+            "a successful run must clear launch-failure deduplication so later failures report again"
+        );
+    })
+    .await
+}
+
 /// External statusline command schedules a trailing rerun when triggered while already running and
 /// resets its guard cleanly on error; `git.lua` also schedules a trailing rerun on overlap while
 /// preserving per-branch PR caching so branches without a PR do not spam `gh pr view` every turn.
