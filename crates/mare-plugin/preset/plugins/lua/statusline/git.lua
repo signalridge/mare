@@ -24,7 +24,7 @@ function M.create(ctx, cfg, S)
 	local function run_git_status(timeout_ms)
 		return pcall(mare.proc.run, {
 			cmd = "git",
-			args = { "status", "--porcelain=v1", "--untracked-files=normal" },
+			args = { "--no-optional-locks", "status", "--porcelain=v1", "--untracked-files=normal" },
 			cwd = mare.cwd,
 			env_exclude = git_env_exclude,
 			sandbox = "current",
