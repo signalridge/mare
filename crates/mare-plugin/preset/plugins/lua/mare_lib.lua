@@ -692,12 +692,166 @@ local ATTR_ESCAPES = {
 	["\t"] = "&#9;",
 }
 
---- Wrap outside content in a data boundary block `<tag k="v">\nbody\n</tag>`. Attribute values
---- are fully XML-escaped; in the body only this tag's closing form (any case, whitespace allowed)
---- is escaped, so the content stays readable and cannot end the block early. A closing tag in
---- the result is therefore always the runtime's own.
-function M.data_block(tag, attrs, body)
+local function validate_block_tag(tag)
 	assert(type(tag) == "string" and tag:match("^[%a_][%w_%-%.]*$"), "invalid data block tag")
+	return tag
+end
+
+local function normalize_block_tags(tags)
+	local list = {}
+	if type(tags) == "string" then
+		list[1] = validate_block_tag(tags)
+	elseif type(tags) == "table" then
+		for _, tag in ipairs(tags) do
+			list[#list + 1] = validate_block_tag(tag)
+		end
+	elseif tags ~= nil then
+		error("invalid data block tags")
+	end
+	return list
+end
+
+local function collect_closing_tag_escapes(text, tag_list)
+	local lower = string.lower(text)
+	local escape_end = {}
+	for _, tag in ipairs(tag_list) do
+		local pattern = "<%s*/%s*" .. string.lower(tag):gsub("%p", "%%%0")
+		local pos = 1
+		while true do
+			local s, e = string.find(lower, pattern, pos)
+			if not s then
+				break
+			end
+			if not escape_end[s] or e > escape_end[s] then
+				escape_end[s] = e
+			end
+			pos = e + 1
+		end
+	end
+	local starts = {}
+	for s in pairs(escape_end) do
+		starts[#starts + 1] = s
+	end
+	table.sort(starts)
+	return starts, escape_end
+end
+
+local function utf8_char_len(s, i)
+	local b = string.byte(s, i)
+	if not b then
+		return 0
+	end
+	if b < 0x80 then
+		return 1
+	elseif b >= 0xC2 and b <= 0xDF then
+		local b2 = string.byte(s, i + 1)
+		if b2 and b2 >= 0x80 and b2 <= 0xBF then
+			return 2
+		end
+	elseif b >= 0xE0 and b <= 0xEF then
+		local b2, b3 = string.byte(s, i + 1), string.byte(s, i + 2)
+		if b2 and b3 and b2 >= 0x80 and b2 <= 0xBF and b3 >= 0x80 and b3 <= 0xBF then
+			return 3
+		end
+	elseif b >= 0xF0 and b <= 0xF4 then
+		local b2, b3, b4 = string.byte(s, i + 1), string.byte(s, i + 2), string.byte(s, i + 3)
+		if
+			b2
+			and b3
+			and b4
+			and b2 >= 0x80
+			and b2 <= 0xBF
+			and b3 >= 0x80
+			and b3 <= 0xBF
+			and b4 >= 0x80
+			and b4 <= 0xBF
+		then
+			return 4
+		end
+	end
+	return 1
+end
+
+--- Escape closing forms (`</tag`, any case, optional whitespace) for `tags` (a single tag string
+--- or an array of tag strings) by replacing the leading `<` with `&lt;`.
+function M.escape_closing_tags(text, tags)
+	local s = tostring(text or "")
+	local tag_list = normalize_block_tags(tags)
+	if #tag_list == 0 or s == "" then
+		return s
+	end
+	local starts = collect_closing_tag_escapes(s, tag_list)
+	if #starts == 0 then
+		return s
+	end
+	local out, pos = {}, 1
+	for _, idx in ipairs(starts) do
+		out[#out + 1] = string.sub(s, pos, idx - 1) .. "&lt;"
+		pos = idx + 1
+	end
+	out[#out + 1] = string.sub(s, pos)
+	return table.concat(out)
+end
+
+local function escape_and_bound_body(text, tag_list, body_limit, suffix)
+	local starts, escape_end = collect_closing_tag_escapes(text, tag_list)
+	local escaped_len = #text + #starts * 3
+	if body_limit == nil or escaped_len <= body_limit then
+		if #starts == 0 then
+			return text
+		end
+		local out, pos = {}, 1
+		for _, idx in ipairs(starts) do
+			out[#out + 1] = string.sub(text, pos, idx - 1) .. "&lt;"
+			pos = idx + 1
+		end
+		out[#out + 1] = string.sub(text, pos)
+		return table.concat(out)
+	end
+	local safe_suffix = M.escape_closing_tags(suffix or "", tag_list)
+	local content_budget = body_limit - #safe_suffix
+	if content_budget <= 0 then
+		return nil
+	end
+	local out, used, i, n = {}, 0, 1, #text
+	while i <= n do
+		local esc_e = escape_end[i]
+		if esc_e then
+			-- Keep the escaped closing-tag prefix atomic when bounded; always keep `&lt;` atomic.
+			local unit_end = (esc_e - i <= 64) and esc_e or i
+			local chunk = "&lt;" .. string.sub(text, i + 1, unit_end)
+			if used + #chunk > content_budget then
+				break
+			end
+			out[#out + 1] = chunk
+			used = used + #chunk
+			i = unit_end + 1
+		else
+			local clen = utf8_char_len(text, i)
+			if used + clen > content_budget then
+				break
+			end
+			out[#out + 1] = string.sub(text, i, i + clen - 1)
+			used = used + clen
+			i = i + clen
+		end
+	end
+	local prefix = table.concat(out):gsub("%s+$", "")
+	if prefix == "" then
+		return nil
+	end
+	return prefix .. safe_suffix
+end
+
+--- Wrap outside content in a data boundary block `<tag k="v">\nbody\n</tag>`. Attribute values
+--- are fully XML-escaped; in the body every closing form of `tag` (and any extra tags listed in
+--- `opts.escape_tags`, any case, whitespace allowed) is escaped so the content stays readable and
+--- cannot end the block (or an enclosing tag) early. When `opts.max_bytes` is set, the final
+--- rendered block is bounded to `<= opts.max_bytes` bytes (reserving space for
+--- `opts.truncate_suffix` when truncated and keeping UTF-8 characters and escape units intact);
+--- returns `nil` when `opts.max_bytes` cannot fit the block wrapper and any content.
+function M.data_block(tag, attrs, body, opts)
+	validate_block_tag(tag)
 	local keys = {}
 	for key in pairs(attrs or {}) do
 		assert(type(key) == "string" and key:match("^[%a_][%w_%-%.]*$"), "invalid data block attribute")
@@ -708,22 +862,28 @@ function M.data_block(tag, attrs, body)
 	for _, key in ipairs(keys) do
 		open[#open + 1] = ('%s="%s"'):format(key, (string.gsub(tostring(attrs[key]), "[&<>\"'\r\n\t]", ATTR_ESCAPES)))
 	end
-	local text = string.gsub(tostring(body or ""), "\n$", "")
-	local lower, tag_lower = string.lower(text), string.lower(tag)
-	local pattern = "<%s*/%s*" .. tag_lower:gsub("%p", "%%%0")
-	local out, pos = {}, 1
-	while true do
-		local s, e = string.find(lower, pattern, pos)
-		if not s then
-			break
+	local tag_list = { tag }
+	if type(opts) == "table" and opts.escape_tags ~= nil then
+		for _, extra in ipairs(normalize_block_tags(opts.escape_tags)) do
+			tag_list[#tag_list + 1] = extra
 		end
-		out[#out + 1] = string.sub(text, pos, s - 1) .. "&lt;"
-		pos = s + 1
-		out[#out + 1] = string.sub(text, pos, e)
-		pos = e + 1
 	end
-	out[#out + 1] = string.sub(text, pos)
-	return ("%s>\n%s\n</%s>"):format(table.concat(open, " "), table.concat(out), tag)
+	local text = string.gsub(tostring(body or ""), "\n$", "")
+	local open_line = table.concat(open, " ") .. ">\n"
+	local close_line = "\n</" .. tag .. ">"
+	local body_limit = nil
+	if type(opts) == "table" and opts.max_bytes ~= nil then
+		body_limit = opts.max_bytes - #open_line - #close_line
+		if body_limit <= 0 then
+			return nil
+		end
+	end
+	local rendered_body =
+		escape_and_bound_body(text, tag_list, body_limit, type(opts) == "table" and opts.truncate_suffix or nil)
+	if rendered_body == nil then
+		return nil
+	end
+	return open_line .. rendered_body .. close_line
 end
 
 function M.project_inbox(inbox)

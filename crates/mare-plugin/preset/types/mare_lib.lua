@@ -291,14 +291,25 @@ function M.validate_inbox(inbox) end
 ---@return any, table[]?
 function M.project_text_and_markers(text, image_markers, array_copy) end
 
+--- Escape closing forms (`</tag`, any case, optional whitespace) for one tag or a list of tags
+--- by replacing the leading `<` with `&lt;`.
+---@param text? string
+---@param tags string|string[]
+---@return string
+function M.escape_closing_tags(text, tags) end
+
 --- Wrap outside content (tool/job/subagent/peer output, files) in a data boundary block
 --- `<tag k="v">\nbody\n</tag>`: attribute values are XML-escaped (keys in sorted order) and every
---- closing form of `tag` inside `body` is escaped, so only the runtime can close the block.
+--- closing form of `tag` (plus any `opts.escape_tags`) inside `body` is escaped, so only the
+--- runtime can close the block. When `opts.max_bytes` is set, bounds the rendered block to
+--- `<= opts.max_bytes` bytes (reserving space for `opts.truncate_suffix` when truncated and
+--- preserving UTF-8 and escape units), returning `nil` if the budget cannot fit wrapper + content.
 ---@param tag string
 ---@param attrs? table<string, string|number|boolean>
 ---@param body? string
----@return string
-function M.data_block(tag, attrs, body) end
+---@param opts? {escape_tags?: string|string[], max_bytes?: integer, truncate_suffix?: string}
+---@return string?
+function M.data_block(tag, attrs, body, opts) end
 
 --- Re-project a queue `inbox` table and keep `image_markers` offsets aligned with projected text.
 ---@param inbox table
