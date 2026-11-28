@@ -647,9 +647,11 @@ function M.new_parser(sink, on_error, opts)
 	local stream = require("mare_lib")
 	local heal_pattern = type(opts.markup_healing) == "string" and opts.markup_healing or nil
 	local healer_mod = heal_pattern and require("provider-openai.dsml_strip") or nil
+	local AMBIGUOUS_INDEX = {}
 	local P = {
 		content = {},
 		tools = {},
+		tools_by_call_id = {},
 		tools_by_index = {},
 		item_key_by_id = {},
 		item_key_by_index = {},
@@ -770,6 +772,66 @@ function M.new_parser(sink, on_error, opts)
 		sink({ type = "text_delta", delta = delta })
 	end
 
+	local function non_empty_string(v)
+		return type(v) == "string" and v:match("%S") ~= nil and v or nil
+	end
+
+	local function malformed_tool_call(item, reason)
+		error({
+			message = ("OpenAI: malformed %s item: %s"):format(tostring(item.type), reason),
+			kind = "malformed_response",
+		})
+	end
+
+	local function resolve_tool_call_identity(item, output_index)
+		local item_id = non_empty_string(item.id)
+		local raw_call_id = non_empty_string(item.call_id)
+		local raw_name = non_empty_string(item.name)
+		local tc
+		if item_id or raw_call_id then
+			local by_item = item_id and P.tools[item_id] or nil
+			local by_call = raw_call_id and P.tools_by_call_id[raw_call_id] or nil
+			if by_item and by_call and by_item ~= by_call then
+				malformed_tool_call(item, "conflicting item.id and call_id")
+			end
+			tc = by_item or by_call
+		elseif output_index ~= nil then
+			local by_idx = P.tools_by_index[output_index]
+			if by_idx == AMBIGUOUS_INDEX then
+				malformed_tool_call(item, "ambiguous output_index")
+			end
+			if by_idx and not by_idx.done then
+				tc = by_idx
+			end
+		end
+		if tc then
+			if tc.item_type and item.type and tc.item_type ~= item.type then
+				malformed_tool_call(item, "conflicting item type")
+			end
+			if item_id and tc.item_id and tc.item_id ~= item_id then
+				malformed_tool_call(item, "conflicting item.id")
+			end
+			if raw_call_id and tc.id and tc.id ~= raw_call_id then
+				malformed_tool_call(item, "conflicting call_id")
+			end
+			if raw_name and tc.name and tc.name ~= raw_name then
+				malformed_tool_call(item, "conflicting tool name")
+			end
+		end
+		local name = raw_name or (tc and non_empty_string(tc.name))
+		local call_id = raw_call_id or (tc and non_empty_string(tc.id))
+		if not name or not call_id then
+			local what = (not name and not call_id) and "tool name and call_id"
+				or (not name and "tool name")
+				or "call_id"
+			malformed_tool_call(item, "missing " .. what)
+		end
+		if tc then
+			tc.done = true
+		end
+		return call_id, name
+	end
+
 	function P.feed(ev)
 		local data = ev.data or ""
 		if data == "[DONE]" then
@@ -792,14 +854,30 @@ function M.new_parser(sink, on_error, opts)
 				has_text_part, need_part_sep, in_newline_only_boundary, last_text_key, trailing_nl =
 					false, false, false, nil, 0
 			elseif item.type == "function_call" or item.type == "custom_tool_call" then
-				local rec = stream.stream_record({ id = item.call_id, name = item.name, args = "" }, { "args" })
-				if item.id or item.call_id then
-					P.tools[item.id or item.call_id] = rec
+				local item_id = non_empty_string(item.id)
+				local call_id = non_empty_string(item.call_id)
+				local name = non_empty_string(item.name)
+				local rec = stream.stream_record(
+					{ item_id = item_id, id = call_id, name = name, item_type = item.type, args = "" },
+					{ "args" }
+				)
+				if item_id then
+					P.tools[item_id] = rec
+				end
+				if call_id then
+					P.tools_by_call_id[call_id] = rec
 				end
 				if d.output_index ~= nil then
-					P.tools_by_index[d.output_index] = rec
+					local existing = P.tools_by_index[d.output_index]
+					if existing == nil then
+						P.tools_by_index[d.output_index] = rec
+					elseif existing ~= rec then
+						P.tools_by_index[d.output_index] = AMBIGUOUS_INDEX
+					end
 				end
-				sink({ type = "tool_call_start", tool_call_id = item.call_id, name = item.name })
+				if name then
+					sink({ type = "tool_call_start", tool_call_id = call_id, name = name })
+				end
 			elseif item.type == "web_search_call" then
 				sink({
 					type = "hosted_tool_start",
@@ -871,7 +949,16 @@ function M.new_parser(sink, on_error, opts)
 		elseif t == "response.refusal.delta" then
 			emit_text_delta(d)
 		elseif t == "response.function_call_arguments.delta" or t == "response.custom_tool_call_input.delta" then
-			local tc = P.tools[d.item_id] or (d.output_index ~= nil and P.tools_by_index[d.output_index])
+			local item_id = non_empty_string(d.item_id)
+			local tc
+			if item_id then
+				tc = P.tools[item_id]
+			elseif d.output_index ~= nil then
+				local by_idx = P.tools_by_index[d.output_index]
+				if by_idx and by_idx ~= AMBIGUOUS_INDEX then
+					tc = by_idx
+				end
+			end
 			if tc then
 				stream.stream_append(tc, "args", d.delta or "")
 				sink({ type = "tool_call_delta", tool_call_id = tc.id, delta = d.delta })
@@ -1029,25 +1116,27 @@ function M.new_parser(sink, on_error, opts)
 					})
 				end
 			elseif item.type == "function_call" then
+				local call_id, name = resolve_tool_call_identity(item, d.output_index)
 				local args, perr = require("mare_lib").parse_args(item.arguments)
 				if not perr and healer_mod and type(args) == "table" then
 					args = healer_mod.clean_arguments(heal_pattern, args)
 				end
 				table.insert(P.content, {
 					type = "tool_call",
-					id = item.call_id,
-					name = item.name,
+					id = call_id,
+					name = name,
 					arguments = args,
 					parse_error = perr,
 					raw_arguments = perr and item.arguments or nil,
 				})
 				P.stop = "tool_use"
 			elseif item.type == "custom_tool_call" then
+				local call_id, name = resolve_tool_call_identity(item, d.output_index)
 				-- freeform input arrives raw; tools see it as arguments.input
 				table.insert(P.content, {
 					type = "tool_call",
-					id = item.call_id,
-					name = item.name,
+					id = call_id,
+					name = name,
 					arguments = type(item.input) == "string" and { input = item.input } or nil,
 					parse_error = type(item.input) ~= "string" and "custom tool input must be a string" or nil,
 				})
