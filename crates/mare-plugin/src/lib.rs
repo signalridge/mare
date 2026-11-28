@@ -741,6 +741,30 @@ pub fn install(lua: &Lua, env: &Env) -> mlua::Result<Table> {
     exec_ctx::install(lua, &mare)?;
 
     mare.set("version", env!("CARGO_PKG_VERSION"))?;
+    let semver_tbl = lua.create_table()?;
+    semver_tbl.set(
+        "compare",
+        lua.create_function(|_, (a, b): (String, String)| {
+            Ok(mare_shared::version::compare(&a, &b).map(|ord| match ord {
+                std::cmp::Ordering::Less => -1i8,
+                std::cmp::Ordering::Equal => 0i8,
+                std::cmp::Ordering::Greater => 1i8,
+            }))
+        })?,
+    )?;
+    semver_tbl.set(
+        "is_newer",
+        lua.create_function(|_, (candidate, current): (String, String)| {
+            Ok(mare_shared::version::is_newer_semver(&candidate, &current))
+        })?,
+    )?;
+    semver_tbl.set(
+        "is_newer_release",
+        lua.create_function(|_, (candidate, current): (String, String)| {
+            Ok(mare_shared::version::is_newer_release(&candidate, &current))
+        })?,
+    )?;
+    mare.set("semver", semver_tbl)?;
     mare.set("api_version", env!("MARE_API_VERSION"))?;
     // development builds (tests, `cargo run`) — e.g. no automatic update check from them
     mare.set("debug_build", cfg!(debug_assertions))?;

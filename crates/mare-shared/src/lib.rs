@@ -30,6 +30,7 @@ pub mod session_barrier;
 pub mod style;
 pub mod txn_scope;
 pub mod ui;
+pub mod version;
 pub mod wire_projection;
 
 pub mod image_resource;

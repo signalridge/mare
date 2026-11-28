@@ -10,6 +10,27 @@
 mare = {}
 ---@type string
 mare.version = ""
+---@class mare.semver
+mare.semver = {}
+--- Pure SemVer 2.0.0 precedence comparison (`-1`, `0`, `1`), ignoring build metadata;
+--- returns `nil` when either version string is malformed.
+---@param a string
+---@param b string
+---@return integer?
+function mare.semver.compare(a, b) end
+--- Pure SemVer 2.0.0 precedence check: whether `candidate` has strictly greater
+--- precedence than `current` (e.g. `1.0.1-rc.1` > `1.0.0`).
+---@param candidate string
+---@param current string
+---@return boolean
+function mare.semver.is_newer(candidate, current) end
+--- Release-channel update policy: whether `candidate` should be offered as an update
+--- over `current` under SemVer 2.0.0 precedence (prerelease → stable notifies; stable
+--- never upgrades to a prerelease).
+---@param candidate string
+---@param current string
+---@return boolean
+function mare.semver.is_newer_release(candidate, current) end
 --- Protocol and Lua API compatibility version (matches `mare_protocol::PROTOCOL_VERSION`).
 ---@type string
 mare.api_version = ""
