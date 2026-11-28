@@ -142,3 +142,35 @@ async fn side_conversation_renders_streamed_and_nonstreamed_answers_once() {
     })
     .await
 }
+
+#[tokio::test]
+async fn btw_and_side_answer_on_brand_new_empty_session() {
+    local(async {
+        let mut t = Term::new(
+            json!([
+                { "text": "EMPTY_BTW_REPLY_42" },
+                { "text": "EMPTY_SIDE_REPLY_42" }
+            ]),
+            90,
+            24,
+        )
+        .await;
+
+        // Brand-new session, nothing sent in main conversation yet.
+        t.submit("/btw hello from empty").await;
+        t.until("btw answer on empty session", |s| {
+            s.contains("SIDE · Esc / /side back") && s.contains("EMPTY_BTW_REPLY_42")
+        })
+        .await;
+        t.key(KeyCode::Escape, Modifiers::NONE);
+        t.until("side closed after btw", |s| !s.contains("SIDE · Esc")).await;
+
+        // Second side question before any main message also succeeds.
+        t.submit("/side second empty check").await;
+        t.until("side answer on empty session", |s| {
+            s.contains("SIDE · Esc / /side back") && s.contains("EMPTY_SIDE_REPLY_42")
+        })
+        .await;
+    })
+    .await
+}

@@ -320,8 +320,6 @@ return {
 				return nil, "Session switch in progress; retry /side afterwards"
 			end
 			local owner_id = session_id()
-			local agent_spi = ctx.agent
-			local agent_msgs = agent_spi:messages() or {}
 			local snap_ctx = sess:snapshot_context({
 				session_id = owner_id,
 				before_item_id = opts and opts.before_item_id or nil,
@@ -329,8 +327,8 @@ return {
 				effort = opts and opts.effort or nil,
 				allow_memory = true,
 			})
-			if not snap_ctx or #(snap_ctx.messages or {}) == 0 and #agent_msgs == 0 then
-				return nil, "Send a main conversation message before starting /side"
+			if not snap_ctx then
+				return nil, "Session context is unavailable"
 			end
 			local cur_model = ctx.llm:current()
 			local model_ref = snap_ctx and snap_ctx.model or (cur_model and cur_model.ref)
