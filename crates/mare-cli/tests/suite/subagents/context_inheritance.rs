@@ -544,3 +544,148 @@ return {
     })
     .await;
 }
+
+/// Issue #115: empty-string optional `type`, `model`, `effort`, and `system` overrides passed to
+/// the model-callable `subagent` tool must behave identically to omitting those fields (preserving
+/// parent model/effort inheritance and type defaults such as `explore`'s system instruction),
+/// while non-empty overrides continue to apply.
+#[tokio::test]
+async fn subagent_tool_empty_string_overrides_match_omitted_and_keep_non_empty_overrides() {
+    local(async {
+        let mut env = TestEnv::new().await;
+        env.set_var("OPENAI_API_KEY", "test-openai");
+
+        let model = ScriptedModel::start(
+            Wire::Responses,
+            vec![
+                // Parent turn 1: omitted optional fields
+                Step::Reply(vec![Part::ToolCall {
+                    id: "c_omitted".into(),
+                    name: "subagent".into(),
+                    args: json!({ "prompt": "check defaults", "wait": true }),
+                }]),
+                Step::Reply(vec![Part::Text("child-omitted-ok".into())]),
+                Step::Reply(vec![Part::Text("parent-1-done".into())]),
+                // Parent turn 2: all four optional fields passed as ""
+                Step::Reply(vec![Part::ToolCall {
+                    id: "c_empty".into(),
+                    name: "subagent".into(),
+                    args: json!({
+                        "prompt": "check defaults",
+                        "type": "",
+                        "model": "",
+                        "effort": "",
+                        "system": "",
+                        "wait": true
+                    }),
+                }]),
+                Step::Reply(vec![Part::Text("child-empty-ok".into())]),
+                Step::Reply(vec![Part::Text("parent-2-done".into())]),
+                // Parent turn 3: `type = "explore"` with empty model/effort/system -> keeps explore system prompt
+                Step::Reply(vec![Part::ToolCall {
+                    id: "c_explore_empty".into(),
+                    name: "subagent".into(),
+                    args: json!({
+                        "prompt": "inspect code",
+                        "type": "explore",
+                        "model": "",
+                        "effort": "",
+                        "system": "",
+                        "wait": true
+                    }),
+                }]),
+                Step::Reply(vec![Part::Text("child-explore-ok".into())]),
+                Step::Reply(vec![Part::Text("parent-3-done".into())]),
+                // Parent turn 4: non-empty model/effort/system overrides still apply
+                Step::Reply(vec![Part::ToolCall {
+                    id: "c_override".into(),
+                    name: "subagent".into(),
+                    args: json!({
+                        "prompt": "inspect with override",
+                        "type": "explore",
+                        "model": "openai/gpt-6-luna",
+                        "effort": "low",
+                        "system": "CUSTOM_SUBAGENT_SYSTEM_OVERRIDE",
+                        "wait": true
+                    }),
+                }]),
+                Step::Reply(vec![Part::Text("child-override-ok".into())]),
+                Step::Reply(vec![Part::Text("parent-4-done".into())]),
+            ],
+        )
+        .await;
+
+        let mut b = env
+            .host()
+            .builtins(SUBAGENT_BUILTINS)
+            .config(model.host_config())
+            .args(json!({ "no_session": true, "trust": "trusted" }));
+        b.opts.project_trusted = true;
+        let h = b.build().await;
+        expose(&h);
+
+        // Switch parent live model and effort so inheritance is distinguishable from startup defaults.
+        exec(
+            &h,
+            r#"
+            local llm = C.cordis:get("llm")
+            llm:set_model("openai/gpt-6.1-sol", { target = "session", save = false })
+            llm:set_effort("high", { target = "session", save = false })
+            "#,
+        )
+        .await;
+
+        for (i, prompt) in ["run 1", "run 2", "run 3", "run 4"].iter().enumerate() {
+            let res = h.prompt(prompt, json!({})).await.unwrap();
+            assert_eq!(res["text"], format!("parent-{}-done", i + 1), "{res}");
+        }
+
+        let reqs = model.requests();
+        // Each turn makes 3 requests: parent step 1 -> child -> parent step 2.
+        assert_eq!(reqs.len(), 12, "expected 12 total requests (4 parent turns * 3), got {}", reqs.len());
+
+        let child_omitted: Value = serde_json::from_str(&reqs[1].body).unwrap();
+        let child_empty: Value = serde_json::from_str(&reqs[4].body).unwrap();
+        let child_explore_empty: Value = serde_json::from_str(&reqs[7].body).unwrap();
+        let child_override: Value = serde_json::from_str(&reqs[10].body).unwrap();
+
+        assert_eq!(child_omitted["model"], "gpt-6.1-sol", "{child_omitted}");
+        assert_eq!(child_omitted["reasoning"]["effort"], "high", "{child_omitted}");
+
+        // Omitted and empty-string fields must produce identical child model, effort, and system prompt.
+        assert_eq!(
+            child_empty["model"], child_omitted["model"],
+            "empty model must inherit like omitted: {child_empty}"
+        );
+        assert_eq!(
+            child_empty["reasoning"]["effort"], child_omitted["reasoning"]["effort"],
+            "empty effort must inherit like omitted: {child_empty}"
+        );
+        assert_eq!(
+            child_empty["instructions"], child_omitted["instructions"],
+            "empty type/system must inherit the exact same instructions as omitted"
+        );
+
+        // `type = "explore"` with empty overrides preserves explore's system instruction and parent model/effort.
+        assert_eq!(child_explore_empty["model"], "gpt-6.1-sol", "{child_explore_empty}");
+        assert_eq!(child_explore_empty["reasoning"]["effort"], "high", "{child_explore_empty}");
+        assert!(
+            child_explore_empty["instructions"]
+                .as_str()
+                .is_some_and(|s| s.contains("Inspect the repository without modifying it")),
+            "empty system must not skip explore's default system instruction: {child_explore_empty}"
+        );
+
+        // Non-empty overrides still apply cleanly.
+        assert_eq!(child_override["model"], "gpt-6-luna", "{child_override}");
+        assert_eq!(child_override["reasoning"]["effort"], "low", "{child_override}");
+        assert!(
+            child_override["instructions"].as_str().is_some_and(|s| s.contains("CUSTOM_SUBAGENT_SYSTEM_OVERRIDE")),
+            "non-empty system override must apply: {child_override}"
+        );
+
+        model.finish();
+        h.shutdown().await;
+    })
+    .await;
+}
