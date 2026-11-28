@@ -153,6 +153,12 @@ mare.lock = {}
 ---@param opts? {timeout_ms?: number, cancel?: mare.Token, root?: string}
 ---@return mare.FileLockGuard
 function mare.lock.file(path, opts) end
+--- Exclusive cross-runtime lock keyed by an opaque string in a per-user, profile-independent lock directory.
+---@async
+---@param key string
+---@param opts? {timeout_ms?: number, cancel?: mare.Token}
+---@return mare.FileLockGuard
+function mare.lock.key(key, opts) end
 
 --- File snapshot journal: core backs files up before tools write, remove or
 --- rename them. The `changes` plugin points it at the session and starts turns.

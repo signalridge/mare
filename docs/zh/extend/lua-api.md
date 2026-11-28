@@ -1020,6 +1020,7 @@
 | | |
 |---|---|
 | `mare.lock.file(path, opts)` | Exclusive lock on `path` (created if missing); `cancel` / `timeout_ms` only end the wait. |
+| `mare.lock.key(key, opts)` | Exclusive cross-runtime lock keyed by an opaque string in a per-user, profile-independent lock directory. |
 
 ## mare.mcp
 
