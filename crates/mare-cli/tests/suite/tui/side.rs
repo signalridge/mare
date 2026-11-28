@@ -174,3 +174,61 @@ async fn btw_and_side_answer_on_brand_new_empty_session() {
     })
     .await
 }
+
+#[tokio::test]
+async fn btw_and_side_answer_after_compaction() {
+    local(async {
+        let a1 = format!("compacted turn one {}", "work ".repeat(800));
+        let mut t = Term::with(
+            json!([
+                { "text": a1 },
+                { "text": "compacted turn two" },
+                { "text": "## Summary\nCompacted summary text." },
+                { "text": "SIDE_AFTER_COMPACT_TUI_129" },
+                { "text": "BTW_AFTER_COMPACT_TUI_129" }
+            ]),
+            json!({
+                "plugins": {
+                    "compact": { "keep_recent_tokens": 100, "recent_user_tokens": 0 }
+                }
+            }),
+            100,
+            30,
+        )
+        .await;
+        expose(&t.vt.host);
+
+        t.submit("first long turn").await;
+        t.idle().await;
+        let keep_turn_two = format!("second long turn {}", "keep ".repeat(200));
+        t.submit(&keep_turn_two).await;
+        t.idle().await;
+        t.submit("/compact").await;
+        t.until_vt("compaction settled", |t| !t.vt.busy() && t.history().contains("Compacted")).await;
+        t.vt.dismiss_notices();
+        t.step().await;
+
+        t.submit("/side What is 2+2?").await;
+        until_side_settled(&mut t, "/side answer after compaction", "SIDE_AFTER_COMPACT_TUI_129").await;
+        let screen = t.screen();
+        assert_eq!(
+            screen.matches("SIDE_AFTER_COMPACT_TUI_129").count(),
+            1,
+            "/side after compaction must render once:\n{screen}"
+        );
+        t.key(KeyCode::Escape, Modifiers::NONE);
+        t.until("side closed after /side", |s| !s.contains("SIDE · Esc")).await;
+
+        t.submit("/btw What is 3+3?").await;
+        until_side_settled(&mut t, "/btw answer after compaction", "BTW_AFTER_COMPACT_TUI_129").await;
+        let screen = t.screen();
+        assert_eq!(
+            screen.matches("BTW_AFTER_COMPACT_TUI_129").count(),
+            1,
+            "/btw after compaction must render once:\n{screen}"
+        );
+        t.key(KeyCode::Escape, Modifiers::NONE);
+        t.until("side closed after /btw", |s| !s.contains("SIDE · Esc")).await;
+    })
+    .await
+}

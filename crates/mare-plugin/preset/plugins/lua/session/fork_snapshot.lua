@@ -158,7 +158,10 @@ return function(D)
 			)
 		end
 		local last_entry = path[#path]
-		local last_msg = last_entry and last_entry.type == "message" and last_entry.message
+		local last_msg = nil
+		if last_entry and last_entry.type == "message" then
+			last_msg = last_entry.message
+		end
 		local is_mid_turn = #synthesized > 0
 			or (
 				last_msg ~= nil
