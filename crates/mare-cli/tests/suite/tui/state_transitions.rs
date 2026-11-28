@@ -1512,16 +1512,32 @@ async fn external_editor_preserves_side_failure_backfill_while_open() {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let mut t =
-            Term::build(json!([]), json!({ "editor": script.to_string_lossy().as_ref() }), json!({}), 80, 20, |_| {})
-                .await;
+        // Disable the faux provider (and onboarding login picker) so `/side` fails to start
+        // ("No model available") and backfills `/side why failed` while the external editor owns
+        // the terminal (empty sessions now allow `/side` after #62 / signalridge/mare#42).
+        let mut t = Term::build(
+            json!([]),
+            json!({
+                "editor": script.to_string_lossy().as_ref(),
+                "model": "",
+                "plugins": {
+                    "onboarding": { "enabled": false },
+                    "provider-faux": { "enabled": false }
+                }
+            }),
+            json!({}),
+            80,
+            20,
+            |_| {},
+        )
+        .await;
         expose(&t.vt.host);
         wait_vt(&mut t, "startup to finish", |t| !t.vt.starting()).await;
 
         t.ctrl('g');
         wait_vt(&mut t, "editor process started", |_| ready.exists()).await;
 
-        // Empty session causes `/side` start to fail and backfill `/side why failed` into the editor.
+        // Missing model causes `/side` start to fail and backfill `/side why failed` into the editor.
         exec(&t.vt.host, r#"C.cordis:get("commands"):run("/side why failed")"#).await;
         t.vt.drain_cmds();
         assert_ne!(
