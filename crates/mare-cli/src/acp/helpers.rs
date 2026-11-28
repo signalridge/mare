@@ -5,9 +5,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
 use agent_client_protocol::v1::schema::{
-    ContentBlock, EmbeddedResourceResource, ListSessionsResponse, McpServer, SessionConfigOption,
-    SessionConfigOptionCategory, SessionConfigOptionValue, SessionConfigSelectGroup, SessionConfigSelectOption,
-    SessionConfigSelectOptions, SessionInfo,
+    AvailableCommand, AvailableCommandInput, ContentBlock, EmbeddedResourceResource, ListSessionsResponse, McpServer,
+    SessionConfigOption, SessionConfigOptionCategory, SessionConfigOptionValue, SessionConfigSelectGroup,
+    SessionConfigSelectOption, SessionConfigSelectOptions, SessionInfo, UnstructuredCommandInput,
 };
 use serde_json::{Map, Value as J, json};
 
@@ -1171,6 +1171,104 @@ pub(super) async fn set_config_option(
     Ok(config_options(host).await)
 }
 
+/// Parse a slash-command invocation matching `commands/registry.lua`: `/name` or `/name <args>`
+/// where `name` contains no `/` or whitespace (so paths like `/etc/hosts` are not matched).
+pub(super) fn parse_slash_command(text: &str) -> Option<(&str, &str)> {
+    let rest = text.strip_prefix('/')?;
+    let end = rest.find(|c: char| c == '/' || c.is_whitespace()).unwrap_or(rest.len());
+    if end == 0 {
+        return None;
+    }
+    let name = &rest[..end];
+    let tail = &rest[end..];
+    if !tail.is_empty() && !tail.starts_with(char::is_whitespace) {
+        return None;
+    }
+    Some((name, tail.trim()))
+}
+
+fn command_executable_in_acp(entry: &J, has_session: bool) -> bool {
+    if entry.get("alias_of").and_then(J::as_str).is_some() {
+        return false;
+    }
+    if entry.get("local_only").and_then(J::as_bool) == Some(true) {
+        return false;
+    }
+    let check_cond = |c: &str| match c {
+        "tui" | "running" => false,
+        "session" => has_session,
+        "always" | "idle" | "main" => true,
+        _ => false,
+    };
+    match entry.get("availability") {
+        None | Some(J::Null) => true,
+        Some(J::String(s)) => check_cond(s),
+        Some(J::Array(arr)) => arr.iter().all(|v| v.as_str().is_some_and(check_cond)),
+        _ => false,
+    }
+}
+
+/// Build ACP `AvailableCommand` entries from the `commands` service registry, excluding
+/// `local_only` commands and commands whose `availability` cannot execute in this ACP session.
+pub(super) fn filter_available_commands(list: &J, has_session: bool) -> Vec<AvailableCommand> {
+    let Some(entries) = list.get("data").and_then(J::as_array) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        if !command_executable_in_acp(entry, has_session) {
+            continue;
+        }
+        let Some(name) = entry.get("name").and_then(J::as_str).filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let description = entry.get("description").and_then(J::as_str).unwrap_or("").to_string();
+        let mut cmd = AvailableCommand::new(name, description);
+        if let Some(args) = entry.get("args").and_then(J::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+            cmd = cmd.input(AvailableCommandInput::Unstructured(UnstructuredCommandInput::new(args)));
+        }
+        out.push(cmd);
+    }
+    out
+}
+
+/// Query the host's command registry and session availability for executable ACP commands.
+pub(super) async fn available_commands(host: &Host) -> Vec<AvailableCommand> {
+    let has_session = match call_service(host, "session", "available", vec![]).await {
+        Ok(J::Bool(b)) => b,
+        Ok(J::Array(a)) => a.first().and_then(J::as_bool).unwrap_or(false),
+        _ => false,
+    };
+    let Ok(list) = call_service(host, "commands", "list", vec![]).await else {
+        return Vec::new();
+    };
+    filter_available_commands(&list, has_session)
+}
+
+pub(super) fn available_commands_update(commands: &[AvailableCommand]) -> J {
+    json!({
+        "sessionUpdate": "available_commands_update",
+        "availableCommands": commands,
+    })
+}
+
+/// Extract a human-readable reply from `commands.run`'s `{ result? }` return payload, if any.
+pub(super) fn command_result_text(val: &J) -> Option<String> {
+    let pick = |v: &J| match v {
+        J::String(s) if !s.trim().is_empty() => Some(s.clone()),
+        J::Object(map) => {
+            for key in ["message", "text", "summary"] {
+                if let Some(s) = map.get(key).and_then(J::as_str).filter(|s| !s.trim().is_empty()) {
+                    return Some(s.to_string());
+                }
+            }
+            None
+        }
+        _ => None,
+    };
+    val.get("result").and_then(pick).or_else(|| pick(val))
+}
+
 #[derive(Clone)]
 pub(super) struct PersistedSession {
     pub(super) cwd: PathBuf,
@@ -1852,5 +1950,48 @@ mod tests {
                 serde_json::from_value(json!({ "sessionId": "s1", "update": u }));
             assert!(parsed.is_ok(), "invalid compaction_update {u}: {parsed:?}");
         }
+    }
+
+    #[test]
+    fn available_commands_filter_and_slash_parsing_respect_local_only_and_availability() {
+        assert_eq!(parse_slash_command("/compact"), Some(("compact", "")));
+        assert_eq!(parse_slash_command("/compact focus on tests"), Some(("compact", "focus on tests")));
+        assert_eq!(parse_slash_command("/model faux/echo"), Some(("model", "faux/echo")));
+        assert_eq!(parse_slash_command("/etc/hosts"), None);
+        assert_eq!(parse_slash_command("/"), None);
+        assert_eq!(parse_slash_command("plain text"), None);
+
+        let registry = json!({
+            "data": [
+                { "name": "compact", "description": "Compact history", "args": "[focus]", "availability": "idle" },
+                { "name": "lua", "description": "Local console", "local_only": true },
+                { "name": "termonly", "description": "TUI only", "availability": "tui" },
+                { "name": "midturn", "description": "Running only", "availability": "running" },
+                { "name": "rename", "description": "Rename session", "availability": ["idle", "session"] },
+                { "name": "alias", "description": "Alias", "alias_of": "compact" }
+            ]
+        });
+
+        let with_session = filter_available_commands(&registry, true);
+        let names_with: Vec<&str> = with_session.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names_with, vec!["compact", "rename"]);
+        assert!(matches!(
+            with_session[0].input,
+            Some(AvailableCommandInput::Unstructured(ref u)) if u.hint == "[focus]"
+        ));
+
+        let without_session = filter_available_commands(&registry, false);
+        let names_without: Vec<&str> = without_session.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names_without, vec!["compact"]);
+
+        let update = available_commands_update(&with_session);
+        assert!(
+            serde_json::from_value::<SessionNotification>(json!({ "sessionId": "s1", "update": update })).is_ok(),
+            "available_commands_update must parse as a valid ACP SessionNotification"
+        );
+
+        assert_eq!(command_result_text(&json!({ "result": "done" })).as_deref(), Some("done"));
+        assert_eq!(command_result_text(&json!({ "result": { "message": "ok" } })).as_deref(), Some("ok"));
+        assert_eq!(command_result_text(&json!({})), None);
     }
 }

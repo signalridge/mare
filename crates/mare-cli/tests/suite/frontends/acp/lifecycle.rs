@@ -390,3 +390,182 @@ fn acp_session_list_returns_rfc3339_updated_at_and_ignores_file_mtime_drift() {
 
     rpc.kill_and_wait();
 }
+
+/// ACP `session/new` and `session/load` must advertise executable slash commands via
+/// `available_commands_update` (respecting `local_only` and `availability`), and advertised
+/// commands must actually execute when sent via `session/prompt`.
+#[test]
+fn acp_advertises_and_executes_available_slash_commands_on_new_and_load() {
+    let home = tempfile::tempdir().unwrap();
+    let ws = tempfile::tempdir().unwrap();
+    let cwd = dunce::canonicalize(ws.path()).unwrap();
+    let plugins_dir = home.path().join("config/plugins");
+    std::fs::create_dir_all(&plugins_dir).unwrap();
+    std::fs::write(
+        plugins_dir.join("acp-cmds-test.lua"),
+        r#"return {
+  name = "acp-cmds-test",
+  inject = { "commands" },
+  apply = function(ctx)
+    ctx.commands:register("ping", {
+      description = "Echo arguments back",
+      args = "<msg>",
+      run = function(args)
+        return "pong:" .. tostring(args or "")
+      end,
+    })
+    ctx.commands:register("local-secret", {
+      description = "Local TUI only",
+      local_only = true,
+      run = function()
+        return "must not run over ACP"
+      end,
+    })
+    ctx.commands:register("tui-only", {
+      description = "Requires connected TUI",
+      availability = "tui",
+      run = function()
+        return "must not run headless"
+      end,
+    })
+    ctx.commands:register("running-only", {
+      description = "Only during an active turn",
+      availability = "running",
+      run = function()
+        return "must not advertise idle"
+      end,
+    })
+  end,
+}
+"#,
+    )
+    .unwrap();
+
+    let mut rpc = acp_in_home(
+        home.path(),
+        json!([
+            { "text": "llm reply 1" },
+            { "text": "llm reply 2" }
+        ]),
+        &[],
+        &[],
+    );
+    let _ = rpc.call_raw("initialize", json!({ "protocolVersion": 1, "clientCapabilities": {} }), |_| json!(null));
+
+    // 1. `session/new` publishes `available_commands_update` immediately after `NewSessionResponse`.
+    let s = rpc.call_raw("session/new", json!({ "cwd": cwd, "mcpServers": [] }), |_| json!(null));
+    let sid = s["result"]["sessionId"].as_str().unwrap_or_else(|| panic!("session/new failed: {s}")).to_string();
+
+    let new_cmds_msg = rpc.read();
+    assert_eq!(new_cmds_msg["method"], "session/update", "expected session/update: {new_cmds_msg}");
+    assert_eq!(new_cmds_msg["params"]["sessionId"], sid);
+    assert_eq!(new_cmds_msg["params"]["update"]["sessionUpdate"], "available_commands_update");
+    let new_cmds = new_cmds_msg["params"]["update"]["availableCommands"]
+        .as_array()
+        .unwrap_or_else(|| panic!("missing availableCommands: {new_cmds_msg}"));
+    let new_names: Vec<&str> = new_cmds.iter().filter_map(|c| c["name"].as_str()).collect();
+    assert!(new_names.contains(&"ping"), "custom executable command must be advertised: {new_names:?}");
+    assert!(new_names.contains(&"compact"), "built-in /compact must be advertised: {new_names:?}");
+    assert!(!new_names.contains(&"local-secret"), "local_only command must be excluded: {new_names:?}");
+    assert!(!new_names.contains(&"tui-only"), "tui-only command must be excluded: {new_names:?}");
+    assert!(!new_names.contains(&"running-only"), "running-only command must be excluded: {new_names:?}");
+    assert!(!new_names.contains(&"lua"), "local_only /lua must be excluded: {new_names:?}");
+    let ping_def = new_cmds.iter().find(|c| c["name"] == "ping").unwrap();
+    assert_eq!(ping_def["input"]["hint"], "<msg>");
+
+    // 2. Executing an advertised command via `session/prompt` runs `commands.run`, not the LLM.
+    let id1 = rpc.request(
+        "session/prompt",
+        json!({ "sessionId": sid, "prompt": [{ "type": "text", "text": "/ping hello world" }] }),
+    );
+    let mut cmd_updates = Vec::new();
+    let p1 = loop {
+        let m = rpc.read();
+        if m["method"] == "session/update" {
+            cmd_updates.push(m);
+        } else if m["id"] == id1 {
+            break m;
+        }
+    };
+    assert_eq!(p1["result"]["stopReason"], "end_turn", "slash command prompt failed: {p1}");
+    let cmd_text: String =
+        cmd_updates.iter().filter_map(|u| u["params"]["update"]["content"]["text"].as_str()).collect();
+    assert_eq!(cmd_text, "pong:hello world", "command output must stream as agent_message_chunk: {cmd_updates:?}");
+
+    // 3. Normal prompts and filesystem paths still reach the LLM (and persist history for load).
+    let id2 =
+        rpc.request("session/prompt", json!({ "sessionId": sid, "prompt": [{ "type": "text", "text": "hello llm" }] }));
+    let mut llm_updates = Vec::new();
+    let p2 = loop {
+        let m = rpc.read();
+        if m["method"] == "session/update" {
+            llm_updates.push(m);
+        } else if m["id"] == id2 {
+            break m;
+        }
+    };
+    assert_eq!(p2["result"]["stopReason"], "end_turn", "{p2}");
+    let llm_text: String =
+        llm_updates.iter().filter_map(|u| u["params"]["update"]["content"]["text"].as_str()).collect();
+    assert!(llm_text.contains("llm reply 1"), "normal prompt must still hit LLM: {llm_text:?}");
+
+    // 4. Built-in advertised command (`/name`) executes cleanly too.
+    let id3 = rpc.request(
+        "session/prompt",
+        json!({ "sessionId": sid, "prompt": [{ "type": "text", "text": "/name Named Via ACP" }] }),
+    );
+    let p3 = loop {
+        let m = rpc.read();
+        if m["id"] == id3 {
+            break m;
+        }
+    };
+    assert_eq!(p3["result"]["stopReason"], "end_turn", "/name command failed: {p3}");
+
+    // Close and reload via `session/load` to verify discovery + execution on loaded sessions.
+    let closed = rpc.call_raw("session/close", json!({ "sessionId": sid }), |_| json!(null));
+    assert!(closed.get("error").is_none(), "session/close failed: {closed}");
+
+    let load_id = rpc.request("session/load", json!({ "sessionId": sid, "cwd": cwd, "mcpServers": [] }));
+    let loaded = loop {
+        let m = rpc.read();
+        if m["id"] == load_id {
+            break m;
+        }
+    };
+    assert!(loaded.get("error").is_none(), "session/load failed: {loaded}");
+    let load_cmd_update = rpc.read();
+    assert_eq!(load_cmd_update["method"], "session/update", "expected session/update after load: {load_cmd_update}");
+    assert_eq!(load_cmd_update["params"]["sessionId"], sid);
+    assert_eq!(load_cmd_update["params"]["update"]["sessionUpdate"], "available_commands_update");
+    let load_names: Vec<&str> = load_cmd_update["params"]["update"]["availableCommands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|c| c["name"].as_str())
+        .collect();
+    assert!(load_names.contains(&"ping"), "loaded session must advertise /ping: {load_names:?}");
+    assert!(!load_names.contains(&"local-secret"), "loaded session must exclude local_only: {load_names:?}");
+    assert!(!load_names.contains(&"tui-only"), "loaded session must exclude tui-only: {load_names:?}");
+
+    // Execute advertised command on the loaded session.
+    let id4 = rpc.request(
+        "session/prompt",
+        json!({ "sessionId": sid, "prompt": [{ "type": "text", "text": "/ping after-load" }] }),
+    );
+    let mut after_updates = Vec::new();
+    let p4 = loop {
+        let m = rpc.read();
+        if m["method"] == "session/update" {
+            after_updates.push(m);
+        } else if m["id"] == id4 {
+            break m;
+        }
+    };
+    assert_eq!(p4["result"]["stopReason"], "end_turn", "loaded-session slash command failed: {p4}");
+    let after_text: String =
+        after_updates.iter().filter_map(|u| u["params"]["update"]["content"]["text"].as_str()).collect();
+    assert_eq!(after_text, "pong:after-load", "{after_updates:?}");
+
+    rpc.kill_and_wait();
+}
