@@ -868,3 +868,41 @@ async fn enter_does_not_accept_stale_completion_popup_after_typing() {
     })
     .await
 }
+
+#[tokio::test]
+async fn repro_247_inline_bracketed_paste_refreshes_completion() {
+    local(async {
+        let mut t = Term::new(json!([]), 80, 24).await;
+        t.until_vt("startup", |t| !t.vt.starting()).await;
+        t.vt.dismiss_notices();
+
+        // Inline bracketed paste of `/he` (e.g. short IME commit).
+        t.vt.paste("/he");
+        for _ in 0..8 {
+            t.step().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            t.screen().contains("/help"),
+            "inline bracketed paste '/he' did not open /help completion popup:\n{}",
+            t.screen()
+        );
+
+        // Large folded pastes (>10 lines) stay folded and do not trigger completion.
+        t.ctrl('c');
+        t.step().await;
+        let big = format!("/he\n{}", "line\n".repeat(12));
+        t.vt.paste(&big);
+        for _ in 0..5 {
+            t.step().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            t.screen().contains("[Pasted text #"),
+            "large paste must still fold into a placeholder token:\n{}",
+            t.screen()
+        );
+        assert!(!t.screen().contains("/help"), "folded large paste must not open command completion:\n{}", t.screen());
+    })
+    .await
+}

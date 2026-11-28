@@ -200,8 +200,14 @@ impl App {
                     }
                     return;
                 }
-                self.ed().handle_paste(text);
+                let inline = self.ed().handle_paste(text);
                 self.sync_editor_state();
+                if inline {
+                    self.history.reset();
+                    self.request_completion(false);
+                } else {
+                    self.completion.invalidate();
+                }
             }
         }
     }
