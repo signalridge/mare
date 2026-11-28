@@ -391,7 +391,12 @@ async fn effort_sent_for_kimi_hidden_for_unmapped_provider_and_invalid_format_re
         let ok_sse = compat_events(&[compat_text("ok"), compat_stop()]);
         server.route(
             "/kimi/chat/completions",
-            vec![Resp::sse(ok_sse.clone()), Resp::sse(ok_sse.clone()), Resp::sse(ok_sse.clone())],
+            vec![
+                Resp::sse(ok_sse.clone()),
+                Resp::sse(ok_sse.clone()),
+                Resp::sse(ok_sse.clone()),
+                Resp::sse(ok_sse.clone()),
+            ],
         );
         server.route("/kimi-code/chat/completions", vec![Resp::sse(ok_sse)]);
 
@@ -427,7 +432,8 @@ async fn effort_sent_for_kimi_hidden_for_unmapped_provider_and_invalid_format_re
         .await;
         expose(&h);
 
-        // 1. kimi/kimi-k3 + /effort low -> top-level reasoning_effort = "low" (no `thinking` key);
+        // 1. kimi/kimi-k3 + /effort low -> real agent prompt (precomputed params path) AND direct
+        //    stream both send top-level reasoning_effort = "low" (no `thinking` key);
         //    max -> top-level reasoning_effort = "max".
         //    kimi/kimi-k2-thinking and kimi-code/kimi-for-coding must send neither field.
         exec(
@@ -435,7 +441,21 @@ async fn effort_sent_for_kimi_hidden_for_unmapped_provider_and_invalid_format_re
             r#"
             LLM:set_model("kimi/kimi-k3", { save = false })
             C.cordis:get("commands"):run("/effort low")
+            "#,
+        )
+        .await;
+        let prompt_res = h.prompt("hi from agent", json!({})).await.unwrap();
+        assert!(prompt_res["error"].is_null(), "agent prompt on kimi-k3 must succeed: {prompt_res}");
+
+        let (k3_opts, bad_med_ok, bad_off_ok, groq_opts_nil): (String, bool, bool, bool) = eval(
+            &h,
+            r#"
             local m = assert(LLM:current())
+            local opts = table.concat(LLM:effort_options(m) or {}, ",")
+            local ok_med = pcall(LLM.set_effort, LLM, "medium", { save = false })
+            local ok_off = pcall(LLM.set_effort, LLM, "off", { save = false })
+            local groq_opts = LLM:effort_options(assert(LLM:resolve("groq/r1")))
+
             local r1 = LLM:stream({ model = m, system = "S", messages = { { role = "user", content = { { type = "text", text = "hi" } } } } }, function() end)
             assert(not r1.error, tostring(r1.error))
 
@@ -449,32 +469,44 @@ async fn effort_sent_for_kimi_hidden_for_unmapped_provider_and_invalid_format_re
             local kc = assert(LLM:resolve("kimi-code/kimi-for-coding"))
             local r4 = LLM:stream({ model = kc, system = "S", messages = { { role = "user", content = { { type = "text", text = "hi" } } } } }, function() end)
             assert(not r4.error, tostring(r4.error))
+            return opts, ok_med, ok_off, groq_opts == nil
             "#,
         )
         .await;
+        assert_eq!(k3_opts, "low,high,max", "effort_options must match kimi-k3 offered levels");
+        assert!(!bad_med_ok, "set_effort must reject unsupported 'medium' on kimi-k3");
+        assert!(!bad_off_ok, "set_effort must reject unsupported 'off' on kimi-k3");
+        assert!(groq_opts_nil, "unmapped groq provider must have nil effort_options");
+
         let kimi_reqs: Vec<Value> = server
             .requests()
             .into_iter()
             .filter(|r| r.path == "/kimi/chat/completions")
             .map(|r| r.json())
             .collect();
-        assert_eq!(kimi_reqs.len(), 3);
+        assert_eq!(kimi_reqs.len(), 4);
         assert_eq!(
             kimi_reqs[0]["reasoning_effort"], "low",
-            "kimi-k3 low effort must send top-level reasoning_effort: {}",
+            "agent prompt on kimi-k3 must send top-level reasoning_effort=low: {}",
             kimi_reqs[0]
         );
-        assert!(kimi_reqs[0].get("thinking").is_none(), "kimi-k3 must not send thinking object: {}", kimi_reqs[0]);
+        assert!(kimi_reqs[0].get("thinking").is_none(), "kimi-k3 agent prompt must not send thinking: {}", kimi_reqs[0]);
         assert_eq!(
-            kimi_reqs[1]["reasoning_effort"], "max",
-            "kimi-k3 max effort must send top-level reasoning_effort: {}",
+            kimi_reqs[1]["reasoning_effort"], "low",
+            "kimi-k3 low effort stream must send top-level reasoning_effort: {}",
             kimi_reqs[1]
         );
         assert!(kimi_reqs[1].get("thinking").is_none(), "kimi-k3 must not send thinking object: {}", kimi_reqs[1]);
-        assert!(
-            kimi_reqs[2].get("thinking").is_none() && kimi_reqs[2].get("reasoning_effort").is_none(),
-            "kimi-k2-thinking must not receive K3 reasoning fields: {}",
+        assert_eq!(
+            kimi_reqs[2]["reasoning_effort"], "max",
+            "kimi-k3 max effort must send top-level reasoning_effort: {}",
             kimi_reqs[2]
+        );
+        assert!(kimi_reqs[2].get("thinking").is_none(), "kimi-k3 must not send thinking object: {}", kimi_reqs[2]);
+        assert!(
+            kimi_reqs[3].get("thinking").is_none() && kimi_reqs[3].get("reasoning_effort").is_none(),
+            "kimi-k2-thinking must not receive K3 reasoning fields: {}",
+            kimi_reqs[3]
         );
         let kc_req = server
             .requests()
@@ -750,6 +782,80 @@ async fn stale_picker_reply_after_live_update_resolves_by_item_id() {
         assert_eq!(after, "deepseek/deepseek-chat");
         assert!(notes.contains("no-longer-present"), "missing item_id must warn: {notes}");
         h.shutdown().await;
+        drop(env);
+
+        // Refresh completing before on_open (between snapshot and on_open) must reconcile immediately
+        // in on_open, and an update-raced reply without item_id must warn instead of falling back
+        // to models[i].
+        let mut env2 = TestEnv::new().await;
+        let cache_dir2 = env2.home.path().join("state/models-cache");
+        std::fs::create_dir_all(&cache_dir2).unwrap();
+        std::fs::write(
+            cache_dir2.join("deepseek.json"),
+            r#"{"fetched_at": 9999999999, "models": [{"id": "deepseek-chat"}]}"#,
+        )
+        .unwrap();
+        let server2 = MockServer::start().await;
+        server2.route(
+            "/compat/models",
+            vec![Resp::status(
+                200,
+                r#"{"object":"list","data":[{"id":"deepseek-000-pre-open","name":"Pre-Open Model"}]}"#,
+            )],
+        );
+        let h2 = provider_host(
+            &mut env2,
+            &server2,
+            json!({
+                "model": "deepseek/deepseek-chat",
+                "plugins": { "llm": { "catalog_open_refresh_ms": 600000 } }
+            }),
+        )
+        .await;
+        expose(&h2);
+        let (reconciled, no_id_after, no_id_notes): (bool, String, String) = eval(
+            &h2,
+            r#"
+            local notes = {}
+            mare.ui.notify = function(msg, lvl)
+              notes[#notes + 1] = tostring(lvl) .. ":" .. tostring(msg)
+            end
+            local saw_pre_open = false
+            mare.ui.select = function(opts)
+              -- Complete the refresh BEFORE calling on_open to exercise the snapshot->on_open gap.
+              LLM:refresh_catalog({ name = "deepseek", force = true })
+              local open = true
+              local handle = {
+                is_open = function() return open end,
+                update = function(_, next_items)
+                  for _, it in ipairs(next_items) do
+                    if it.item_id == "deepseek/deepseek-000-pre-open" then
+                      saw_pre_open = true
+                    end
+                  end
+                  return true
+                end,
+              }
+              if opts.on_open then opts.on_open(handle) end
+              open = false
+              -- Reply with an index but NO item_id (5th return value nil) after list_updated=true.
+              return 1, 1, nil, "", nil
+            end
+            C.cordis:get("commands"):run("/model")
+            return saw_pre_open, assert(LLM:current()).ref, table.concat(notes, "\n")
+            "#,
+        )
+        .await;
+        assert!(reconciled, "on_open must reconcile models refreshed before subscription");
+        assert_eq!(
+            no_id_after, "deepseek/deepseek-chat",
+            "reply without item_id after live update must not pick shifted models[1]"
+        );
+        assert!(
+            no_id_notes.contains("Model list updated while selecting"),
+            "missing item_id after live update must warn user: {no_id_notes}"
+        );
+        h2.shutdown().await;
     })
     .await;
 }
@@ -819,6 +925,60 @@ async fn reset_session_model_keeps_unresolvable_default_and_catalogless_default_
         let picked: String = eval(&h2, "return assert(LLM:current()).ref").await;
         assert_eq!(picked, "gw/z-default", "declared default_model must win over alphabetical override");
         h2.shutdown().await;
+        drop(env2);
+
+        // 3. Explicit default_model whose provider is disabled: reset_session_model must keep it
+        //    (never fall back to another configured provider) and prompting must send 0 requests.
+        let mut env3 = TestEnv::new().await;
+        env3.set_var("LOCALMOCK_KEY", "test-lm");
+        server.route(
+            "/disabled-fallback/chat/completions",
+            vec![Resp::sse(compat_events(&[compat_text("wrong-provider"), compat_stop()]))],
+        );
+        let h3 = env3
+            .host()
+            .config(json!({
+                "model": "anthropic/claude-sonnet-5-5",
+                "plugins": {
+                    "preset": "minimal",
+                    "permissions": { "enabled": false },
+                    "provider-faux": { "enabled": false },
+                    "provider-anthropic": { "enabled": false }
+                },
+                "providers": {
+                    "localmock": {
+                        "wire": "openai-chat",
+                        "base_url": format!("{}/disabled-fallback", server.base),
+                        "api_key_env": "LOCALMOCK_KEY",
+                        "list_models": false,
+                        "default_model": "m1",
+                        "models": [{ "model_id": "m1", "context_window": 128000, "max_output": 4096 }]
+                    }
+                }
+            }))
+            .no_session()
+            .build()
+            .await;
+        global(&h3, "LLM", h3.service_table("llm").unwrap());
+        let (reset_nil3, cur_ref3): (bool, String) = eval(
+            &h3,
+            r#"
+            local r = LLM:reset_session_model()
+            local c = LLM:current()
+            return r == nil, c and tostring(c.ref) or ""
+            "#,
+        )
+        .await;
+        assert!(reset_nil3, "reset_session_model must not fall back when explicit default provider is disabled");
+        assert_eq!(cur_ref3, "anthropic/claude-sonnet-5-5", "explicit disabled model ref must stay selected");
+        let res3 = h3.prompt("hi", json!({})).await.unwrap();
+        assert!(!res3["error"].is_null(), "prompt with disabled explicit provider must fail: {res3}");
+        assert_eq!(
+            server.count("/disabled-fallback/chat/completions"),
+            0,
+            "working fallback provider must receive 0 requests when explicit model's provider is disabled"
+        );
+        h3.shutdown().await;
     })
     .await;
 }
@@ -900,6 +1060,34 @@ mare.provider("beta", {{
         );
         h.shutdown().await;
         drop(env);
+
+        // 1b. Cold-start in-process prompt (`agent/loop_preflight.lua` passes `model = current()`):
+        //     `model = "shared-cached"` with static `alpha/shared-cached` and pending disk cache
+        //     `beta.json` must hydrate before admission and refuse as ambiguous with 0 requests.
+        let env_cold = TestEnv::new().await;
+        std::fs::create_dir_all(env_cold.config_dir()).unwrap();
+        std::fs::write(env_cold.config_dir().join("init.lua"), &init_lua).unwrap();
+        let cold_cache_dir = env_cold.home.path().join("state/models-cache");
+        std::fs::create_dir_all(&cold_cache_dir).unwrap();
+        std::fs::write(cold_cache_dir.join("beta.json"), cache_json).unwrap();
+        let h_cold = env_cold
+            .host()
+            .user_config(false)
+            .config(json!({
+                "model": "shared-cached",
+                "plugins": { "provider-faux": { "enabled": false } }
+            }))
+            .no_session()
+            .build()
+            .await;
+        let cold_res = h_cold.prompt("hi", json!({})).await.unwrap();
+        let cold_err = cold_res["error"]["message"].as_str().unwrap_or("");
+        assert!(
+            cold_err.contains("alpha/shared-cached, beta/shared-cached"),
+            "cold-start prompt must hydrate disk cache and reject bare id as ambiguous: {cold_res}"
+        );
+        h_cold.shutdown().await;
+        drop(env_cold);
 
         // 2. Headless CLI `-p --model shared-cached` (cold start, no ui/ready):
         //    must fail with sorted candidates and send 0 generation requests.

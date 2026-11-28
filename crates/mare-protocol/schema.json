@@ -5520,6 +5520,13 @@
               "string",
               "null"
             ]
+          },
+          "item_id": {
+            "description": "`item_id` of the chosen item as rendered by the client, so callers using `ui/select/update`\nresolve by identity even when a reply races with a live update.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "additionalProperties": false

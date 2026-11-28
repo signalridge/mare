@@ -4,22 +4,25 @@ return function(ctx, args)
 	local llm = ctx:get("llm")
 	local filter = nil
 	if args ~= "" then
-		-- Resolve through the single shared llm resolver: exact ref, alias, or unambiguous bare id
-		-- switches directly; ambiguous bare ids and explicit `provider/id` typos fail immediately;
-		-- other partial strings open the picker pre-filtered.
-		local ok, desc = pcall(llm.get_model, llm, args)
-		if ok and desc then
-			local target = llm.alias_target and llm:alias_target(args)
-			local m = llm:set_model(args)
+		-- Resolve through the single shared llm setter: exact ref, alias, or unambiguous bare id
+		-- switches directly; ambiguous bare ids, explicit `provider/id` typos, and refusals fail
+		-- immediately; other partial strings open the picker pre-filtered.
+		local target = llm.alias_target and llm:alias_target(args)
+		local ok, res = pcall(llm.set_model, llm, args)
+		if ok and res then
 			if target and target ~= args then
-				ui.notify(("Model: %s (alias %s)"):format(m.ref, args))
+				ui.notify(("Model: %s (alias %s)"):format(res.ref, args))
 			else
-				ui.notify("Model: " .. m.ref)
+				ui.notify("Model: " .. res.ref)
 			end
 			return
 		end
-		local err = type(desc) == "table" and desc.message or tostring(desc)
-		if err:find("ambiguous model", 1, true) or args:find("/", 1, true) then
+		local err = type(res) == "table" and res.message or tostring(res)
+		if
+			err:find("ambiguous model", 1, true)
+			or args:find("/", 1, true)
+			or not err:find("unknown model", 1, true)
+		then
 			ui.notify(err, "error")
 			return false, err
 		end
@@ -118,6 +121,18 @@ return function(ctx, args)
 	end
 	local cur = llm:current()
 	local models, items, sel, can_use = build_picker_items(cur)
+	local list_updated = false
+	local function items_differ(a, b)
+		if #a ~= #b then
+			return true
+		end
+		for idx = 1, #a do
+			if a[idx].item_id ~= b[idx].item_id or a[idx].label ~= b[idx].label or a[idx].detail ~= b[idx].detail then
+				return true
+			end
+		end
+		return false
+	end
 	local unsub
 	local _guard <close> = setmetatable({}, {
 		__close = function()
@@ -136,15 +151,20 @@ return function(ctx, args)
 		-- Ctrl+S: switch for this session only (state.json's default stays)
 		keys = { { key = "tab", label = "parameters" }, { key = "ctrl+s", label = "this session only" } },
 		on_open = function(sel_handle)
-			unsub = ctx:on("llm/providers-changed", function()
+			local function sync_picker()
 				if not sel_handle:is_open() then
 					return
 				end
 				local next_models, next_items, _, next_can_use = build_picker_items(cur)
-				if sel_handle:update(next_items) then
-					models, can_use = next_models, next_can_use
+				if items_differ(items, next_items) and sel_handle:update(next_items) then
+					models, items, can_use = next_models, next_items, next_can_use
+					list_updated = true
 				end
-			end)
+			end
+			unsub = ctx:on("llm/providers-changed", sync_picker)
+			-- Reconcile once right after subscribing so a background refresh that completed
+			-- between the initial snapshot and `on_open` is never missed.
+			sync_picker()
 		end,
 	})
 	local function resolve_selected()
@@ -158,6 +178,10 @@ return function(ctx, args)
 				end
 			end
 			ui.notify(("Model %s is no longer available"):format(chosen_id), "warning")
+			return nil
+		end
+		if list_updated then
+			ui.notify("Model list updated while selecting — please choose again", "warning")
 			return nil
 		end
 		return models[i]
