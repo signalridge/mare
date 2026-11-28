@@ -118,26 +118,237 @@ pub fn prepare_grants(roots: &[PathBuf], temp: &Path) -> Result<Vec<String>, Str
     Ok(sids)
 }
 
-/// Grants already verified in this process (the DACL check is cheap, the rewrite is not).
+/// Format a targeted diagnostic when a directory under a granted workspace root has a protected
+/// DACL (`SE_DACL_PROTECTED`) that blocks inheritance of the sandbox write grant.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn format_protected_dacl_diagnostic(blocked_path: &Path, root: &Path) -> String {
+    format!(
+        "directory {} has a protected DACL (inheritance disabled) that blocks the Windows sandbox write grant \
+         inherited from workspace root {}; mare preserves administrator-set protected DACLs — either grant write \
+         access to this directory explicitly or re-enable DACL inheritance on it",
+        blocked_path.display(),
+        root.display(),
+    )
+}
+
+/// Outcome of checking whether `cwd` receives effective write access under a single containing root.
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RootInheritance {
+    /// `cwd` inherits or explicitly carries the root's capability ACE.
+    Allowed,
+    /// A protected DACL (`SE_DACL_PROTECTED`) along the path blocks this root's grant.
+    Blocked(String),
+}
+
+/// Evaluate all granted writable roots containing `cwd`: succeed if ANY containing root provides
+/// effective write access to `cwd`, and only report a protected-DACL block when no valid grant
+/// path covers `cwd`. Deepest containing roots are evaluated first so diagnostics name the closest
+/// blocked root.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn verify_cwd_inheritance_with(
+    roots: &[PathBuf],
+    cwd: &Path,
+    mut check_root: impl FnMut(&Path, &Path) -> Result<RootInheritance, String>,
+) -> Result<(), String> {
+    let mut containing: Vec<&PathBuf> = roots.iter().filter(|root| crate::realpath::path_within(cwd, root)).collect();
+    if containing.is_empty() {
+        return Ok(());
+    }
+    containing.sort_by_key(|root| std::cmp::Reverse(root.components().count()));
+    let mut first_blocked: Option<String> = None;
+    let mut first_err: Option<String> = None;
+    for root in containing {
+        match check_root(root, cwd) {
+            Ok(RootInheritance::Allowed) => return Ok(()),
+            Ok(RootInheritance::Blocked(diag)) => {
+                if first_blocked.is_none() {
+                    first_blocked = Some(diag);
+                }
+            }
+            Err(err) => {
+                if first_err.is_none() {
+                    first_err = Some(err);
+                }
+            }
+        }
+    }
+    if let Some(diag) = first_blocked {
+        return Err(diag);
+    }
+    if let Some(err) = first_err {
+        return Err(err);
+    }
+    Ok(())
+}
+
+/// Verify that at least one granted writable root containing `cwd` gives `cwd` effective write
+/// access (not blocked by a protected DACL).
+pub(crate) fn verify_cwd_inheritance(roots: &[PathBuf], cwd: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        verify_cwd_inheritance_with(roots, cwd, |root, target| {
+            let sid = workspace_write_sid(root)?;
+            win::verify_dir_inheritance(root, target, &sid)
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (roots, cwd);
+        Ok(())
+    }
+}
+
+fn grant_once_with(
+    done: &mut std::collections::HashSet<(PathBuf, String)>,
+    path: &Path,
+    sid: &str,
+    mut check_standing: impl FnMut(&Path, &str) -> Result<bool, String>,
+    mut apply_grant: impl FnMut(&Path, &str) -> Result<(), String>,
+) -> Result<(), String> {
+    let key = (path.to_path_buf(), sid.to_string());
+    if done.contains(&key) {
+        // Re-verify the effective ACL before trusting the process cache so external ACL resets or
+        // edits within the same mare process are detected and repaired.
+        if check_standing(path, sid)? {
+            return Ok(());
+        }
+        done.remove(&key);
+    }
+    apply_grant(path, sid)?;
+    done.insert(key);
+    Ok(())
+}
+
+/// Grants already verified in this process: re-verify the cheap standing-grant check before
+/// trusting the cache, and rewrite the DACL only when the effective ACL differs.
 fn grant_once(path: &Path, sid: &str) -> Result<(), String> {
     use std::collections::HashSet;
     use std::sync::Mutex;
     static DONE: Mutex<Option<HashSet<(PathBuf, String)>>> = Mutex::new(None);
-    let key = (path.to_path_buf(), sid.to_string());
-    if DONE.lock().unwrap().get_or_insert_with(HashSet::new).contains(&key) {
-        return Ok(());
-    }
+    let mut guard = DONE.lock().unwrap();
+    let set = guard.get_or_insert_with(HashSet::new);
     #[cfg(windows)]
-    win::grant_write(path, sid)?;
+    {
+        grant_once_with(set, path, sid, win::has_standing_grant, win::grant_write)
+    }
     #[cfg(not(windows))]
-    let _ = (path, sid);
-    DONE.lock().unwrap().get_or_insert_with(HashSet::new).insert(key);
-    Ok(())
+    {
+        grant_once_with(set, path, sid, |_, _| Ok(true), |_, _| Ok(()))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grant_once_rechecks_standing_acl_and_rewrites_on_drift() {
+        let mut cache = std::collections::HashSet::new();
+        let dir = Path::new("/workspace/demo");
+        let sid = "S-1-4-11-22";
+
+        let standing = std::cell::Cell::new(false);
+        let mut checks = 0usize;
+        let mut writes = 0usize;
+
+        // First call applies the grant and caches it.
+        grant_once_with(
+            &mut cache,
+            dir,
+            sid,
+            |_, _| {
+                checks += 1;
+                Ok(standing.get())
+            },
+            |_, _| {
+                writes += 1;
+                standing.set(true);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!((checks, writes), (0, 1));
+
+        // Second call hits the cache, re-verifies standing == true, and skips rewriting.
+        grant_once_with(
+            &mut cache,
+            dir,
+            sid,
+            |_, _| {
+                checks += 1;
+                Ok(standing.get())
+            },
+            |_, _| {
+                writes += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!((checks, writes), (1, 1));
+
+        // External ACL drift invalidates the standing grant; next call must rewrite it.
+        standing.set(false);
+        grant_once_with(
+            &mut cache,
+            dir,
+            sid,
+            |_, _| {
+                checks += 1;
+                Ok(standing.get())
+            },
+            |_, _| {
+                writes += 1;
+                standing.set(true);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!((checks, writes), (2, 2));
+        assert!(cache.contains(&(dir.to_path_buf(), sid.to_string())));
+
+        let msg = format_protected_dacl_diagnostic(Path::new("/workspace/demo/locked"), dir);
+        assert!(msg.contains("/workspace/demo/locked"), "{msg}");
+        assert!(msg.contains("/workspace/demo"), "{msg}");
+        assert!(msg.contains("protected DACL"), "{msg}");
+    }
+
+    #[test]
+    fn verify_cwd_inheritance_allows_when_any_containing_root_grants_effective_access() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outer = tmp.path().join("outer");
+        let inner = outer.join("protected-inner");
+        let leaf = inner.join("leaf");
+        let deep_locked = inner.join("deep-locked");
+        std::fs::create_dir_all(&leaf).unwrap();
+        std::fs::create_dir_all(&deep_locked).unwrap();
+
+        // Outer root is blocked at `inner` (protected DACL), but `inner` itself is also a granted
+        // writable root whose explicit SID covers both `inner` and `inner/leaf`.
+        let roots = vec![outer.clone(), inner.clone()];
+        let check_nested = |root: &Path, _target: &Path| {
+            if root == inner {
+                Ok(RootInheritance::Allowed)
+            } else {
+                Ok(RootInheritance::Blocked(format_protected_dacl_diagnostic(&inner, root)))
+            }
+        };
+        verify_cwd_inheritance_with(&roots, &inner, check_nested).unwrap();
+        verify_cwd_inheritance_with(&roots, &leaf, check_nested).unwrap();
+
+        // When only `outer` is granted, `inner` has no effective grant path and must report blocked.
+        let err = verify_cwd_inheritance_with(std::slice::from_ref(&outer), &inner, check_nested).unwrap_err();
+        assert!(err.contains(&inner.display().to_string()), "{err}");
+        assert!(err.contains(&outer.display().to_string()), "{err}");
+
+        // When every containing root is blocked at `deep_locked`, report blocked against the closest root (`inner`).
+        let both_blocked = |root: &Path, _target: &Path| {
+            Ok(RootInheritance::Blocked(format_protected_dacl_diagnostic(&deep_locked, root)))
+        };
+        let err = verify_cwd_inheritance_with(&roots, &deep_locked, both_blocked).unwrap_err();
+        assert!(err.contains(&deep_locked.display().to_string()), "{err}");
+        assert!(err.contains(&inner.display().to_string()), "expected closest root in diagnostic: {err}");
+    }
 
     #[test]
     fn readonly_sid_validation_and_persistence_reuse_valid_sid() {

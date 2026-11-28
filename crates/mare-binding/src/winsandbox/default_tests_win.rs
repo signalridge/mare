@@ -1,8 +1,164 @@
 //! Unit tests for the Windows default sandbox tier (restricted token, NUL ACL, environment, pipe stdio).
 
-use super::acl::{ACCESS_ALLOWED_ACE_TYPE, allow_null_device, has_exact};
+use super::acl::{
+    ACCESS_ALLOWED_ACE_TYPE, allow_null_device, grant_write, has_exact, has_standing_grant, verify_dir_inheritance,
+};
 use super::token::restricted_token;
 use super::*;
+
+mod acl_revalidation_tests {
+    use super::*;
+    use windows_sys::Win32::Security::Authorization::{
+        GetNamedSecurityInfoW, REVOKE_ACCESS, SE_FILE_OBJECT, SetEntriesInAclW, SetNamedSecurityInfoW,
+    };
+    use windows_sys::Win32::Security::{
+        ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorControl, PROTECTED_DACL_SECURITY_INFORMATION,
+        SE_DACL_PROTECTED,
+    };
+
+    #[test]
+    fn grant_once_revalidates_and_rewrites_after_in_process_acl_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let sids = crate::winsandbox::prepare_root_grants(&[root.clone()]).unwrap();
+        assert_eq!(sids.len(), 1);
+        assert!(has_standing_grant(&root, &sids[0]).unwrap());
+
+        // Simulate external in-process ACL drift by revoking the capability SID from the DACL.
+        let cap = LocalSid::parse(&sids[0]).unwrap();
+        let wpath = wide(&root);
+        unsafe {
+            let (mut dacl, mut sd): (*mut ACL, *mut c_void) = (std::ptr::null_mut(), std::ptr::null_mut());
+            assert_eq!(
+                GetNamedSecurityInfoW(
+                    wpath.as_ptr(),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut dacl,
+                    std::ptr::null_mut(),
+                    &mut sd,
+                ),
+                0
+            );
+            let revoke = [super::super::acl::explicit(cap.0, REVOKE_ACCESS, 0, 0)];
+            let mut stripped: *mut ACL = std::ptr::null_mut();
+            assert_eq!(SetEntriesInAclW(1, revoke.as_ptr(), dacl, &mut stripped), 0);
+            LocalFree(sd as HLOCAL);
+            assert_eq!(
+                SetNamedSecurityInfoW(
+                    wpath.as_ptr(),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    stripped,
+                    std::ptr::null_mut(),
+                ),
+                0
+            );
+            LocalFree(stripped as HLOCAL);
+        }
+        assert!(!has_standing_grant(&root, &sids[0]).unwrap());
+
+        // Calling prepare_root_grants again in the same process must re-verify and restore the grant.
+        let sids2 = crate::winsandbox::prepare_root_grants(&[root.clone()]).unwrap();
+        assert_eq!(sids2, sids);
+        assert!(has_standing_grant(&root, &sids[0]).unwrap());
+    }
+
+    #[test]
+    fn verify_dir_inheritance_diagnoses_protected_subdirectory_without_modifying_dacl() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let sub = root.join("protected-sub");
+        std::fs::create_dir(&sub).unwrap();
+
+        let sid = crate::winsandbox::workspace_write_sid(root).unwrap();
+        grant_write(root, &sid).unwrap();
+
+        // Protect `sub`'s DACL (disable inheritance) and revoke the inherited capability ACE.
+        let cap = LocalSid::parse(&sid).unwrap();
+        let wsub = wide(&sub);
+        unsafe {
+            let (mut dacl, mut sd): (*mut ACL, *mut c_void) = (std::ptr::null_mut(), std::ptr::null_mut());
+            assert_eq!(
+                GetNamedSecurityInfoW(
+                    wsub.as_ptr(),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut dacl,
+                    std::ptr::null_mut(),
+                    &mut sd,
+                ),
+                0
+            );
+            let revoke = [super::super::acl::explicit(cap.0, REVOKE_ACCESS, 0, 0)];
+            let mut stripped: *mut ACL = std::ptr::null_mut();
+            assert_eq!(SetEntriesInAclW(1, revoke.as_ptr(), dacl, &mut stripped), 0);
+            LocalFree(sd as HLOCAL);
+            assert_eq!(
+                SetNamedSecurityInfoW(
+                    wsub.as_ptr(),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    stripped,
+                    std::ptr::null_mut(),
+                ),
+                0
+            );
+            LocalFree(stripped as HLOCAL);
+        }
+
+        let err = match verify_dir_inheritance(root, &sub, &sid).unwrap() {
+            crate::winsandbox::grants::RootInheritance::Blocked(msg) => msg,
+            crate::winsandbox::grants::RootInheritance::Allowed => {
+                panic!("expected protected subdirectory to be blocked")
+            }
+        };
+        assert!(err.contains(&sub.display().to_string()), "expected blocked path in error: {err}");
+        assert!(err.contains("protected DACL"), "expected protected DACL reason in error: {err}");
+
+        // The administrator-set SE_DACL_PROTECTED flag must remain intact.
+        unsafe {
+            let mut sd: *mut c_void = std::ptr::null_mut();
+            assert_eq!(
+                GetNamedSecurityInfoW(
+                    wsub.as_ptr(),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut sd,
+                ),
+                0
+            );
+            let mut control = 0u16;
+            let mut rev = 0u32;
+            assert_ne!(GetSecurityDescriptorControl(sd, &mut control, &mut rev), 0);
+            LocalFree(sd as HLOCAL);
+            assert_ne!(control & SE_DACL_PROTECTED, 0, "SE_DACL_PROTECTED must be preserved");
+        }
+
+        // When both the outer root and the protected inner root are granted, `verify_cwd_inheritance`
+        // must succeed for `sub` and its children via the inner root's explicit grant while keeping
+        // `SE_DACL_PROTECTED` intact.
+        let leaf = sub.join("leaf");
+        std::fs::create_dir(&leaf).unwrap();
+        let both_roots = vec![root.to_path_buf(), sub.clone()];
+        crate::winsandbox::prepare_root_grants(&both_roots).unwrap();
+        crate::winsandbox::verify_cwd_inheritance(&both_roots, &sub).unwrap();
+        crate::winsandbox::verify_cwd_inheritance(&both_roots, &leaf).unwrap();
+        assert!(crate::winsandbox::verify_cwd_inheritance(&[root.to_path_buf()], &sub).is_err());
+    }
+}
 
 mod enhanced_token_tests {
     use super::*;

@@ -41,8 +41,8 @@ mod temp;
 #[path = "default_win.rs"]
 pub(crate) mod win;
 
-pub(crate) use grants::prepare_root_grants;
 pub use grants::{prepare_grants, readonly_capability_sid, temp_write_sid, workspace_write_sid};
+pub(crate) use grants::{prepare_root_grants, verify_cwd_inheritance};
 pub use runner::runner_main;
 pub use runner_args::{RunnerArgs, helper_exe};
 #[cfg(not(unix))]
