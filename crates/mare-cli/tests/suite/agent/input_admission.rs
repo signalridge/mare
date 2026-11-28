@@ -1869,3 +1869,96 @@ async fn session_resume_warns_on_missing_model_effort_cwd_sandbox_dir_and_render
     })
     .await
 }
+
+#[tokio::test]
+async fn repro_304_cancel_during_step_ready_before_admission_returns_not_sent() {
+    local(async {
+        let env = TestEnv::new().await;
+        let script = json!([{ "text": "should never be reached" }]);
+        let h = env.host().faux(script).build().await;
+        expose(&h);
+        exec(
+            &h,
+            r#"
+            STEP_STARTED_TX, STEP_STARTED_RX = mare.task.channel()
+            STEP_RELEASE_TX, STEP_RELEASE_RX = mare.task.channel()
+            C.cordis:get("policy"):voter("agent/step-ready", function(ev)
+                STEP_STARTED_TX:send(true)
+                STEP_RELEASE_RX:recv()
+                if ev.cancel and ev.cancel:is_cancelled() then
+                    return { decision = "deny", reason = "cancelled before admit" }
+                end
+                return { decision = "allow" }
+            end)
+            "#,
+        )
+        .await;
+
+        let started = eval_json(&h, "return A:prompt('unsent draft text')").await;
+        let turn_id = started["turn_id"].as_str().unwrap().to_string();
+        global(&h, "T_REPRO", turn_id);
+        let entered: bool =
+            eval(&h, "return mare.task.timeout(5000, function() return STEP_STARTED_RX:recv() end) == true").await;
+        assert!(entered, "timed out waiting for agent/step-ready voter");
+
+        // Cancel while parked in agent/step-ready BEFORE on_admit runs.
+        exec(&h, "A:cancel(); STEP_RELEASE_TX:send(true)").await;
+        let res = eval_json(&h, "return A:wait(T_REPRO)").await;
+        let msg_count: i64 = eval(&h, "return #A:list_messages().data").await;
+        h.shutdown().await;
+
+        assert_eq!(msg_count, 0, "cancelled pre-admission prompt must stay out of history: {res}");
+        assert_eq!(
+            res["not_sent"], true,
+            "repro #304: prompt cancelled before on_admit returned without not_sent=true (draft lost): {res}"
+        );
+    })
+    .await
+}
+
+#[tokio::test]
+async fn cancel_during_first_lease_before_admission_returns_not_sent() {
+    local(async {
+        let env = TestEnv::new().await;
+        let script = json!([{ "text": "should never be reached" }]);
+        let h = env.host().faux(script).build().await;
+        expose(&h);
+        exec(
+            &h,
+            r#"
+            LEASE_ENTERED_TX, LEASE_ENTERED_RX = mare.task.channel()
+            ORIG_REQ_LEASE = C.cordis.kernel.request_lease
+            C.cordis.kernel.request_lease = function(kself, tok)
+                LEASE_ENTERED_TX:send(true)
+                if tok then
+                    tok:wait()
+                end
+                C.cordis.kernel.request_lease = ORIG_REQ_LEASE
+                return nil, "cancelled waiting for first lease"
+            end
+            "#,
+        )
+        .await;
+
+        let started = eval_json(&h, "return A:prompt('unsent first-lease draft')").await;
+        let turn_id = started["turn_id"].as_str().unwrap().to_string();
+        global(&h, "T_LEASE", turn_id);
+        let entered: bool =
+            eval(&h, "return mare.task.timeout(5000, function() return LEASE_ENTERED_RX:recv() end) == true").await;
+        assert!(entered, "timed out waiting for acquire_first_lease");
+
+        // Cancel while waiting in acquire_first_lease BEFORE on_admit runs (with no input-ready voters).
+        exec(&h, "A:cancel()").await;
+        let res = eval_json(&h, "return A:wait(T_LEASE)").await;
+        let msg_count: i64 = eval(&h, "return #A:list_messages().data").await;
+        h.shutdown().await;
+
+        assert_eq!(msg_count, 0, "cancelled first-lease prompt must stay out of history (no <turn_aborted>): {res}");
+        assert_eq!(res["termination_reason"], "interrupted", "{res}");
+        assert_eq!(
+            res["not_sent"], true,
+            "prompt cancelled during acquire_first_lease must return not_sent=true so draft is restored: {res}"
+        );
+    })
+    .await
+}
