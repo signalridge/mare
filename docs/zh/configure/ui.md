@@ -172,7 +172,7 @@ mare.plugin("statusline", { command = "~/bin/statusline.sh", command_timeout_ms 
 | `prompt` | 字符串，默认 `❯` | 输入提示符。 |
 | `terminal.ambiwidth` | `single`、`double` | 东亚模糊宽度字符的宽度，与 Vim 相同。 |
 | `spinner` | 字形列表，或 `{ frames = {...}, still = "•" }` | 旋转指示器的字形。 |
-| `ui.working` | `{ glyph, label, elapsed, tokens, interrupt_hint, sep, tools, interval_ms, text_throttle_ms, frames, glyphs, verbs }` | 工作状态行细粒度外观（默认 `{ glyph = "swell", label = "glint", elapsed = "auto", tokens = true, interrupt_hint = true, sep = "dot", tools = "still", text_throttle_ms = 250 }`）。 |
+| `ui.working` | `{ glyph, label, elapsed, tokens, interrupt_hint, sep, tools, interval_ms, text_throttle_ms, frames, glyphs, verbs }` | 工作状态行细粒度外观（默认 `{ glyph = "ember", label = "glint", elapsed = "auto", tokens = true, interrupt_hint = true, sep = "dot", tools = "still", text_throttle_ms = 250 }`）。 |
 | `ui.tool_call`、`ui.stopping` | `{ spinner = "braille" }` / `{ spinner = true }` | 工具调用与停止阶段的旋转指示器（设为 `false` 时显示静态圆点）。 |
 | `markdown` | `{ glyphs = {...}, code_line_numbers = false }` | Markdown 渲染（当 `icons = "nerd"` 时，围栏代码块标题自动附带语言图标）。 |
 | `logo` | `true`、`false`、`"compact"` | 启动标志。 |
@@ -187,7 +187,7 @@ mare.setup {
   icons = "nerd",
   ui = {
     working = {
-      glyph = "swell",
+      glyph = "ember",
       label = "glint",
       elapsed = "auto",
       tokens = true,
@@ -203,7 +203,7 @@ mare.setup {
 }
 ```
 
-`ui.working` 的每一项外观都可以单独配置：`glyph`（`swell`、`ember`、`braille`、`moon`、`phase`、`wave`、`sail`、`bullet`、`pulse`、`none` 或 `glyphs` 中定义的名称）、`label`（`accent`、`shimmer`、`glint`、`foam`、`dots`）、`elapsed`（`auto`、`seconds`、`off`）、`tokens`、`interrupt_hint`、`sep`（`dot`、`bullet`）、`tools`（`still`、`spin`）、`interval_ms`、`text_throttle_ms`、内联 `frames` / 自定义 `glyphs` 以及重命名 `reasoning` / `responding` / `tool` / `shell` / `exploring` 各阶段标签的 `verbs`。在 `reduce_motion` 下一切都保持静止。[选项](options.md)页面有带默认值的完整列表。
+`ui.working` 的每一项外观都可以单独配置：`glyph`（`ember`、`swell`、`braille`、`moon`、`phase`、`wave`、`sail`、`bullet`、`pulse`、`none` 或 `glyphs` 中定义的名称）、`label`（`accent`、`shimmer`、`glint`、`foam`、`dots`）、`elapsed`（`auto`、`seconds`、`off`）、`tokens`、`interrupt_hint`、`sep`（`dot`、`bullet`）、`tools`（`still`、`spin`）、`interval_ms`、`text_throttle_ms`、内联 `frames` / 自定义 `glyphs` 以及重命名 `reasoning` / `responding` / `tool` / `shell` / `exploring` 各阶段标签的 `verbs`。在 `reduce_motion` 下一切都保持静止。[选项](options.md)页面有带默认值的完整列表。
 
 影响对话记录的插件选项，例如 `preview_lines`（紧凑视图中每个工具调用显示的输出行数）和 `diff_fold_lines`（紧凑 diff 折叠前保留的行数，默认 `8`，设为 `false` 展开完整 diff），属于 `ui` 插件：
 

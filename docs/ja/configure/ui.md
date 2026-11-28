@@ -172,7 +172,7 @@ mare.plugin("statusline", { command = "~/bin/statusline.sh", command_timeout_ms 
 | `prompt` | 文字列、既定は `❯` | 入力プロンプトの記号。 |
 | `terminal.ambiwidth` | `single`、`double` | 東アジアの曖昧幅文字の幅。Vim と同様。 |
 | `spinner` | グリフのリスト、または `{ frames = {...}, still = "•" }` | スピナーのグリフ。 |
-| `ui.working` | `{ glyph, label, elapsed, tokens, interrupt_hint, sep, tools, interval_ms, text_throttle_ms, frames, glyphs, verbs }` | 作業中の行のきめ細かな見た目設定 (既定 `{ glyph = "swell", label = "glint", elapsed = "auto", tokens = true, interrupt_hint = true, sep = "dot", tools = "still", text_throttle_ms = 250 }`)。 |
+| `ui.working` | `{ glyph, label, elapsed, tokens, interrupt_hint, sep, tools, interval_ms, text_throttle_ms, frames, glyphs, verbs }` | 作業中の行のきめ細かな見た目設定 (既定 `{ glyph = "ember", label = "glint", elapsed = "auto", tokens = true, interrupt_hint = true, sep = "dot", tools = "still", text_throttle_ms = 250 }`)。 |
 | `ui.tool_call`、`ui.stopping` | `{ spinner = "braille" }` / `{ spinner = true }` | ツール実行中・停止処理中のスピナー (`false` で静止ドット)。 |
 | `markdown` | `{ glyphs = {...}, code_line_numbers = false }` | Markdown の描画 (`icons = "nerd"` のときフェンスコードブロック見出しに言語アイコンが付く)。 |
 | `logo` | `true`、`false`、`"compact"` | 起動時のロゴ。 |
@@ -187,7 +187,7 @@ mare.setup {
   icons = "nerd",
   ui = {
     working = {
-      glyph = "swell",
+      glyph = "ember",
       label = "glint",
       elapsed = "auto",
       tokens = true,
@@ -203,7 +203,7 @@ mare.setup {
 }
 ```
 
-`ui.working` の各項目は個別に設定できます: `glyph` (`swell`、`ember`、`braille`、`moon`、`phase`、`wave`、`sail`、`bullet`、`pulse`、`none` または `glyphs` のキー)、`label` (`accent`、`shimmer`、`glint`、`foam`、`dots`)、`elapsed` (`auto`、`seconds`、`off`)、`tokens`、`interrupt_hint`、`sep` (`dot`、`bullet`)、`tools` (`still`、`spin`)、`interval_ms`、`text_throttle_ms`、インライン `frames` / カスタム `glyphs`、および各フェーズ (`reasoning`、`responding`、`tool`、`shell`、`exploring`) のラベルを変える `verbs`。`reduce_motion` のもとでは、すべてが静止します。既定値を含む完全な一覧は [オプション](options.md) のページにあります。
+`ui.working` の各項目は個別に設定できます: `glyph` (`ember`、`swell`、`braille`、`moon`、`phase`、`wave`、`sail`、`bullet`、`pulse`、`none` または `glyphs` のキー)、`label` (`accent`、`shimmer`、`glint`、`foam`、`dots`)、`elapsed` (`auto`、`seconds`、`off`)、`tokens`、`interrupt_hint`、`sep` (`dot`、`bullet`)、`tools` (`still`、`spin`)、`interval_ms`、`text_throttle_ms`、インライン `frames` / カスタム `glyphs`、および各フェーズ (`reasoning`、`responding`、`tool`、`shell`、`exploring`) のラベルを変える `verbs`。`reduce_motion` のもとでは、すべてが静止します。既定値を含む完全な一覧は [オプション](options.md) のページにあります。
 
 トランスクリプトに影響するプラグインのオプション、たとえば `preview_lines` (コンパクト表示でツール呼び出しごとに表示する出力の行数) や `diff_fold_lines` (コンパクト diff を折りたたむ前に残す行数。既定 `8`、`false` で全文表示) は、`ui` プラグインに属します。
 

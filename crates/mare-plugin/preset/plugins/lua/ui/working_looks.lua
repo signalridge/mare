@@ -2,7 +2,7 @@
 --
 -- Elements:
 --   preset  combined (default) | mare | spinner | codex | cc | kimi | shimmer | pulse | dots | wave | foam | sail | sea | <custom>
---   glyph   swell (default) | ember | braille | moon | phase | wave | sail | bullet | pulse | none
+--   glyph   ember (default) | swell | braille | moon | phase | wave | sail | bullet | pulse | none
 --   label   accent | shimmer | glint | foam | dots
 --   elapsed auto | seconds | off
 --   tokens  true | false
@@ -13,7 +13,7 @@ local M = {}
 
 M.defaults = {
 	preset = "combined",
-	glyph = "swell",
+	glyph = "ember",
 	label = "glint",
 	elapsed = "auto",
 	tokens = true,
@@ -25,7 +25,7 @@ M.defaults = {
 }
 
 M.presets = {
-	combined = { glyph = "swell", label = "glint", elapsed = "auto", sep = "dot", tools = "still" },
+	combined = { glyph = "ember", label = "glint", elapsed = "auto", sep = "dot", tools = "still" },
 	mare = { glyph = "swell", label = "foam", elapsed = "auto", sep = "dot" },
 	spinner = { glyph = "braille", label = "accent", elapsed = "seconds", sep = "dot" },
 	codex = { glyph = "bullet", label = "shimmer", tokens = false, sep = "bullet" },

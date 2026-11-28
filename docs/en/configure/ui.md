@@ -172,7 +172,7 @@ To add a segment from your own plugin, use the `ui` service: `ctx.ui:status(id, 
 | `prompt` | a string, default `❯` | The input prompt symbol. |
 | `terminal.ambiwidth` | `single`, `double` | Width of East Asian ambiguous characters, like Vim. |
 | `spinner` | list of glyphs, or `{ frames = {...}, still = "•" }` | Glyphs of the spinners. |
-| `ui.working` | `{ glyph, label, elapsed, tokens, interrupt_hint, sep, tools, interval_ms, text_throttle_ms, frames, glyphs, verbs }` | Fine-grained working indicator options (default `{ glyph = "swell", label = "glint", elapsed = "auto", tokens = true, interrupt_hint = true, sep = "dot", tools = "still", text_throttle_ms = 250 }`). |
+| `ui.working` | `{ glyph, label, elapsed, tokens, interrupt_hint, sep, tools, interval_ms, text_throttle_ms, frames, glyphs, verbs }` | Fine-grained working indicator options (default `{ glyph = "ember", label = "glint", elapsed = "auto", tokens = true, interrupt_hint = true, sep = "dot", tools = "still", text_throttle_ms = 250 }`). |
 | `ui.tool_call`, `ui.stopping` | `{ spinner = "braille" }` / `{ spinner = true }` | Tool-call and stopping spinners (`false` for static dot). |
 | `markdown` | `{ glyphs = {...}, code_line_numbers = false }` | Markdown rendering (fenced code blocks show Nerd Font language icons automatically when `icons = "nerd"`). |
 | `logo` | `true`, `false`, `"compact"` | Startup logo. |
@@ -187,7 +187,7 @@ mare.setup {
   icons = "nerd",
   ui = {
     working = {
-      glyph = "swell",
+      glyph = "ember",
       label = "glint",
       elapsed = "auto",
       tokens = true,
@@ -203,7 +203,7 @@ mare.setup {
 }
 ```
 
-Each leaf of `ui.working` can be configured independently: `glyph` (`swell`, `ember`, `braille`, `moon`, `phase`, `wave`, `sail`, `bullet`, `pulse`, `none`, or a key in `glyphs`), `label` (`accent`, `shimmer`, `glint`, `foam`, `dots`), `elapsed` (`auto`, `seconds`, `off`), `tokens`, `interrupt_hint`, `sep` (`dot`, `bullet`), `tools` (`still`, `spin`), `interval_ms`, `text_throttle_ms`, inline `frames` / custom `glyphs`, and `verbs` to rename each phase (`reasoning`, `responding`, `tool`, `shell`, `exploring`). Everything holds still under `reduce_motion`. The [Options](options.md) page has the full list with defaults.
+Each leaf of `ui.working` can be configured independently: `glyph` (`ember`, `swell`, `braille`, `moon`, `phase`, `wave`, `sail`, `bullet`, `pulse`, `none`, or a key in `glyphs`), `label` (`accent`, `shimmer`, `glint`, `foam`, `dots`), `elapsed` (`auto`, `seconds`, `off`), `tokens`, `interrupt_hint`, `sep` (`dot`, `bullet`), `tools` (`still`, `spin`), `interval_ms`, `text_throttle_ms`, inline `frames` / custom `glyphs`, and `verbs` to rename each phase (`reasoning`, `responding`, `tool`, `shell`, `exploring`). Everything holds still under `reduce_motion`. The [Options](options.md) page has the full list with defaults.
 
 Plugin options that affect the transcript, such as `preview_lines` (lines of output shown per tool call in compact view) and `diff_fold_lines` (rows kept in a compact diff before folding, default `8`, or `false` to show full diffs), belong to the `ui` plugin:
 
