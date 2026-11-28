@@ -86,11 +86,14 @@ pub fn query_whitelisted(var: &dyn Fn(&str) -> Option<String>) -> bool {
         || ["ghostty", "wezterm", "iterm.app", "vscode", "rio", "tabby", "contour"].contains(&prog.as_str())
 }
 
+/// OSC 11 dynamic background color query (ST-terminated).
+pub const OSC11_QUERY: &[u8] = b"\x1b]11;?\x1b\\";
+
 /// The probe sequence. Everything is fenced by DA1 (`ESC [ c`), which every terminal answers.
 pub fn probe_query(osc11: bool, whitelisted: bool) -> Vec<u8> {
     let mut q = Vec::new();
     if osc11 {
-        q.extend_from_slice(b"\x1b]11;?\x1b\\");
+        q.extend_from_slice(OSC11_QUERY);
     }
     if whitelisted {
         // DECRQM 2026 / 2027; XTGETTCAP RGB (hex 524742) and Tc (hex 5463)

@@ -16,6 +16,7 @@ pub(in crate::app) fn suspend(app: &mut App, guard: &TermGuard) {
     }
     app.reacquire_terminal(app_now());
     app.emit("ui/resume", serde_json::json!({}));
+    super::probe::refresh_background_inband(app);
 }
 
 #[cfg(unix)]

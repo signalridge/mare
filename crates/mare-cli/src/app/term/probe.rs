@@ -250,3 +250,17 @@ pub(in crate::app) fn maybe_reprobe_inband(app: &mut App) {
     let wl = mare_tui::term_input::query_whitelisted(&|k| std::env::var(k).ok());
     mare_tui::out::write_own(mare_tui::term_input::probe_query(osc11, wl));
 }
+
+/// Send one nonblocking in-band OSC 11 background query after regaining the foreground
+/// (e.g. `Ctrl+Z` / `fg`), honoring the existing probe and `flavor = "auto"` settings.
+/// Replies route through [`apply_inband_escape`] / [`apply_inband_reply_bytes`] -> `ui/background`.
+pub(in crate::app) fn refresh_background_inband(app: &App) {
+    if !cfg!(unix) || mare_tui::modes::handed_off() {
+        return;
+    }
+    let (probe_enabled, osc11) = probe_settings(&app.host);
+    if !probe_enabled || !osc11 {
+        return;
+    }
+    mare_tui::out::write_own(mare_tui::term_input::OSC11_QUERY.to_vec());
+}
