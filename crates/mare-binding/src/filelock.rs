@@ -9,6 +9,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use mlua::{Lua, Table, UserData, UserDataMethods};
+use sha2::{Digest, Sha256};
 
 use mare_shared::lua::rt_err;
 use mare_shared::private::{LockError, LockGuard, create_dir_all, lock_file_async, lock_opened_file_async};
@@ -160,6 +161,62 @@ fn open_anchored_lock_file(root: &Path, path: &Path, create_parent: bool) -> std
     }
 }
 
+/// Resolve an OS-user-shared, `MARE_HOME`-independent lock root so separate Mare processes
+/// running under different profiles still serialize keyed resource locks for the same OS user.
+fn key_lock_root() -> PathBuf {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let euid = unsafe { libc::geteuid() };
+        if let Some(dir) =
+            std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()).map(PathBuf::from).filter(|p| p.is_absolute())
+            && let Ok(meta) = std::fs::symlink_metadata(&dir)
+            && meta.is_dir()
+            && !meta.file_type().is_symlink()
+            && meta.uid() == euid
+        {
+            return dir.join("mare").join("locks");
+        }
+        let tmp_root = std::env::temp_dir().join(format!("mare-locks-{euid}"));
+        let squatted = std::fs::symlink_metadata(&tmp_root)
+            .ok()
+            .is_some_and(|m| m.file_type().is_symlink() || !m.is_dir() || m.uid() != euid || (m.mode() & 0o077) != 0);
+        if !squatted {
+            return tmp_root;
+        }
+        if let Some(home) = dirs::home_dir() {
+            return home.join(".local").join("state").join("mare").join("locks");
+        }
+        tmp_root
+    }
+    #[cfg(windows)]
+    {
+        if let Some(local) = dirs::data_local_dir() {
+            return local.join("mare").join("locks");
+        }
+        std::env::temp_dir().join("mare-locks")
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        std::env::temp_dir().join("mare-locks")
+    }
+}
+
+fn key_lock_paths(key: &str) -> mlua::Result<(PathBuf, PathBuf)> {
+    if key.is_empty() {
+        return Err(rt_err("lock key must not be empty"));
+    }
+    let root = key_lock_root();
+    let digest = Sha256::digest(key.as_bytes());
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        use std::fmt::Write as _;
+        let _ = write!(hex, "{b:02x}");
+    }
+    let path = root.join(format!("{hex}.lock"));
+    Ok((root, path))
+}
+
 async fn acquire(
     path: String,
     root: Option<PathBuf>,
@@ -167,7 +224,7 @@ async fn acquire(
     cancel: Option<tokio_util::sync::CancellationToken>,
 ) -> mlua::Result<Guard> {
     let p = PathBuf::from(&path);
-    let poll = Duration::from_millis(25);
+    let poll = Duration::from_millis(10);
     let res = match root {
         Some(r) => match open_anchored_lock_file(&r, &p, true) {
             Ok(file) => lock_opened_file_async(file, &p, timeout, poll, cancel.as_ref()).await,
@@ -199,6 +256,18 @@ pub fn install(lua: &Lua, mare: &Table) -> mlua::Result<()> {
                 .map(|ms| Duration::from_millis(ms as u64));
             let cancel = crate::task::opt_token(&opts);
             acquire(path, root, timeout, cancel).await
+        })?,
+    )?;
+    t.set(
+        "key",
+        lua.create_async_function(|_lua, (key, opts): (String, Option<Table>)| async move {
+            let (root, path) = key_lock_paths(&key)?;
+            let timeout = opts
+                .as_ref()
+                .and_then(|o| o.get::<Option<f64>>("timeout_ms").ok().flatten())
+                .map(|ms| Duration::from_millis(ms as u64));
+            let cancel = crate::task::opt_token(&opts);
+            acquire(path.to_string_lossy().into_owned(), Some(root), timeout, cancel).await
         })?,
     )?;
     mare.set("lock", t)?;
@@ -291,5 +360,33 @@ mod tests {
         .unwrap();
         assert!(new_root.is_dir());
         drop(created);
+    }
+
+    #[tokio::test]
+    async fn keyed_lock_serializes_holders_and_rejects_empty_key() {
+        assert!(key_lock_paths("").is_err(), "empty lock key must be rejected");
+        let (root, path) = key_lock_paths("fs:path:/tmp/example.txt").unwrap();
+        assert_eq!(path.parent(), Some(root.as_path()));
+        if std::env::var_os("MARE_HOME").is_some_and(|v| !v.is_empty()) {
+            assert!(
+                !root.starts_with(mare_shared::paths::state_dir()),
+                "keyed lock root must be independent of MARE_HOME profile state_dir (root={}, state={})",
+                root.display(),
+                mare_shared::paths::state_dir().display()
+            );
+        }
+        let g =
+            acquire(path.to_string_lossy().into_owned(), Some(root.clone()), Some(Duration::from_millis(200)), None)
+                .await
+                .unwrap();
+        let busy =
+            acquire(path.to_string_lossy().into_owned(), Some(root.clone()), Some(Duration::from_millis(60)), None)
+                .await;
+        assert!(busy.is_err(), "second holder of same key must block and time out");
+        g.0.lock().unwrap().take().unwrap().release().unwrap();
+        let g2 = acquire(path.to_string_lossy().into_owned(), Some(root), Some(Duration::from_millis(200)), None)
+            .await
+            .unwrap();
+        drop(g2);
     }
 }

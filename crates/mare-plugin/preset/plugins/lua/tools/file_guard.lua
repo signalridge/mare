@@ -26,8 +26,10 @@ return function(D)
 	-- events: add checks), tools:observe / tools:observation, `read_before_edit = false`.
 	---------------------------------------------------------------------------
 	local observed = {} -- abs path -> {kind = "present", size, mtime, hash} | {kind = "absent"}
+	local observed_paths = {} -- abs path -> true once observed in this session (detects atomic inode replacement)
 	ctx:on("session/changed", function()
 		observed = {}
+		observed_paths = {}
 	end)
 
 	--- version_of(path, data?, max_bytes?) -> version, data | nil, nil, err (err ends in
@@ -56,6 +58,11 @@ return function(D)
 	end
 	local function record(path, obs)
 		observed[obs_key(path)] = obs
+		if obs and obs.kind == "present" then
+			observed_paths[path] = true
+		else
+			observed_paths[path] = nil
+		end
 		ctx.bus:emit("fs/observed", { path = path, observation = obs })
 	end
 
@@ -101,6 +108,13 @@ return function(D)
 			local prior = observed[obs_key(path)]
 			if verb == "edit" or cur then
 				if not prior then
+					if cur and observed_paths[path] then
+						return nil,
+							("%s %s: the file changed since you read it — read it again before editing (stale)"):format(
+								tool,
+								short_path(path)
+							)
+					end
 					return nil,
 						("%s %s: read it first — %s refuses files not read in this session (not_observed)"):format(
 							tool,
@@ -182,10 +196,11 @@ return function(D)
 		return true
 	end
 	--- Waiter-queue per-file lock table (keyed by realpath + identity, sorted to avoid deadlocks).
-	--- Used for both `tools:with_file_lock` and the outer pipeline lock (`acquire_pipeline_lock`).
+	--- Used for both `tools:with_file_lock` (shared across runtimes via `mare.lock.key`) and the
+	--- outer pipeline lock (`acquire_pipeline_lock`).
 	--- Strict lock order is always `pipeline_locks` -> `file_locks`, which works cleanly across
 	--- `mare.exec.run` fresh threads and cross-plugin service calls such as `apply_patch`.
-	local function make_lock_table()
+	local function make_lock_table(shared)
 		local locks = {} -- key -> {locked, waiters}
 		local function acquire(paths, cancel)
 			local keys, seen = {}, {}
@@ -220,6 +235,10 @@ return function(D)
 				released = true
 				for i = #acquired, 1, -1 do
 					local entry = acquired[i]
+					if entry.ext then
+						pcall(entry.ext.release, entry.ext)
+						entry.ext = nil
+					end
 					local l = entry.lock
 					local next_waiter
 					while #l.waiters > 0 do
@@ -302,15 +321,27 @@ return function(D)
 					end
 					pending_waiter, pending_key, pending_lock = nil, nil, nil
 				end
-				acquired[#acquired + 1] = { key = k, lock = l }
+				local entry = { key = k, lock = l }
+				acquired[#acquired + 1] = entry
+				if shared and mare.lock and mare.lock.key then
+					local ok_ext, ext_or_err = pcall(mare.lock.key, "fs:" .. k, { cancel = cancel })
+					if not ok_ext then
+						release_acquired()
+						if cancel and cancel:is_cancelled() then
+							return nil, "cancelled"
+						end
+						return nil, ext_or_err
+					end
+					entry.ext = ext_or_err
+				end
 			end
 			committed = true
 			return release_acquired
 		end
 		return locks, acquire
 	end
-	local file_locks, acquire_file_lock = make_lock_table()
-	local _, acquire_pipeline_lock = make_lock_table()
+	local file_locks, acquire_file_lock = make_lock_table(true)
+	local _, acquire_pipeline_lock = make_lock_table(false)
 	--- with_file_lock(paths, fn) -> fn() — mutations of the same file run one at a time
 	--- (keyed by realpath + identity; locks taken in sorted order, so two calls needing
 	--- overlapping sets can't deadlock); different files still run in parallel
