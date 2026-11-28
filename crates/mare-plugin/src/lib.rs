@@ -252,6 +252,41 @@ pub fn types_texts() -> Vec<(&'static str, std::borrow::Cow<'static, str>)> {
     }
 }
 
+/// Bundled skill files, `(path under skills/, text)`: every file shipped under `preset/skills/`.
+pub fn skill_texts() -> Vec<(String, std::borrow::Cow<'static, str>)> {
+    #[cfg(not(debug_assertions))]
+    {
+        let mut entries: Vec<_> = runtime_archive::list_prefix("skills/")
+            .into_iter()
+            .map(|(rel, text)| (rel, std::borrow::Cow::Owned(text)))
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        entries
+    }
+    #[cfg(debug_assertions)]
+    {
+        let root = std::path::Path::new(mare_macro::preset_dir!()).join("skills");
+        let mut out = Vec::new();
+        let mut stack = vec![root.clone()];
+        while let Some(d) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&d) else { continue };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.is_file() {
+                    let rel = p.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
+                    let text =
+                        std::fs::read_to_string(&p).unwrap_or_else(|err| panic!("reading preset/skills/{rel}: {err}"));
+                    out.push((rel, std::borrow::Cow::Owned(text)));
+                }
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+}
+
 /// Build-time validated static built-in service contracts cached once per process behind shared
 /// `Arc`s so startup, reloads, and child hosts materialize contracts directly from compile-time
 /// data without runtime deflate decompression, JSON parsing, or schema re-validation.
@@ -1160,6 +1195,31 @@ mod tests {
             );
         }
         assert_eq!(super::news_text().as_ref(), std::fs::read_to_string(preset_root.join("NEWS.md")).unwrap());
+    }
+
+    #[test]
+    fn bundled_skills_match_preset_directory() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("preset/skills");
+        let mut on_disk = Vec::new();
+        let mut stack = vec![root.clone()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.is_file() {
+                    on_disk.push(p.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/"));
+                }
+            }
+        }
+        on_disk.sort();
+        let listed = super::skill_texts();
+        let names: Vec<String> = listed.iter().map(|(n, _)| n.clone()).collect();
+        assert_eq!(names, on_disk);
+        assert!(names.iter().any(|n| n == "plugin-authoring/SKILL.md"), "missing bundled plugin-authoring skill");
+        for (rel, text) in &listed {
+            assert_eq!(text.as_ref(), std::fs::read_to_string(root.join(rel)).unwrap(), "{rel}");
+        }
     }
 
     #[test]

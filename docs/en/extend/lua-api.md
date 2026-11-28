@@ -1084,6 +1084,7 @@ Defined in `types/mare/config.lua`, `types/mare/plugins.lua`.
 | `mare.plugins.set_enabled(name, on, source)` |  |
 | `mare.plugins.fetch_catalog()` |  |
 | `mare.plugins.mare_news()` |  |
+| `mare.plugins.ensure_runtime()` | Ensure mare's bundled runtime assets (`mare.paths.runtime`, including `skills/`, `types/`, and `plugins/`) are extracted and up to date for this binary, waiting on the cross-process runtime lock if a background refresh is already in progress. |
 | `mare.plugins.dirs(kind)` | The installed packages' `skills/`, `prompts/`, `themes/` or `types/` directories (or custom paths declared in `mare-plugin.toml`, or package roots when `kind` is omitted), in load order (`context` reads skills and prompts, `theme-default` reads themes). Empty under `--no-user-plugins` (`mare.no_user_plugins`): no package loads, nor its content. |
 
 ## mare.policy

@@ -35,8 +35,9 @@ The `context` plugin scans these directories in order. When two skills share a `
 | 3 | `.mare/skills/` | Project resource root (nearest `.mare/` or `.mcp.json` up to `.git`) | Yes |
 | 4 | `.agents/skills/` | Resolved against the same project resource root (`mare.project.root`) | Yes |
 | 5 | `<package>/skills/` | Installed [packages](../configure/packages.md) | No |
+| 6 | `~/.local/share/mare/runtime/skills/` | Bundled skills shipped with mare (for example `plugin-authoring`) | No |
 
-Change search paths with `skill_dirs` in `init.lua`. Relative entries resolve via `mare.project.root` and require [project trust](permissions.md#project-trust).
+Change search paths with `skill_dirs` in `init.lua`. Relative entries resolve via `mare.project.root` and require [project trust](permissions.md#project-trust). User, project, and package skills always shadow a bundled skill with the same name.
 
 ```lua
 mare.plugin("context", {
