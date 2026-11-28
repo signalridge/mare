@@ -304,7 +304,7 @@ pub(super) async fn request(lua: Lua, opts: Table, authz: Option<crate::exec_ctx
         Some(a) => match &a.policy.network {
             crate::ossandbox::Network::Proxy(np) => send_authorized(&lua, a, np, &p, &url, &tok, deadline).await?,
             crate::ossandbox::Network::Open if p.block_private => {
-                let np = crate::netauth::NetPolicy::block_private_open();
+                let np = crate::netauth::NetPolicy::block_private_open(crate::netauth::fake_ip_mode_from_lua(&lua));
                 send_authorized(&lua, a, &np, &p, &url, &tok, deadline).await?
             }
             crate::ossandbox::Network::Open => send_open(&lua, &p, &url, &tok).await?,
