@@ -16,6 +16,7 @@ const MAX_DECODED_PIXELS: u64 = 4096 * 4096;
 const MAX_IMAGE_DIM: u32 = 16_384;
 const MAX_ALLOC_BYTES: u64 = 256 * 1024 * 1024;
 const DEFAULT_MAX_DIM: u32 = 2000;
+const MAX_ENCODED_BYTES: usize = 1_500_000;
 
 fn decoder_limits() -> Limits {
     let mut limits = Limits::default();
@@ -53,21 +54,51 @@ pub fn is_image_path(p: &Path) -> bool {
     p.extension().and_then(|e| e.to_str()).is_some_and(|e| IMAGE_EXTS.contains(&e.to_ascii_lowercase().as_str()))
 }
 
-/// Downscale so the longest side is ≤ `max_dim`, encode as PNG (JPEG for large photos).
+fn is_opaque(img: &DynamicImage) -> bool {
+    if !img.color().has_alpha() {
+        return true;
+    }
+    match img {
+        DynamicImage::ImageRgba8(i) => i.pixels().all(|p| p.0[3] == u8::MAX),
+        DynamicImage::ImageLumaA8(i) => i.pixels().all(|p| p.0[1] == u8::MAX),
+        DynamicImage::ImageRgba16(i) => i.pixels().all(|p| p.0[3] == u16::MAX),
+        DynamicImage::ImageLumaA16(i) => i.pixels().all(|p| p.0[1] == u16::MAX),
+        DynamicImage::ImageRgba32F(i) => i.pixels().all(|p| p.0[3] >= 1.0),
+        _ => img.to_rgba8().pixels().all(|p| p.0[3] == u8::MAX),
+    }
+}
+
+/// Downscale so the longest side is ≤ `max_dim`. For opaque images, pick the smaller of PNG
+/// and JPEG so photographic inputs are not expanded while crisp diagrams stay PNG; for
+/// transparent inputs, always preserve alpha as PNG (downscaling further if needed to stay
+/// within `MAX_ENCODED_BYTES`).
 pub fn encode(img: DynamicImage, max_dim: u32) -> anyhow::Result<Encoded> {
-    let img =
+    let mut img =
         if img.width().max(img.height()) > max_dim { img.resize(max_dim, max_dim, FilterType::Lanczos3) } else { img };
-    let (width, height) = (img.width(), img.height());
     let mut buf = Vec::new();
     img.write_to(&mut Cursor::new(&mut buf), ImageFormat::Png)?;
     let mut mime = "image/png";
-    if buf.len() > 1_500_000 {
+    if is_opaque(&img) {
         let mut jbuf = Vec::new();
         DynamicImage::ImageRgb8(img.to_rgb8()).write_to(&mut Cursor::new(&mut jbuf), ImageFormat::Jpeg)?;
-        buf = jbuf;
-        mime = "image/jpeg";
+        if jbuf.len() < buf.len() {
+            buf = jbuf;
+            mime = "image/jpeg";
+        }
+    } else {
+        while buf.len() > MAX_ENCODED_BYTES {
+            let cur_max = img.width().max(img.height());
+            if cur_max <= 1 {
+                anyhow::bail!("encoded transparent PNG ({} bytes) exceeds {MAX_ENCODED_BYTES} byte limit", buf.len());
+            }
+            let scale = ((MAX_ENCODED_BYTES as f64) / (buf.len() as f64)).sqrt() * 0.9;
+            let next_max = ((cur_max as f64) * scale).floor().clamp(1.0, (cur_max - 1) as f64) as u32;
+            img = img.resize(next_max, next_max, FilterType::Lanczos3);
+            buf.clear();
+            img.write_to(&mut Cursor::new(&mut buf), ImageFormat::Png)?;
+        }
     }
-    Ok(Encoded { data: STANDARD.encode(&buf), mime, width, height })
+    Ok(Encoded { data: STANDARD.encode(&buf), mime, width: img.width(), height: img.height() })
 }
 
 pub fn load_bytes(bytes: &[u8], max_dim: u32) -> anyhow::Result<Encoded> {
@@ -304,5 +335,88 @@ mod tests {
         assert!(noisy_bytes.len() <= 1_500_000);
         let noisy_img = image::load_from_memory(&noisy_bytes).unwrap();
         assert_eq!((noisy_img.width(), noisy_img.height()), (2000, 2000));
+    }
+
+    #[test]
+    fn repro_265_photographic_jpeg_not_expanded_to_larger_png() {
+        let (width, height) = (640u32, 480u32);
+        let mut rgb = image::RgbImage::new(width, height);
+        for (x, y, px) in rgb.enumerate_pixels_mut() {
+            let h = x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(2_246_822_519);
+            let r = (((x * 3 + y * 5) ^ (h >> 16)) & 0xff) as u8;
+            let g = (((x * 7 + y * 2) ^ (h >> 8)) & 0xff) as u8;
+            let b = (((x * 11 + y * 13) ^ h) & 0xff) as u8;
+            *px = image::Rgb([r, g, b]);
+        }
+        let mut jpeg_bytes = Vec::new();
+        DynamicImage::ImageRgb8(rgb).write_to(&mut Cursor::new(&mut jpeg_bytes), ImageFormat::Jpeg).unwrap();
+        let encoded = load_bytes(&jpeg_bytes, 2000).unwrap();
+        let out_bytes = STANDARD.decode(&encoded.data).unwrap();
+        assert!(
+            out_bytes.len() <= jpeg_bytes.len() * 2,
+            "opaque photographic JPEG ({} bytes) expanded to {} bytes as {}",
+            jpeg_bytes.len(),
+            out_bytes.len(),
+            encoded.mime,
+        );
+        assert_eq!(encoded.mime, "image/jpeg");
+    }
+
+    #[test]
+    fn transparent_png_preserves_alpha_and_flat_opaque_stays_png() {
+        // Noisy RGBA image with non-opaque alpha: must keep PNG so alpha is not lost.
+        let mut rgba = image::RgbaImage::new(256, 256);
+        for (x, y, px) in rgba.enumerate_pixels_mut() {
+            let h = x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(2_246_822_519);
+            let alpha = if (x + y) % 17 == 0 { 128 } else { 255 };
+            *px = image::Rgba([((h >> 16) & 0xff) as u8, ((h >> 8) & 0xff) as u8, (h & 0xff) as u8, alpha]);
+        }
+        let mut png_bytes = Vec::new();
+        DynamicImage::ImageRgba8(rgba).write_to(&mut Cursor::new(&mut png_bytes), ImageFormat::Png).unwrap();
+        let encoded_alpha = load_bytes(&png_bytes, 2000).unwrap();
+        assert_eq!(encoded_alpha.mime, "image/png", "transparent input must preserve alpha as PNG");
+        let decoded = image::load_from_memory(&STANDARD.decode(&encoded_alpha.data).unwrap()).unwrap();
+        assert!(decoded.color().has_alpha(), "decoded output must retain alpha channel");
+        assert_eq!(decoded.to_rgba8().get_pixel(0, 0).0[3], 128);
+
+        // Flat opaque diagram: PNG compresses smaller than JPEG and stays lossless PNG.
+        let flat = image::RgbImage::from_pixel(512, 512, image::Rgb([30, 40, 50]));
+        let encoded_flat = encode(DynamicImage::ImageRgb8(flat), 2000).unwrap();
+        assert_eq!(encoded_flat.mime, "image/png", "flat opaque image should pick smaller PNG");
+    }
+
+    #[test]
+    fn oversized_transparent_png_preserves_alpha_within_byte_limit() {
+        // Construct a noisy semi-transparent RGBA image whose unscaled PNG exceeds 1.5 MiB.
+        let mut rgba = image::RgbaImage::new(1000, 1000);
+        for (x, y, px) in rgba.enumerate_pixels_mut() {
+            let h = x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(2_246_822_519) ^ (x.wrapping_mul(y));
+            let alpha = 64 + ((h >> 24) & 0x7f) as u8;
+            *px = image::Rgba([((h >> 16) & 0xff) as u8, ((h >> 8) & 0xff) as u8, (h & 0xff) as u8, alpha]);
+        }
+        let img = DynamicImage::ImageRgba8(rgba);
+        let mut raw_png = Vec::new();
+        img.write_to(&mut Cursor::new(&mut raw_png), ImageFormat::Png).unwrap();
+        assert!(
+            raw_png.len() > MAX_ENCODED_BYTES,
+            "test precondition: raw semi-transparent PNG must exceed {MAX_ENCODED_BYTES} bytes (got {})",
+            raw_png.len()
+        );
+
+        let encoded = encode(img, 2000).unwrap();
+        assert_eq!(encoded.mime, "image/png", "oversized transparent PNG must never drop alpha to JPEG");
+        let out_bytes = STANDARD.decode(&encoded.data).unwrap();
+        assert!(
+            out_bytes.len() <= MAX_ENCODED_BYTES,
+            "downscaled transparent PNG must stay <= {MAX_ENCODED_BYTES} bytes (got {})",
+            out_bytes.len()
+        );
+        let decoded = image::load_from_memory(&out_bytes).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (encoded.width, encoded.height));
+        assert!(decoded.color().has_alpha(), "decoded output must retain alpha channel");
+        assert!(
+            decoded.to_rgba8().pixels().any(|p| p.0[3] < u8::MAX),
+            "decoded output must retain semi-transparent pixels"
+        );
     }
 }
