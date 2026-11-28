@@ -7,6 +7,7 @@ mod config_origin;
 mod contract_files;
 pub mod engines;
 pub mod flags;
+pub mod install;
 pub mod loader;
 mod lua_cov;
 pub mod pkg_binding;
@@ -790,6 +791,47 @@ pub fn install(lua: &Lua, env: &Env) -> mlua::Result<Table> {
     paths.set("log", mare_shared::paths::log_dir().to_string_lossy().into_owned())?;
     paths.set("crashes", mare_shared::paths::crash_dir().to_string_lossy().into_owned())?;
     mare.set("paths", paths)?;
+    let install_tbl = lua.create_table()?;
+    install_tbl.set(
+        "channel",
+        lua.create_function(|_, ()| Ok(crate::install::InstallInfo::detect_current().channel.as_str()))?,
+    )?;
+    install_tbl.set(
+        "info",
+        lua.create_function(|lua, method: Option<String>| {
+            let info = match method.as_deref().and_then(crate::install::InstallChannel::parse_method) {
+                Some(ch) => crate::install::InstallInfo::for_channel(ch),
+                None => crate::install::InstallInfo::detect_current(),
+            };
+            mare_shared::lua::json_to_lua(lua, &serde_json::to_value(&info).map_err(mare_shared::lua::rt_err)?)
+        })?,
+    )?;
+    install_tbl.set(
+        "update_command",
+        lua.create_function(|_, ()| Ok(crate::install::InstallInfo::detect_current().command))?,
+    )?;
+    install_tbl
+        .set("is_managed", lua.create_function(|_, ()| Ok(crate::install::InstallInfo::detect_current().managed))?)?;
+    install_tbl.set(
+        "update_check_disabled",
+        lua.create_function(|_, ()| Ok(mare_shared::env::is_update_check_disabled_env()))?,
+    )?;
+    install_tbl.set(
+        "policy",
+        lua.create_function(|lua, (config_update_check, plugin_enabled): (mlua::Value, Option<bool>)| {
+            let cfg_val = match config_update_check {
+                mlua::Value::Nil => None,
+                v => Some(mare_shared::lua::lua_to_json(lua, v)?),
+            };
+            Ok(crate::install::UpdatePolicy::resolve(
+                cfg_val.as_ref(),
+                plugin_enabled,
+                mare_shared::env::is_update_check_disabled_env(),
+            )
+            .as_str())
+        })?,
+    )?;
+    mare.set("install", install_tbl)?;
     let rr = mare_shared::project::resource_root(&env.cwd);
     let project = lua.create_table()?;
     project.set("root", rr.root.as_ref().map(|p| p.to_string_lossy().into_owned()))?;

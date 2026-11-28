@@ -2327,6 +2327,7 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "dirs",
+ "dunce",
  "flate2",
  "jiff 0.2.45",
  "libc",
@@ -2338,7 +2339,9 @@ dependencies = [
  "mare-protocol",
  "mare-shared",
  "mlua",
+ "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-util",
  "tracing",

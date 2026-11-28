@@ -291,9 +291,17 @@ mare.options = mare.options
 		},
 		prompt = { type = "string", default = "❯", desc = "input prompt symbol" },
 		update_check = {
-			type = "boolean",
-			default = true,
-			desc = "check GitHub releases for a newer mare (at most daily, interactive sessions; nothing else is sent)",
+			type = { "boolean", "string" },
+			default = "notify",
+			luals_type = 'false|"notify"|"auto"',
+			validate = function(v, path, warn_fn)
+				if v == false or v == true or v == "notify" or v == "auto" then
+					return true
+				end
+				warn_fn(path .. ' must be false, "notify", or "auto"')
+				return false
+			end,
+			desc = 'check GitHub releases for a newer mare: "notify" | "auto" (stage standalone updates) | false (at most daily, interactive sessions; nothing else is sent)',
 		},
 		news = {
 			type = "boolean",

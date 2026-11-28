@@ -968,6 +968,19 @@
 | `mare.image.is_image(path)` |  |
 | `mare.image.to_png(data)` | Decode base64-encoded image bytes within safety limits, downscale if oversized, and re-encode as PNG (or JPEG when large). |
 
+## mare.install
+
+定義元 `types/mare.lua`.
+
+| | |
+|---|---|
+| `mare.install.channel()` |  |
+| `mare.install.info(method)` |  |
+| `mare.install.update_command()` |  |
+| `mare.install.is_managed()` |  |
+| `mare.install.update_check_disabled()` |  |
+| `mare.install.policy(config_update_check, plugin_enabled)` | Effective update-check policy resolved from `mare.o.update_check`, plugin `enabled`, and env opt-outs. |
+
 ## mare.json
 
 定義元 `types/mare/text.lua`.

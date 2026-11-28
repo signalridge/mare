@@ -29,11 +29,13 @@ mlua.workspace = true
 tokio.workspace = true
 # cancelling package operations (mare.plugins): git stops when the Lua call is dropped
 tokio-util.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 jiff.workspace = true
 dirs.workspace = true
+dunce.workspace = true
 flate2.workspace = true
 
 [target.'cfg(unix)'.dependencies]
@@ -41,6 +43,9 @@ libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_SystemInformation"] }
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [build-dependencies]
 flate2.workspace = true
