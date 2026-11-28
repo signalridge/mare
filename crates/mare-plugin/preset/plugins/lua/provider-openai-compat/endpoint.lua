@@ -128,6 +128,7 @@ local function build_param_rules(name, entry, live_entry, live_base_url)
 				end,
 				define = {
 					effort = {
+						only = tf == "kimi" and { "low", "high", "max" } or nil,
 						wire = {
 							chat = function(req, c)
 								local cur = live_entry()

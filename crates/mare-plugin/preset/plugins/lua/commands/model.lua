@@ -151,11 +151,17 @@ return function(ctx, args)
 		-- Ctrl+S: switch for this session only (state.json's default stays)
 		keys = { { key = "tab", label = "parameters" }, { key = "ctrl+s", label = "this session only" } },
 		on_open = function(sel_handle)
+			local sync_gen = 0
 			local function sync_picker()
+				sync_gen = sync_gen + 1
+				local gen = sync_gen
 				if not sel_handle:is_open() then
 					return
 				end
 				local next_models, next_items, _, next_can_use = build_picker_items(cur)
+				if gen ~= sync_gen or not sel_handle:is_open() then
+					return
+				end
 				if items_differ(items, next_items) and sel_handle:update(next_items) then
 					models, items, can_use = next_models, next_items, next_can_use
 					list_updated = true
