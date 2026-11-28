@@ -7,7 +7,12 @@ use super::*;
 async fn failed_cancelled_or_concurrent_compactions_replace_nothing() {
     local(async {
         let env = TestEnv::new().await;
-        let cfg = json!({ "plugins": { "compact": { "keep_recent_tokens": 1, "recent_user_tokens": 0 } } });
+        let cfg = json!({
+            "plugins": {
+                "compact": { "keep_recent_tokens": 1, "recent_user_tokens": 0 },
+                "llm": { "retries": 0 }
+            }
+        });
         let script = json!([
             { "text": "   " },
             { "text": "## Summary\ncut off", "stop": "length" },

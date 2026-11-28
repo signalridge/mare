@@ -1008,8 +1008,9 @@ LLM:stream({ model = m, session_id = "same-sess", messages = { { role = "user", 
                     if let Message::Text(_) = msg {
                         for frame in [
                             r#"{"type":"response.created","response":{"id":"resp_ws_401"}}"#,
-                            r#"{"type":"response.output_item.added","item":{"type":"message"}}"#,
-                            r#"{"type":"response.output_text.delta","delta":"ws-recovered"}"#,
+                            r#"{"type":"response.output_item.added","output_index":0,"item":{"id":"msg_ws_401","type":"message","role":"assistant","content":[]}}"#,
+                            r#"{"type":"response.output_text.delta","item_id":"msg_ws_401","delta":"ws-recovered"}"#,
+                            r#"{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_ws_401","type":"message","role":"assistant","content":[{"type":"output_text","text":"ws-recovered","annotations":[]}]}}"#,
                             r#"{"type":"response.completed","response":{"id":"resp_ws_401","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}"#,
                         ] {
                             ws.send(Message::Text(frame.into())).await.unwrap();
@@ -1059,7 +1060,7 @@ LLM:auth_set("openai-codex", {
 local m = LLM:resolve("openai/gpt-5.3-codex")
 local res1 = LLM:stream({ model = m, session_id = "s-401", messages = { { role = "user", content = { { type = "text", text = "hi 1" } } } }, no_fallback = true }, function() end)
 local res2 = LLM:stream({ model = m, session_id = "s-401", messages = { { role = "user", content = { { type = "text", text = "hi 2" } } } }, no_fallback = true }, function() end)
-return tostring(res1.content[1].text) == "ws-recovered" and tostring(res2.content[1].text) == "ws-recovered"
+return res1.stop_reason == "stop" and res2.stop_reason == "stop" and tostring(res1.content[1].text) == "ws-recovered" and tostring(res2.content[1].text) == "ws-recovered"
 "#,
         )
         .await;

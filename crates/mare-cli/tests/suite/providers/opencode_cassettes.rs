@@ -918,6 +918,7 @@ async fn independent_encrypted_reasoning_details_are_replayed_in_order() {
         let (sent, _) = replay_after(vec![
             json!({ "choices": [{ "delta": { "reasoning_details": [repeated_identity[0]] } }] }),
             json!({ "choices": [{ "delta": { "reasoning_details": [repeated_identity[1]] } }] }),
+            compat_text("Hello"),
             compat_stop(),
         ])
         .await;
@@ -947,6 +948,7 @@ async fn reasoning_detail_text_merges_only_compatible_consecutive_entries() {
             .iter()
             .map(|d| json!({ "choices": [{ "delta": { "reasoning_details": [d] } }] }))
             .collect();
+        frames.push(compat_text("Hello"));
         frames.push(compat_stop());
         let (sent, _) = replay_after(frames).await;
         assert_eq!(sent["reasoning_details"], json!([
