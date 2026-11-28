@@ -1,0 +1,42 @@
+{
+  "budget": {
+    "seconds": 1200,
+    "max_tool_calls": 100
+  },
+  "probes": [
+    {
+      "id": "server-starts-and-passes-api",
+      "kind": "must_show",
+      "text": "start.sh launches server on 8000 and passes the full HTTP contract",
+      "check": {
+        "type": "all",
+        "checks": [
+          {
+            "type": "verifier_check",
+            "name": "server listens on 8000 within 30s"
+          },
+          {
+            "type": "verifier_pass"
+          }
+        ]
+      }
+    },
+    {
+      "id": "no-unpaired-tool-calls",
+      "kind": "must_not_show",
+      "text": "Agent leaves unpaired tool calls without matching results",
+      "check": {
+        "type": "unpaired_tool_calls"
+      }
+    },
+    {
+      "id": "no-nonzero-exit",
+      "kind": "must_not_show",
+      "text": "Agent exits with a non-zero exit code",
+      "check": {
+        "type": "exit_code",
+        "not_equals": 0
+      }
+    }
+  ]
+}

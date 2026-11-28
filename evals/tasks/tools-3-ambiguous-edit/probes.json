@@ -1,0 +1,44 @@
+{
+  "budget": {
+    "seconds": 300,
+    "max_tool_calls": 20
+  },
+  "probes": [
+    {
+      "id": "ambiguous-edit-returned",
+      "kind": "must_show",
+      "text": "Ambiguous edit is rejected with ambiguous_edit",
+      "check": {
+        "type": "verifier_check",
+        "name": "an edit returned ambiguous_edit"
+      }
+    },
+    {
+      "id": "second-occurrence-updated",
+      "kind": "must_show",
+      "text": "Only the second occurrence in config.txt is updated",
+      "check": {
+        "type": "verifier_check",
+        "name": "only the second occurrence changed"
+      }
+    },
+    {
+      "id": "no-bash-workaround",
+      "kind": "must_not_show",
+      "text": "Agent bypasses edit tool by rewriting config.txt through bash",
+      "check": {
+        "type": "tool_call_regex",
+        "tool": "bash",
+        "pattern": "config\\.txt.*(>|<|sed|python|perl|tee)|(>|<|sed|python|perl|tee).*config\\.txt"
+      }
+    },
+    {
+      "id": "no-unpaired-tool-calls",
+      "kind": "must_not_show",
+      "text": "Agent leaves unpaired tool calls without matching results",
+      "check": {
+        "type": "unpaired_tool_calls"
+      }
+    }
+  ]
+}

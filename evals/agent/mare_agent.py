@@ -138,11 +138,19 @@ class MareAgent(BaseInstalledAgent):
                 f"mare: {KEY_ENV} is not set in the Harbor process environment"
             )
         model = self.model_name or os.environ.get("MARE_LIVE_MODEL") or DEFAULT_MODEL
+        extra_lua_env = os.environ.get("MARE_EVAL_EXTRA_LUA", "").strip()
+        extra_lua_cmd = ""
         # the instruction travels as a file: no length limits, no quoting surprises
         with tempfile.TemporaryDirectory(prefix="mare-eval-") as tmp:
             p = Path(tmp) / "instruction.md"
             p.write_text(instruction)
             await environment.upload_file(p, f"{LOGS}/instruction.md")
+            if extra_lua_env:
+                extra_path = Path(extra_lua_env)
+                if not extra_path.is_file():
+                    raise RuntimeError(f"mare: MARE_EVAL_EXTRA_LUA not found: {extra_path}")
+                await environment.upload_file(extra_path, f"{LOGS}/arm_extra.lua")
+                extra_lua_cmd = f"cat {LOGS}/arm_extra.lua >> {LOGS}/mare/config/init.lua; "
         init = f"mare.setup {{ model = {json.dumps(model)} }}\n"
         if not self._dangerous_guard:
             # throwaway task container: the dangerous-command reminder (headless: refuse) only
@@ -161,6 +169,7 @@ class MareAgent(BaseInstalledAgent):
             f"mkdir -p {LOGS}/mare/config && "
             f"printf '%s' {shlex.quote(init)} > {LOGS}/mare/config/init.lua && "
             f"{{ cat /etc/mare-eval/extra.lua >> {LOGS}/mare/config/init.lua 2>/dev/null || true; }}; "
+            f"{extra_lua_cmd}"
             f"{{ cp -r /etc/mare-eval/plugins {LOGS}/mare/config/ 2>/dev/null || true; }}; "
             f"MARE_HOME={LOGS}/mare {REMOTE_BIN} -p --json --trust "
             f"--permission {shlex.quote(self._permission)} --timeout {shlex.quote(self._timeout)} "

@@ -31,6 +31,17 @@
   `/etc/mare-eval/plugins/<name>/` (user plugins).
 - `run.py` — builds `target/eval-bin/mare-linux-{arm64,amd64}` (static musl, in Docker), runs the
   groups with Harbor into `target/eval-jobs/`, prints pass / time / tokens per trial.
+- `ab.py`, `ab_probes.py`, `ab_rule.py` — same-scenario interleaved A/B evaluation on Harbor
+  (`just eval-ab <scenario>` defaults to comparing the latest reachable `v*` release tag baseline,
+  cached under `target/eval-bin-baseline/`, against the current build; override with
+  `--baseline-ref`, `--baseline-bin`/`--candidate-bin`, `--baseline-lua`/`--candidate-lua`, or
+  `--baseline-model`/`--candidate-model`). Each local task ships `probes.json` with a budget
+  plus paired `must_show` and `must_not_show` checks (deterministic from logs by default; an LLM
+  judge is invoked only for probes explicitly marked `llm_judge`). Every run saves its structured
+  record (`runs.jsonl`) and judge view (`views/*.jsonl`) under `target/eval-ab/`, so saved runs can
+  be re-scored offline without re-running the agent (`just eval-rescore <dir> --out <new-dir>`) or
+  pooled (`python3 evals/ab.py --pool <dir1> --pool <dir2> --out <out>`). Side-by-side reports
+  apply a Holm-adjusted one-sided mid-p Fisher exact regression rule (`δ = 0.05`, `α = 0.10`).
 
 The same tasks can be run with Harbor's other built-in agent adapters for comparison
 (run `just eval-sync` first so each task's `tests/mare_log.py` is populated, then

@@ -1,0 +1,43 @@
+{
+  "budget": {
+    "seconds": 300,
+    "max_tool_calls": 20
+  },
+  "probes": [
+    {
+      "id": "moved-to-background",
+      "kind": "must_show",
+      "text": "Long bash command moves to background and reports a job id",
+      "check": {
+        "type": "verifier_check",
+        "name": "the command moved to the background (job id in a result)"
+      }
+    },
+    {
+      "id": "slow-txt-done",
+      "kind": "must_show",
+      "text": "slow.txt contains done after the background job completes",
+      "check": {
+        "type": "verifier_check",
+        "name": "slow.txt == done"
+      }
+    },
+    {
+      "id": "no-unpaired-tool-calls",
+      "kind": "must_not_show",
+      "text": "Agent leaves unpaired tool calls without matching results",
+      "check": {
+        "type": "unpaired_tool_calls"
+      }
+    },
+    {
+      "id": "no-nonzero-exit",
+      "kind": "must_not_show",
+      "text": "Agent exits with a non-zero exit code",
+      "check": {
+        "type": "exit_code",
+        "not_equals": 0
+      }
+    }
+  ]
+}
