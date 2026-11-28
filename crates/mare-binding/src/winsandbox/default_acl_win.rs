@@ -16,7 +16,7 @@ use windows_sys::Win32::Security::{
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    LOCKFILE_EXCLUSIVE_LOCK, LockFileEx, OPEN_EXISTING, UnlockFileEx,
+    GetVolumeInformationW, GetVolumePathNameW, LOCKFILE_EXCLUSIVE_LOCK, LockFileEx, OPEN_EXISTING, UnlockFileEx,
 };
 use windows_sys::Win32::System::IO::OVERLAPPED;
 
@@ -30,6 +30,7 @@ const FILE_GENERIC_WRITE: u32 = 0x0012_0116;
 const DELETE: u32 = 0x0001_0000;
 const FILE_DELETE_CHILD: u32 = 0x0000_0040;
 const STANDARD_RIGHTS_WRITE: u32 = 0x0002_0000;
+const FILE_PERSISTENT_ACLS: u32 = 0x0000_0008;
 /// Write + delete grant, without READ_CONTROL (reads come from the user SID).
 const GRANT_MASK: u32 = (FILE_GENERIC_WRITE | DELETE | FILE_DELETE_CHILD) & !STANDARD_RIGHTS_WRITE;
 
@@ -118,6 +119,36 @@ pub fn grant_write(path: &Path, sid: &str) -> Result<(), String> {
     with_path_acl_lock(path, || grant_write_locked(path, sid))
 }
 
+/// Query whether the volume hosting `path` supports persistent Windows ACLs (`FILE_PERSISTENT_ACLS`).
+pub(super) fn query_volume_acl_support(path: &Path) -> Option<super::super::grants::VolumeAclInfo> {
+    let wpath = wide(path);
+    let mut vol_root = vec![0u16; wpath.len().max(260) + 16];
+    let ok = unsafe { GetVolumePathNameW(wpath.as_ptr(), vol_root.as_mut_ptr(), vol_root.len() as u32) };
+    if ok == 0 {
+        return None;
+    }
+    let mut flags: u32 = 0;
+    let mut fs_buf = [0u16; 64];
+    let info_ok = unsafe {
+        GetVolumeInformationW(
+            vol_root.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut flags,
+            fs_buf.as_mut_ptr(),
+            fs_buf.len() as u32,
+        )
+    };
+    if info_ok == 0 {
+        return None;
+    }
+    let fs_len = fs_buf.iter().position(|&c| c == 0).unwrap_or(fs_buf.len());
+    let fs_name = String::from_utf16_lossy(&fs_buf[..fs_len]);
+    Some(super::super::grants::VolumeAclInfo { fs_name, persistent_acls: (flags & FILE_PERSISTENT_ACLS) != 0 })
+}
+
 fn grant_write_locked(path: &Path, sid: &str) -> Result<(), String> {
     let cap = LocalSid::parse(sid)?;
     let low = BufSid::well_known(WinLowLabelSid)?;
@@ -137,7 +168,8 @@ fn grant_write_locked(path: &Path, sid: &str) -> Result<(), String> {
             &mut sd,
         );
         if rc != 0 {
-            return Err(format!("GetNamedSecurityInfoW({}) failed: {rc}", path.display()));
+            let vol = query_volume_acl_support(path);
+            return Err(super::super::grants::diagnose_acl_failure("GetNamedSecurityInfoW", path, rc, vol.as_ref()));
         }
         let standing =
             has_exact(dacl, ACCESS_ALLOWED_ACE_TYPE, SUB_CONTAINERS_AND_OBJECTS_INHERIT as u8, GRANT_MASK, cap.0)
@@ -152,6 +184,12 @@ fn grant_write_locked(path: &Path, sid: &str) -> Result<(), String> {
         if standing {
             LocalFree(sd as HLOCAL);
             return Ok(());
+        }
+        if let Some(vol) = query_volume_acl_support(path)
+            && !vol.persistent_acls
+        {
+            LocalFree(sd as HLOCAL);
+            return Err(super::super::grants::format_unsupported_volume_error(path, &vol));
         }
         // Low mandatory label ACL: header + one mandatory ACE (8 bytes + SID), 4-aligned
         let low_len = GetLengthSid(low.ptr());
@@ -192,7 +230,8 @@ fn grant_write_locked(path: &Path, sid: &str) -> Result<(), String> {
         );
         LocalFree(new_dacl as HLOCAL);
         if rc != 0 {
-            return Err(format!("SetNamedSecurityInfoW({}) failed: {rc}", path.display()));
+            let vol = query_volume_acl_support(path);
+            return Err(super::super::grants::diagnose_acl_failure("SetNamedSecurityInfoW", path, rc, vol.as_ref()));
         }
     }
     Ok(())
