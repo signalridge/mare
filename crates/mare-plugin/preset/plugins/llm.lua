@@ -493,9 +493,6 @@ return {
 						return providers[name]
 					end,
 					provider_failure = provider_failure,
-					warn_unlisted = function(m)
-						return D.models.warn_unlisted(m)
-					end,
 					how_to_login = function(name)
 						return D.how_to_login(name)
 					end,

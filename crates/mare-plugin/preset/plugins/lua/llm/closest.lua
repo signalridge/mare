@@ -152,17 +152,13 @@ function M.models(asked, models, providers, limit)
 	return out
 end
 
---- Format a user-facing warning for an explicit `provider/id` not listed in its provider's catalog.
-function M.format_unlisted(m, models, providers)
-	local candidates = M.models(m.ref, models, providers, 3)
+--- Format a user-facing error for an explicit `provider/id` not listed in its provider's catalog.
+function M.format_unknown(ref, prov, models, providers)
+	local candidates = M.models(ref, models, providers, 3)
 	if #candidates > 0 then
-		return ("Model %s is not in %s's catalog (closest: %s)"):format(
-			m.ref,
-			m.provider,
-			table.concat(candidates, ", ")
-		)
+		return ("unknown model: %s (not in %s catalog; closest: %s)"):format(ref, prov, table.concat(candidates, ", "))
 	end
-	return ("Model %s is not in %s's catalog"):format(m.ref, m.provider)
+	return ("unknown model: %s (not in %s catalog)"):format(ref, prov)
 end
 
 return M

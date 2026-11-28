@@ -284,9 +284,8 @@ async fn capabilities_detach_param_functions_and_report_unavailable_models() {
         assert_eq!(down["unavailable_reason"], "maintenance window");
         assert_eq!(down["ready"], false);
 
-        // a hidden model is not listed but can be described; an explicit id not in a catalogued
-        // provider's catalog is allowed and marked `unlisted = true`, while a catalog-less
-        // provider serves arbitrary ids without marking them unlisted
+        // a hidden model is not listed but can be described; a catalogued provider rejects unlisted ids
+        // while a catalog-less provider serves arbitrary ids
         let listed: String = eval(
             &host,
             r#"local refs = {} for _, m in ipairs(C.cordis:get("llm"):list_models().data) do refs[#refs + 1] = m.ref end return table.concat(refs, ",")"#,
@@ -295,24 +294,16 @@ async fn capabilities_detach_param_functions_and_report_unavailable_models() {
         assert!(!listed.contains("probe/secret-model") && !listed.contains("probe/unlisted"), "{listed}");
         let hidden: Value = serde_json::from_str(&eval::<String>(&host, &by_ref("probe/secret-model")).await).unwrap();
         assert_eq!((hidden["ref"].clone(), hidden["reasoning"].clone()), (json!("probe/secret-model"), json!(true)), "{hidden}");
-        let probe_unlisted: Value =
-            serde_json::from_str(&eval::<String>(&host, &by_ref("probe/unlisted-1")).await).unwrap();
-        assert_eq!(
-            (probe_unlisted["ref"].clone(), probe_unlisted["provider"].clone(), probe_unlisted["unlisted"].clone()),
-            (json!("probe/unlisted-1"), json!("probe"), json!(true)),
-            "{probe_unlisted}"
-        );
+        let unlisted_rejected: bool =
+            eval(&host, r#"return pcall(function() return C.cordis:get("llm"):get_model("probe/unlisted-1") end)"#).await;
+        assert!(!unlisted_rejected, "catalogued provider must reject unlisted model id");
         exec(
             &host,
             r#"LLM:register_provider({ provider = "free", no_key = true, stream = function() return { role = "assistant", content = {}, stop_reason = "stop" } end })"#,
         )
         .await;
         let unlisted: Value = serde_json::from_str(&eval::<String>(&host, &by_ref("free/unlisted-1")).await).unwrap();
-        assert_eq!(
-            (unlisted["ref"].clone(), unlisted["provider"].clone(), unlisted["unlisted"].clone()),
-            (json!("free/unlisted-1"), json!("free"), Value::Null),
-            "{unlisted}"
-        );
+        assert_eq!((unlisted["ref"].clone(), unlisted["provider"].clone()), (json!("free/unlisted-1"), json!("free")), "{unlisted}");
         let unknown_described: bool =
             eval(&host, r#"return pcall(function() return C.cordis:get("llm"):get_model("nonexistent/missing") end)"#).await;
         assert!(!unknown_described, "a ref no provider resolves is an error");
@@ -577,12 +568,9 @@ fn get_model_by_ref_over_real_rpc() {
         (json!("probe/secret-model"), json!("secret-model"), json!(true)),
         "{hidden}"
     );
-    let unlisted = get(&mut rpc, json!({ "session_id": session, "ref": "probe/unlisted-1" }));
-    assert_eq!(
-        (unlisted["ref"].clone(), unlisted["provider"].clone(), unlisted["unlisted"].clone()),
-        (json!("probe/unlisted-1"), json!("probe"), json!(true)),
-        "{unlisted}"
-    );
+    let unlisted =
+        rpc.call_raw("llm.get_model", json!({ "session_id": session, "ref": "probe/unlisted-1" }), |_| json!(null));
+    assert_eq!(unlisted["error"]["data"]["code"], "llm.unknown_model", "{unlisted}");
     let listed = rpc.call_raw("llm.list_models", json!({}), |_| json!(null));
     let refs: Vec<&str> =
         listed["result"]["data"].as_array().unwrap().iter().filter_map(|m| m["ref"].as_str()).collect();

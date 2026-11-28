@@ -2299,9 +2299,6 @@
         "unavailable_reason": {
           "type": "string"
         },
-        "unlisted": {
-          "type": "boolean"
-        },
         "wire_route": {
           "type": "string"
         }
@@ -2502,9 +2499,6 @@
               },
               "unavailable_reason": {
                 "type": "string"
-              },
-              "unlisted": {
-                "type": "boolean"
               },
               "wire_route": {
                 "type": "string"
@@ -3103,9 +3097,6 @@
         },
         "unavailable_reason": {
           "type": "string"
-        },
-        "unlisted": {
-          "type": "boolean"
         },
         "wire_route": {
           "type": "string"

@@ -8,7 +8,6 @@ return function(D)
 	local apply_overrides = D.catalog.apply_overrides
 	local validate = require("llm.validate")
 	local closest = require("llm.closest")
-	local warned_unlisted = {}
 	local provider_accessor_mod
 	local function provider_accessor()
 		if not provider_accessor_mod then
@@ -586,8 +585,10 @@ return function(D)
 			})
 		end
 		if prov and providers[prov] then
+			if provider_has_catalog(prov) then
+				return nil, closest.format_unknown(ref, prov, models, providers)
+			end
 			local p = providers[prov]
-			local unlisted = provider_has_catalog(prov) or nil
 			local m = {
 				id = id,
 				name = id,
@@ -597,7 +598,6 @@ return function(D)
 				max_output = p.default_max_output or 16384,
 				max_output_default = true,
 				reasoning = p.default_reasoning,
-				unlisted = unlisted,
 			}
 			return apply_overrides(m)
 		end
@@ -736,22 +736,6 @@ return function(D)
 		return not (opts and opts.save == false)
 	end
 
-	local function warn_unlisted(m, opts)
-		if not m or not m.unlisted then
-			return nil
-		end
-		if not (opts and opts.always) and warned_unlisted[m.ref] then
-			return nil
-		end
-		warned_unlisted[m.ref] = true
-		local msg = closest.format_unlisted(m, models, providers)
-		mare.log("warn", msg)
-		if mare.ui and mare.ui.notify then
-			mare.ui.notify(msg, "warning")
-		end
-		return msg
-	end
-
 	--- select_model(ref, opts?) -> model: internal helper behind set_model and restore_selection.
 	--- opts.save = false (or target = "session"): this session only (restored on resume),
 	--- the default in state.json stays as it is.
@@ -828,9 +812,6 @@ return function(D)
 			ctx.bus:emit_checked("model/changed", identity)
 		else
 			ctx.bus:emit("model/changed", identity)
-		end
-		if m.unlisted and not (opts and opts.restoring) then
-			warn_unlisted(m, { always = true })
 		end
 		return m
 	end
@@ -1258,7 +1239,6 @@ return function(D)
 			unavailable_reason = text(unavailable_reason),
 			ready = ready == true,
 			ready_reason = text(ready_reason),
-			unlisted = m.unlisted == true or nil,
 			efforts = mare.json.array(strings(efforts)),
 			default_effort = text(default_effort),
 			parameters = mare.json.array(parameters),
@@ -1292,7 +1272,6 @@ return function(D)
 		install_provider = install_provider,
 		uninstall_provider = uninstall_provider,
 		normalize_entry = normalize_entry,
-		warn_unlisted = warn_unlisted,
 		unresolved_model = function()
 			if type(state.model) ~= "string" or state.model == "" then
 				return nil

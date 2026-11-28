@@ -219,7 +219,7 @@ assert(type(out.openai) == "number" and out.openai >= 2, "expected added models,
                    if m.id == "gpt-6-none" then none_picker = true end
                end
                local n = LLM:resolve("openai/gpt-6-none")
-               return h ~= nil, h and h.hidden == true, hidden_picker, none_picker, n == nil or (n.unlisted == true and not n.listed)"#,
+               return h ~= nil, h and h.hidden == true, hidden_picker, none_picker, n == nil"#,
         )
         .await;
         assert!(hidden_ok && hidden_flag, "visibility=hide resolves as hidden");

@@ -1,8 +1,9 @@
 //! Acceptance tests for consistent model resolution across CLI, `/model`, ACP, and Lua
 //! (`signalridge/mare#33`):
 //! 1. Explicit unresolvable model never falls back to another configured provider (0 requests sent).
-//! 2. Explicit `provider/<id>` not in a provider's catalog is allowed, marked `unlisted`, and emits
-//!    a warning with up to 3 closest catalog candidates.
+//! 2. Providers with a catalog reject unknown `provider/<id>` in the shared setter (including
+//!    `/model`, ACP, CLI, and Lua), keeping the prior selection and suggesting up to 3 closest
+//!    catalog candidates; catalog-less gateways continue accepting arbitrary explicit IDs.
 //! 3. CLI, `/model`, ACP, and Lua share one deterministic bare-id disambiguator independent of
 //!    provider registration order.
 //! 4. Family aliases pick the newest dated snapshot (and prefer undated alias over dated).
@@ -94,27 +95,32 @@ mare.provider("localmock", {{
     .await;
 }
 
-/// Criterion 2: explicit `provider/<id>` not in a catalogued provider's catalog is allowed,
-/// marked `unlisted = true`, and warns with up to 3 closest catalog candidates.
+/// Criterion 2: providers with a catalog reject unknown `provider/<id>` in the shared setter
+/// (including `/model`), preserve the current selection, and surface up to 3 closest catalog
+/// candidates in the rejection error; catalog-less gateways still accept explicit IDs.
 #[tokio::test]
-async fn model_command_allows_unlisted_id_with_warning_and_closest_candidates() {
+async fn model_command_rejects_unknown_id_on_catalogued_provider() {
     local(async {
         let mut env = TestEnv::new().await;
         let server = MockServer::start().await;
         let h = provider_host(&mut env, &server, json!({ "model": "anthropic/claude-sonnet-5-5" })).await;
         expose(&h);
 
-        let (run_ok, after, unlisted_cur, unlisted_cap, notes_json, wrong_prov_note, no_hit_note): (
+        let (before, run_ok, run_err, notes_json, after, wrong_prov_ok, wrong_prov_err, no_hit_ok, no_hit_err, gw_ref): (
+            String,
+            bool,
+            String,
+            String,
+            String,
             bool,
             String,
             bool,
-            bool,
-            String,
             String,
             String,
         ) = eval(
             &h,
             r#"
+            local before = assert(LLM:current()).ref
             local notes = {}
             mare.ui.notify = function(msg, lvl)
               notes[#notes + 1] = tostring(lvl) .. ":" .. tostring(msg)
@@ -122,61 +128,63 @@ async fn model_command_allows_unlisted_id_with_warning_and_closest_candidates() 
             local ok, err = pcall(function()
               return C.cordis:get("commands"):run("/model anthropic/claude-sonet-4-5")
             end)
-            assert(ok, tostring(err))
-            local cur = assert(LLM:current())
-            local cap = assert(LLM:capabilities(cur.ref))
+            local after = assert(LLM:current()).ref
 
-            -- Wrong provider for an existing model still surfaces cross-provider closest matches.
-            notes_wrong = {}
-            mare.ui.notify = function(msg, lvl)
-              notes_wrong[#notes_wrong + 1] = tostring(lvl) .. ":" .. tostring(msg)
-            end
-            LLM:set_model("openai/claude-sonnet-5-5", { save = false })
+            -- Wrong provider for an existing model is rejected and suggests cross-provider closest matches.
+            local ok_wrong, err_wrong = pcall(LLM.set_model, LLM, "openai/claude-sonnet-5-5", { save = false })
 
-            -- Completely unrelated id still warns without bogus provider-only matches.
-            notes_none = {}
-            mare.ui.notify = function(msg, lvl)
-              notes_none[#notes_none + 1] = tostring(lvl) .. ":" .. tostring(msg)
-            end
-            LLM:set_model("anthropic/zzzz-totally-new-model", { save = false })
+            -- Completely unrelated id is rejected without bogus provider-only matches.
+            local ok_none, err_none = pcall(LLM.set_model, LLM, "anthropic/zzzz-totally-new-model", { save = false })
 
-            return ok, cur.ref, cur.unlisted == true, cap.unlisted == true,
-              mare.json.encode(notes),
-              table.concat(notes_wrong, "\n"),
-              table.concat(notes_none, "\n")
+            -- Catalog-less gateway continues accepting explicit provider/id.
+            LLM:register_provider({
+              provider = "open-gw",
+              no_key = true,
+              stream = function()
+                return { role = "assistant", content = {}, stop_reason = "stop" }
+              end,
+            })
+            local gw = LLM:set_model("open-gw/custom-unlisted-model", { save = false })
+
+            return before, ok, tostring(type(err) == "table" and err.message or err), mare.json.encode(notes), after,
+              ok_wrong, tostring(type(err_wrong) == "table" and err_wrong.message or err_wrong),
+              ok_none, tostring(type(err_none) == "table" and err_none.message or err_none),
+              gw.ref
             "#,
         )
         .await;
-        assert!(run_ok, "/model with explicit provider/id must succeed");
-        assert_eq!(after, "anthropic/claude-sonet-4-5", "current model must switch to unlisted explicit ref");
-        assert!(unlisted_cur, "resolved unlisted model must carry unlisted = true");
-        assert!(unlisted_cap, "capabilities descriptor must expose unlisted = true");
+        assert_eq!(before, "anthropic/claude-sonnet-5-5");
+        assert_eq!(after, "anthropic/claude-sonnet-5-5", "current model must stay unchanged after rejection");
         assert!(
-            notes_json.contains("warning:")
-                && notes_json.contains("anthropic/claude-sonet-4-5")
-                && notes_json.contains("closest:")
-                && notes_json.contains("anthropic/claude-sonnet-4-5"),
-            "/model command must warn with closest catalog candidates: {notes_json}"
+            !run_ok
+                && run_err.contains("unknown model: anthropic/claude-sonet-4-5")
+                && run_err.contains("not in anthropic catalog")
+                && run_err.contains("closest:")
+                && run_err.contains("anthropic/claude-sonnet-4-5"),
+            "/model command must fail naming typo ref and closest catalog candidates: {run_err}"
         );
         // Verify at most 3 closest candidates are listed.
-        let notes: Vec<String> = serde_json::from_str(&notes_json).unwrap();
-        let warn_line = notes.iter().find(|n| n.starts_with("warning:")).expect("warning notification");
-        let after_closest = warn_line.split("closest: ").nth(1).unwrap().trim_end_matches(')');
+        let after_closest = run_err.split("closest: ").nth(1).unwrap().trim_end_matches(')');
         let cand_count = after_closest.split(", ").count();
         assert!(
             (1..=3).contains(&cand_count),
-            "warning must list 1..=3 closest candidates, got {cand_count}: {warn_line}"
+            "error must list 1..=3 closest candidates, got {cand_count}: {run_err}"
         );
         assert!(
-            wrong_prov_note.contains("warning:") && wrong_prov_note.contains("anthropic/claude-sonnet-5-5"),
-            "wrong-provider ref must suggest real model from catalog: {wrong_prov_note}"
+            notes_json.contains("error:") && notes_json.contains("anthropic/claude-sonet-4-5"),
+            "/model command must notify error naming typo ref: {notes_json}"
         );
         assert!(
-            no_hit_note.contains("warning:")
-                && no_hit_note.contains("anthropic/zzzz-totally-new-model")
-                && !no_hit_note.contains("closest:"),
-            "zero-overlap id must warn without provider-only noise: {no_hit_note}"
+            !wrong_prov_ok && wrong_prov_err.contains("anthropic/claude-sonnet-5-5"),
+            "wrong-provider ref must be rejected and suggest real model from catalog: {wrong_prov_err}"
         );
+        assert!(
+            !no_hit_ok
+                && no_hit_err.contains("anthropic/zzzz-totally-new-model")
+                && !no_hit_err.contains("closest:"),
+            "zero-overlap id must be rejected without provider-only noise: {no_hit_err}"
+        );
+        assert_eq!(gw_ref, "open-gw/custom-unlisted-model", "catalog-less gateway must allow explicit provider/id");
         h.shutdown().await;
     })
     .await;
@@ -1035,9 +1043,8 @@ async fn reset_session_model_keeps_unresolvable_default_and_catalogless_default_
 /// Regression: pending disk caches are hydrated before resolving non-exact refs so that
 /// (1) a bare id present statically on `alpha` and only in `beta`'s disk cache reports ambiguity
 /// identically across Lua `set_model`, `/model`, and headless `-p --model` with zero generation
-/// requests, and (2) `beta/shared-cachd` resolves as `unlisted = true` against `beta`'s pending
-/// disk-cached catalog and warns with `beta/shared-cached` as closest candidate while still
-/// allowing the request to proceed.
+/// requests, and (2) `beta/shared-cachd` is rejected against `beta`'s pending disk-cached catalog
+/// naming `beta/shared-cached` as closest candidate with zero generation requests.
 #[tokio::test]
 async fn pending_disk_cache_hydrates_before_bare_id_and_catalog_typo_resolution() {
     local(async {
@@ -1074,7 +1081,7 @@ mare.provider("beta", {{
 
         // 1. In-process host (disk cache pending, ui/ready not emitted):
         //    set_model("shared-cached") must report ambiguity; set_model("beta/shared-cachd")
-        //    hydrates beta's cache, allows the unlisted model, and warns with beta/shared-cached.
+        //    hydrates beta's cache, rejects the typo, and suggests beta/shared-cached.
         let env = TestEnv::new().await;
         std::fs::create_dir_all(env.config_dir()).unwrap();
         std::fs::write(env.config_dir().join("init.lua"), &init_lua).unwrap();
@@ -1090,26 +1097,15 @@ mare.provider("beta", {{
             .await;
         global(&h, "LLM", h.service_table("llm").unwrap());
 
-        let (resolved_nil, bare_ok, bare_err, typo_ok, typo_unlisted, typo_notes): (
-            bool,
-            bool,
-            String,
-            bool,
-            bool,
-            String,
-        ) = eval(
+        let (resolved_nil, bare_ok, bare_err, typo_ok, typo_err): (bool, bool, String, bool, String) = eval(
             &h,
             r#"
             -- Cold-cache Lua LLM:resolve must hydrate pending disk caches and return nil on ambiguity.
             local res = LLM:resolve("shared-cached")
             local ok1, e1 = pcall(function() return LLM:set_model("shared-cached", { save = false }) end)
-            local notes = {}
-            mare.ui.notify = function(msg, lvl)
-              notes[#notes + 1] = tostring(lvl) .. ":" .. tostring(msg)
-            end
-            local ok2, d2 = pcall(function() return LLM:set_model("beta/shared-cachd", { save = false }) end)
+            local ok2, e2 = pcall(function() return LLM:set_model("beta/shared-cachd", { save = false }) end)
             return res == nil, ok1, tostring(type(e1) == "table" and e1.message or e1),
-              ok2, ok2 and d2.unlisted == true or false, table.concat(notes, "\n")
+              ok2, tostring(type(e2) == "table" and e2.message or e2)
             "#,
         )
         .await;
@@ -1119,13 +1115,12 @@ mare.provider("beta", {{
             bare_err.contains("alpha/shared-cached, beta/shared-cached"),
             "bare id error must list both static and disk-cached candidates: {bare_err}"
         );
-        assert!(typo_ok, "explicit provider/id on provider with pending disk cache must be allowed");
-        assert!(typo_unlisted, "explicit id missing from beta disk cache must be marked unlisted");
+        assert!(!typo_ok, "typo on provider with pending disk cache must be rejected");
         assert!(
-            typo_notes.contains("warning:")
-                && typo_notes.contains("beta/shared-cachd")
-                && typo_notes.contains("beta/shared-cached"),
-            "unlisted warning must name beta/shared-cachd and closest disk-cached beta/shared-cached: {typo_notes}"
+            typo_err.contains("unknown model: beta/shared-cachd")
+                && typo_err.contains("not in beta catalog")
+                && typo_err.contains("beta/shared-cached"),
+            "typo error must name beta/shared-cachd, beta catalog, and closest disk-cached beta/shared-cached: {typo_err}"
         );
         h.shutdown().await;
         drop(env);
@@ -1185,11 +1180,8 @@ mare.provider("beta", {{
             "headless bare id must list sorted candidates: {cli_bare_out}"
         );
 
-        assert_eq!(server.count("/alpha/chat/completions"), 0, "alpha must receive 0 requests");
-        assert_eq!(server.count("/beta/chat/completions"), 0, "beta must receive 0 requests before unlisted run");
-
-        // 3. Headless CLI `-p --model beta/shared-cachd`: unlisted explicit provider/id is allowed
-        //    and routes directly to beta while logging an unlisted warning with closest candidate.
+        // 3. Headless CLI `-p --model beta/shared-cachd`: must fail against beta's pending disk cache
+        //    naming closest candidate and sending zero generation requests.
         let home_path2 = home.path().to_path_buf();
         let cfg_dir_cli2 = cfg_dir.clone();
         let cli_typo = tokio::task::spawn_blocking(move || {
@@ -1209,15 +1201,14 @@ mare.provider("beta", {{
         .unwrap();
         let cli_typo_out =
             format!("{}\n{}", String::from_utf8_lossy(&cli_typo.stdout), String::from_utf8_lossy(&cli_typo.stderr));
-        assert!(cli_typo.status.success(), "headless unlisted beta/shared-cachd must succeed: {cli_typo_out}");
+        assert!(!cli_typo.status.success(), "headless beta/shared-cachd must fail: {cli_typo_out}");
+        assert!(
+            cli_typo_out.contains("unknown model: beta/shared-cachd")
+                && cli_typo_out.contains("beta/shared-cached"),
+            "headless beta/shared-cachd must report unknown model and closest candidate: {cli_typo_out}"
+        );
         assert_eq!(server.count("/alpha/chat/completions"), 0, "alpha must receive 0 requests");
-        assert_eq!(server.count("/beta/chat/completions"), 1, "beta must receive the unlisted model request");
-        let sent_model =
-            server.requests().into_iter().find(|r| r.path == "/beta/chat/completions").unwrap().json()["model"]
-                .as_str()
-                .unwrap()
-                .to_string();
-        assert_eq!(sent_model, "shared-cachd");
+        assert_eq!(server.count("/beta/chat/completions"), 0, "beta must receive 0 requests");
     })
     .await;
 }
