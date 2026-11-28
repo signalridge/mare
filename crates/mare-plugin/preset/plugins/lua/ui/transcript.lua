@@ -53,12 +53,9 @@ return function(D)
 	end
 	local function subagent_name_of(o)
 		return type(o) == "table"
-				and (
-					trim_non_empty(o.label)
-					or trim_non_empty(o.name)
-					or trim_non_empty(o.agent_id)
-					or trim_non_empty(o.subagent_id)
-				)
+				and (trim_non_empty(o.label) or trim_non_empty(o.name) or trim_non_empty(o.agent_id) or trim_non_empty(
+					o.subagent_id
+				))
 			or "subagent"
 	end
 	local function resolve_subagent_name(id_or_name)

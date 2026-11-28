@@ -878,17 +878,17 @@ async fn permission_approval_dialog_shows_grant_scope_and_expiry() {
         let cfg = json!({ "plugins": { "permissions": { "enabled": true, "preset": "auto" } } });
         let mut t = Term::with(script, cfg, 120, 32).await;
         t.submit("fetch").await;
-        // Body wraps the resolved `reason`, so physical worktree roots remain visible without raw argument echo.
+        // Structured body shows resolved physical worktree roots and grant scope/expiry without raw argument echo.
         let wt_gd_tail = wt_gitdir.file_name().unwrap().to_string_lossy().to_string();
-        let main_git_s = format!("write:{}", main_git.display());
+        let main_git_s = main_git.display().to_string();
         let file_parent_s = format!("write:{}", file_parent.display());
         t.until("scoped permission dialog shows scope, expiry, and resolved physical worktree roots in body", |s| {
             let trimmed: Vec<&str> = s.lines().map(|l| l.trim().trim_matches('│').trim()).collect();
             let flat_paths = trimmed.join("");
             let flat_words = trimmed.join(" ");
-            flat_words.contains("maximum grant scope: session")
-                && flat_words.contains("expires when this session ends")
-                && flat_words.matches("maximum grant scope: session").count() == 1
+            flat_words.contains("this session (a, until session ends or until the permission preset changes)")
+                && flat_words.contains("reused by later commands until this turn ends")
+                && flat_words.matches("until session ends or until the permission preset changes").count() == 1
                 && s.contains("Allow requested access for this turn (y)")
                 && s.contains("Allow requested access for this session (a)")
                 && !s.contains("Grant scope:")

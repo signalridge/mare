@@ -13,7 +13,7 @@ expression: snap
   │ Purpose: write selector artifacts                                        │
   │ Scope: this turn (y, expires on turn end)                                │
   │                                                                          │
-  │ Allow requested access for this turn (y)                                 │
+  │ Allow requested access for this turn (y)  reused by later commands unti… │
   │ Deny, and tell the model why (n) — affects only this subagent            │
   │ Deny and stop this turn (ctrl+c) — stops only this subagent              │
   ╰───────────────────────────────────────────────────────────────── 1 of 3 ─╯

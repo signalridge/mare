@@ -81,7 +81,11 @@ function M.ask(ev)
 		local trimmed = v:match("^%s*(.-)%s*$")
 		return trimmed ~= "" and trimmed or nil
 	end
-	local primary = non_empty(o.label) or non_empty(o.name) or non_empty(o.agent_id) or non_empty(o.subagent_id) or "sub-agent"
+	local primary = non_empty(o.label)
+		or non_empty(o.name)
+		or non_empty(o.agent_id)
+		or non_empty(o.subagent_id)
+		or "sub-agent"
 	local parts = { primary }
 	local seen = { [primary] = true }
 	local function add_part(v)
