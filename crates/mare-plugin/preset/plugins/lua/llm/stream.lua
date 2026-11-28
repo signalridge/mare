@@ -202,6 +202,7 @@ return function(D)
 				describe = resolved and resolved.describe,
 				stream = resolved and resolved.stream,
 			}
+			local wire_name = (resolved and resolved.config and resolved.config.wire) or p.wire or wire_route
 			copy.messages = transform_messages(
 				req.messages or {},
 				model,
@@ -209,7 +210,7 @@ return function(D)
 				p.tool_id_policy,
 				route,
 				p.route,
-				wire_route,
+				wire_name,
 				req.no_images == true
 			)
 			-- every request of a session carries its id, auxiliary ones (summaries, titles)
