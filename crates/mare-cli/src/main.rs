@@ -191,7 +191,16 @@ async fn run(cli: Cli, cli_flags: serde_json::Map<String, serde_json::Value>) ->
                 return Err(anyhow::anyhow!(msg));
             }
         },
-        None => std::env::current_dir()?,
+        None => match std::env::current_dir() {
+            Ok(p) => p,
+            Err(e) => {
+                let msg = format!("cannot determine current working directory: {e} (use --cwd to specify one)");
+                if pre_json {
+                    return Ok(crate::headless::usage_error(true, &msg));
+                }
+                return Err(anyhow::anyhow!(msg));
+            }
+        },
     };
     if let Some(cmd) = &cli.command
         && let Some(code) = commands::dispatch(cmd, &cli, &cwd, &cli_flags).await?

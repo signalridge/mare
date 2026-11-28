@@ -2528,3 +2528,56 @@ fn auth_subcommands_honor_no_trust_and_clean() {
         "--clean logout must not load project or user providers:\n{clean_logout}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn repro_258_deleted_inherited_cwd_emits_json_settled_error() {
+    let home = tempfile::tempdir().unwrap();
+    let gone = tempfile::tempdir().unwrap();
+    let gone_path = gone.path().to_path_buf();
+    let bin = mare_cmd().get_program().to_os_string();
+
+    let out = std::process::Command::new("sh")
+        .args(["-c", r#"cd "$1" && rmdir "$1" && exec "$2" -p --json --no-session "hi""#, "_"])
+        .arg(&gone_path)
+        .arg(&bin)
+        .env("MARE_HOME", home.path())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "deleted cwd must fail");
+    let settled: Option<Value> = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|v| v.get("type").and_then(Value::as_str) == Some("settled"));
+    let settled = settled.unwrap_or_else(|| {
+        panic!("expected JSON settled error record on stdout in -p --json mode; code={:?} stdout={stdout:?} stderr={stderr:?}", out.status.code())
+    });
+    assert_eq!(out.status.code(), Some(2), "deleted inherited cwd should match usage-error exit code: {settled}");
+    assert_eq!(settled.pointer("/data/reason").and_then(Value::as_str), Some("usage"), "{settled}");
+    let err_msg = settled.pointer("/data/error/message").and_then(Value::as_str).unwrap_or("");
+    assert!(
+        err_msg.contains("working directory") && err_msg.contains("--cwd"),
+        "expected actionable working-directory diagnostic suggesting --cwd: {settled}"
+    );
+
+    // Non-JSON headless mode also emits an actionable diagnostic mentioning --cwd.
+    let gone_plain = tempfile::tempdir().unwrap();
+    let plain_out = std::process::Command::new("sh")
+        .args(["-c", r#"cd "$1" && rmdir "$1" && exec "$2" -p --no-session "hi""#, "_"])
+        .arg(gone_plain.path())
+        .arg(&bin)
+        .env("MARE_HOME", home.path())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!plain_out.status.success(), "deleted cwd must fail in plain mode");
+    let plain_err = String::from_utf8_lossy(&plain_out.stderr);
+    assert!(
+        plain_err.contains("working directory") && plain_err.contains("--cwd"),
+        "expected actionable working-directory diagnostic in plain mode stderr: {plain_err:?}"
+    );
+}
