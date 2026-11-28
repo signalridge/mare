@@ -273,7 +273,15 @@ fn kernel_prims(lua: &Lua, kernel: std::sync::Weak<KernelInner>) -> mlua::Result
                 let h = mare_shared::txn_scope::spawn_local(async move { kernel.reload(name.as_deref()).await });
                 match h.await {
                     Ok(Ok(v)) => Ok(v),
-                    Ok(Err(e)) => Err(mlua::Error::runtime(e.to_string())),
+                    Ok(Err(e)) => {
+                        if let Some(coded) = e.chain().find_map(|c| c.downcast_ref::<mare_shared::errors::Coded>()) {
+                            return Err(mlua::Error::external(coded.clone()));
+                        }
+                        if let Some(known) = e.chain().find_map(|c| c.downcast_ref::<crate::ServiceCallError>()) {
+                            return Err(mlua::Error::external(known.clone()));
+                        }
+                        Err(mlua::Error::runtime(format!("{e:#}")))
+                    }
                     Err(e) => Err(mlua::Error::runtime(e.to_string())),
                 }
             }

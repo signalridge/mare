@@ -102,3 +102,11 @@ pub fn recall_code_message(lua: &Lua, error: &mlua::Error) -> Option<String> {
     };
     Some(format!("{code}: {message}"))
 }
+
+/// Wrap a Rust callback returning `(ok, value_or_error)` so failures raise `error(value, 0)` on
+/// the Lua side and keep structured `mare.Error` tables intact across the boundary.
+pub fn wrap_coded(lua: &Lua, chunk_name: &str, inner: mlua::Function) -> mlua::Result<mlua::Function> {
+    lua.load("local f = ... return function(...) local ok, v = f(...) if not ok then error(v, 0) end return v end")
+        .set_name(chunk_name)
+        .call(inner)
+}

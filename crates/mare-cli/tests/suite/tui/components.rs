@@ -1928,3 +1928,129 @@ async fn custom_multiline_select_row_scrolls_and_recovers_after_failure() {
     })
     .await
 }
+
+/// Signalridge/mare#57: running `/reload`, `/reload config`, or `/reload <plugin>` while a model
+/// request is active must display a clean busy notice rather than a raw Lua stack traceback.
+/// Reference: Codex `codex-rs/tui/src/chatwidget/slash_dispatch.rs:231-236` (`'/{cmd}' is disabled
+/// while a task is in progress.`) and mare's `commands/availability.lua:77-79`.
+#[tokio::test]
+async fn reload_while_model_request_active_shows_clean_notice_without_traceback() {
+    local(async {
+        let mut t = Term::new(json!([{ "text": "streamed reply" }]), 100, 30).await;
+        t.until_vt("startup", |t| !t.vt.starting()).await;
+        t.vt.dismiss_notices();
+
+        expose(&t.vt.host);
+        global(&t.vt.host, "L", t.vt.host.service_table("llm").unwrap());
+        exec(
+            &t.vt.host,
+            r#"
+            local rel_tx, rel_rx = mare.task.channel()
+            mare._stream_release = rel_tx
+            mare._stream_started = false
+            local prov = L:provider("faux")
+            local orig_stream = prov.stream
+            local intercepted = false
+            prov.stream = function(req, sink)
+                if not intercepted then
+                    intercepted = true
+                    mare._stream_started = true
+                    rel_rx:recv()
+                end
+                return orig_stream(req, sink)
+            end
+            "#,
+        )
+        .await;
+
+        t.submit("hello").await;
+        let stream_deadline = Instant::now() + WAIT;
+        while !eval::<bool>(&t.vt.host, "return mare._stream_started == true").await {
+            assert!(Instant::now() < stream_deadline, "timed out waiting for faux stream to start;\n{}", t.screen());
+            t.step().await;
+            // sleep-ok: polling cadence until faux stream holds request_lease
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let flat_text = |s: &str| {
+            s.replace(['╭', '╮', '╰', '╯', '│', '─'], " ").split_whitespace().collect::<Vec<_>>().join(" ")
+        };
+        for (cmd, expected) in [
+            ("/reload", "/reload isn't available while a model request is active (Esc stops it)"),
+            ("/reload config", "/reload config isn't available while a model request is active (Esc stops it)"),
+            ("/reload agent", "/reload agent isn't available while a model request is active (Esc stops it)"),
+        ] {
+            t.vt.dismiss_notices();
+            t.submit(cmd).await;
+            t.until("reload busy notice", |s| {
+                let flat = flat_text(s);
+                flat.contains(expected) || flat.contains("stack traceback") || flat.contains("Reload failed")
+            })
+            .await;
+            let screen = t.screen();
+            assert!(!screen.contains("stack traceback"), "{cmd} leaked traceback on screen:\n{screen}");
+            assert!(!screen.contains("runtime error:"), "{cmd} leaked raw runtime error on screen:\n{screen}");
+            assert!(
+                flat_text(&screen).contains(expected),
+                "{cmd} expected busy notice `{expected}` on screen:\n{screen}"
+            );
+        }
+
+        // Lua callers of mare.reload / mare.reload_config / ctx.kernel:reload receive structured
+        // mare.Error values (`code = "busy"`) without raw stack tracebacks.
+        let structured_ok: bool = eval(
+            &t.vt.host,
+            r#"
+            local ok1, e1 = pcall(mare.reload)
+            local ok2, e2 = pcall(mare.reload_config)
+            local ok3, e3 = pcall(function() return C.cordis:get("kernel"):reload("agent") end)
+            for _, pair in ipairs({ { ok1, e1 }, { ok2, e2 }, { ok3, e3 } }) do
+                local ok, err = pair[1], pair[2]
+                assert(not ok, "expected busy refusal")
+                assert(type(err) == "table" and err.code == "busy", "expected busy mare.Error table, got: " .. tostring(err))
+                assert(type(err.message) == "string" and err.message:find("model request is active", 1, true), tostring(err))
+                assert(not tostring(err):find("stack traceback", 1, true), tostring(err))
+            end
+            return true
+            "#,
+        )
+        .await;
+        assert!(structured_ok);
+
+        // Open /notifications to verify unclipped full notice text also contains no traceback frames.
+        t.vt.dismiss_notices();
+        t.submit("/notifications").await;
+        t.until("notifications overlay", |s| {
+            s.contains("Notifications") && flat_text(s).contains("model request is active")
+        })
+        .await;
+        let overlay = t.screen();
+        assert!(!overlay.contains("stack traceback"), "unclipped notification contained traceback:\n{overlay}");
+        assert!(!overlay.contains("runtime error:"), "unclipped notification contained runtime error:\n{overlay}");
+        assert!(flat_text(&overlay).contains("/reload agent isn't available while a model request is active"));
+        t.key(KeyCode::Escape, Modifiers::NONE);
+        t.until("notifications closed", |s| !s.contains("Notifications")).await;
+
+        // Release stream and confirm the active turn still completes cleanly.
+        exec(&t.vt.host, "mare._stream_release:send(true)").await;
+        t.idle().await;
+        t.until_vt("streamed reply", |t| t.history().contains("streamed reply")).await;
+
+        // Adjacent non-busy error path (`/reload nonexistent-plugin`) must also surface cleanly
+        // without a Lua stack traceback or raw `runtime error:` prefix.
+        t.vt.dismiss_notices();
+        t.submit("/reload no-such-plugin").await;
+        t.until("unknown plugin reload error", |s| {
+            flat_text(s).contains("Reload failed:") || flat_text(s).contains("stack traceback")
+        })
+        .await;
+        let err_screen = t.screen();
+        assert!(!err_screen.contains("stack traceback"), "unknown plugin error leaked traceback:\n{err_screen}");
+        assert!(!err_screen.contains("runtime error:"), "unknown plugin error leaked runtime error:\n{err_screen}");
+        assert!(
+            flat_text(&err_screen).contains("no-such-plugin"),
+            "expected unknown plugin name in error notice:\n{err_screen}"
+        );
+    })
+    .await
+}

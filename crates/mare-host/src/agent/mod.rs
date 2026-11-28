@@ -314,12 +314,6 @@ fn coded_result(lua: &Lua, code: &str, message: &str) -> mlua::Result<(bool, Val
     Ok((false, Value::Table(err)))
 }
 
-fn wrap_coded(lua: &Lua, inner: mlua::Function) -> mlua::Result<mlua::Function> {
-    lua.load("local f = ... return function(...) local ok, v = f(...) if not ok then error(v, 0) end return v end")
-        .set_name("@subagent/wrap")
-        .call(inner)
-}
-
 /// start{prompt, model, effort, system, cwd, config = {plugins = {...}}, tools = {"read",...},
 ///       messages = {...} (fork history), plugins_only = bool}
 fn start_raw(lua: &Lua, opts: Value) -> mlua::Result<(bool, Value)> {
@@ -690,7 +684,7 @@ pub fn install(lua: &Lua, mare: &Table) -> mlua::Result<()> {
         draining: false,
     }))));
     let t = lua.create_table()?;
-    t.set("start", wrap_coded(lua, lua.create_function(start_raw)?)?)?;
+    t.set("start", mare_shared::lua_error::wrap_coded(lua, "@subagent/wrap", lua.create_function(start_raw)?)?)?;
     t.set(
         "tool_allowed",
         lua.create_function(|lua, name: String| {

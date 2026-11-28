@@ -39,7 +39,7 @@ pub(super) fn install(lua: &Lua, api: &Table, store: std::sync::Arc<local::Store
                 save_value(&lua, &store, owner, value.as_bytes().to_vec(), save_opts).await
             }
         })?;
-    api.set("save_bytes", wrap_coded(lua, save_bytes_raw)?)?;
+    api.set("save_bytes", mare_shared::lua_error::wrap_coded(lua, "@spill/wrap", save_bytes_raw)?)?;
     let read_bytes_raw = lua.create_async_function(move |lua, args: mlua::MultiValue| {
         let store = store.clone();
         async move {
@@ -97,7 +97,7 @@ pub(super) fn install(lua: &Lua, api: &Table, store: std::sync::Arc<local::Store
             Ok((true, mlua::Value::Table(out)))
         }
     })?;
-    api.set("read_bytes", wrap_coded(lua, read_bytes_raw)?)?;
+    api.set("read_bytes", mare_shared::lua_error::wrap_coded(lua, "@spill/wrap", read_bytes_raw)?)?;
     Ok(())
 }
 

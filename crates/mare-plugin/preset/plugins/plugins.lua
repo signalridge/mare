@@ -71,7 +71,14 @@ return {
 			if opts and opts.reload then
 				local ok, reloaded = pcall(mare.reload)
 				if not ok then
-					error(mare.error("plugins.failed", tostring(reloaded), { log = out_log }), 0)
+					error(
+						mare.error(
+							"plugins.failed",
+							require("mare_lib").error_message(reloaded) or "reload failed",
+							{ log = out_log }
+						),
+						0
+					)
 				end
 				return { log = out_log, reload = reloaded }
 			end
