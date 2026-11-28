@@ -120,6 +120,7 @@ local WIRE_FIELDS = {
 	hosted_tools = "string_array",
 	encode = "function",
 	decoder = "function",
+	filter_tools = "function",
 	finalize = "function",
 	error = "function",
 	retry = "function",

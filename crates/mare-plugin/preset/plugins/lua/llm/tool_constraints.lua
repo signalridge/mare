@@ -68,6 +68,30 @@ return function(D)
 				end
 			end
 		end
+		if #tools > 0 and req.model and D.routes and D.routes.wire_for_model then
+			local wire, provider, route_cfg = D.routes.wire_for_model(req.model)
+			if wire and wire.spec and type(wire.spec.filter_tools) == "function" then
+				local prov_cfg = D.api_keys and D.api_keys.provider_cfg and D.api_keys.provider_cfg(req.model.provider)
+					or nil
+				local warm_ok, warm_url
+				if provider and type(provider.warm_url) == "function" then
+					warm_ok, warm_url = pcall(provider.warm_url)
+				end
+				local meta = {
+					provider = req.model.provider,
+					model = req.model,
+					dialect = (route_cfg and route_cfg.dialect) or (prov_cfg and prov_cfg.dialect) or nil,
+					base_url = (route_cfg and route_cfg.base_url)
+						or (prov_cfg and prov_cfg.base_url)
+						or (warm_ok and type(warm_url) == "string" and warm_url)
+						or nil,
+				}
+				local filtered = wire.spec.filter_tools(tools, req, meta)
+				if type(filtered) == "table" then
+					tools = filtered
+				end
+			end
+		end
 		local copy = {}
 		for key, value in pairs(req) do
 			copy[key] = value

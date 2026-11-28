@@ -202,6 +202,22 @@ return function(D)
 		return wires[name]
 	end
 
+	--- Resolve the registered wire, provider, and optional route config for `model`.
+	function R.wire_for_model(model)
+		local p = model and providers[model.provider]
+		if not p then
+			return nil, nil, nil
+		end
+		if type(p.routes) == "table" then
+			local route = select_route(model)
+			local rc = route and p.routes[route]
+			local wire = type(rc) == "table" and type(rc.wire) == "string" and wires[rc.wire] or nil
+			return wire, p, rc
+		end
+		local wire = type(p.wire) == "string" and wires[p.wire] or nil
+		return wire, p, nil
+	end
+
 	--- Collect all registered wire specs referenced by a provider declaration (`wire`, `routes`, or `route`).
 	function R.wire_specs_for_provider(p)
 		if type(p) ~= "table" then

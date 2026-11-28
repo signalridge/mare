@@ -345,6 +345,9 @@ return {
 			encode = function(req, ep)
 				return ensure_spec().encode(req, ep)
 			end,
+			filter_tools = function(tools, req, meta)
+				return ensure_spec().filter_tools(tools, req, meta)
+			end,
 			finalize = function(req, ep, wire, state)
 				return ensure_spec().finalize(req, ep, wire, state)
 			end,
